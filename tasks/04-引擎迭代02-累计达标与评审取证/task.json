@@ -1,0 +1,425 @@
+{
+  "schema_version": 1,
+  "task_id": "engine-iter-02",
+  "title": "引擎迭代 02：门禁限次重跑、评审方可取证、版本号与指纹清单",
+  "source": "../../engine",
+  "agents": {
+    "dev": {
+      "kind": "command",
+      "identity": "sol-developer",
+      "output": "stdout",
+      "inherit_env": [],
+      "argv": [
+        "{python}",
+        "/Users/Admin/Desktop/Loop/adapters/pi_member.py",
+        "--model",
+        "openai-codex/gpt-6.1-sol",
+        "--thinking",
+        "max",
+        "--tools",
+        "read,bash,edit,write,grep,find,ls"
+      ]
+    },
+    "review": {
+      "kind": "command",
+      "identity": "astra-reviewer",
+      "output": "stdout",
+      "inherit_env": [],
+      "argv": [
+        "{python}",
+        "/Users/Admin/Desktop/Loop/adapters/pi_member.py",
+        "--model",
+        "openai-codex/gpt-6-astra",
+        "--thinking",
+        "xhigh",
+        "--tools",
+        "read,grep,find,ls"
+      ]
+    }
+  },
+  "limits": {
+    "max_parallel": 1,
+    "max_wall_seconds": 21600,
+    "max_member_invocations": 30
+  },
+  "completion": {
+    "mode": "independent"
+  },
+  "notes": "【本任务】你是 Loop 循环内的成员，在提供的引擎副本中工作；加载的 AGENTS.md/CLAUDE.md 按其中的循环内角色解释，历史任务不构成新授权。开发方自测用 /opt/homebrew/bin/python3.12，在前台等待结束；只执行本单元 gates 中列出的检查命令，不要求提前完成后续单元的验收。原有测试约 30 秒，每份验收脚本约 10 秒；这些均不调用模型、不联网。不要启动后台进程、其他 Agent 或引擎正式任务；不要运行 examples/real_pi_codex.json 或任何真实模型/业务联网命令。acceptance/ 是只读标准，字段名、取值、退出码以当前单元引用的验收脚本断言为准。只做本单元目标范围的改动；原有测试不能改或删，新增测试可以。只读当前代码副本及本次上下文明确提供的规则、响应模板、输入清单、候选和门禁证据；不要搜索原项目、其他运行、拍板人专用目录或参考实现。评审方只读当前候选和已有证据，不执行测试、接口或桌面操作。最终仅交付本次 response_schema 对应的 JSON；开发自评不是达标，语义条款仍须独立评审。",
+  "units": [
+    {
+      "id": "u3-gate-reruns",
+      "depends_on": [],
+      "goal": "门禁可以限次重跑（累计达标加护栏）：同一份候选上没过的门禁按规则重跑，重跑通过算通过；失败的那次保留并写进结论；同一原因出现两次不再重跑；候选一改全部重来。",
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "引擎原有的全部自动化测试继续通过；原有测试文件（tests/ 下已有的四个）没有被改动或删除。",
+          "gate_ids": [
+            "G1"
+          ]
+        },
+        {
+          "id": "S2",
+          "text": "迭代 01 的行为没有被破坏。以 acceptance/check_u1.py、acceptance/check_u2.py 为准。",
+          "gate_ids": [
+            "G2",
+            "G3"
+          ]
+        },
+        {
+          "id": "S3",
+          "text": "门禁规则新增可选字段 max_reruns（0 到 5 的整数，默认 0；布尔值、小数、字符串、负数、大于 5 都在规则检查时拒绝）。一次门禁执行失败（进程非 0 退出）且还有重跑次数时，在同一份候选的新副本里再执行；最后一次执行通过，门禁就是 PASS。无法启动、超时等 UNKNOWN 不重跑，照旧停为 BLOCKED。失败原因取那次执行标准输出里最后一行以 LOOP_FAIL_REASON= 开头的内容（去掉首尾空白，最多 200 个字符），没有这样的行或内容为空记为 unspecified。同一单元同一轮里，某次失败的原因和之前任何一次失败（同一门禁或别的门禁）的原因相同，这个门禁立即停止重跑、状态 FAIL，并记下 repeated_reason。返修产生新候选后，所有门禁从第 1 次重新执行，上一轮的原因不带过来，上一轮的记录原样保留。每个门禁每轮一份记录（gates/r<轮>-<门禁ID>/evidence.json），原有字段指最后一次执行，新增 attempts（每次执行的 attempt、status、exit_code、reason、stdout、stderr，各次日志互不覆盖）、reruns、passed_after_rerun、repeated_reason；单元计数新增 gate_reruns（为 0 也要有）；结果的证据索引里 gate: 条目带 attempts；评审方拿到的门禁证据里能看到每次执行。以 acceptance/check_u3.py 为准。",
+          "gate_ids": [
+            "G4"
+          ]
+        },
+        {
+          "id": "S4",
+          "text": "result.md 里，执行过不止一次的门禁要写出每次执行的状态和失败原因；重跑后才通过的门禁要让读的人一眼看出不是一次通过；因同一原因出现两次而停止重跑的要写明。",
+          "gate_ids": []
+        },
+        {
+          "id": "S5",
+          "text": "不写 max_reruns 时行为与改动前一致：第 1 次执行的目录名、日志位置、evidence.json 的原有字段含义都不变。",
+          "gate_ids": []
+        },
+        {
+          "id": "S6",
+          "text": "文档与代码行为一致：docs/03-规则配置参考.md 写明 max_reruns、LOOP_FAIL_REASON 的约定和四条护栏（限次重跑、失败保留、同因两次不再重跑、候选一改全部重来）；docs/05-结果验收与导出.md 写明结果里怎么看重跑记录；CHANGELOG.md 增加一条。",
+          "gate_ids": []
+        },
+        {
+          "id": "S7",
+          "text": "在 tests/ 下新增测试文件，至少覆盖三种情形：重跑后通过、同一原因出现两次停止重跑、返修后重新计，并随 G1 一起运行通过。",
+          "gate_ids": []
+        },
+        {
+          "id": "S8",
+          "text": "只改了允许范围内的文件；没有做本单元目标之外的改动（重构、改名、调整无关行为）。",
+          "gate_ids": []
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ],
+          "timeout_seconds": 600
+        },
+        {
+          "id": "G2",
+          "argv": [
+            "{python}",
+            "acceptance/check_u1.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G3",
+          "argv": [
+            "{python}",
+            "acceptance/check_u2.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G4",
+          "argv": [
+            "{python}",
+            "acceptance/check_u3.py"
+          ],
+          "timeout_seconds": 300
+        }
+      ],
+      "writable_paths": [
+        "loop_engineering/",
+        "docs/",
+        "tests/",
+        "CHANGELOG.md"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 2,
+      "max_infra_retries": 1,
+      "max_protocol_retries": 2,
+      "stage_timeout_seconds": 3000,
+      "max_seconds": 9000,
+      "protected_paths": [
+        "acceptance/",
+        "tests/test_contracts.py",
+        "tests/test_engine.py",
+        "tests/test_protocol_retries.py",
+        "tests/test_source_drift.py"
+      ]
+    },
+    {
+      "id": "u4-reviewer-exec",
+      "depends_on": [
+        "u3-gate-reruns"
+      ],
+      "goal": "评审方可以执行只读的取证命令：单元上打开开关后，评审方有自己的取证目录，取到的证据可以引用、可以追溯。",
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "引擎原有的全部自动化测试继续通过；原有测试文件（tests/ 下已有的四个）没有被改动或删除。",
+          "gate_ids": [
+            "G1"
+          ]
+        },
+        {
+          "id": "S2",
+          "text": "之前各单元的行为没有被破坏。以 acceptance/check_u1.py、check_u2.py、check_u3.py 为准。",
+          "gate_ids": [
+            "G2",
+            "G3",
+            "G4"
+          ]
+        },
+        {
+          "id": "S3",
+          "text": "单元规则新增可选字段 reviewer_exec（只接受 true 或 false，默认 false）。为 true 时：评审方每次启动都得到一个已存在、可写、不在候选副本里的取证目录，路径写在上下文的 scratch_path 和环境变量 LOOP_SCRATCH 里；开发方的 scratch_path 为 null；评审方可以在 evidence 里写 scratch:<取证目录内的相对路径>，被引用的必须是取证目录里的普通文件（不存在、越出目录、符号链接都按交付格式错误处理）；开发方写 scratch: 按交付格式错误处理；取证目录里普通文件总大小超过 limits.max_log_bytes 按交付格式错误处理；评审方因交付格式错误重交时，上一次取证目录里的内容带到这一次；被接受的交付所引用的取证文件记入结果的证据索引（path、sha256）并纳入完整性核对，事后被改时 audit 以退出码 5 报出。为 false 时：scratch_path 为 null，scratch: 引用按交付格式错误处理，给评审方的提示里不出现 scratch:。无论开不开，评审方改了候选副本都照旧停为 BLOCKED。以 acceptance/check_u4.py 为准。",
+          "gate_ids": [
+            "G5"
+          ]
+        },
+        {
+          "id": "S4",
+          "text": "开关打开时，引擎给评审方的提示明确写出四点：可以执行只读的取证命令；脚本和输出只能写在取证目录里（写出目录路径）；不得修改候选副本、门禁证据、规则、交接记录和原始项目；引用取证目录里的文件写 scratch:<相对路径>，只有评审方可以这样引用。",
+          "gate_ids": []
+        },
+        {
+          "id": "S5",
+          "text": "内置 pi 接法：reviewer_exec 为 true 时给评审方的工具加上 bash 和 write，为 false 时不变。内置 codex 接法不改，并在文档里写明它的只读沙箱下取证目录不可写这一限制。自定义 command 接法的工具由规则里的 argv 决定，引擎不改写。",
+          "gate_ids": []
+        },
+        {
+          "id": "S6",
+          "text": "取证目录里没有被引用的文件留在原处不删除；被引用的文件在交付被接受后设为只读。",
+          "gate_ids": []
+        },
+        {
+          "id": "S7",
+          "text": "文档与代码行为一致：docs/03-规则配置参考.md 写明 reviewer_exec；docs/04-成员工具接入.md 写明取证目录、scratch: 引用、内置接法的变化、自定义接法要自己给工具；docs/10-安全边界与已知限制.md 写明「只读」靠约定加事后核对，不是沙箱；CHANGELOG.md 增加一条。",
+          "gate_ids": []
+        },
+        {
+          "id": "S8",
+          "text": "在 tests/ 下新增测试文件，至少覆盖：开关打开时引用取证文件达标、不开开关时引用被拒、评审方改候选被发现，并随 G1 一起运行通过。",
+          "gate_ids": []
+        },
+        {
+          "id": "S9",
+          "text": "只改了允许范围内的文件；没有做本单元目标之外的改动（重构、改名、调整无关行为）。",
+          "gate_ids": []
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ],
+          "timeout_seconds": 600
+        },
+        {
+          "id": "G2",
+          "argv": [
+            "{python}",
+            "acceptance/check_u1.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G3",
+          "argv": [
+            "{python}",
+            "acceptance/check_u2.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G4",
+          "argv": [
+            "{python}",
+            "acceptance/check_u3.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G5",
+          "argv": [
+            "{python}",
+            "acceptance/check_u4.py"
+          ],
+          "timeout_seconds": 300
+        }
+      ],
+      "writable_paths": [
+        "loop_engineering/",
+        "docs/",
+        "tests/",
+        "CHANGELOG.md"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 2,
+      "max_infra_retries": 1,
+      "max_protocol_retries": 2,
+      "stage_timeout_seconds": 3000,
+      "max_seconds": 9000,
+      "protected_paths": [
+        "acceptance/",
+        "tests/test_contracts.py",
+        "tests/test_engine.py",
+        "tests/test_protocol_retries.py",
+        "tests/test_source_drift.py"
+      ]
+    },
+    {
+      "id": "u5-release",
+      "depends_on": [
+        "u4-reviewer-exec"
+      ],
+      "goal": "版本号、变更记录、包内指纹清单跟着迭代更新到 0.2.0，并提供一条可以重复执行的命令来核对和重新生成指纹清单。",
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "引擎原有的全部自动化测试继续通过；原有测试文件（tests/ 下已有的四个）没有被改动或删除。",
+          "gate_ids": [
+            "G1"
+          ]
+        },
+        {
+          "id": "S2",
+          "text": "之前各单元的行为没有被破坏。以 acceptance/check_u1.py、check_u2.py、check_u3.py、check_u4.py 为准。",
+          "gate_ids": [
+            "G2",
+            "G3",
+            "G4",
+            "G5"
+          ]
+        },
+        {
+          "id": "S3",
+          "text": "版本号为 0.2.0：loop.py --version、README.md 第一行、CHANGELOG.md 最靠前的版本小节三处一致。新增命令 loop.py checksums：不带参数时核对 SHA256SUMS，一致退出 0，不一致退出 5 并列出缺少、多出、不一致的路径，且不改写 SHA256SUMS；带 --write 时按当前文件重新生成。清单范围是引擎目录下全部普通文件，不含 SHA256SUMS 自己和扫描时本来就忽略的缓存（__pycache__、.pyc、.DS_Store 等）；每行「<sha256>  <相对路径>」，按路径排序。交付时 SHA256SUMS 必须与候选里的文件完全一致。以 acceptance/check_release.py 为准。",
+          "gate_ids": [
+            "G6"
+          ]
+        },
+        {
+          "id": "S4",
+          "text": "CHANGELOG.md：原「未发布」一节的三条和本次迭代各单元的条目都归到 0.2.0 小节下，一条不丢；0.1.0 小节原文不动。",
+          "gate_ids": []
+        },
+        {
+          "id": "S5",
+          "text": "文档：docs/11-CLI命令速查.md 加上 checksums 命令；在 docs/ 里写明版本规则：每合并一次迭代次版本号加一，由该迭代最后一个单元更新版本号、变更记录和指纹清单，之后任何文件再改都要重新生成指纹清单。",
+          "gate_ids": []
+        },
+        {
+          "id": "S6",
+          "text": "verification/ 目录和 docs/09-测试报告与本机验收.md 是 0.1.0 构建时的历史记录，内容不改写。",
+          "gate_ids": []
+        },
+        {
+          "id": "S7",
+          "text": "在 tests/ 下新增测试文件，覆盖 checksums 的核对与重新生成，并随 G1 一起运行通过。",
+          "gate_ids": []
+        },
+        {
+          "id": "S8",
+          "text": "只改了允许范围内的文件；没有做本单元目标之外的改动（重构、改名、调整无关行为）。",
+          "gate_ids": []
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ],
+          "timeout_seconds": 600
+        },
+        {
+          "id": "G2",
+          "argv": [
+            "{python}",
+            "acceptance/check_u1.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G3",
+          "argv": [
+            "{python}",
+            "acceptance/check_u2.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G4",
+          "argv": [
+            "{python}",
+            "acceptance/check_u3.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G5",
+          "argv": [
+            "{python}",
+            "acceptance/check_u4.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G6",
+          "argv": [
+            "{python}",
+            "acceptance/check_release.py"
+          ],
+          "timeout_seconds": 300
+        }
+      ],
+      "writable_paths": [
+        "loop_engineering/",
+        "docs/",
+        "tests/",
+        "CHANGELOG.md",
+        "README.md",
+        "SHA256SUMS"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 2,
+      "max_infra_retries": 1,
+      "max_protocol_retries": 2,
+      "stage_timeout_seconds": 3000,
+      "max_seconds": 9000,
+      "protected_paths": [
+        "acceptance/",
+        "tests/test_contracts.py",
+        "tests/test_engine.py",
+        "tests/test_protocol_retries.py",
+        "tests/test_source_drift.py"
+      ]
+    }
+  ]
+}

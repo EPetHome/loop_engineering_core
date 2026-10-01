@@ -73,7 +73,7 @@ def main() -> int:
     name = "loop-%s-%s" % (os.environ.get("LOOP_UNIT_ID", "unit"), os.environ.get("LOOP_ATTEMPT_ID", "attempt"))
     argv = [os.environ.get("LOOP_PI_BIN", PI_DEFAULT), "--offline",
             "--model", args.model, "--thinking", args.thinking,
-            "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
+            "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
             "--tools", args.tools, "-e", PERMISSION_EXT, "--name", name, "-p", TAIL_MESSAGE]
     print("pi_member: " + " ".join(argv[:-1]) + " <结尾提示>", file=sys.stderr)
     done = subprocess.run(argv, input=prompt, capture_output=True, text=True, env=env)

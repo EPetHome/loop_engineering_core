@@ -1,0 +1,58 @@
+{
+  "scope": "OFFLINE WIRING ONLY; no real members or semantic acceptance",
+  "task_sha256": "0a7b29a46d1b7fd52b1d1a06f63fdbd06bfbe3bedc361fa2cf3e77d4b5013498",
+  "run_id": "engine-iter-02-20261001T125932-2600cde5",
+  "stop": "PASSED",
+  "member_invocations": 6,
+  "units": {
+    "u3-gate-reruns": {
+      "r001-G2": "PASS",
+      "r001-G4": "PASS",
+      "r001-G3": "PASS",
+      "r001-G1": "PASS"
+    },
+    "u4-reviewer-exec": {
+      "r001-G2": "PASS",
+      "r001-G5": "PASS",
+      "r001-G4": "PASS",
+      "r001-G3": "PASS",
+      "r001-G1": "PASS"
+    },
+    "u5-release": {
+      "r001-G2": "PASS",
+      "r001-G5": "PASS",
+      "r001-G4": "PASS",
+      "r001-G3": "PASS",
+      "r001-G6": "PASS",
+      "r001-G1": "PASS"
+    }
+  },
+  "original_engine_unchanged": true,
+  "original_task_unchanged": true,
+  "final_task_sha256": "6e1c69353f7c50c0d44013dd44ea2c0cfcd4e60d4a201b39757e247916afcd47",
+  "post_rehearsal_change": "notes only; criteria, gates, paths, dependencies, agents, limits unchanged",
+  "adapter_sha256": "0a63c90857b7d492af0d6f62b18ab7dbeb94f56950d981dcb399247551fc6f0e",
+  "adapter_check": "1 unittest with developer and reviewer command cases; fake Pi only",
+  "final_structure_validation": {
+    "exit_code": 0,
+    "output": "规则结构、依赖与边界检查通过。业务口径和模型凭据尚未验证。"
+  },
+  "real_pi_started": false,
+  "optional_summary_agent": {
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "requested_thinking": "xhigh",
+    "local_pi_mapping": "max",
+    "tools": "read,grep,find,ls",
+    "started": false,
+    "activation": "automatic after terminal run if logs exceed threshold; exact run binding"
+  },
+  "single_entry": {
+    "path": "/Users/Admin/Desktop/Loop/run_loop.py",
+    "sha256": "000b6becc6dc0a16fd5257b178cd364417d5849cdb9cb49807106bfb52c1e21a",
+    "log_threshold_bytes": 65536,
+    "summary_timeout_seconds": 300,
+    "delivery_file": "交付结果.md",
+    "checks": "3 offline test methods covering delivery branches and command configuration, plus 1 real offline Loop integration with fake summary; audit passed",
+    "real_models_called": false
+  }
+}
