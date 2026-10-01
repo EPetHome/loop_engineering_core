@@ -1,0 +1,138 @@
+{
+  "success": true,
+  "check": "archive_extract_unprivileged_unicode_spaces_foreground_DAG_background_export",
+  "uid": 1000,
+  "python": "3.13.5 (main, Jul 15 2026, 20:25:40) [GCC 14.2.0]",
+  "platform": "linux",
+  "run_ids": [
+    "dag-demo-20261001T081120-6eb4f56f",
+    "invite-demo-20261001T081103-11a6580f",
+    "invite-demo-20261001T081135-763e62e5"
+  ],
+  "source_unchanged": true,
+  "exported_test_count": 4,
+  "driver_note": "Initial combined installation driver exceeded the container call limit of 45 seconds after background start; saved runs independently rechecked in this script. This record does not claim the initial driver returned success.",
+  "records": [
+    {
+      "argv": [
+        "doctor"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"engine\": \"0.1.0\",\n  \"python\": \"3.13.5\",\n  \"platform\": \"linux\",\n  \"runtime_supported\": true,\n  \"credentials\": \"未验证账户、模型可用性或额度；不会读取/打印密钥\",\n  \"tools\": {\n    \"codex\": {\n      \"installed\": false,\n      \"path\": null,\n      \"version\": null\n    },\n    \"pi\": {\n      \"installed\": false,\n      \"path\": null,\n      \"version\": null\n    }\n  }\n}\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "status",
+        "dag-demo-20261001T081120-6eb4f56f",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "\ndag-demo-20261001T081120-6eb4f56f | 达标\n  front              达标             round=1 calls=2  last_step=2026-10-01T08:11:27Z last_output=2026-10-01T08:11:27Z\n  back               达标             round=1 calls=2  last_step=2026-10-01T08:11:28Z last_output=2026-10-01T08:11:27Z\n  integration        达标             round=1 calls=2  last_step=2026-10-01T08:11:33Z last_output=—\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "result",
+        "dag-demo-20261001T081120-6eb4f56f",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "# Loop 结果：离线演示：前后端并行与集成\n\n**停止类型：达标**\n\nfront：达标；back：达标；integration：达标\n\n- 运行：`dag-demo-20261001T081120-6eb4f56f`\n- 父运行：`无`\n- 规则指纹：`df6637f57736e67fa87d573f64cfd21f07c2678c6406a130ed76fa32b0309316`\n- 引擎：`0.1.0`\n- 成员调用：6；总耗时：12.482 秒。\n- token / 金额：未计量。一次成员调用可能包含多次模型请求。\n- 人工验收：未进行。达标不等于拍板人已认可；不自动合并、不更新基线。\n\n最终完整性异常：未发现\n\n## 单元结果\n\n### front — 达标\n\n当前候选的全部标准有效通过，必需门禁通过；待拍板人验收。\n\n- 候选代码：`/mnt/data/Loop 安装验证/本地运行 数据/artifacts/dag-demo-20261001T081120-6eb4f56f/front/round-001/code`\n- 候选指纹：`ba3e8e77290c59ac7ebdfb9fd1207741d324308af893dcfe84d784dd84ec20a9`\n- 已评审本候选：True\n- 改动清单：`/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/front/candidate-001.json`\n\n| 标准 | 最终状态 | 说明 | 证据 |\n|---|---|---|---|\n| S1 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['gate:G1'] |\n\n规则缺口：未记录\n\n计数：`{\"member_invocations\": 2, \"repairs\": 0, \"infra_retries\": 0, \"protocol_retries\": 0}`\n\n证据索引（当前候选绑定）：\n\n```json\n{\n  \"gate:G1\": {\n    \"candidate_hash\": \"ba3e8e77290c59ac7ebdfb9fd1207741d324308af893dcfe84d784dd84ec20a9\",\n    \"status\": \"PASS\",\n    \"stdout\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/front/gates/r001-G1/job/stdout.log\",\n    \"stderr\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/front/gates/r001-G1/job/stderr.log\",\n    \"exit_code\": 0\n  }\n}\n```\n\n### back — 达标\n\n当前候选的全部标准有效通过，必需门禁通过；待拍板人验收。\n\n- 候选代码：`/mnt/data/Loop 安装验证/本地运行 数据/artifacts/dag-demo-20261001T081120-6eb4f56f/back/round-001/code`\n- 候选指纹：`a3f81c7a511bdbc66c0d48a50e5749067c74bd0a703c0860a517880320b9db9b`\n- 已评审本候选：True\n- 改动清单：`/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/back/candidate-001.json`\n\n| 标准 | 最终状态 | 说明 | 证据 |\n|---|---|---|---|\n| S1 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['gate:G1'] |\n\n规则缺口：未记录\n\n计数：`{\"member_invocations\": 2, \"repairs\": 0, \"infra_retries\": 0, \"protocol_retries\": 0}`\n\n证据索引（当前候选绑定）：\n\n```json\n{\n  \"gate:G1\": {\n    \"candidate_hash\": \"a3f81c7a511bdbc66c0d48a50e5749067c74bd0a703c0860a517880320b9db9b\",\n    \"status\": \"PASS\",\n    \"stdout\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/back/gates/r001-G1/job/stdout.log\",\n    \"stderr\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/back/gates/r001-G1/job/stderr.log\",\n    \"exit_code\": 0\n  }\n}\n```\n\n### integration — 达标\n\n当前候选的全部标准有效通过，必需门禁通过；待拍板人验收。\n\n- 候选代码：`/mnt/data/Loop 安装验证/本地运行 数据/artifacts/dag-demo-20261001T081120-6eb4f56f/integration/round-001/code`\n- 候选指纹：`04aae297c9d542c9a312e0a74d050ea0aa990289e7a9856a8d0d8b7b42b0df59`\n- 已评审本候选：True\n- 改动清单：`/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/integration/candidate-001.json`\n\n| 标准 | 最终状态 | 说明 | 证据 |\n|---|---|---|---|\n| S1 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['gate:G1'] |\n\n规则缺口：未记录\n\n计数：`{\"member_invocations\": 2, \"repairs\": 0, \"infra_retries\": 0, \"protocol_retries\": 0}`\n\n证据索引（当前候选绑定）：\n\n```json\n{\n  \"gate:G1\": {\n    \"candidate_hash\": \"04aae297c9d542c9a312e0a74d050ea0aa990289e7a9856a8d0d8b7b42b0df59\",\n    \"status\": \"PASS\",\n    \"stdout\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/integration/gates/r001-G1/job/stdout.log\",\n    \"stderr\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/dag-demo-20261001T081120-6eb4f56f/units/integration/gates/r001-G1/job/stderr.log\",\n    \"exit_code\": 0\n  }\n}\n```\n\n## 边界\n\n本结果仅基于冻结标准、当前候选代码和本次证据。原始项目未由引擎覆盖。\n同账号防误改不是安全沙箱。未支持脱离进程组的后台作业、生产发布和外部不可逆动作。\n完整过程见 events.jsonl 与 units/<单元>/。manifest.json 是权威记录，其他文件可重新生成。\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "audit",
+        "dag-demo-20261001T081120-6eb4f56f",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"run_id\": \"dag-demo-20261001T081120-6eb4f56f\",\n  \"integrity_ok\": true,\n  \"errors\": [],\n  \"scope\": \"检查保存的规则、交接、门禁日志、输入快照及候选文件指纹；不重新判定业务语义，不防同账号恶意改写整个清单。\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "status",
+        "invite-demo-20261001T081103-11a6580f",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "\ninvite-demo-20261001T081103-11a6580f | 达标\n  invite             达标             round=2 calls=4  last_step=2026-10-01T08:11:14Z last_output=2026-10-01T08:11:08Z\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "result",
+        "invite-demo-20261001T081103-11a6580f",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "# Loop 结果：离线演示：成员邀请过期重发\n\n**停止类型：达标**\n\ninvite：达标\n\n- 运行：`invite-demo-20261001T081103-11a6580f`\n- 父运行：`无`\n- 规则指纹：`04360765f425510994efbc3132d9b8efe8cc4e16879bdd32ff4df2609889510d`\n- 引擎：`0.1.0`\n- 成员调用：4；总耗时：11.508 秒。\n- token / 金额：未计量。一次成员调用可能包含多次模型请求。\n- 人工验收：未进行。达标不等于拍板人已认可；不自动合并、不更新基线。\n\n最终完整性异常：未发现\n\n## 单元结果\n\n### invite — 达标\n\n当前候选的全部标准有效通过，必需门禁通过；待拍板人验收。\n\n- 候选代码：`/mnt/data/Loop 安装验证/本地运行 数据/artifacts/invite-demo-20261001T081103-11a6580f/invite/round-002/code`\n- 候选指纹：`1f7896a440801b8f4de72ba0c5868d98da846ecb15ce0cfd0a6ecc8abbebda7f`\n- 已评审本候选：True\n- 改动清单：`/mnt/data/Loop 安装验证/本地运行 数据/runs/invite-demo-20261001T081103-11a6580f/units/invite/candidate-002.json`\n\n| 标准 | 最终状态 | 说明 | 证据 |\n|---|---|---|---|\n| S1 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['gate:G1'] |\n| S2 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['code:invites.py'] |\n\n规则缺口：未记录\n\n计数：`{\"member_invocations\": 4, \"repairs\": 1, \"infra_retries\": 0, \"protocol_retries\": 0}`\n\n证据索引（当前候选绑定）：\n\n```json\n{\n  \"gate:G1\": {\n    \"candidate_hash\": \"1f7896a440801b8f4de72ba0c5868d98da846ecb15ce0cfd0a6ecc8abbebda7f\",\n    \"status\": \"PASS\",\n    \"stdout\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/invite-demo-20261001T081103-11a6580f/units/invite/gates/r002-G1/job/stdout.log\",\n    \"stderr\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/invite-demo-20261001T081103-11a6580f/units/invite/gates/r002-G1/job/stderr.log\",\n    \"exit_code\": 0\n  },\n  \"code:invites.py\": {\n    \"path\": \"/mnt/data/Loop 安装验证/本地运行 数据/artifacts/invite-demo-20261001T081103-11a6580f/invite/round-002/code/invites.py\",\n    \"sha256\": \"609dd7017f113b082a60cd9c872d8aa11dde0816c3849f2d01341cacd1e1ce40\",\n    \"candidate_hash\": \"1f7896a440801b8f4de72ba0c5868d98da846ecb15ce0cfd0a6ecc8abbebda7f\"\n  }\n}\n```\n\n## 边界\n\n本结果仅基于冻结标准、当前候选代码和本次证据。原始项目未由引擎覆盖。\n同账号防误改不是安全沙箱。未支持脱离进程组的后台作业、生产发布和外部不可逆动作。\n完整过程见 events.jsonl 与 units/<单元>/。manifest.json 是权威记录，其他文件可重新生成。\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "audit",
+        "invite-demo-20261001T081103-11a6580f",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"run_id\": \"invite-demo-20261001T081103-11a6580f\",\n  \"integrity_ok\": true,\n  \"errors\": [],\n  \"scope\": \"检查保存的规则、交接、门禁日志、输入快照及候选文件指纹；不重新判定业务语义，不防同账号恶意改写整个清单。\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "status",
+        "invite-demo-20261001T081135-763e62e5",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "\ninvite-demo-20261001T081135-763e62e5 | 达标\n  invite             达标             round=2 calls=4  last_step=2026-10-01T08:11:46Z last_output=2026-10-01T08:11:40Z\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "result",
+        "invite-demo-20261001T081135-763e62e5",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "# Loop 结果：离线演示：成员邀请过期重发\n\n**停止类型：达标**\n\ninvite：达标\n\n- 运行：`invite-demo-20261001T081135-763e62e5`\n- 父运行：`无`\n- 规则指纹：`04360765f425510994efbc3132d9b8efe8cc4e16879bdd32ff4df2609889510d`\n- 引擎：`0.1.0`\n- 成员调用：4；总耗时：10.967 秒。\n- token / 金额：未计量。一次成员调用可能包含多次模型请求。\n- 人工验收：未进行。达标不等于拍板人已认可；不自动合并、不更新基线。\n\n最终完整性异常：未发现\n\n## 单元结果\n\n### invite — 达标\n\n当前候选的全部标准有效通过，必需门禁通过；待拍板人验收。\n\n- 候选代码：`/mnt/data/Loop 安装验证/本地运行 数据/artifacts/invite-demo-20261001T081135-763e62e5/invite/round-002/code`\n- 候选指纹：`1f7896a440801b8f4de72ba0c5868d98da846ecb15ce0cfd0a6ecc8abbebda7f`\n- 已评审本候选：True\n- 改动清单：`/mnt/data/Loop 安装验证/本地运行 数据/runs/invite-demo-20261001T081135-763e62e5/units/invite/candidate-002.json`\n\n| 标准 | 最终状态 | 说明 | 证据 |\n|---|---|---|---|\n| S1 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['gate:G1'] |\n| S2 | PASS | 离线协议桩结论；真实测试由引擎执行 | ['code:invites.py'] |\n\n规则缺口：未记录\n\n计数：`{\"member_invocations\": 4, \"repairs\": 1, \"infra_retries\": 0, \"protocol_retries\": 0}`\n\n证据索引（当前候选绑定）：\n\n```json\n{\n  \"gate:G1\": {\n    \"candidate_hash\": \"1f7896a440801b8f4de72ba0c5868d98da846ecb15ce0cfd0a6ecc8abbebda7f\",\n    \"status\": \"PASS\",\n    \"stdout\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/invite-demo-20261001T081135-763e62e5/units/invite/gates/r002-G1/job/stdout.log\",\n    \"stderr\": \"/mnt/data/Loop 安装验证/本地运行 数据/runs/invite-demo-20261001T081135-763e62e5/units/invite/gates/r002-G1/job/stderr.log\",\n    \"exit_code\": 0\n  },\n  \"code:invites.py\": {\n    \"path\": \"/mnt/data/Loop 安装验证/本地运行 数据/artifacts/invite-demo-20261001T081135-763e62e5/invite/round-002/code/invites.py\",\n    \"sha256\": \"609dd7017f113b082a60cd9c872d8aa11dde0816c3849f2d01341cacd1e1ce40\",\n    \"candidate_hash\": \"1f7896a440801b8f4de72ba0c5868d98da846ecb15ce0cfd0a6ecc8abbebda7f\"\n  }\n}\n```\n\n## 边界\n\n本结果仅基于冻结标准、当前候选代码和本次证据。原始项目未由引擎覆盖。\n同账号防误改不是安全沙箱。未支持脱离进程组的后台作业、生产发布和外部不可逆动作。\n完整过程见 events.jsonl 与 units/<单元>/。manifest.json 是权威记录，其他文件可重新生成。\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "audit",
+        "invite-demo-20261001T081135-763e62e5",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"run_id\": \"invite-demo-20261001T081135-763e62e5\",\n  \"integrity_ok\": true,\n  \"errors\": [],\n  \"scope\": \"检查保存的规则、交接、门禁日志、输入快照及候选文件指纹；不重新判定业务语义，不防同账号恶意改写整个清单。\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "export",
+        "invite-demo-20261001T081135-763e62e5",
+        "--root",
+        "/mnt/data/Loop 安装验证/本地运行 数据",
+        "--to",
+        "/mnt/data/Loop 安装验证/导出代码"
+      ],
+      "exit_code": 4,
+      "stdout": "",
+      "stderr": "错误：目标已存在，拒绝覆盖：/mnt/data/Loop 安装验证/导出代码\n"
+    }
+  ],
+  "exported_tests_output": "test_accepted_cannot_resend (test_invites.InvitationTests.test_accepted_cannot_resend) ... ok\ntest_expired_pending_can_resend (test_invites.InvitationTests.test_expired_pending_can_resend) ... ok\ntest_live_pending_cannot_resend (test_invites.InvitationTests.test_live_pending_cannot_resend) ... ok\ntest_revoked_cannot_resend (test_invites.InvitationTests.test_revoked_cannot_resend) ... ok\n\n----------------------------------------------------------------------\nRan 4 tests in 0.000s\n\nOK\n"
+}

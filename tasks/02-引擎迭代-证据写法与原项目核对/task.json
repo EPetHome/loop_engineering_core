@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "task_id": "engine-iter-01",
+  "title": "引擎迭代 01：证据写法讲清、格式修复按角色分开、原项目被动能发现",
+  "source": "../../engine",
+  "agents": {
+    "dev": {
+      "kind": "command",
+      "identity": "sol-developer",
+      "output": "stdout",
+      "inherit_env": [],
+      "argv": [
+        "{python}",
+        "/Users/Admin/Desktop/Loop/adapters/pi_member.py",
+        "--model",
+        "openai-codex/gpt-6.1-sol",
+        "--thinking",
+        "max",
+        "--tools",
+        "read,bash,edit,write,grep,find,ls"
+      ]
+    },
+    "review": {
+      "kind": "command",
+      "identity": "astra-reviewer",
+      "output": "stdout",
+      "inherit_env": [],
+      "argv": [
+        "{python}",
+        "/Users/Admin/Desktop/Loop/adapters/pi_member.py",
+        "--model",
+        "openai-codex/gpt-6-astra",
+        "--thinking",
+        "xhigh",
+        "--tools",
+        "read,grep,find,ls"
+      ]
+    }
+  },
+  "limits": {
+    "max_parallel": 1,
+    "max_wall_seconds": 18000,
+    "max_member_invocations": 24
+  },
+  "completion": {
+    "mode": "independent"
+  },
+  "notes": "【证据写法，务必照做】criteria 里的 evidence 数组只能写两种引用：code:<被审项目内的相对路径>（例如 code:loop_engineering/engine.py），或 gate:<门禁ID>（例如 gate:G1）。开发方不要写 gate: 引用，门禁由引擎在你交付之后才运行，你自己跑过的测试写在 note 里。评审方可以写 gate: 引用。任何其他内容都不要放进 evidence：绝对路径、工作区里的文件、网址、日志位置，一律写在 note 里。【本任务】你面对的是 Loop Engineering 引擎的一份副本，你就在这份副本里工作。自测请用 /opt/homebrew/bin/python3.12（需要 Python 3.10 以上）：/opt/homebrew/bin/python3.12 -m unittest discover -s tests；/opt/homebrew/bin/python3.12 acceptance/check_u1.py；/opt/homebrew/bin/python3.12 acceptance/check_u2.py。这些都不调用模型、不联网。不要运行 examples/real_pi_codex.json，不要运行任何会调用真实模型或联网的命令，不要启动后台进程。acceptance/ 目录是验收标准，只读。保持现有代码风格和中文提示用语；只做本单元目标要求的改动。",
+  "units": [
+    {
+      "id": "u1-evidence-retries",
+      "depends_on": [],
+      "goal": "让引擎给成员的提示把证据写法讲全，并把交付格式修复额度改为按角色分开计。",
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "引擎原有的全部自动化测试继续通过；原有测试文件没有被改动或删除。",
+          "gate_ids": [
+            "G1"
+          ]
+        },
+        {
+          "id": "S2",
+          "text": "交付格式修复额度按角色分开：规则里的 max_protocol_retries 表示同一单元内开发方、评审方各自最多这么多次交付格式修复，一方用掉不影响另一方；某一方到达自己的上限后，仍按原来的方式停为 BLOCKED。单元统计 stats 里保留整数 protocol_retries（本单元格式修复总次数），并新增 protocol_retries_by_role，形如 {\"developer\": 0, \"reviewer\": 0}，为 0 时也要有。以 acceptance/check_u1.py 为准。",
+          "gate_ids": [
+            "G2"
+          ]
+        },
+        {
+          "id": "S3",
+          "text": "证据校验不放宽：开发方把门禁写进证据、任何一方把 code: 和 gate: 之外的内容写进证据，仍然判为交付格式错误。以 acceptance/check_u1.py 为准。",
+          "gate_ids": [
+            "G2"
+          ]
+        },
+        {
+          "id": "S4",
+          "text": "引擎生成给成员的提示（loop_engineering/adapters.py 的 member_prompt）明确写出三点：一、evidence 只接受 code:<项目内相对路径> 和 gate:<门禁ID> 两种引用；二、开发方不得写 gate: 引用，自己跑过的测试写在 note 里；三、其他路径、网址、日志位置不放进 evidence，写在 note 里。",
+          "gate_ids": []
+        },
+        {
+          "id": "S5",
+          "text": "文档与代码行为一致：docs/03-规则配置参考.md 里 max_protocol_retries 的含义改为按角色；docs/04-成员工具接入.md 的交付结构一节写明 S4 的三点；CHANGELOG.md 增加一条说明本次改动。",
+          "gate_ids": []
+        },
+        {
+          "id": "S6",
+          "text": "在 tests/ 下新增测试文件，至少有一个自动化测试覆盖「开发方用掉一次格式修复后，评审方仍有自己的一次」，并随 G1 一起运行通过。",
+          "gate_ids": []
+        },
+        {
+          "id": "S7",
+          "text": "只改了允许范围内的文件；没有做本单元目标之外的改动（重构、改名、调整无关行为）。",
+          "gate_ids": []
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ],
+          "timeout_seconds": 420
+        },
+        {
+          "id": "G2",
+          "argv": [
+            "{python}",
+            "acceptance/check_u1.py"
+          ],
+          "timeout_seconds": 300
+        }
+      ],
+      "writable_paths": [
+        "loop_engineering/",
+        "docs/",
+        "tests/",
+        "CHANGELOG.md"
+      ],
+      "protected_paths": [
+        "acceptance/",
+        "tests/test_contracts.py",
+        "tests/test_engine.py"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 2,
+      "max_infra_retries": 1,
+      "max_protocol_retries": 3,
+      "stage_timeout_seconds": 2400,
+      "max_seconds": 9000
+    },
+    {
+      "id": "u2-source-drift",
+      "depends_on": [
+        "u1-evidence-retries"
+      ],
+      "goal": "运行结束时能发现原项目被动过：总停止类型为推不动，并在结果里列出被动过的路径。",
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "引擎原有的全部自动化测试继续通过；原有测试文件没有被改动或删除。",
+          "gate_ids": [
+            "G1"
+          ]
+        },
+        {
+          "id": "S2",
+          "text": "上一个单元（按角色分开的格式修复额度、证据校验不放宽）的行为没有被破坏。以 acceptance/check_u1.py 为准。",
+          "gate_ids": [
+            "G2"
+          ]
+        },
+        {
+          "id": "S3",
+          "text": "运行正常收尾时，按启动时同样的纳入范围和排除规则重新扫描原项目，与启动时的输入快照清单比较。有差异（内容变化、新增、删除）时：本次运行的总停止类型为 BLOCKED，命令退出码为 3；总结果（manifest.json 的 result 和 result.json）里有 source_drift 字段，列出有差异的相对路径；result.md 里写出这些路径。没有差异时 source_drift 为空数组，停止类型不受影响。被排除的文件（例如 .DS_Store、__pycache__）不算差异。由故障恢复补写结果的情况不要求做这次核对。以 acceptance/check_u2.py 为准。",
+          "gate_ids": [
+            "G3"
+          ]
+        },
+        {
+          "id": "S4",
+          "text": "重新扫描失败（例如原项目目录不见了）时收尾不崩溃：总停止类型为 BLOCKED，结果里写明原因，结果文件照常生成。",
+          "gate_ids": []
+        },
+        {
+          "id": "S5",
+          "text": "各单元自己的结论和证据不因为这次核对被改写；它只影响总停止类型和总结果。",
+          "gate_ids": []
+        },
+        {
+          "id": "S6",
+          "text": "文档与代码行为一致：docs/05-结果验收与导出.md 说明 source_drift 字段的含义和出现时怎么处理；docs/10-安全边界与已知限制.md 把「原项目被成员改动」写成能发现、不能阻止；CHANGELOG.md 增加一条。",
+          "gate_ids": []
+        },
+        {
+          "id": "S7",
+          "text": "在 tests/ 下新增测试文件，至少有一个自动化测试覆盖「运行期间原项目被改，总停止类型为 BLOCKED 并列出路径」，并随 G1 一起运行通过。",
+          "gate_ids": []
+        },
+        {
+          "id": "S8",
+          "text": "只改了允许范围内的文件；没有做本单元目标之外的改动（重构、改名、调整无关行为）。",
+          "gate_ids": []
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ],
+          "timeout_seconds": 420
+        },
+        {
+          "id": "G2",
+          "argv": [
+            "{python}",
+            "acceptance/check_u1.py"
+          ],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "G3",
+          "argv": [
+            "{python}",
+            "acceptance/check_u2.py"
+          ],
+          "timeout_seconds": 300
+        }
+      ],
+      "writable_paths": [
+        "loop_engineering/",
+        "docs/",
+        "tests/",
+        "CHANGELOG.md"
+      ],
+      "protected_paths": [
+        "acceptance/",
+        "tests/test_contracts.py",
+        "tests/test_engine.py"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 2,
+      "max_infra_retries": 1,
+      "max_protocol_retries": 3,
+      "stage_timeout_seconds": 2400,
+      "max_seconds": 9000
+    }
+  ]
+}

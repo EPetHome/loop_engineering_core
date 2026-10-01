@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "task_id": "dag-demo",
+  "title": "离线演示：前后端并行与集成",
+  "source": "dag_project",
+  "agents": {
+    "dev": {
+      "kind": "command",
+      "identity": "offline-developer",
+      "argv": [
+        "{python}",
+        "{engine}/examples/demo_member.py",
+        "--context",
+        "{context}",
+        "--mode",
+        "dag-good"
+      ],
+      "output": "file"
+    },
+    "review": {
+      "kind": "command",
+      "identity": "offline-reviewer",
+      "argv": [
+        "{python}",
+        "{engine}/examples/demo_member.py",
+        "--context",
+        "{context}",
+        "--mode",
+        "dag-good"
+      ],
+      "output": "file"
+    }
+  },
+  "limits": {
+    "max_wall_seconds": 120,
+    "max_member_invocations": 12
+  },
+  "units": [
+    {
+      "id": "front",
+      "kind": "work",
+      "goal": "实现 front 的邀请接口",
+      "depends_on": [],
+      "writable_paths": [
+        "frontend.py"
+      ],
+      "protected_paths": [
+        "tests/"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 0,
+      "max_infra_retries": 0,
+      "max_protocol_retries": 0,
+      "max_seconds": 90,
+      "stage_timeout_seconds": 20,
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "本单元的冻结接口检查通过。",
+          "gate_ids": [
+            "G1"
+          ]
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-c",
+            "import runpy,sys;sys.argv=['tests/check_unit.py','front'];runpy.run_path(sys.argv[0],run_name='__main__')"
+          ],
+          "timeout_seconds": 10
+        }
+      ]
+    },
+    {
+      "id": "back",
+      "kind": "work",
+      "goal": "实现 back 的邀请接口",
+      "depends_on": [],
+      "writable_paths": [
+        "backend.py"
+      ],
+      "protected_paths": [
+        "tests/"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 0,
+      "max_infra_retries": 0,
+      "max_protocol_retries": 0,
+      "max_seconds": 90,
+      "stage_timeout_seconds": 20,
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "本单元的冻结接口检查通过。",
+          "gate_ids": [
+            "G1"
+          ]
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-c",
+            "import runpy,sys;sys.argv=['tests/check_unit.py','back'];runpy.run_path(sys.argv[0],run_name='__main__')"
+          ],
+          "timeout_seconds": 10
+        }
+      ]
+    },
+    {
+      "id": "integration",
+      "kind": "integration",
+      "goal": "验证最终接口能够组合工作",
+      "depends_on": [
+        "front",
+        "back"
+      ],
+      "writable_paths": [],
+      "protected_paths": [
+        "tests/"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 0,
+      "max_infra_retries": 0,
+      "max_protocol_retries": 0,
+      "max_seconds": 90,
+      "stage_timeout_seconds": 20,
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "本单元的冻结接口检查通过。",
+          "gate_ids": [
+            "G1"
+          ]
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-c",
+            "import runpy,sys;sys.argv=['tests/check_unit.py','integration'];runpy.run_path(sys.argv[0],run_name='__main__')"
+          ],
+          "timeout_seconds": 10
+        }
+      ]
+    }
+  ],
+  "completion": {
+    "mode": "integration",
+    "unit": "integration"
+  }
+}
