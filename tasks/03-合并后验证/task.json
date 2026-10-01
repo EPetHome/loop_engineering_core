@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "task_id": "verify-iter-01",
+  "title": "合并后验证：新引擎自己把证据写法讲清，不靠任务补充说明",
+  "source": "project",
+  "agents": {
+    "dev": {
+      "kind": "command",
+      "identity": "sol-developer",
+      "output": "stdout",
+      "inherit_env": [],
+      "argv": [
+        "{python}",
+        "/Users/Admin/Desktop/Loop/adapters/pi_member.py",
+        "--model",
+        "openai-codex/gpt-6.1-sol",
+        "--thinking",
+        "max",
+        "--tools",
+        "read,bash,edit,write,grep,find,ls"
+      ]
+    },
+    "review": {
+      "kind": "command",
+      "identity": "astra-reviewer",
+      "output": "stdout",
+      "inherit_env": [],
+      "argv": [
+        "{python}",
+        "/Users/Admin/Desktop/Loop/adapters/pi_member.py",
+        "--model",
+        "openai-codex/gpt-6-astra",
+        "--thinking",
+        "xhigh",
+        "--tools",
+        "read,grep,find,ls"
+      ]
+    }
+  },
+  "limits": {
+    "max_wall_seconds": 3000,
+    "max_member_invocations": 8
+  },
+  "notes": "用合并了迭代 01 的引擎重跑最小示例。任务里不再附带证据写法的说明，交付格式修复额度为每个角色 1 次。只改示例副本，不接任何外部服务。",
+  "units": [
+    {
+      "id": "invite",
+      "goal": "修复邀请重新发送判断：仅 pending 且 expired 为真时允许重发。",
+      "depends_on": [],
+      "writable_paths": [
+        "invites.py"
+      ],
+      "protected_paths": [
+        "tests/",
+        "baseline.md"
+      ],
+      "developer": "dev",
+      "reviewer": "review",
+      "max_repairs": 1,
+      "max_infra_retries": 1,
+      "max_protocol_retries": 1,
+      "stage_timeout_seconds": 900,
+      "max_seconds": 2700,
+      "criteria": [
+        {
+          "id": "S1",
+          "text": "四个冻结用例全部通过，只有待接受且已过期的邀请可以重发。",
+          "gate_ids": [
+            "G1"
+          ]
+        },
+        {
+          "id": "S2",
+          "text": "修改仅涉及 invites.py；代码与目标一致。",
+          "gate_ids": []
+        }
+      ],
+      "gates": [
+        {
+          "id": "G1",
+          "argv": [
+            "{python}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-v"
+          ],
+          "timeout_seconds": 30
+        }
+      ]
+    }
+  ]
+}
