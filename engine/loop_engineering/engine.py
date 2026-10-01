@@ -274,10 +274,10 @@ class UnitEngine:
                 atomic_write(adir / 'protocol-error.txt', last_error + '\n', readonly=True)
                 self.store.seal(adir / 'protocol-error.txt')
                 stats = self.store.data['units'][self.uid]['stats']
-                if stats['protocol_retries'] >= self.unit['max_protocol_retries']:
+                if stats['protocol_retries_by_role'][role] >= self.unit['max_protocol_retries']:
                     raise Stop('BLOCKED', '交付协议修复已耗尽：' + last_error)
-                self.store.counter(self.uid, 'protocol_retries')
-                self.store.event('protocol_retry', self.uid, attempt=attempt, error=last_error)
+                self.store.protocol_retry(self.uid, role)
+                self.store.event('protocol_retry', self.uid, role=role, attempt=attempt, error=last_error)
                 frozen = self.store.root / 'snapshots' / self.store.rid / ('protocol-' + attempt)
                 copy_manifest(code, frozen, actual, readonly=True)
                 base_path, base_manifest = frozen, actual
@@ -528,5 +528,13 @@ class Controller:
                         verify_candidate(result['candidate'], self.rules['limits'])
             except (LoopError, OSError) as exc:
                 self.store.patch(final_integrity_error=str(exc))
-            self.store.finish_run()
+            source_drift, source_drift_error = [], None
+            if self.store.data['input']:
+                try:
+                    source = Path(self.store.data['input_override'] or self.rules['source'])
+                    current = snapshot_manifest(source, self.rules['limits'], self.rules['exclude_paths'])
+                    source_drift = changes(self.store.data['input']['manifest'], current)
+                except (LoopError, OSError) as exc:
+                    source_drift_error = f'原项目收尾核对失败：{type(exc).__name__}: {exc}'
+            self.store.finish_run(source_drift=source_drift, source_drift_error=source_drift_error)
             render_views(self.store.root, self.store.rid)

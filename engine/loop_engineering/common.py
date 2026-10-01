@@ -173,12 +173,15 @@ def tree_manifest(root: Path, excludes: list[str] | None = None,
 
     Including empty directories catches otherwise invisible out-of-scope mkdirs.
     All limits apply to one snapshot, not the whole disk.
+    Directory enumeration errors invalidate the snapshot instead of omitting entries.
     """
     if not root.is_dir() or root.is_symlink():
         raise IntegrityError(f"代码目录不存在或是符号链接：{root}")
     result, size = {}, 0
     excludes = excludes or []
-    for base, dirs, files in os.walk(root, followlinks=False):
+    def raise_scan_error(exc: OSError) -> None:
+        raise exc
+    for base, dirs, files in os.walk(root, onerror=raise_scan_error, followlinks=False):
         dirs.sort()
         files.sort()
         for name in list(dirs):

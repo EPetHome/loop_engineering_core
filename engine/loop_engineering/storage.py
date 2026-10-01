@@ -53,7 +53,9 @@ def create_run(root: Path, rules: dict, parent: str | None = None,
                 'units': {u['id']: {'state': 'PENDING', 'phase': 'pending', 'round': 0,
                                   'criterion_ids': [c['id'] for c in u['criteria']],
                                   'stats': {'member_invocations': 0, 'repairs': 0, 'infra_retries': 0,
-                                            'protocol_retries': 0}, 'result': None} for u in rules['units']},
+                                            'protocol_retries': 0,
+                                            'protocol_retries_by_role': {'developer': 0, 'reviewer': 0}},
+                                  'result': None} for u in rules['units']},
                 'result': None}
     atomic_json(run / 'manifest.json', manifest)
     return rid
@@ -97,6 +99,13 @@ class Store:
             self.data['units'][uid]['stats'][key] += 1
             self.commit()
 
+    def protocol_retry(self, uid: str, role: str):
+        with self.lock:
+            stats = self.data['units'][uid]['stats']
+            stats['protocol_retries'] += 1
+            stats['protocol_retries_by_role'][role] += 1
+            self.commit()
+
     def reserve_call(self, uid: str, maximum: int) -> bool:
         with self.lock:
             if self.data['budget']['member_invocations'] >= maximum:
@@ -134,7 +143,7 @@ class Store:
             self.commit()  # status + full result are in the same atomic record
             self.event('unit_stopped', uid, stop=result['stop'], reason=result['reason'])
 
-    def finish_run(self):
+    def finish_run(self, source_drift: list[str] | None = None, source_drift_error: str | None = None):
         with self.lock:
             if self.data['state'] == 'TERMINAL':
                 return
@@ -143,11 +152,17 @@ class Store:
                 raise IntegrityError('仍有未收尾单元，不能提交总结果')
             values = [v['stop'] for v in results.values()]
             stop = 'PASSED' if all(v == 'PASSED' for v in values) else ('BLOCKED' if 'BLOCKED' in values else 'NOT_MET')
-            if self.data.get('final_integrity_error'):
+            source_drift = source_drift or []
+            if self.data.get('final_integrity_error') or source_drift or source_drift_error:
                 stop = 'BLOCKED'
+            summary = '；'.join(f'{k}：{STOP_LABELS[v["stop"]]}' for k, v in results.items())
+            if source_drift:
+                summary += '；原项目发生变化，请核对 source_drift 列出的路径；未自动还原。'
+            if source_drift_error:
+                summary += '；' + source_drift_error
             self.data.update(state='TERMINAL', result={
-                'stop': stop, 'finished_at': now(), 'run_id': self.rid,
-                'summary': '；'.join(f'{k}：{STOP_LABELS[v["stop"]]}' for k, v in results.items()),
+                'stop': stop, 'finished_at': now(), 'run_id': self.rid, 'summary': summary,
+                'source_drift': source_drift, 'source_drift_error': source_drift_error,
                 'elapsed_seconds': round(time.time() - self.data['created_epoch'], 3),
                 'member_invocations': self.data['budget']['member_invocations'],
                 'token_usage': None, 'cost': None,
@@ -166,7 +181,14 @@ def markdown_result(data: dict) -> str:
              f'- 成员调用：{r["member_invocations"]}；总耗时：{r["elapsed_seconds"]} 秒。',
              '- token / 金额：未计量。一次成员调用可能包含多次模型请求。',
              '- 人工验收：未进行。达标不等于拍板人已认可；不自动合并、不更新基线。',
-             '', '最终完整性异常：' + str(r.get('integrity_error') or '未发现'), '', '## 单元结果', '']
+             '', '最终完整性异常：' + str(r.get('integrity_error') or '未发现'), '',
+             '## 原项目收尾核对', '', '核对异常：' + str(r.get('source_drift_error') or '未记录'), '']
+    if r.get('source_drift'):
+        lines += ['变动路径（source_drift，未自动还原）：', '']
+        lines += [f'- `{rel}`' for rel in r['source_drift']]
+    else:
+        lines += ['source_drift：`[]`（未列出差异；故障恢复补写结果时不做核对）。']
+    lines += ['', '## 单元结果', '']
     for uid, state in data['units'].items():
         v = state['result']
         lines += [f'### {uid} — {STOP_LABELS[v["stop"]]}', '', v['reason'], '']
