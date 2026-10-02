@@ -64,6 +64,8 @@ def recover(root: Path, rid: str, internal=False) -> dict:
                 'criteria': [{'id': c, 'status': 'UNKNOWN', 'note': '故障恢复，未获得完整有效结论', 'evidence': []} for c in ids],
                 'rule_gaps': [], 'evidence': {}, 'history': [], 'recovery_notes': unresolved})
         store.event('orphan_recovered', unresolved=unresolved)
+        # No final-check flags: even all-PASSED units cannot attest to a lost
+        # finish_run commit. Do not rescan, rerun members or infer from [] here.
         store.finish_run()
         render_views(root, rid)
         return store.data['result']

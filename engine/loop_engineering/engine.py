@@ -21,10 +21,13 @@ from .adapters import ENGINE_DIR, command, expand, member_prompt
 from .common import (LoopError, IntegrityError, FileLock, atomic_json, atomic_write, changes,
                      check_boundary, copy_manifest, digest, environment, file_hash,
                      load_json, matches, now, safe_child, tree_manifest)
-from .protocol import evaluate, validate_report, response_schema
+from .protocol import evaluate, validate_report, response_schema, scratch_file
+from .handoff import make_comparison, record_findings, apply_resolutions, rule_gaps
 from .rules import ancestors, topological
 from .runner import kill_group, process_identity
 from .storage import Store, render_views
+from .observability import read_observation
+from .sessions import DeveloperSessions
 
 
 class Stop(Exception):
@@ -52,6 +55,16 @@ def verify_candidate(candidate: dict, limits: dict) -> dict:
     return manifest
 
 
+def gate_failure_reason(stdout: Path) -> str:
+    """Use the last stdout marker, including an empty marker overriding earlier ones."""
+    reason = 'unspecified'
+    with stdout.open(encoding='utf-8', errors='replace') as log:
+        for line in log:
+            if line.startswith('LOOP_FAIL_REASON='):
+                reason = line[len('LOOP_FAIL_REASON='):].strip()[:200] or 'unspecified'
+    return reason
+
+
 class UnitEngine:
     def __init__(self, controller: 'Controller', unit: dict):
         self.controller, self.store, self.rules, self.unit = controller, controller.store, controller.rules, unit
@@ -61,7 +74,9 @@ class UnitEngine:
         self.deadline = min(controller.deadline, time.time() + unit['max_seconds'])
         self.input_path, self.input_manifest = None, None
         self.candidate, self.last_reviewed, self.rows = None, None, None
-        self.gates, self.gaps, self.feedback, self.history = {}, [], None, []
+        self.gates, self.feedback, self.history = {}, None, []
+        self.issue_history = []
+        self.scratch_evidence = {}
         self.round = 1
 
     def check_time(self):
@@ -78,6 +93,21 @@ class UnitEngine:
             stamp = max(p.stat().st_mtime for p in existing)
             values['last_output_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(stamp))
         self.store.unit(self.uid, **values)
+        self.observe_member(phase, job)
+
+    def observe_member(self, phase: str, job: Path, receipt: dict | None = None):
+        if phase not in ('developing', 'reviewing'):
+            return
+        workspace = job.parent
+        self.store.member_observation(self.uid, workspace.name,
+            'developer' if phase == 'developing' else 'reviewer', workspace,
+            read_observation(workspace), receipt)
+
+    def seal_observation(self, workspace: Path):
+        for name in ('pi-events.jsonl', 'pi-stderr.log', 'activity.json', 'usage.json', 'session-protection.json'):
+            path = workspace / name
+            if path.is_file() and not path.is_symlink():
+                self.store.seal(path)
 
     def run_job(self, argv: list[str], code: Path, job: Path, stdin: str,
                 timeout: float, idle: float, env: dict, phase: str) -> dict:
@@ -120,6 +150,9 @@ class UnitEngine:
             raise Stop('BLOCKED', '进程守护器没有交付执行回执：' + str(job))
         receipt = load_json(receipt_path)
         self.store.event('command_finished', self.uid, phase=phase, job=str(job), **receipt)
+        self.observe_member(phase, job, receipt)
+        if phase in ('developing', 'reviewing'):
+            self.seal_observation(job.parent)
         self.check_time()
         for name in ('job.json', 'stdin.txt', 'receipt.json', 'stdout.log', 'stderr.log'):
             p = job / name
@@ -188,15 +221,43 @@ class UnitEngine:
         self.store.unit(self.uid, input_hash=digest(actual), input_path=str(frozen), last_step_at=now())
         return frozen, actual
 
+    def comparison(self, code: Path, manifest: dict, adir: Path) -> dict:
+        if snapshot_manifest(self.input_path, self.limits) != self.input_manifest:
+            raise IntegrityError('本单元冻结输入发生变化')
+        previous = next((h for h in reversed(self.history) if h['round'] == self.round - 1), None)
+        candidate = previous['candidate'] if previous else None
+        previous_manifest = verify_candidate(candidate, self.limits) if candidate else None
+        review = (load_json(Path(previous['review_path']))['report']
+                  if previous and previous.get('review_path') else None)
+        comp = make_comparison(self.input_path, self.input_manifest, code, manifest,
+                               candidate, previous_manifest, review, adir / 'comparison.diff')
+        self.store.seal(adir / 'comparison.diff')
+        return comp
+
     def member(self, role: str, base_path: Path, base_manifest: dict) -> tuple[dict, Path, dict, str]:
+        with DeveloperSessions(self.store, self.unit, role) as sessions:
+            return self._member(role, base_path, base_manifest, sessions)
+
+    def _member(self, role: str, base_path: Path, base_manifest: dict,
+                sessions: DeveloperSessions) -> tuple[dict, Path, dict, str]:
         agent = self.rules['agents'][self.unit[role]]
         protocol_repair, last_error, invalid_excerpt = False, '', ''
+        reviewer_exec = role == 'reviewer' and self.unit.get('reviewer_exec', False)
+        scratch = None
         while True:
             self.check_time()
             self.store.assert_integrity()
             attempt = f'{role}-r{self.round:03d}-' + uuid.uuid4().hex[:12]
             adir = self.workspace / 'attempts' / attempt
             adir.mkdir(parents=True)
+            if reviewer_exec:
+                previous_scratch, scratch = scratch, adir / 'scratch'
+                if previous_scratch is None:
+                    scratch.mkdir(mode=0o700)
+                else:
+                    # Fresh attempt, same collected contents; never follow links while copying.
+                    shutil.copytree(previous_scratch, scratch, symlinks=True)
+                    os.chmod(scratch, 0o700)
             code = self.store.root / 'checkouts' / self.store.rid / self.uid / attempt
             copy_manifest(base_path, code, base_manifest, readonly=(role == 'reviewer' or protocol_repair))
             response = adir / 'response.json'
@@ -204,7 +265,7 @@ class UnitEngine:
             values = {'python': sys.executable, 'engine': str(ENGINE_DIR), 'code': str(code),
                       'workspace': str(adir), 'context': str(context_path), 'response': str(response),
                       'schema': str(self.store.run / 'response.schema.json'), 'role': role, 'unit': self.uid}
-            args, output = command(agent, role, values)
+            args, output = command(agent, role, values, reviewer_exec=reviewer_exec)
             role_unit = {k: v for k, v in self.unit.items() if k not in ('developer', 'reviewer')}
             context = {'schema_version': 1, 'run_id': self.store.rid, 'unit_id': self.uid,
                        'attempt_id': attempt, 'role': role, 'member_identity': agent['identity'],
@@ -213,14 +274,20 @@ class UnitEngine:
                        'input_hash': digest(base_manifest), 'unit_input_hash': digest(self.input_manifest),
                        'candidate_hash': self.candidate['hash'] if role == 'reviewer' else '',
                        'code_path': str(code), 'workspace_path': str(adir), 'response_path': str(response),
+                       'scratch_path': str(scratch) if scratch is not None else None,
                        'output_mode': output, 'adapter_kind': agent['kind'], 'unit': role_unit, 'limits': self.limits,
                        'feedback': self.feedback if role == 'developer' else None,
                        'developer_delivery': self.history[-1].get('developer') if role == 'reviewer' and self.history else None,
                        'gate_evidence': self.gates if role == 'reviewer' else {},
                        'history_index': str(self.workspace),
+                       'comparison': self.comparison(code, base_manifest, adir),
+                       'issue_history': copy.deepcopy(self.issue_history),
                        'protocol_repair_only': protocol_repair,
                        'protocol_error': last_error, 'invalid_response_excerpt': invalid_excerpt,
                        'response_schema': response_schema()}
+            context['session'] = sessions.select(context, agent)
+            atomic_json(adir / 'session-choice.json', context['session'], readonly=True)
+            self.store.seal(adir / 'session-choice.json')
             template = {'attempt_id': attempt, 'role': role,
                         'candidate_hash': context['candidate_hash'], 'summary': '尚未评估', 'blocked': False,
                         'criteria': [{'id': c['id'], 'status': 'UNKNOWN', 'note': '尚未评估', 'evidence': []}
@@ -241,9 +308,15 @@ class UnitEngine:
             member_env = environment(agent['inherit_env'])
             member_env.update(LOOP_CONTEXT=str(context_path), LOOP_RESPONSE=str(response),
                               LOOP_CODE=str(code), LOOP_ATTEMPT_ID=attempt, LOOP_ROLE=role, LOOP_UNIT_ID=self.uid)
+            member_env.pop('LOOP_SCRATCH', None)
+            if scratch is not None:
+                member_env['LOOP_SCRATCH'] = str(scratch)
+            phase = 'developing' if role == 'developer' else 'reviewing'
+            self.observe_member(phase, adir / 'job')
             receipt = self.run_job(args, code, adir / 'job', prompt,
                                    self.unit['stage_timeout_seconds'], self.unit['idle_output_seconds'],
-                                   member_env, 'developing' if role == 'developer' else 'reviewing')
+                                   member_env, phase)
+            self.observe_member(phase, adir / 'job', receipt)
             self.store.assert_integrity()
             actual = snapshot_manifest(code, self.limits)
             if role == 'reviewer' or protocol_repair:
@@ -252,6 +325,7 @@ class UnitEngine:
             else:
                 check_boundary(self.input_manifest, actual, self.unit['writable_paths'], self.unit['protected_paths'])
             if receipt['reason'] != 'ok':
+                sessions.complete(context, False, 'execution_failed: ' + receipt['reason'])
                 if receipt['reason'] in ('timeout', 'idle_timeout', 'cancelled', 'controller_lost', 'log_limit'):
                     raise Stop('BLOCKED', '成员执行停止：' + receipt['reason'])
                 stats = self.store.data['units'][self.uid]['stats']
@@ -268,6 +342,7 @@ class UnitEngine:
                 report = load_json(response, self.limits['max_response_bytes'])
                 validate_report(report, context, code, self.gates)
             except (LoopError, TypeError, KeyError) as exc:
+                sessions.complete(context, False, 'protocol_rejected: ' + str(exc)[:400])
                 last_error = str(exc)
                 if response.is_file() and not response.is_symlink():
                     invalid_excerpt = response.read_bytes()[:4096].decode('utf-8', errors='replace')
@@ -283,14 +358,35 @@ class UnitEngine:
                 base_path, base_manifest = frozen, actual
                 protocol_repair = True
                 continue
+            sessions.complete(context, True, 'accepted_business_delivery' if not protocol_repair else 'format_only_not_reusable')
             self.store.seal(response)
+            scratch_evidence = {}
+            if scratch is not None:
+                evidence_rows = report['criteria'] + report.get('issue_resolutions', [])
+                refs = {ref for row in evidence_rows for ref in row['evidence'] if ref.startswith('scratch:')}
+                for ref in sorted(refs):
+                    path = scratch_file(scratch, ref[8:])
+                    self.store.seal(path)
+                    scratch_evidence[ref] = {'path': str(path), 'sha256': file_hash(path),
+                                             'candidate_hash': digest(actual)}
+                self.scratch_evidence = scratch_evidence
             wrapper = {'attempt_id': attempt, 'role': role, 'rule_hash': self.store.data['rule_hash'],
                        'input_hash': digest(base_manifest), 'candidate_hash': digest(actual),
                        'received_at': now(), 'report': report}
+            if scratch is not None:
+                wrapper['scratch_evidence'] = scratch_evidence
             accepted = adir / 'accepted.json'
             atomic_json(accepted, wrapper, readonly=True)
             self.store.seal(accepted)
-            self.store.unit(self.uid, last_step_at=now())
+            self.issue_history = record_findings(self.issue_history, report, self.store.rid, self.uid,
+                                                 self.round, digest(actual), str(accepted))
+            if role == 'reviewer':
+                self.issue_history = apply_resolutions(self.issue_history, report, self.unit, self.gates,
+                                                       digest(actual), self.round, str(accepted),
+                                                       self.evidence_index(report.get('issue_resolutions', [])))
+            # Persist accepted findings before the next member/step, including on
+            # failure paths. Recovery uses this ledger without inferring closure.
+            self.store.unit(self.uid, issue_history=copy.deepcopy(self.issue_history), last_step_at=now())
             self.store.event('handoff_accepted', self.uid, role=role, attempt=attempt, candidate_hash=digest(actual))
             return report, code, actual, str(accepted)
 
@@ -310,38 +406,63 @@ class UnitEngine:
 
     def run_gates(self, manifest: dict):
         self.gates = {}
+        # Reasons are shared across gates, but never across candidates/repair rounds.
+        failed_reasons = set()
+        if self.history:
+            self.history[-1]['gates'] = self.gates
         for gate in self.unit['gates']:
-            self.check_time()
-            self.store.assert_integrity()
-            verify_candidate(self.candidate, self.limits)
             gid = gate['id']
             location = self.workspace / 'gates' / f'r{self.round:03d}-{gid}'
-            code = self.store.root / 'checkouts' / self.store.rid / self.uid / f'gate-r{self.round:03d}-{gid}'
-            copy_manifest(Path(self.candidate['path']), code, manifest)
-            if any(matches(p, gate['output_paths']) for p in manifest):
-                raise IntegrityError(f'门禁 {gid} 的输出范围与已有源码重合')
-            values = {'python': sys.executable, 'engine': str(ENGINE_DIR), 'code': str(code),
-                      'workspace': str(location), 'unit': self.uid}
-            args = expand(gate['argv'], values)
-            receipt = self.run_job(args, code, location / 'job', '', gate['timeout_seconds'], 0,
-                                   environment(gate_home=location / 'home'), 'testing')
-            self.store.assert_integrity()
-            after = snapshot_manifest(code, self.limits)
-            # Tests may create explicitly declared new scratch files, never modify existing assets.
-            for p in changes(manifest, after):
-                if p in manifest or not (matches(p, gate['output_paths']) or
-                        (p.endswith('/') and any(x.startswith(p) for x in gate['output_paths']))):
-                    raise IntegrityError(f'门禁 {gid} 修改了受测源码/验收资产或未声明输出：{p}')
-            status = 'PASS' if receipt['reason'] == 'ok' else ('FAIL' if receipt['reason'] == 'nonzero_exit' else 'UNKNOWN')
+            attempts, repeated_reason = [], None
+            for attempt in range(1, gate.get('max_reruns', 0) + 2):
+                self.check_time()
+                self.store.assert_integrity()
+                verify_candidate(self.candidate, self.limits)
+                # Keep first paths unchanged. A separate namespace prevents reruns
+                # from colliding with first executions of IDs such as G1-a002.
+                execution = location if attempt == 1 else location / f'attempt-{attempt:03d}'
+                checkout = self.store.root / 'checkouts' / self.store.rid / self.uid
+                code = (checkout / f'gate-r{self.round:03d}-{gid}' if attempt == 1 else
+                        checkout / 'gate-reruns' / f'r{self.round:03d}-{gid}' / f'attempt-{attempt:03d}')
+                copy_manifest(Path(self.candidate['path']), code, manifest)
+                if any(matches(p, gate['output_paths']) for p in manifest):
+                    raise IntegrityError(f'门禁 {gid} 的输出范围与已有源码重合')
+                values = {'python': sys.executable, 'engine': str(ENGINE_DIR), 'code': str(code),
+                          'workspace': str(execution), 'unit': self.uid}
+                args = expand(gate['argv'], values)
+                receipt = self.run_job(args, code, execution / 'job', '', gate['timeout_seconds'], 0,
+                                       environment(gate_home=execution / 'home'), 'testing')
+                if attempt > 1:
+                    self.store.counter(self.uid, 'gate_reruns')
+                self.store.assert_integrity()
+                after = snapshot_manifest(code, self.limits)
+                # Tests may create explicitly declared new scratch files, never modify existing assets.
+                for p in changes(manifest, after):
+                    if p in manifest or not (matches(p, gate['output_paths']) or
+                            (p.endswith('/') and any(x.startswith(p) for x in gate['output_paths']))):
+                        raise IntegrityError(f'门禁 {gid} 修改了受测源码/验收资产或未声明输出：{p}')
+                status = 'PASS' if receipt['reason'] == 'ok' else ('FAIL' if receipt['reason'] == 'nonzero_exit' else 'UNKNOWN')
+                stdout, stderr = execution / 'job' / 'stdout.log', execution / 'job' / 'stderr.log'
+                reason = gate_failure_reason(stdout) if status == 'FAIL' else None
+                attempts.append({'attempt': attempt, 'status': status, 'exit_code': receipt['exit_code'],
+                                 'reason': reason, 'stdout': str(stdout), 'stderr': str(stderr)})
+                if status != 'FAIL':
+                    break  # PASS is final; infrastructure UNKNOWN must not be retried.
+                if reason in failed_reasons:
+                    repeated_reason = reason
+                    break
+                failed_reasons.add(reason)
             record = {'id': gid, 'status': status, 'candidate_hash': self.candidate['hash'],
                       'rule_hash': self.store.data['rule_hash'], 'input_hash': digest(self.input_manifest),
-                      'argv': args, 'receipt': receipt,
-                      'stdout': str(location / 'job' / 'stdout.log'), 'stderr': str(location / 'job' / 'stderr.log')}
+                      'argv': args, 'receipt': receipt, 'stdout': str(stdout), 'stderr': str(stderr),
+                      'attempts': attempts, 'reruns': len(attempts) - 1,
+                      'passed_after_rerun': status == 'PASS' and len(attempts) > 1,
+                      'repeated_reason': repeated_reason}
             path = location / 'evidence.json'
             atomic_json(path, record, readonly=True)
             self.store.seal(path)
             self.gates[gid] = record
-            self.store.unit(self.uid, last_step_at=now())
+            self.store.unit(self.uid, history=copy.deepcopy(self.history), last_step_at=now())
         verify_candidate(self.candidate, self.limits)
 
     def evidence_index(self, rows: list[dict]) -> dict:
@@ -353,11 +474,14 @@ class UnitEngine:
                         p = safe_child(Path(self.candidate['path']), ref[5:])
                         if p.is_file():
                             result[ref] = {'path': str(p), 'sha256': file_hash(p), 'candidate_hash': self.candidate['hash']}
+                    elif ref.startswith('scratch:') and ref in self.scratch_evidence:
+                        result[ref] = dict(self.scratch_evidence[ref])
                     elif ref.startswith('gate:') and ref[5:] in self.gates:
                         record = self.gates[ref[5:]]
                         result[ref] = {'candidate_hash': record['candidate_hash'], 'status': record['status'],
                                        'stdout': record['stdout'], 'stderr': record['stderr'],
-                                       'exit_code': record['receipt']['exit_code']}
+                                       'exit_code': record['receipt']['exit_code'],
+                                       'attempts': copy.deepcopy(record['attempts'])}
         return result
 
     def finish(self, stop: str, reason: str):
@@ -376,7 +500,9 @@ class UnitEngine:
         result = {'stop': stop, 'reason': reason, 'candidate': self.candidate,
                   'last_reviewed_candidate': self.last_reviewed,
                   'reviewed': bool(self.last_reviewed and self.candidate and self.last_reviewed['hash'] == self.candidate['hash']),
-                  'criteria': rows, 'rule_gaps': sorted(set(self.gaps)),
+                  'criteria': rows, 'rule_gaps': rule_gaps(self.issue_history),
+                  'historical_rule_gaps': rule_gaps(self.issue_history, historical=True),
+                  'issue_history': copy.deepcopy(self.issue_history),
                   'evidence': self.evidence_index(rows), 'history': self.history,
                   'workspace': str(self.workspace)}
         self.store.finish_unit(self.uid, result)
@@ -397,13 +523,13 @@ class UnitEngine:
                 self.check_time()
                 self.store.unit(self.uid, round=self.round)
                 dev, code, manifest, delivery = self.member('developer', base_path, base_manifest)
-                self.gaps += dev['rule_gaps']
                 self.candidate = self.freeze_candidate(code, manifest, delivery)
-                self.rows, self.gates = None, {}
+                self.rows, self.gates, self.scratch_evidence = None, {}, {}
                 self.history.append({'round': self.round, 'candidate': self.candidate, 'developer': dev,
-                                     'delivery_path': delivery, 'review_path': None})
+                                     'delivery_path': delivery, 'review_path': None,
+                                     'issue_history': copy.deepcopy(self.issue_history)})
                 # Persist candidate pointer before validation so crash recovery can preserve it.
-                self.store.unit(self.uid, checkpoint=self.candidate, last_step_at=now())
+                self.store.unit(self.uid, checkpoint=self.candidate, history=copy.deepcopy(self.history), last_step_at=now())
                 if dev['blocked']:
                     raise Stop('NOT_MET', '开发方记录了阻断目标的规则缺口：' + dev['summary'])
                 self.run_gates(manifest)
@@ -414,8 +540,9 @@ class UnitEngine:
                 verify_candidate(self.candidate, self.limits)
                 self.last_reviewed = dict(self.candidate)
                 self.rows = evaluate(review, self.unit, self.gates)
-                self.gaps += review['rule_gaps']
-                self.history[-1].update(review_path=review_path, review=review, evaluated=self.rows)
+                self.history[-1].update(review_path=review_path, review=review, evaluated=self.rows,
+                                        issue_history=copy.deepcopy(self.issue_history))
+                self.store.unit(self.uid, history=copy.deepcopy(self.history), last_step_at=now())
                 if all(r['status'] == 'PASS' for r in self.rows) and not review['blocked']:
                     self.check_time()
                     self.finish('PASSED', '当前候选的全部标准有效通过，必需门禁通过；待拍板人验收。')
@@ -442,7 +569,10 @@ class UnitEngine:
             except BaseException as secondary:
                 self.store.finish_unit(self.uid, {'stop': 'BLOCKED', 'reason': f'{exc}；收尾降级：{secondary}',
                     'candidate': self.candidate, 'reviewed': False, 'criteria': unknown_rows(self.unit, '完整性或收尾失败'),
-                    'rule_gaps': self.gaps, 'evidence': {}, 'history': self.history, 'workspace': str(self.workspace)})
+                    'rule_gaps': rule_gaps(self.issue_history),
+                    'historical_rule_gaps': rule_gaps(self.issue_history, historical=True),
+                    'issue_history': copy.deepcopy(self.issue_history),
+                    'evidence': {}, 'history': self.history, 'workspace': str(self.workspace)})
 
 
 class Controller:
@@ -520,21 +650,29 @@ class Controller:
                         self.store.finish_unit(u['id'], {'stop': 'BLOCKED', 'reason': f'调度失败：{type(exc).__name__}: {exc}',
                             'candidate': self.store.data['units'][u['id']].get('checkpoint'), 'reviewed': False,
                             'criteria': unknown_rows(u, '调度失败，未获得完整结论'), 'rule_gaps': [], 'evidence': {}, 'history': []})
+            # Keep final check outcomes in memory until the single finish_run commit.
+            # A lost worker cannot leave a separately persisted claim of completion.
+            integrity_checked, integrity_error = False, None
             try:
                 self.store.assert_integrity()
-                for state in self.store.data['units'].values():
-                    result = state.get('result')
-                    if result and result['stop'] == 'PASSED':
-                        verify_candidate(result['candidate'], self.rules['limits'])
-            except (LoopError, OSError) as exc:
-                self.store.patch(final_integrity_error=str(exc))
+                from .audit import audit
+                check = audit(self.store.root, self.store.rid)
+                if not check['integrity_ok']:
+                    raise IntegrityError('; '.join(check['errors']))
+                integrity_checked = True
+            except (LoopError, OSError, KeyError, TypeError, ValueError) as exc:
+                integrity_error = f'{type(exc).__name__}: {exc}'
+            source_checked = False
             source_drift, source_drift_error = [], None
             if self.store.data['input']:
                 try:
                     source = Path(self.store.data['input_override'] or self.rules['source'])
                     current = snapshot_manifest(source, self.rules['limits'], self.rules['exclude_paths'])
                     source_drift = changes(self.store.data['input']['manifest'], current)
-                except (LoopError, OSError) as exc:
+                    source_checked = True
+                except (LoopError, OSError, KeyError, TypeError, ValueError) as exc:
                     source_drift_error = f'原项目收尾核对失败：{type(exc).__name__}: {exc}'
-            self.store.finish_run(source_drift=source_drift, source_drift_error=source_drift_error)
+            self.store.finish_run(source_drift=source_drift, source_drift_error=source_drift_error,
+                                  integrity_checked=integrity_checked, source_checked=source_checked,
+                                  integrity_error=integrity_error)
             render_views(self.store.root, self.store.rid)

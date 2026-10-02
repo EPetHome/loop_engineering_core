@@ -17,8 +17,17 @@ from .common import (LoopError, IntegrityError, atomic_json, atomic_write, canon
                      file_hash, FileLock, load_json, now, tree_manifest)
 from .rules import render_rules
 from .protocol import response_schema
+from .handoff import rule_gaps
+from .observability import engine_summary, summarize
 
 STOP_LABELS = {'PASSED': '达标', 'NOT_MET': '未达标', 'BLOCKED': '推不动', 'NOT_RUN': '未执行'}
+
+
+def finalization_binding(data: dict) -> dict:
+    return {'rule_hash': data['rule_hash'], 'input_hash': (data.get('input') or {}).get('hash'),
+            'candidate_hashes': {uid: state['result']['candidate']['hash']
+                                 for uid, state in data['units'].items()
+                                 if state.get('result') and state['result'].get('candidate')}}
 
 
 def engine_identity() -> dict:
@@ -53,9 +62,9 @@ def create_run(root: Path, rules: dict, parent: str | None = None,
                 'units': {u['id']: {'state': 'PENDING', 'phase': 'pending', 'round': 0,
                                   'criterion_ids': [c['id'] for c in u['criteria']],
                                   'stats': {'member_invocations': 0, 'repairs': 0, 'infra_retries': 0,
-                                            'protocol_retries': 0,
+                                            'gate_reruns': 0, 'protocol_retries': 0,
                                             'protocol_retries_by_role': {'developer': 0, 'reviewer': 0}},
-                                  'result': None} for u in rules['units']},
+                                  'issue_history': [], 'history': [], 'result': None} for u in rules['units']},
                 'result': None}
     atomic_json(run / 'manifest.json', manifest)
     return rid
@@ -115,6 +124,23 @@ class Store:
             self.commit()
             return True
 
+    def member_observation(self, uid: str, attempt: str, role: str, workspace: Path,
+                           observation: dict, receipt: dict | None = None):
+        with self.lock:
+            state = self.data['units'][uid]
+            if state['state'] == 'TERMINAL':
+                raise IntegrityError(f'单元 {uid} 的终态不可修改')
+            records = state.setdefault('member_observations', {})
+            old = records.get(attempt, {})
+            records[attempt] = {**old, 'attempt_id': attempt, 'role': role,
+                                'workspace': str(workspace), **observation}
+            if receipt is not None:
+                records[attempt]['receipt'] = copy.deepcopy(receipt)
+            state['member_activity'] = copy.deepcopy(observation.get('activity'))
+            summary = summarize(list(records.values()), state['stats']['member_invocations'])
+            state['member_usage'], state['member_processes'] = summary['usage'], summary['processes']
+            self.commit()
+
     def seal(self, path: Path):
         with self.lock:
             relative = path.relative_to(self.run).as_posix()
@@ -137,13 +163,31 @@ class Store:
             state = self.data['units'][uid]
             if state['state'] == 'TERMINAL':
                 return
+            if not result.get('history') and state.get('history'):
+                result['history'] = copy.deepcopy(state['history'])
+            result.setdefault('issue_history', copy.deepcopy(state.get('issue_history', [])))
+            if result['issue_history']:
+                result['rule_gaps'] = rule_gaps(result['issue_history'])
+            result.setdefault('historical_rule_gaps', rule_gaps(result['issue_history'], historical=True)
+                              if result['issue_history'] else list(result.get('rule_gaps', [])))
+            summary = summarize(list(state.get('member_observations', {}).values()),
+                                state['stats']['member_invocations'])
+            result.update(member_usage=summary['usage'], member_processes=summary['processes'],
+                          member_observations=copy.deepcopy(state.get('member_observations', {})))
             result.update(unit_id=uid, run_id=self.rid, rule_hash=self.data['rule_hash'],
                           stats=copy.deepcopy(state['stats']), finished_at=now())
             state.update(state='TERMINAL', phase='terminal', result=result, last_step_at=now())
             self.commit()  # status + full result are in the same atomic record
             self.event('unit_stopped', uid, stop=result['stop'], reason=result['reason'])
 
-    def finish_run(self, source_drift: list[str] | None = None, source_drift_error: str | None = None):
+    def finish_run(self, source_drift: list[str] | None = None, source_drift_error: str | None = None,
+                   *, integrity_checked: bool = False, source_checked: bool = False,
+                   integrity_error: str | None = None):
+        """Commit completion and its binding together; missing checks are never a PASS.
+
+        Only normal controller finalization supplies the completed-check flags.
+        Recovery keeps submitted unit results but cannot attest to unsaved checks.
+        """
         with self.lock:
             if self.data['state'] == 'TERMINAL':
                 return
@@ -152,42 +196,83 @@ class Store:
                 raise IntegrityError('仍有未收尾单元，不能提交总结果')
             values = [v['stop'] for v in results.values()]
             stop = 'PASSED' if all(v == 'PASSED' for v in values) else ('BLOCKED' if 'BLOCKED' in values else 'NOT_MET')
-            source_drift = source_drift or []
-            if self.data.get('final_integrity_error') or source_drift or source_drift_error:
+            integrity_error = integrity_error or self.data.get('final_integrity_error')
+            checks = {
+                'integrity': 'FAIL' if integrity_error else ('PASS' if integrity_checked else 'UNKNOWN'),
+                'source': 'FAIL' if source_drift or source_drift_error else
+                          ('PASS' if source_checked and source_drift is not None and self.data.get('input') else 'UNKNOWN')}
+            status = 'FAIL' if 'FAIL' in checks.values() else ('PASS' if all(v == 'PASS' for v in checks.values()) else 'UNKNOWN')
+            finalization = {**finalization_binding(self.data), 'status': status, 'checks': checks}
+            if status != 'PASS':
                 stop = 'BLOCKED'
+            source_drift = source_drift or []
             summary = '；'.join(f'{k}：{STOP_LABELS[v["stop"]]}' for k, v in results.items())
+            if status == 'UNKNOWN':
+                summary += '；总收尾核对未执行或无法确认完成，候选与已提交单元成果保留；不追认达标。'
+            if integrity_error:
+                summary += '；最终完整性核对失败：' + integrity_error
             if source_drift:
                 summary += '；原项目发生变化，请核对 source_drift 列出的路径；未自动还原。'
             if source_drift_error:
                 summary += '；' + source_drift_error
+            observation = engine_summary(self.data)
+            tokens = observation['usage']['tokens']
             self.data.update(state='TERMINAL', result={
                 'stop': stop, 'finished_at': now(), 'run_id': self.rid, 'summary': summary,
+                'finalization': finalization,
                 'source_drift': source_drift, 'source_drift_error': source_drift_error,
                 'elapsed_seconds': round(time.time() - self.data['created_epoch'], 3),
                 'member_invocations': self.data['budget']['member_invocations'],
-                'token_usage': None, 'cost': None,
-                'cost_note': '只统计成员进程调用；不等于模型 API 请求数。token 和费用未计量。',
-                'human_acceptance': 'NOT_PERFORMED', 'integrity_error': self.data.get('final_integrity_error')})
-            self.commit()
-            self.event('run_stopped', stop=stop)
+                'member_usage': observation['usage'], 'member_processes': observation['processes'],
+                'token_usage': tokens if any(x is not None for x in tokens.values()) else None, 'cost': None,
+                'cost_note': 'member_invocations 仍为成员启动预算计数（含重试），不是模型 API 请求数。'
+                             'token 仅汇总 message_end 已知维度；缺失保留 null，observed_total 只是小计。'
+                             '隐藏请求、订阅实际费用与重复理解成本未计量。',
+                'human_acceptance': 'NOT_PERFORMED', 'integrity_error': integrity_error})
+            self.commit()  # run state, total result and finalization have one commit point
+            self.event('run_stopped', stop=stop, finalization=status)
 
 
 def markdown_result(data: dict) -> str:
     r = data['result']
+    finalization = r.get('finalization') or {}
+    final_status = finalization.get('status', 'UNKNOWN')
+    checks = finalization.get('checks') or {}
+    integrity_status = checks.get('integrity', 'PASS' if final_status == 'PASS' else 'UNKNOWN')
+    source_status = checks.get('source', 'PASS' if final_status == 'PASS' else 'UNKNOWN')
     lines = [f'# Loop 结果：{data["title"]}', '',
              f'**停止类型：{STOP_LABELS[r["stop"]]}**', '', r['summary'], '',
              f'- 运行：`{data["run_id"]}`', f'- 父运行：`{data["parent_run"] or "无"}`',
              f'- 规则指纹：`{data["rule_hash"]}`', f'- 引擎：`{data["engine"]["version"]}`',
              f'- 成员调用：{r["member_invocations"]}；总耗时：{r["elapsed_seconds"]} 秒。',
-             '- token / 金额：未计量。一次成员调用可能包含多次模型请求。',
+             '- 成员用量（未知为 null，覆盖及已观察小计见 coverage）：`'
+             + json.dumps(r.get('member_usage'), ensure_ascii=False) + '`',
+             '- 成员进程计时（guardian 范围，不是纯模型时间）：`'
+             + json.dumps(r.get('member_processes'), ensure_ascii=False) + '`',
+             '- 底层 API 请求数 / 实际金额 / 重复理解成本：未计量。一次成员调用可能包含多次模型请求。',
              '- 人工验收：未进行。达标不等于拍板人已认可；不自动合并、不更新基线。',
-             '', '最终完整性异常：' + str(r.get('integrity_error') or '未发现'), '',
-             '## 原项目收尾核对', '', '核对异常：' + str(r.get('source_drift_error') or '未记录'), '']
+             '', '## 总收尾核对', '', f'finalization.status：**{final_status}**', '']
+    if not finalization:
+        lines += ['旧记录缺少 finalization；核对未知，不改写旧结论，不追认完成。', '']
+    else:
+        lines += [f'- 收尾规则指纹：`{finalization.get("rule_hash")}`',
+                  f'- 收尾输入指纹：`{finalization.get("input_hash")}`',
+                  '- 当前候选指纹：`' + json.dumps(finalization.get('candidate_hashes'), ensure_ascii=False) + '`', '']
+    if final_status == 'UNKNOWN':
+        lines += ['总收尾未执行或无法确认完成；已提交单元成果保留，不等于总体达标。', '']
+    lines += [f'最终完整性核对：{integrity_status}',
+              '完整性说明：' + str(r.get('integrity_error') or
+                  ('核对完成，无异常' if integrity_status == 'PASS' else '未执行或无法确认完成')), '',
+              '## 原项目收尾核对', '', f'原项目核对状态：{source_status}',
+              '核对说明：' + str(r.get('source_drift_error') or
+                  ('已完成扫描' if source_status in ('PASS', 'FAIL') else '未执行或无法确认完成')), '']
     if r.get('source_drift'):
         lines += ['变动路径（source_drift，未自动还原）：', '']
         lines += [f'- `{rel}`' for rel in r['source_drift']]
+    elif source_status == 'PASS':
+        lines += ['source_drift：`[]`（已完成核对，无差异）。']
     else:
-        lines += ['source_drift：`[]`（未列出差异；故障恢复补写结果时不做核对）。']
+        lines += ['source_drift：`[]`（核对失败或未知，不能据此判断原项目没有变化）。']
     lines += ['', '## 单元结果', '']
     for uid, state in data['units'].items():
         v = state['result']
@@ -201,8 +286,44 @@ def markdown_result(data: dict) -> str:
         for row in v.get('criteria', []):
             clean = lambda value: str(value).replace('|', '／').replace('\n', '<br>')
             lines.append('| ' + ' | '.join(clean(row.get(k, '')) for k in ('id', 'status', 'note', 'evidence')) + ' |')
-        lines += ['', '规则缺口：' + ('；'.join(v.get('rule_gaps', [])) or '未记录'),
-                  '', '计数：`' + json.dumps(v['stats'], ensure_ascii=False) + '`', '']
+        lines += ['', '当前未解决规则缺口：' + ('；'.join(v.get('rule_gaps', [])) or '无'),
+                  '', '计数：`' + json.dumps(v['stats'], ensure_ascii=False) + '`', '',
+                  '成员用量：`' + json.dumps(v.get('member_usage'), ensure_ascii=False) + '`', '',
+                  '成员进程计时：`' + json.dumps(v.get('member_processes'), ensure_ascii=False) + '`', '']
+        if v.get('issue_history'):
+            lines += ['#### 历史问题与缺口', '',
+                      '历史提出、当前状态、处理依据分别列出；未再提及或标准 PASS 不等于解决。旧候选解决不沿用。', '',
+                      '| ID / 种类 | 历史提出（首个来源） | 相关标准 | 当前状态 | 处理依据 |', '|---|---|---|---|---|']
+            clean = lambda value: str(value).replace('|', '／').replace('\n', '<br>')
+            for item in v['issue_history']:
+                source = item['source']
+                origin = f'第 {source["round"]} 轮 {source["role"]}：{item["description"]}'
+                lines.append('| ' + ' | '.join(clean(value) for value in
+                    (item['id'] + ' / ' + item['kind'], origin, item['criterion_ids'],
+                     item['status'], item['state_note'])) + ' |')
+            lines.append('')
+            for item in v['issue_history']:
+                lines += [f'**{item["id"]} 原始提出记录**（不删改）：', '', '```json',
+                          json.dumps(item['occurrences'], ensure_ascii=False, indent=2), '```', '']
+                if item['resolution_attempts']:
+                    lines += ['处理记录（applied=true 才有效；candidate_hash 绑定处理时的候选，旧记录仅作历史）：', '',
+                              '```json', json.dumps(item['resolution_attempts'], ensure_ascii=False, indent=2), '```', '']
+        rerun_gates = [(h['round'], g) for h in v.get('history', [])
+                       for g in h.get('gates', {}).values()
+                       if len(g.get('attempts', [])) > 1 or g.get('repeated_reason') is not None]
+        if rerun_gates:
+            lines += ['#### 门禁重跑记录', '', '按轮次保留失败证据；历史候选的通过不沿用到当前候选。', '']
+        for round_number, gate in rerun_gates:
+            clean = lambda value: str(value).replace('|', '／').replace('\n', '<br>').replace('\r', '')
+            label = '重跑后通过（不是一次通过）' if gate['passed_after_rerun'] else '最终 ' + gate['status']
+            lines += [f'**第 {round_number} 轮 · {gate["id"]}：{label}**（重跑 {gate["reruns"]} 次）', '']
+            if gate['repeated_reason'] is not None:
+                lines += ['同一原因出现两次，停止重跑：' + clean(gate['repeated_reason']) + '。', '']
+            lines += ['| 执行次数 | 状态 | 退出码 | 失败原因 |', '|---|---|---|---|']
+            for attempt in gate['attempts']:
+                lines.append('| ' + ' | '.join(clean(attempt[k] if attempt[k] is not None else '—')
+                                               for k in ('attempt', 'status', 'exit_code', 'reason')) + ' |')
+            lines.append('')
         if v.get('evidence'):
             lines += ['证据索引（当前候选绑定）：', '', '```json',
                       json.dumps(v['evidence'], ensure_ascii=False, indent=2), '```', '']

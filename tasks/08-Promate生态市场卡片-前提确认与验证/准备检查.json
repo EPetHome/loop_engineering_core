@@ -1,0 +1,60 @@
+{
+  "task_id": "promate-ecology-cards-02",
+  "status": "PREPARED_NOT_STARTED",
+  "engine_version": "0.3.0",
+  "rule_hash": "05231f67c3f08e59650c3bdbdf0e0992172df7baecd78fbf74cfddc12d376199",
+  "source_hash": "7e2e1c5c66a10a8d6a5a91467521eb617a851779b79e5828c38eafe6befcd47c",
+  "order": [
+    "host-ready",
+    "cards"
+  ],
+  "rule_validation": "PASS",
+  "node_gate_syntax": "PASS",
+  "pi_cli_parser": "PASS",
+  "pi_version": "0.87.1",
+  "permission_extension_version": "32.0.2",
+  "new_assertion_checks_on_old_code": [
+    {
+      "check": "a",
+      "old_candidate_result": "FAIL (expected)",
+      "intended_assertion_reached": true
+    },
+    {
+      "check": "resources",
+      "old_candidate_result": "FAIL (expected)",
+      "intended_assertion_reached": true
+    }
+  ],
+  "old_candidate_preserved": true,
+  "host_preflight_executed": false,
+  "real_seven_steps_executed": false,
+  "real_pi_or_models_started": false,
+  "actual_session_tools_models": "UNVERIFIED_UNTIL_LAUNCH",
+  "full_engine_rehearsal_performed": false,
+  "engine_upgrade": "Existing 0.3.0 installed by another authorized task; not changed here",
+  "physical_root": "/Users/Admin/Desktop/loop",
+  "invocation_root_uses_physical_case": true,
+  "runtime_sha256": {
+    "run_loop.py": "250caad6387f75112f8536a62f23270bd4f51529d24f31d25b1c5fb3907de2d0",
+    "adapters/pi_member.py": "2b256c9439ea21ce3e3d844e7da52a919dfa7275aca5bd693cec946cc1cbd475",
+    "prompts/brief.md": "63cdc6391c20ab712c5c7cb63345fc1747169119575e0bd0df221cc029d0c1e2",
+    "engine/loop_engineering/__init__.py": "b4831e79f78aa215921413597f709441c965881f809628871342b4496133e87d",
+    "engine/loop_engineering/__main__.py": "79ee6f134c5c5193377cf9b189cbdcc3e2095e49ba9cec310114441c15a917c4",
+    "engine/loop_engineering/adapters.py": "139b0bc33b24a7f67d0501cdcbe8d25a50817ddc6748024d5dfeef6b6973f4f8",
+    "engine/loop_engineering/audit.py": "20bffc35716d2d8f8c46b20b0f1f2ee3fd5d2095bb8b704cdb5cfa3dbdc591a5",
+    "engine/loop_engineering/checksums.py": "93e8fc1c007db710a24b874cf0db12742eace8a27a322a0455cbe452cf3d04e1",
+    "engine/loop_engineering/cli.py": "101b3eb4927a045640970d752e6d35e108987cb94c201e2f0f1e8f546f7f6f33",
+    "engine/loop_engineering/common.py": "eacdcef0823eba8399ea078e6e7538741c6581fa35391015c8704e9c1f30f2c8",
+    "engine/loop_engineering/engine.py": "74759ee6773ab996a6bb563557ad1c67d12372a4f0c7d1f403d84d7559ef4b0c",
+    "engine/loop_engineering/handoff.py": "814403f75cc48ba79412f5d0acb7908f4a4b1c9949ae3b1f80b570007df79d73",
+    "engine/loop_engineering/observability.py": "526b06978d3331b9d3837b16bfa0d59dcf469d2c5be3ed028118d5aa404f6caa",
+    "engine/loop_engineering/pi_events.py": "f8e8983a8cfa99b1e3d3de04cc3e1cf4c59d447e43b523b9de485b5be78fab49",
+    "engine/loop_engineering/protocol.py": "98c47cbf4465a0064ec226232b77287185da13fd2abb9bc14d5f5d09acc676b7",
+    "engine/loop_engineering/rules.py": "39861f5c60ee52714159079c0aa77db180f4883f7288d3facad9fa67a4259bc6",
+    "engine/loop_engineering/runner.py": "4aa745b36efafd3dd34c09ad03c4abfcbf8acb074f5752e6da8941f0e19a8ce2",
+    "engine/loop_engineering/session_sandbox.py": "8ed3707d3081f9fba742080bb8f7889eadb7143eafa02fd809877d66b3d0320d",
+    "engine/loop_engineering/sessions.py": "f3a79f5d8a06dabf101b686b8226f88b949a7d7ea20a0c404de0155c240ea3c4",
+    "engine/loop_engineering/storage.py": "2984d456754991809f27a948224e44dd081587b5a7339a57e85c938fbd4f237c",
+    "engine/loop_engineering/supervisor.py": "74b3353d88cfe1ec8d2692a1b52db310a021967aeaa1146115995aa173194298"
+  }
+}

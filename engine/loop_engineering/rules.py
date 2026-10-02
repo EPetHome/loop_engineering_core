@@ -13,7 +13,8 @@ LIMITS = {"max_parallel": 2, "max_wall_seconds": 7200, "max_member_invocations":
 UNIT_DEFAULTS = {"depends_on": [], "protected_paths": [], "read_paths": [], "resources": [],
                  "max_repairs": 2, "max_infra_retries": 1, "max_protocol_retries": 1,
                  "max_seconds": 3600, "stage_timeout_seconds": 900,
-                 "idle_output_seconds": 0, "kind": "work"}
+                 "idle_output_seconds": 0, "kind": "work", "reviewer_exec": False,
+                 "developer_session": "fresh"}
 
 
 def fields(obj, allowed, required, where):
@@ -162,7 +163,7 @@ def normalize(raw: dict, base: Path) -> dict:
             forbidden = ['--yolo', '--dangerously-bypass-approvals-and-sandbox', 'danger-full-access',
                          '--full-auto', '--resume', '--continue', '--sandbox', '-s', '-a', '--ask-for-approval',
                          '--output-last-message', '--output-schema', '--add-dir', '--cd', '-C', '-o', '-c', '--config', '--profile', '-p',
-                         '--api-key', '--session', '--session-id', '--fork', '-r', '--tools', '-t',
+                         '--api-key', '--session', '--session-id', '--session-dir', '--no-session', '--fork', '-r', '--tools', '-t',
                          '--extension', '-e', '--skill', '--system-prompt', '--approve', '--mode']
             if any(x.split('=')[0] in forbidden or x in forbidden for x in a['extra_args']):
                 raise LoopError('extra_args 不可覆盖安全、目录、会话或输出配置；复杂接入使用显式 command 适配器')
@@ -179,8 +180,12 @@ def normalize(raw: dict, base: Path) -> dict:
         text(u['goal'], 'goal')
         for k, default in UNIT_DEFAULTS.items():
             u.setdefault(k, copy.deepcopy(default))
+        if type(u['reviewer_exec']) is not bool:
+            raise LoopError('unit.reviewer_exec 只接受 true 或 false')
         if u['kind'] not in ('work', 'integration'):
             raise LoopError('unit.kind 只支持 work / integration')
+        if not isinstance(u['developer_session'], str) or u['developer_session'] not in ('fresh', 'reuse_repairs'):
+            raise LoopError('unit.developer_session 只接受 fresh / reuse_repairs')
         for k in ('writable_paths', 'protected_paths', 'read_paths'):
             strings(u[k], k, True)
         for k in ('depends_on', 'resources'):
@@ -195,19 +200,27 @@ def normalize(raw: dict, base: Path) -> dict:
                 raise LoopError(f'未知 {role}：{u[role]}')
         if u['developer'] == u['reviewer'] or r['agents'][u['developer']]['identity'] == r['agents'][u['reviewer']]['identity']:
             raise LoopError('开发方和评审方必须是两个明确、不同的成员身份')
+        if u['developer_session'] == 'reuse_repairs':
+            from .sessions import supports_reuse
+            if not supports_reuse(r['agents'][u['developer']]):
+                raise LoopError('reuse_repairs 仅支持组合交付内 adapters/pi_member.py 的本地 Pi command/stdout 接法；内置 pi/codex 或其他 command 不支持')
         if not isinstance(u['criteria'], list) or not u['criteria']:
             raise LoopError('criteria 不能为空')
         if not isinstance(u['gates'], list):
             raise LoopError('gates 必须是数组；纯语义任务可为空')
         gate_ids, criterion_ids = set(), set()
         for g in u['gates']:
-            fields(g, ['id', 'argv', 'timeout_seconds', 'output_paths'], ['id', 'argv', 'timeout_seconds'], 'gate')
+            fields(g, ['id', 'argv', 'timeout_seconds', 'output_paths', 'max_reruns'], ['id', 'argv', 'timeout_seconds'], 'gate')
             ident(g['id'], 'gate.id')
             if g['id'] in gate_ids:
                 raise LoopError('gate.id 重复')
             gate_ids.add(g['id'])
             argv(g['argv'], 'gate.argv')
             number(g['timeout_seconds'], 'gate.timeout_seconds', 0.1)
+            g.setdefault('max_reruns', 0)
+            number(g['max_reruns'], 'gate.max_reruns', 0, True)
+            if g['max_reruns'] > 5:
+                raise LoopError('gate.max_reruns 上限为 5')
             g.setdefault('output_paths', [])
             strings(g['output_paths'], 'gate.output_paths', True)
             # Output directories are new scratch paths only; enforced against snapshot at runtime.
@@ -273,6 +286,7 @@ def render_rules(r: dict) -> str:
                   f'- 依赖：{u["depends_on"]}', f'- 可改：{u["writable_paths"]}',
                   f'- 保护：{u["protected_paths"]}',
                   f'- 最大返修：{u["max_repairs"]}（不含首次开发）；最长：{u["max_seconds"]} 秒。',
+                  f'- 开发会话：{u.get("developer_session", "fresh")}；评审与格式修复始终新会话。',
                   '', '| 标准 | 完整条款 | 必需门禁 |', '|---|---|---|']
         for c in u['criteria']:
             lines.append(f'| {c["id"]} | {c["text"].replace(chr(10), " ").replace("|", "／")} | {", ".join(c["gate_ids"]) or "语义判断"} |')

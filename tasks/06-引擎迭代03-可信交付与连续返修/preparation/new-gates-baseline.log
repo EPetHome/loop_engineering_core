@@ -1,0 +1,167 @@
+test_crash_at_final_commit_never_becomes_pass (__main__.A.test_crash_at_final_commit_never_becomes_pass) ... 
+  test_crash_at_final_commit_never_becomes_pass (__main__.A.test_crash_at_final_commit_never_becomes_pass) (drift=False) ... FAIL
+  test_crash_at_final_commit_never_becomes_pass (__main__.A.test_crash_at_final_commit_never_becomes_pass) (drift=True) ... FAIL
+test_independent_pass_can_export_when_other_unit_fails (__main__.A.test_independent_pass_can_export_when_other_unit_fails) ... ERROR
+test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) ... 
+  test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='legacy') ... FAIL
+  test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='rule') ... ERROR
+  test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='input') ... ERROR
+  test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='candidate') ... ERROR
+test_normal_finalization_and_export (__main__.A.test_normal_finalization_and_export) ... ERROR
+test_source_drift_blocks_formal_export_but_keeps_candidate (__main__.A.test_source_drift_blocks_formal_export_but_keeps_candidate) ... ERROR
+test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) ... 
+  test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) (resolution='resolved') ... ERROR
+  test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) (resolution='omitted') ... ERROR
+  test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) (resolution='invented') ... ERROR
+test_stream_updates_before_exit_and_usage_not_double_counted (__main__.C.test_stream_updates_before_exit_and_usage_not_double_counted) ... FAIL
+test_explicit_session_reused_only_for_developer_and_old_writes_denied (__main__.D.test_explicit_session_reused_only_for_developer_and_old_writes_denied) ... ERROR
+test_policy_is_explicit_opt_in (__main__.D.test_policy_is_explicit_opt_in) ... ERROR
+
+======================================================================
+ERROR: test_independent_pass_can_export_when_other_unit_fails (__main__.A.test_independent_pass_can_export_when_other_unit_fails)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 170, in test_independent_pass_can_export_when_other_unit_fails
+    self.assertEqual(d['result']['finalization']['status'], 'PASS')
+                     ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'finalization'
+
+======================================================================
+ERROR: test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='rule')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 146, in test_missing_or_forged_binding_does_not_allow_export
+    f = d['result']['finalization']
+        ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'finalization'
+
+======================================================================
+ERROR: test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='input')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 146, in test_missing_or_forged_binding_does_not_allow_export
+    f = d['result']['finalization']
+        ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'finalization'
+
+======================================================================
+ERROR: test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='candidate')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 146, in test_missing_or_forged_binding_does_not_allow_export
+    f = d['result']['finalization']
+        ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'finalization'
+
+======================================================================
+ERROR: test_normal_finalization_and_export (__main__.A.test_normal_finalization_and_export)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 96, in test_normal_finalization_and_export
+    f = d['result']['finalization']
+        ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'finalization'
+
+======================================================================
+ERROR: test_source_drift_blocks_formal_export_but_keeps_candidate (__main__.A.test_source_drift_blocks_formal_export_but_keeps_candidate)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 114, in test_source_drift_blocks_formal_export_but_keeps_candidate
+    self.assertEqual(d['result']['finalization']['status'], 'FAIL')
+                     ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'finalization'
+
+======================================================================
+ERROR: test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) (resolution='resolved')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 194, in test_comparison_and_explicit_resolution
+    comp = c['comparison']
+           ~^^^^^^^^^^^^^^
+KeyError: 'comparison'
+
+======================================================================
+ERROR: test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) (resolution='omitted')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 194, in test_comparison_and_explicit_resolution
+    comp = c['comparison']
+           ~^^^^^^^^^^^^^^
+KeyError: 'comparison'
+
+======================================================================
+ERROR: test_comparison_and_explicit_resolution (__main__.B.test_comparison_and_explicit_resolution) (resolution='invented')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 194, in test_comparison_and_explicit_resolution
+    comp = c['comparison']
+           ~^^^^^^^^^^^^^^
+KeyError: 'comparison'
+
+======================================================================
+ERROR: test_explicit_session_reused_only_for_developer_and_old_writes_denied (__main__.D.test_explicit_session_reused_only_for_developer_and_old_writes_denied)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 324, in test_explicit_session_reused_only_for_developer_and_old_writes_denied
+    rig.create()
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 61, in create
+    self.rules = normalize(self.raw, self.work)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/engine/loop_engineering/rules.py", line 173, in normalize
+    fields(u, ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'] + list(UNIT_DEFAULTS),
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/engine/loop_engineering/rules.py", line 24, in fields
+    raise LoopError(f"{where}: 缺少字段 {sorted(missing)}；不支持字段 {sorted(extra)}")
+loop_engineering.common.LoopError: unit: 缺少字段 []；不支持字段 ['developer_session']
+
+======================================================================
+ERROR: test_policy_is_explicit_opt_in (__main__.D.test_policy_is_explicit_opt_in)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 345, in test_policy_is_explicit_opt_in
+    self.assertEqual(normalize(rig.raw,rig.work)['units'][0]['developer_session'],'fresh')
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'developer_session'
+
+======================================================================
+FAIL: test_crash_at_final_commit_never_becomes_pass (__main__.A.test_crash_at_final_commit_never_becomes_pass) (drift=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 133, in test_crash_at_final_commit_never_becomes_pass
+    self.assertEqual(result['stop'], 'BLOCKED')
+AssertionError: 'PASSED' != 'BLOCKED'
+- PASSED
++ BLOCKED
+
+
+======================================================================
+FAIL: test_crash_at_final_commit_never_becomes_pass (__main__.A.test_crash_at_final_commit_never_becomes_pass) (drift=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 133, in test_crash_at_final_commit_never_becomes_pass
+    self.assertEqual(result['stop'], 'BLOCKED')
+AssertionError: 'PASSED' != 'BLOCKED'
+- PASSED
++ BLOCKED
+
+
+======================================================================
+FAIL: test_missing_or_forged_binding_does_not_allow_export (__main__.A.test_missing_or_forged_binding_does_not_allow_export) (case='legacy')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 153, in test_missing_or_forged_binding_does_not_allow_export
+    with self.assertRaises(LoopError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: LoopError not raised
+
+======================================================================
+FAIL: test_stream_updates_before_exit_and_usage_not_double_counted (__main__.C.test_stream_updates_before_exit_and_usage_not_double_counted)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin/Desktop/loop/tasks/06-引擎迭代03-可信交付与连续返修/project/acceptance/check_iter03.py", line 298, in test_stream_updates_before_exit_and_usage_not_double_counted
+    self.assertIsNone(p.poll(), 'fake member must still be running at observation')
+AssertionError: 1 is not None : fake member must still be running at observation
+
+----------------------------------------------------------------------
+Ran 9 tests in 2.170s
+
+FAILED (failures=4, errors=11)

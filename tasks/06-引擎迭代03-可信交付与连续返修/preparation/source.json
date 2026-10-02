@@ -1,0 +1,9 @@
+{
+  "source_run": "engine-iter-02-20261001T131449-ca25bde6",
+  "candidate_hash": "3d488a8f16c232d82172010e6bbc3a22618d0fc3c0ce81df12b6216320f0ce91",
+  "candidate_path": "/Users/Admin/Desktop/Loop/loop-data/artifacts/engine-iter-02-20261001T131449-ca25bde6/u5-release/round-002/code",
+  "version": "0.2.0",
+  "copied_files_verified": true,
+  "test_adjustment": "test_run_loop.py only: replace fixed original engine path with this project/engine; assertions unchanged",
+  "merged_into_live_engine": false
+}

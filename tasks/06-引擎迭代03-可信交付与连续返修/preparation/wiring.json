@@ -1,0 +1,28 @@
+{
+  "scope": "WIRING ONLY: fake members and placeholder path-check gates, not new behavior acceptance",
+  "work": "/private/var/folders/11/sxl0444d11xbqzz8pz0lr2nm0000gp/T/loop-iter03-wiring-205dfswe",
+  "exit_code": 0,
+  "run_id": "iter03-wiring-only-20261001T153215-39d65756",
+  "result": {
+    "stop": "PASSED",
+    "finished_at": "2026-10-01T15:32:20Z",
+    "run_id": "iter03-wiring-only-20261001T153215-39d65756",
+    "summary": "u6-finalization：达标；u7-evidence：达标；u8-observability：达标；u9-session-integration：达标",
+    "source_drift": [],
+    "source_drift_error": null,
+    "elapsed_seconds": 4.308,
+    "member_invocations": 8,
+    "token_usage": null,
+    "cost": null,
+    "cost_note": "只统计成员进程调用；不等于模型 API 请求数。token 和费用未计量。",
+    "human_acceptance": "NOT_PERFORMED",
+    "integrity_error": null
+  },
+  "unit_states": {
+    "u6-finalization": "PASSED",
+    "u7-evidence": "PASSED",
+    "u8-observability": "PASSED",
+    "u9-session-integration": "PASSED"
+  },
+  "real_models_called": false
+}

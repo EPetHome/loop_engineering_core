@@ -13,6 +13,7 @@ import time
 from . import __version__
 from .adapters import ENGINE_DIR, command, program_available
 from .audit import audit, export_candidate
+from .checksums import checksums
 from .common import LoopError, IntegrityError, atomic_json, atomic_write, load_json, lock_busy
 from .engine import Controller
 from .rules import load_rules, normalize, render_rules
@@ -130,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
             c.add_argument('--all', action='store_true')
         if name == 'retry':
             c.add_argument('--background', action='store_true')
-    e = sub.add_parser('export', help='把已达标候选复制到新目录；不覆盖已有目录')
+    e = sub.add_parser('export', help='总收尾有效通过且审计完整后导出已达标候选；不覆盖已有目录')
     e.add_argument('run_id', nargs='?', default='latest')
     e.add_argument('--to', type=Path, required=True)
     e.add_argument('--unit')
@@ -139,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument('--source', type=Path, required=True)
     init.add_argument('--out', type=Path, default=Path('task.json'))
     sub.add_parser('selftest', help='运行随包自动化测试，不调用真实模型')
+    sums = sub.add_parser('checksums', help='核对引擎目录的 SHA256SUMS，不调用模型')
+    sums.add_argument('--write', action='store_true', help='按当前普通文件重新生成 SHA256SUMS')
     for name in ('_worker', '_supervise'):
         c = sub.add_parser(name, help=argparse.SUPPRESS)
         c.add_argument('run_id')
@@ -153,6 +156,8 @@ def main(argv=None) -> int:
         cmd = args.command
         if cmd == 'doctor':
             return doctor(args.plan, args.check_tools)
+        if cmd == 'checksums':
+            return checksums(ENGINE_DIR, args.write)
         if cmd == 'validate':
             r = load_rules(args.plan)
             if args.render:
@@ -197,10 +202,20 @@ def main(argv=None) -> int:
                     if data['state'] != 'TERMINAL' and not live:
                         state += ' / 未检测到持锁进程，可 recover'
                     print(f'\n{data["run_id"]} | {state}')
+                    if data['result']:
+                        finalization = data['result'].get('finalization') or {}
+                        print('  总收尾核对：' + finalization.get('status', 'UNKNOWN（旧记录未确认）'))
                     for uid, u in data['units'].items():
                         label = STOP_LABELS[u['result']['stop']] if u['result'] else u['phase']
                         print(f'  {uid:18} {label:14} round={u["round"]} calls={u["stats"]["member_invocations"]}'
                               f'  last_step={u.get("last_step_at", "—")} last_output={u.get("last_output_at", "—")}')
+                        activity = u.get('member_activity') or {}
+                        print(f'    member_stage={activity.get("phase", "unknown")}'
+                              f' last_event={activity.get("last_event_at") or "未知"}'
+                              f' basis={activity.get("basis") or "无事件依据"}'
+                              f' tools={json.dumps(activity.get("tool_calls", []), ensure_ascii=False)}')
+                        if u.get('member_usage'):
+                            print('    member_usage=' + json.dumps(u['member_usage'], ensure_ascii=False))
             return 0
         if cmd == 'result':
             data = load_json(run / 'manifest.json')
@@ -216,7 +231,8 @@ def main(argv=None) -> int:
             return 0 if check['integrity_ok'] else 5
         if cmd == 'recover':
             result = recover(root, rid)
-            print('已核对并生成结果：' + str(run / 'result.md'))
+            finalization = result.get('finalization') or {}
+            print('已生成结果：' + str(run / 'result.md') + '\n总收尾核对：' + finalization.get('status', 'UNKNOWN（旧记录未确认）'))
             return EXIT_CODES[result['stop']]
         if cmd == 'stop':
             if load_json(run / 'manifest.json')['state'] == 'TERMINAL':

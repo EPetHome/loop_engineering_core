@@ -1,7 +1,9 @@
 """Only valid, current reports may cross a develop/review boundary."""
 from __future__ import annotations
+import os
 from pathlib import Path
-from .common import LoopError, safe_child
+import stat
+from .common import LoopError, relative_path, safe_child
 from .rules import fields, text
 
 STATUSES = ('PASS', 'FAIL', 'UNKNOWN')
@@ -12,7 +14,7 @@ def response_schema() -> dict:
         return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
     s = {'type': 'string'}
     arr = lambda x: {'type': 'array', 'items': x}
-    return obj({
+    schema = obj({
         'attempt_id': s, 'role': {'type': 'string', 'enum': ['developer', 'reviewer']},
         'candidate_hash': s, 'summary': s, 'blocked': {'type': 'boolean'},
         'criteria': arr(obj({'id': s, 'status': {'type': 'string', 'enum': list(STATUSES)},
@@ -20,6 +22,77 @@ def response_schema() -> dict:
         'issues': arr(obj({'criterion_id': s, 'description': s, 'suggested_fix': s})),
         'rule_gaps': arr(s),
     })
+    # Optional for backward compatibility; old reports remain valid unchanged.
+    schema['properties']['issue_resolutions'] = arr(obj({'id': s, 'note': s, 'evidence': arr(s)}))
+    return schema
+
+
+def scratch_file(root: Path, relative: str) -> Path:
+    """Reject links in every path component, even links pointing inside the root."""
+    relative_path(relative)
+    current = root
+    if root.is_symlink() or not root.is_dir():
+        raise LoopError('取证目录不存在或是符号链接')
+    for part in Path(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise LoopError(f'取证引用不接受符号链接：{relative}')
+    # Reject links before resolving: a looping intermediate link makes resolve()
+    # raise RuntimeError on Python 3.12, bypassing delivery-format retries.
+    path = safe_child(root, relative)
+    if not path.is_file():
+        raise LoopError(f'取证引用必须指向已存在的普通文件：{relative}')
+    return path
+
+
+def report_scratch(context: dict) -> Path | None:
+    if context['role'] != 'reviewer' or not context['unit'].get('reviewer_exec', False):
+        return None
+    value = context.get('scratch_path')
+    if not isinstance(value, str) or not value:
+        raise LoopError('缺少评审方取证目录')
+    root = Path(value)
+    try:
+        if root.is_symlink() or not root.is_dir():
+            raise LoopError('取证目录不存在或是符号链接')
+        size = 0
+        def scan_error(exc):
+            raise exc
+        # No source/cache exclusions: unreferenced regular files count too.
+        for base, _, files in os.walk(root, followlinks=False, onerror=scan_error):
+            for name in files:
+                info = (Path(base) / name).lstat()
+                if stat.S_ISREG(info.st_mode):
+                    size += info.st_size
+                    if size > context['limits']['max_log_bytes']:
+                        raise LoopError('取证目录普通文件总大小超过 limits.max_log_bytes')
+    except OSError as exc:
+        raise LoopError(f'取证目录无法核对：{exc}') from exc
+    return root
+
+
+def validate_evidence(evidence: list[str], context: dict, code: Path, gates: dict,
+                      scratch: Path | None, *, resolution: bool = False) -> None:
+    if not isinstance(evidence, list) or any(not isinstance(e, str) for e in evidence):
+        raise LoopError('evidence 必须是字符串数组')
+    for ref in evidence:
+        if ref.startswith('code:'):
+            if not safe_child(code, ref[5:]).is_file():
+                raise LoopError(f'证据文件不存在：{ref}')
+        elif ref.startswith('gate:'):
+            if context['role'] != 'reviewer' or ref[5:] not in gates:
+                raise LoopError(f'门禁证据不存在：{ref}')
+            if resolution and gates[ref[5:]].get('candidate_hash') != context['candidate_hash']:
+                raise LoopError(f'问题解决不得使用旧候选门禁证据：{ref}')
+        elif ref.startswith('scratch:'):
+            if scratch is None:
+                raise LoopError('取证引用仅允许开启 reviewer_exec 的评审方使用')
+            try:
+                scratch_file(scratch, ref[8:])
+            except OSError as exc:
+                raise LoopError(f'取证文件无法核对：{ref}: {exc}') from exc
+        else:
+            raise LoopError('证据只接受本次允许的文件或门禁引用，不接受其他运行路径或网址')
 
 
 def validate_report(report: dict, context: dict, code: Path, gates: dict) -> dict:
@@ -36,6 +109,7 @@ def validate_report(report: dict, context: dict, code: Path, gates: dict) -> dic
         raise LoopError('criteria 必须是数组')
     expected = {c['id'] for c in context['unit']['criteria']}
     received = set()
+    scratch = report_scratch(context)
     for row in report['criteria']:
         fields(row, ['id', 'status', 'note', 'evidence'], ['id', 'status', 'note', 'evidence'], '标准结论')
         if not isinstance(row['id'], str) or row['id'] in received or row['id'] not in expected:
@@ -44,20 +118,9 @@ def validate_report(report: dict, context: dict, code: Path, gates: dict) -> dic
         if row['status'] not in STATUSES:
             raise LoopError('标准状态必须是 PASS / FAIL / UNKNOWN')
         text(row['note'], 'criterion.note')
-        if not isinstance(row['evidence'], list) or any(not isinstance(e, str) for e in row['evidence']):
-            raise LoopError('evidence 必须是字符串数组')
+        validate_evidence(row['evidence'], context, code, gates, scratch)
         if row['status'] == 'PASS' and not row['evidence']:
             raise LoopError('PASS 必须给出当前成果的证据引用')
-        for evidence in row['evidence']:
-            if evidence.startswith('code:'):
-                p = safe_child(code, evidence[5:])
-                if not p.is_file():
-                    raise LoopError(f'证据文件不存在：{evidence}')
-            elif evidence.startswith('gate:'):
-                if context['role'] != 'reviewer' or evidence[5:] not in gates:
-                    raise LoopError(f'门禁证据不存在：{evidence}')
-            else:
-                raise LoopError('证据只接受 code:项目内文件 或 gate:门禁ID，不接受其他运行路径或网址')
     if received != expected:
         raise LoopError(f'缺少标准：{sorted(expected - received)}')
     if not isinstance(report['issues'], list):
@@ -73,6 +136,22 @@ def validate_report(report: dict, context: dict, code: Path, gates: dict) -> dic
         raise LoopError('rule_gaps 必须是文字数组')
     if report['blocked'] and not report['rule_gaps']:
         raise LoopError('blocked=true 必须说明无法继续的规则缺口')
+    resolutions = report.get('issue_resolutions', [])
+    if not isinstance(resolutions, list):
+        raise LoopError('issue_resolutions 必须是数组')
+    if resolutions and context['role'] != 'reviewer':
+        raise LoopError('开发方不得声明解决历史问题；仅评审能显式关项')
+    known = {item['id'] for item in context.get('issue_history', [])}
+    resolved = set()
+    for resolution in resolutions:
+        fields(resolution, ['id', 'note', 'evidence'], ['id', 'note', 'evidence'], '问题解决')
+        if not isinstance(resolution['id'], str) or resolution['id'] not in known or resolution['id'] in resolved:
+            raise LoopError('问题解决 ID 未知或重复')
+        resolved.add(resolution['id'])
+        text(resolution['note'], 'issue_resolution.note')
+        validate_evidence(resolution['evidence'], context, code, gates, scratch, resolution=True)
+        if not resolution['evidence']:
+            raise LoopError('问题解决必须提供当前候选有效证据')
     return report
 
 

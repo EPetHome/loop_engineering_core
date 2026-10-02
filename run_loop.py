@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One foreground entry: run Loop, then optionally summarize its exact terminal run."""
 import argparse
+import json
 import os
 from pathlib import Path
 import signal
@@ -15,17 +16,18 @@ from loop_engineering.common import LoopError, atomic_json, atomic_write, enviro
 from loop_engineering.rules import load_rules
 from loop_engineering.runner import kill_group, process_identity
 from loop_engineering.storage import STOP_LABELS, create_run
+from loop_engineering.observability import engine_summary, read_observation, summarize
 from loop_engineering.supervisor import supervise
 
 PI = '/Users/Admin/.local/bin/pi'
 EXTENSION = '/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts'
-PROMPT = Path('/Users/Admin/Desktop/Promate/coding/prompt/提示词-Loop日志简报-ds4.1.md')
+PROMPT = ROOT / 'prompts' / 'brief.md'
 LONG_LOG_BYTES = 64 * 1024
 BRIEF_SECONDS = 300
 
 
 def brief_command():
-    return [PI, '--offline', '--model', 'opencode-go/deepseek-v4.1-flash',
+    return [PI, '--offline', '--mode', 'json', '--no-session', '--model', 'opencode-go/deepseek-v4.1-flash',
             '--thinking', 'xhigh', '--no-extensions', '--no-skills',
             '--no-prompt-templates', '--no-themes', '--tools', 'read,grep,find,ls',
             '-e', EXTENSION, '-p', '只压缩指定运行的已有记录，最终输出简报正文。']
@@ -43,6 +45,7 @@ def make_brief(run):
         'timeout_seconds': BRIEF_SECONDS, 'idle_output_seconds': 0,
         'deadline_epoch': time.time() + BRIEF_SECONDS,
         'cancel_file': str(job / 'cancel'), 'max_log_bytes': 512 * 1024,
+        'pi_json': True, 'pi_delivery': 'text',
     }, readonly=True)
     env = environment()
     env['PATH'] = '/Users/Admin/.hermes/node/bin:' + env.get('PATH', '')
@@ -70,7 +73,55 @@ def make_brief(run):
     if not body:
         raise LoopError('简报进程未交付正文')
     atomic_write(run / 'brief.md', '# 日志简报\n\n'
-                 '此为辅助摘要；达标判断以原始结果为准，未重新验证。\n\n' + body + '\n', readonly=True)
+                 '此为辅助摘要；达标判断以原始结果为准，未重新验证。\n'
+                 '新功能的真实 CLI/账号接法、模型质量及节省收益未在此验证；人工验收以原始记录为准。\n\n'
+                 + body + '\n', readonly=True)
+
+
+def delivery_overview(run, manifest):
+    engine = engine_summary(manifest)
+    result = manifest['result']
+    job = run / 'brief-job'
+    invoked = int((job / 'job.json').is_file())
+    observation = read_observation(job)
+    receipt = load_json(job / 'receipt.json') if (job / 'receipt.json').is_file() else None
+    brief = summarize([{**observation, 'receipt': receipt}] if invoked else [], invoked)
+    return {
+        'run_id': run.name,
+        'engine': {'member_invocations': result.get('member_invocations',
+                       (manifest.get('budget') or {}).get('member_invocations')),
+                   'wall_elapsed_seconds': result.get('elapsed_seconds'),
+                   'member_processes': result.get('member_processes', engine['processes']),
+                   'usage': result.get('member_usage', engine['usage']),
+                   'scope': 'engine elapsed is end-to-end wall time including gates/I/O/scheduling; '
+                            'member_invocations retains the reserved member-start counter, including retries'},
+        'brief': {**brief['processes'], 'usage': brief['usage'],
+                  'reason': receipt.get('reason') if receipt else ('not_invoked' if not invoked else 'unknown'),
+                  'scope': 'separate optional brief command-start attempt; guardian span includes launch/drain/cleanup'},
+        'note': 'Engine and brief counters are separate; no manifest terminal result is rewritten. '
+                'Process invocations are not proof of real model participation or HTTP request counts. '
+                'Unknown usage/cost and repeated-understanding cost stay unknown.',
+    }
+
+
+def overview_text(overview):
+    engine, brief = overview['engine'], overview['brief']
+    text = lambda value: '未知' if value is None else str(value)
+    return ('## 调用与耗时范围\n\n'
+        f'- 引擎：成员启动预算计数 {text(engine["member_invocations"])}；'
+        f'端到端墙钟 {text(engine["wall_elapsed_seconds"])} 秒（含门禁、I/O、调度）。\n'
+        '- 引擎成员进程计时：`' + json.dumps(engine['member_processes'], ensure_ascii=False) + '`\n'
+        '- 引擎可用成员用量：`' + json.dumps(engine['usage'], ensure_ascii=False) + '`\n'
+        f'- 简报：独立启动尝试 {brief["process_invocations"]}；'
+        f'guardian monotonic {text(brief["elapsed_seconds"])} 秒；'
+        f'wall {text(brief["wall_elapsed_seconds"])} 秒；状态 {brief["reason"]}。\n'
+        f'- 简报计时显著差异（绝对差 > 2 秒）：{brief["timing_discrepancy"]}；'
+        '时钟/暂停/调度差异未经诊断，不能直接归因模型。\n'
+        '- 简报可用用量：`' + json.dumps(brief['usage'], ensure_ascii=False) + '`\n\n'
+        'null 为未知，coverage 的 observed_total 只是小计；模型轮次不等于底层 HTTP 次数，'
+        'provider cost=0 不证明免费。真实费用、隐藏请求及重复理解成本未计量。\n\n'
+        '真实成员参与需核对本次原始调用记录；假成员离线通过不能证明真实模型参与。'
+        '新功能真实 CLI/账号接法、模型质量和节省收益未在本入口验证；人工验收未由简报执行。\n\n')
 
 
 def deliver(run):
@@ -81,10 +132,16 @@ def deliver(run):
     status = '日志较短，直接查看原始结果。'
     entry = run / '交付结果.md'
     def write_entry():
+        overview = delivery_overview(run, manifest)
+        atomic_json(run / 'delivery-overview.json', overview, readonly=True)
+        links = [(label, name) for label, name in [('原始结果', 'result.md'), ('权威记录', 'manifest.json'),
+                 ('完整报告', 'report.html'), ('独立计量总览', 'delivery-overview.json')]
+                 if (run / name).is_file() and not (run / name).is_symlink()]
         atomic_write(entry, f'# Loop 交付结果\n\n运行：`{run.name}`\n\n'
             f'停止类型：**{STOP_LABELS[result["stop"]]}**。人工验收状态：'
             f'`{result.get("human_acceptance", "未记录")}`。\n\n'
-            f'{status}\n\n[原始结果](result.md) · [权威记录](manifest.json) · [完整报告](report.html)\n')
+            f'{status}\n\n' + overview_text(overview)
+            + ' · '.join(f'[{label}]({name})' for label, name in links) + '\n')
     write_entry()  # Raw results stay available while optional summarization runs.
     try:
         size = (run / 'result.md').stat().st_size + sum(

@@ -16,6 +16,8 @@ import time
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from loop_engineering.common import FileLock, atomic_json, load_json, now
+from loop_engineering.observability import timing_fields
+from loop_engineering.pi_events import EventError, PiEvents
 
 
 def process_identity(pid: int) -> str | None:
@@ -52,9 +54,9 @@ def kill_group(pgid: int, grace: float = 0.3) -> None:
 def guard(job: Path) -> int:
     spec = load_json(job / 'job.json')
     owner = spec['owner_pid']
-    begin = time.monotonic()
+    begin, wall_begin = time.monotonic(), time.time()
     last_output = begin
-    total, reason, proc = 0, None, None
+    total, reason, proc, collector = 0, None, None, None
     terminate_requested = False
     def cancel(*_):
         nonlocal terminate_requested
@@ -63,6 +65,10 @@ def guard(job: Path) -> int:
     signal.signal(signal.SIGINT, cancel)
     with FileLock(job / 'guardian.lock'):
         try:
+            # Only explicitly declared Pi JSONL jobs (e.g. the optional brief).
+            # Ordinary command members still hand the guardian a final report.
+            if spec.get('pi_json'):
+                collector = PiEvents(job, spec['max_log_bytes'])
             with (job / 'stdin.txt').open('rb') as source:
                 proc = subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdin=source,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -101,8 +107,11 @@ def guard(job: Path) -> int:
                             continue
                         last_output = time.monotonic()
                         remaining = max(0, spec['max_log_bytes'] - total)
-                        outputs[key.data].write(data[:remaining])
-                        outputs[key.data].flush()
+                        if key.data == 'stdout' and collector is not None:
+                            collector.feed(data[:remaining])
+                        else:
+                            outputs[key.data].write(data[:remaining])
+                            outputs[key.data].flush()
                         total += len(data)
                         if total > spec['max_log_bytes'] and reason is None:
                             reason = 'log_limit'
@@ -110,6 +119,10 @@ def guard(job: Path) -> int:
                     if reason and current - begin > spec['timeout_seconds'] + 3 and proc.poll() is not None:
                         break
                 proc.wait(timeout=3)
+                reason = reason or ('ok' if proc.returncode == 0 else 'nonzero_exit')
+                if collector is not None:
+                    body = collector.finish(reason, spec.get('pi_delivery', 'json'), spec['max_log_bytes'])
+                    outputs['stdout'].write(body)
             finally:
                 sel.close()
                 for f in outputs.values():
@@ -119,15 +132,19 @@ def guard(job: Path) -> int:
                 kill_group(proc.pid, 0.05)
             reason = reason or ('ok' if proc.returncode == 0 else 'nonzero_exit')
             result = {'reason': reason, 'exit_code': proc.returncode, 'finished_at': now(),
-                      'elapsed_seconds': round(time.monotonic() - begin, 3), 'output_bytes': total}
+                      **timing_fields(begin, wall_begin, time.monotonic(), time.time()), 'output_bytes': total}
         except BaseException as exc:
             if proc:
                 kill_group(proc.pid)
                 with contextlib.suppress(Exception):
                     proc.wait(timeout=2)
-            result = {'reason': 'launch_error' if proc is None else 'guardian_error', 'exit_code': None,
+            result = {'reason': exc.reason if isinstance(exc, EventError) else
+                                ('launch_error' if proc is None else 'guardian_error'), 'exit_code': None,
                       'error': f'{type(exc).__name__}: {exc}', 'finished_at': now(),
-                      'elapsed_seconds': round(time.monotonic() - begin, 3), 'output_bytes': total}
+                      **timing_fields(begin, wall_begin, time.monotonic(), time.time()), 'output_bytes': total}
+        if collector is not None and collector.activity.get('running'):
+            with contextlib.suppress(Exception):
+                collector.finish(result['reason'])
         atomic_json(job / 'receipt.json', result)
     return 0
 
