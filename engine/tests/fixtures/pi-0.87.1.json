@@ -1,0 +1,24 @@
+{
+  "version": "0.87.1",
+  "note": "Synthetic protocol samples checked against the installed Pi 0.87.1 source/types; not a recorded model run.",
+  "sources": [
+    "packages/coding-agent/src/core/agent-session.ts",
+    "packages/coding-agent/src/core/session-manager.ts",
+    "packages/ai/src/types.ts"
+  ],
+  "compaction": [
+    {"type": "compaction_start", "reason": "threshold"},
+    {"type": "compaction_end", "reason": "threshold", "result": {"summary": "Completed work retained.", "firstKeptEntryId": "sample-user", "tokensBefore": 1024}, "aborted": false, "willRetry": false}
+  ],
+  "summarization_retry": [
+    {"type": "summarization_retry_scheduled", "attempt": 2, "maxAttempts": 3, "delayMs": 100, "errorMessage": "temporary summary failure"},
+    {"type": "summarization_retry_attempt_start", "source": "compaction", "reason": "threshold"},
+    {"type": "summarization_retry_finished"}
+  ],
+  "session_entries": [
+    {"type": "message", "id": "sample-system", "parentId": null, "timestamp": "2026-10-01T00:00:00.000Z", "message": {"role": "system", "content": [{"type": "text", "text": "Use current checkout."}], "timestamp": 1}},
+    {"type": "message", "id": "sample-user", "parentId": "sample-system", "timestamp": "2026-10-01T00:00:01.000Z", "message": {"role": "user", "content": "Original instructions.", "timestamp": 2}},
+    {"type": "context_edit", "id": "sample-edit", "parentId": "sample-user", "timestamp": "2026-10-01T00:00:02.000Z", "targetId": "sample-user", "replacement": {"content": "Updated instructions."}},
+    {"type": "session_info", "id": "sample-info", "parentId": "sample-edit", "timestamp": "2026-10-01T00:00:03.000Z"}
+  ]
+}

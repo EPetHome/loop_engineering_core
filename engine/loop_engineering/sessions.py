@@ -165,7 +165,7 @@ def _message(value):
         _require(type(value.get('isError')) is bool, 'toolResult.isError')
         _content(value.get('content'), strings=False)
     elif role == 'system':
-        _strings(value, 'content')
+        _content(value.get('content'), ('text',))
         if 'sections' in value:
             sections = value['sections']
             _require(isinstance(sections, dict), 'system.sections')
@@ -219,8 +219,9 @@ def _entry_payload(entry: dict, preceding: dict):
         _require(role in ('user', 'assistant', 'toolResult') or target['type'] == 'custom_message', 'context_edit target type')
         _require('replacement' in entry, 'context_edit.replacement missing')
         if entry['replacement'] is not None:
+            _require(isinstance(entry['replacement'], dict), 'context_edit.replacement must be an object or null')
             allowed = ('text', 'thinking', 'toolCall') if role == 'assistant' else ('text', 'image')
-            _content(entry['replacement'], allowed)  # Pi normalizes string replacements for array roles.
+            _content(entry['replacement'].get('content'), allowed)
     elif kind == 'branch_summary':
         _strings(entry, 'fromId', 'summary')
         _require(entry['fromId'] in preceding, 'branch_summary.fromId')
@@ -237,7 +238,8 @@ def _entry_payload(entry: dict, preceding: dict):
         if 'label' in entry:  # Omitted label clears the bookmark.
             _strings(entry, 'label')
     elif kind == 'session_info':
-        _strings(entry, 'name')
+        if 'name' in entry:  # Omitted name clears the display name.
+            _strings(entry, 'name')
     else:
         raise ValueError('unsupported session entry type: ' + kind)
     if kind in ('compaction', 'branch_summary'):

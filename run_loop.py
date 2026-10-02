@@ -22,7 +22,6 @@ from loop_engineering.supervisor import supervise
 PI = '/Users/Admin/.local/bin/pi'
 EXTENSION = '/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts'
 PROMPT = ROOT / 'prompts' / 'brief.md'
-LONG_LOG_BYTES = 64 * 1024
 BRIEF_SECONDS = 300
 
 
@@ -97,7 +96,8 @@ def delivery_overview(run, manifest):
                             'member_invocations retains the reserved member-start counter, including retries'},
         'brief': {**brief['processes'], 'usage': brief['usage'],
                   'reason': receipt.get('reason') if receipt else ('not_invoked' if not invoked else 'unknown'),
-                  'scope': 'separate optional brief command-start attempt; guardian span includes launch/drain/cleanup'},
+                  'scope': 'optional brief command-start attempts for this run, including existing records; '
+                           'not a count of new starts in this delivery; guardian span includes launch/drain/cleanup'},
         'note': 'Engine and brief counters are separate; no manifest terminal result is rewritten. '
                 'Process invocations are not proof of real model participation or HTTP request counts. '
                 'Unknown usage/cost and repeated-understanding cost stay unknown.',
@@ -112,7 +112,7 @@ def overview_text(overview):
         f'端到端墙钟 {text(engine["wall_elapsed_seconds"])} 秒（含门禁、I/O、调度）。\n'
         '- 引擎成员进程计时：`' + json.dumps(engine['member_processes'], ensure_ascii=False) + '`\n'
         '- 引擎可用成员用量：`' + json.dumps(engine['usage'], ensure_ascii=False) + '`\n'
-        f'- 简报：独立启动尝试 {brief["process_invocations"]}；'
+        f'- 简报（本运行累计，含已有记录；不代表本次交付新增调用数）：独立启动尝试 {brief["process_invocations"]}；'
         f'guardian monotonic {text(brief["elapsed_seconds"])} 秒；'
         f'wall {text(brief["wall_elapsed_seconds"])} 秒；状态 {brief["reason"]}。\n'
         f'- 简报计时显著差异（绝对差 > 2 秒）：{brief["timing_discrepancy"]}；'
@@ -124,12 +124,12 @@ def overview_text(overview):
         '新功能真实 CLI/账号接法、模型质量和节省收益未在本入口验证；人工验收未由简报执行。\n\n')
 
 
-def deliver(run):
+def deliver(run, brief=False):
     manifest = load_json(run / 'manifest.json')
     if manifest['state'] != 'TERMINAL' or not manifest.get('result'):
         raise LoopError('没有完整终态，不启动简报')
     result = manifest['result']
-    status = '日志较短，直接查看原始结果。'
+    status = '已请求 AI 简报，原始结果已就绪。' if brief else '未请求 AI 简报，直接查看原始结果。'
     entry = run / '交付结果.md'
     def write_entry():
         overview = delivery_overview(run, manifest)
@@ -144,44 +144,43 @@ def deliver(run):
             + ' · '.join(f'[{label}]({name})' for label, name in links) + '\n')
     write_entry()  # Raw results stay available while optional summarization runs.
     try:
-        size = (run / 'result.md').stat().st_size + sum(
-            p.stat().st_size for p in run.rglob('*.log') if p.is_file() and not p.is_symlink())
-        if (run / 'cancel').exists():
+        if brief and (run / 'cancel').exists():
             status = '运行收到停止请求，直接交付原始结果，未再调用简报模型。'
-        elif size > LONG_LOG_BYTES:
-            status = '原始结果已完成，正在自动生成长日志简报（最多 5 分钟）。'
+        elif brief:
+            status = '原始结果已完成，正在按请求生成 AI 简报（最多 5 分钟）。'
             write_entry()
-            print('日志较长，自动调用 ds4.1 生成简报。', flush=True)
+            print('已请求 AI 简报，调用 ds4.1 生成简报。', flush=True)
             make_brief(run)
             status = '[查看日志简报](brief.md)。简报不改变原始结论。'
     except Exception as exc:
-        status = '自动简报未完成，原始结果已保留；无需重新启动开发任务。'
+        status = 'AI 简报未完成，原始结果已保留；无需重新启动开发任务。'
         atomic_json(run / 'brief-error.json', {'error_type': type(exc).__name__, 'message': str(exc)[:500]})
     write_entry()
     print(f'停止：{STOP_LABELS[result["stop"]]}。结果入口：{entry}', flush=True)
     return entry
 
 
-def run(plan, root):
+def run(plan, root, brief=False):
     root = root.expanduser().resolve()
     rid = create_run(root, load_rules(plan))
     current = root / 'runs' / rid
     print(f'运行：{rid}\n结果入口：{current / "交付结果.md"}', flush=True)
     code = supervise(root, rid)
     try:
-        deliver(current)
+        deliver(current, brief=brief)
     except Exception as exc:
-        print(f'简报入口未生成（{type(exc).__name__}）；原始结果：{current / "result.md"}', file=sys.stderr)
+        print(f'交付入口未生成（{type(exc).__name__}）；原始结果：{current / "result.md"}', file=sys.stderr)
     return code
 
 
 def main():
-    parser = argparse.ArgumentParser(description='启动 Loop；停止后长日志自动生成简报。')
+    parser = argparse.ArgumentParser(description='启动 Loop；默认只生成程序汇总，--brief 按需生成 AI 简报。')
     parser.add_argument('plan', type=Path)
     parser.add_argument('--root', type=Path, default=ROOT / 'loop-data')
+    parser.add_argument('--brief', action='store_true', help='完整终态且未取消时生成一次 AI 简报（最多 5 分钟）')
     args = parser.parse_args()
     try:
-        return run(args.plan, args.root)
+        return run(args.plan, args.root, brief=args.brief)
     except (LoopError, OSError, KeyError, ValueError) as exc:
         print(f'启动失败：{exc}', file=sys.stderr)
         return 4

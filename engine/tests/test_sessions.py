@@ -246,9 +246,9 @@ class SessionContract(unittest.TestCase):
                     v3_entry('custom', customType='extension-without-data'),
                     v3_entry('custom_message', customType='extension-context', content='injected', display=False),
                     v3_entry('context_edit', targetId='m1', replacement=None),
-                    v3_entry('context_edit', targetId='m3', replacement='normalized assistant string'),
-                    v3_entry('context_edit', targetId='m4', replacement='normalized tool string'),
-                    v3_entry('context_edit', targetId='e13', replacement=[{'type': 'text', 'text': 'patched'}]),
+                    v3_entry('context_edit', targetId='m3', replacement={'content': [{'type': 'text', 'text': 'assistant'}]}),
+                    v3_entry('context_edit', targetId='m4', replacement={'content': [{'type': 'text', 'text': 'tool'}]}),
+                    v3_entry('context_edit', targetId='e13', replacement={'content': [{'type': 'text', 'text': 'patched'}]}),
                     v3_entry('label', targetId='m1', label='bookmark'),
                     v3_entry('label', targetId='m1'), v3_entry('session_info', name='display only')]
         for i, entry in enumerate(entries):
@@ -265,6 +265,42 @@ class SessionContract(unittest.TestCase):
             self.assertEqual(rebound['id'], first['session']['session_id'])
         self.sessions.complete(c, True, 'accepted')
         self.assertTrue(load_json(self.sessions.map_path)['ready'])
+
+    def test_pi087_samples_survive_acceptance_rebinding_and_next_repair(self):
+        sample = load_json(ENGINE_DIR / 'tests/fixtures/pi-0.87.1.json')
+        first = self.context()
+        self.select(first)
+        path = Path(first['session']['session_path'])
+        history = b''.join((json.dumps(e) + '\n').encode() for e in sample['session_entries'])
+        path.write_bytes(path.read_bytes() + history)
+        for c in (first, self.context(2), self.context(3)):
+            if c is not first:
+                selected = self.select(c)
+                self.assertEqual(selected['mode'], 'reuse_repairs')
+                self.assertEqual(selected['session_path'], str(path))
+            with pi_session(c, Path(c['code_path'])):
+                header, raw = session_contents(path, first['session']['session_id'], c['code_path'])
+                self.assertEqual(header['cwd'], c['code_path'])
+                self.assertEqual(raw, history)
+            self.sessions.complete(c, True, 'accepted')
+            self.assertTrue(load_json(self.sessions.map_path)['ready'])
+
+    def test_pi087_invalid_replacements_and_system_blocks_still_fall_back(self):
+        first = self.seed()
+        record = load_json(self.sessions.map_path)
+        header = Path(first['session']['session_path']).read_bytes()
+        prefix = (json.dumps(v3_entry('message', id='root', message=USER)) + '\n').encode()
+        entries = [v3_entry('context_edit', targetId='root', replacement=value)
+                   for value in ('bare string', [{'type': 'text', 'text': 'bare array'}],
+                                 {}, {'content': None}, {'content': 1},
+                                 {'content': [{'type': 'text'}]})]
+        entries += [v3_entry('message', message={**SYSTEM, 'content': content})
+                    for content in ([{'type': 'image', 'data': 'AA==', 'mimeType': 'image/png'}],
+                                    [{'type': 'text', 'text': False}])]
+        entries.append(v3_entry('session_info', name=None))
+        for entry in entries:
+            with self.subTest(entry=entry):
+                self.assert_corrupt_fresh(first, record, header + prefix + (json.dumps(entry) + '\n').encode())
 
     def test_valid_json_but_corrupt_messages_fall_back_without_touching_old_bytes(self):
         first = self.seed()
@@ -322,7 +358,8 @@ class SessionContract(unittest.TestCase):
         invalid = []
         for valid, wrong in cases:
             for field, value in wrong.items():
-                invalid.append({k: v for k, v in valid.items() if k != field})
+                if valid['type'] != 'session_info':  # Pi's name is optional; explicit non-strings are not.
+                    invalid.append({k: v for k, v in valid.items() if k != field})
                 invalid.append({**valid, field: value})
         invalid += [{'type': 'compaction', 'summary': 'summary', 'firstKeptEntryId': 'root', 'tokensBefore': 10,
                      'systemMessage': None},

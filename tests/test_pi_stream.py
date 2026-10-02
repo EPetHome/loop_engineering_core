@@ -1,4 +1,5 @@
 """Pi wire counterexamples. Every subprocess is a local deterministic stub, not Pi."""
+import copy
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,18 @@ import unittest
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'engine'))
 from loop_engineering.pi_events import EventError, PiEvents
+
+PI_SAMPLE = json.loads((PROJECT / 'engine/tests/fixtures/pi-0.87.1.json').read_text())
+
+
+def compaction_events(reason='threshold', summary_retry=False):
+    events = copy.deepcopy(PI_SAMPLE['compaction'])
+    if summary_retry:
+        events[1:1] = copy.deepcopy(PI_SAMPLE['summarization_retry'])
+    for event in events:
+        if 'reason' in event:
+            event['reason'] = reason
+    return events
 
 
 def message(text='{"answer":2}', usage=None, stop='stop'):
@@ -250,6 +263,66 @@ class EventProjection(unittest.TestCase):
         self.assertEqual(json.loads(self.parser.finish('ok')), {'answer': 2})
         self.assertEqual(self.usage()['tokens']['input'], 4)
 
+    def test_successful_no_retry_compaction_keeps_completed_reply(self):
+        for reason in ('threshold', 'overflow', 'manual'):
+            for summary_retry in (False, True):
+                with self.subTest(reason=reason, summary_retry=summary_retry):
+                    p = PiEvents(None, 65536)
+                    p.feed(wire(final_events(usage={'input': 3})[:-1]
+                                + compaction_events(reason, summary_retry)))
+                    self.assertFalse(p.settled)  # Compaction end alone is not settlement.
+                    p.feed(wire([{'type': 'agent_settled'}]))
+                    self.assertEqual(json.loads(p.finish('ok')), {'answer': 2})
+                    self.assertEqual(p.usage()['tokens']['input'], 3)
+                    self.assertEqual(p.usage()['coverage']['compaction_events'], 1)
+
+    def test_incomplete_failed_or_unknown_compaction_cannot_recover_old_reply(self):
+        start, end = compaction_events()
+        invalid = [[start], [end], [start, start, end]]
+        for field, value in (('result', None), ('result', {}), ('result', 'summary'),
+                             ('aborted', True), ('aborted', 0), ('willRetry', True),
+                             ('willRetry', 0), ('errorMessage', 'failed'), ('reason', 'overflow')):
+            invalid.append([start, {**end, field: value}])
+        for field in ('result', 'aborted', 'willRetry', 'reason'):
+            invalid.append([start, {k: v for k, v in end.items() if k != field}])
+        invalid.append([{**start, 'reason': 'unknown'}, {**end, 'reason': 'unknown'}])
+        for events in invalid:
+            with self.subTest(events=events):
+                p = PiEvents(None, 65536)
+                p.feed(wire(final_events() + events + [{'type': 'agent_settled'}]))
+                with self.assertRaises(EventError): p.finish('ok')
+        p = PiEvents(None, 65536)
+        p.feed(wire(final_events() + compaction_events()))
+        with self.assertRaises(EventError): p.finish('ok')  # Requires settlement after maintenance.
+
+    def test_work_during_or_after_compaction_invalidates_old_reply(self):
+        start, end = compaction_events()
+        work = [{'type': 'turn_start'}, {'type': 'auto_retry_start'},
+                {'type': 'message_start', 'message': {'role': 'assistant'}},
+                {'type': 'message_update'}, {'type': 'message_end', 'message': {'role': 'user'}},
+                {'type': 'queue_update', 'followUp': ['new task']},
+                {'type': 'tool_execution_end', 'toolCallId': 'unseen'},
+                {'type': 'summarization_retry_attempt_start', 'source': 'branchSummary'}]
+        for event in work:
+            for events in ([start, event, end], [start, end, event]):
+                with self.subTest(events=events):
+                    p = PiEvents(None, 65536)
+                    p.feed(wire(final_events() + events + [{'type': 'agent_settled'}]))
+                    with self.assertRaises(EventError): p.finish('ok')
+
+    def test_compaction_retry_requires_new_completed_reply(self):
+        start, end = compaction_events('overflow')
+        for fields in ({'willRetry': True}, {'result': None, 'errorMessage': 'failed'}):
+            p = PiEvents(None, 65536)
+            p.feed(wire(final_events() + [start, {**end, **fields}, {'type': 'agent_start'}]
+                        + final_events(text='{"answer":3}')))
+            self.assertEqual(json.loads(p.finish('ok')), {'answer': 3})
+
+    def test_pending_compaction_blocks_even_a_new_completed_reply(self):
+        p = PiEvents(None, 65536)
+        p.feed(wire([compaction_events()[0]] + final_events()))
+        with self.assertRaises(EventError): p.finish('ok')
+
     def test_malformed_or_truncated_stream_is_not_legacy_fallback(self):
         for middle in (b'not-json\n', b'{"type":"message_end",broken}\n', b'\xff\n'):
             p = PiEvents(None, 65536)
@@ -415,6 +488,31 @@ class ForegroundCollector(unittest.TestCase):
         self.assertEqual(code, 7)
         self.assertEqual(out, b'')
         self.assertEqual(json.loads((self.workspace / 'usage.json').read_text())['tokens']['input'], 3)
+
+    def test_compaction_wire_delivers_only_successful_settled_zero_exit(self):
+        for reason, retry in (('threshold', False), ('overflow', False), ('threshold', True)):
+            events = final_events()[:-1] + compaction_events(reason, retry) + [{'type': 'agent_settled'}]
+            with self.subTest(reason=reason, summary_retry=retry):
+                code, out = self.wait(self.start('os.write(1, ' + repr(wire(events)) + ')\n'))
+                self.assertEqual(code, 0, (self.work / 'err').read_text())
+                self.assertEqual(json.loads(out), {'answer': 2})
+        start, end = compaction_events()
+        tails = [[start], [start, {**end, 'aborted': True}],
+                 [start, {**end, 'result': None, 'errorMessage': 'failed'}],
+                 [start, {**end, 'willRetry': True}],
+                 [start, {'type': 'message_start', 'message': {'role': 'user'}}, end]]
+        for tail in tails:
+            with self.subTest(tail=tail):
+                events = final_events()[:-1] + tail + [{'type': 'agent_settled'}]
+                code, out = self.wait(self.start('os.write(1, ' + repr(wire(events)) + ')\n'))
+                self.assertEqual(code, 2)
+                self.assertEqual(out, b'')
+        events = final_events()[:-1] + compaction_events()
+        code, out = self.wait(self.start('os.write(1, ' + repr(wire(events)) + ')\n'))
+        self.assertEqual((code, out), (2, b''))
+        events += [{'type': 'agent_settled'}]
+        code, out = self.wait(self.start('os.write(1, ' + repr(wire(events)) + ')\nsys.exit(7)\n'))
+        self.assertEqual((code, out), (7, b''))
 
     def test_signal_cancellation_is_foreground_and_no_delivery(self):
         p = self.start('os.write(1,' + repr(wire([{'type': 'turn_start'}])) + ')\ntime.sleep(5)\n')

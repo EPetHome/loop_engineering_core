@@ -4,6 +4,7 @@ These are wire stubs, never a call to Pi or proof of model savings. Assertions
 inspect frozen code, gate executions, leases, raw events and formal export, not
 merely the stub's own PASS report.
 """
+import copy
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,8 @@ from loop_engineering.common import LoopError, load_json
 from loop_engineering.engine import Controller
 from loop_engineering.rules import normalize
 from loop_engineering.storage import create_run
+
+PI_SAMPLE = load_json(PROJECT / 'engine/tests/fixtures/pi-0.87.1.json')
 
 
 PROGRAM = r'''
@@ -124,7 +127,8 @@ class ComposedSessionIntegration(unittest.TestCase):
             'assert 1 <= value <= 3; print("tested candidate value", value)'], 'timeout_seconds': 10}]
         for row in u['criteria']: row['gate_ids'] = ['G']
 
-    def execute(self, scenario='two_repairs'):
+    def execute(self, scenario='two_repairs', expected_stop='PASSED'):
+        self.capture.unlink(missing_ok=True)
         rules = normalize(self.raw, self.work)
         rid = create_run(self.root, rules)
         self.run = self.root / 'runs' / rid
@@ -132,9 +136,71 @@ class ComposedSessionIntegration(unittest.TestCase):
             Controller(self.root, rid).execute()
         data = load_json(self.run / 'manifest.json')
         diagnostics = '\n'.join(p.read_text() for p in self.run.glob('units/*/attempts/*/job/stderr.log'))
-        self.assertEqual(data['result']['stop'], 'PASSED', data['units']['invite']['result']['reason'] + '\n' + diagnostics)
+        self.assertEqual(data['result']['stop'], expected_stop, data['units']['invite']['result']['reason'] + '\n' + diagnostics)
         self.calls = [json.loads(line) for line in self.capture.read_text().splitlines()]
         return data
+
+    def protocol_program(self, events, session_entries=()):
+        source = PROGRAM.replace("emit({'type':'agent_settled'})",
+                                 'for event in ' + repr(events) + ':emit(event)\n'
+                                 + "emit({'type':'agent_settled'})")
+        if session_entries:
+            source = source.replace('    tool_cwd=Path(header[\'cwd\'])',
+                '    if len(lines)==1:\n'
+                '        entries=' + repr(session_entries) + '\n'
+                "        entries[0]['parentId']=c['attempt_id']\n"
+                "        with p.open('a') as f:\n"
+                "            for entry in entries:f.write(json.dumps(entry)+'\\n')\n"
+                "    tool_cwd=Path(header['cwd'])")
+        self.program.write_text('#!' + sys.executable + '\n' + source)
+
+    def test_successful_compaction_does_not_retry_fresh_development(self):
+        self.raw['units'][0]['developer_session'] = 'fresh'
+        for reason, summary_retry in (('threshold', False), ('overflow', False), ('threshold', True)):
+            with self.subTest(reason=reason, summary_retry=summary_retry):
+                events = copy.deepcopy(PI_SAMPLE['compaction'])
+                for event in events: event['reason'] = reason
+                if summary_retry: events[1:1] = PI_SAMPLE['summarization_retry']
+                self.protocol_program(events)
+                data = self.execute('one_repair')
+                stats = data['units']['invite']['stats']
+                self.assertEqual(stats['member_invocations'], 4)
+                self.assertEqual(stats['infra_retries'], 0)
+                self.assertEqual(stats['repairs'], 1)
+                self.assertTrue(all(x['session'] is None for x in self.calls))
+                self.assertEqual(data['result']['finalization']['status'], 'PASS')
+
+    def test_failed_compaction_still_blocks_despite_complete_report(self):
+        self.raw['units'][0]['developer_session'] = 'fresh'
+        events = copy.deepcopy(PI_SAMPLE['compaction'])
+        events[-1].update(result=None, errorMessage='summary failed')
+        self.protocol_program(events)
+        data = self.execute('one_repair', expected_stop='BLOCKED')
+        self.assertEqual(data['units']['invite']['stats']['infra_retries'], 1)
+        self.assertEqual(len(self.calls), 2)
+        for call in self.calls:
+            attempt = Path(call['context']['workspace_path'])
+            self.assertEqual(load_json(attempt / 'job/receipt.json')['exit_code'], 2)
+            self.assertEqual(load_json(attempt / 'activity.json')['finish_reason'], 'invalid_response')
+            self.assertFalse((attempt / 'accepted.json').exists())
+
+    def test_pi087_session_payloads_and_compaction_preserve_business_reuse(self):
+        self.protocol_program(PI_SAMPLE['compaction'], PI_SAMPLE['session_entries'])
+        data = self.execute('one_repair')
+        dev = [x for x in self.calls if x['context']['role'] == 'developer']
+        self.assertEqual([x['context']['session']['mode'] for x in dev], ['fresh', 'reuse_repairs'])
+        self.assertEqual(dev[0]['session'], dev[1]['session'])
+        self.assertTrue(dev[1]['attempted'])  # The reused run actually probed old-path OS protection.
+        self.assertEqual(data['units']['invite']['stats']['member_invocations'], 4)
+        self.assertEqual(data['units']['invite']['stats']['infra_retries'], 0)
+        lines = [json.loads(line) for line in Path(dev[0]['session']).read_text().splitlines()]
+        self.assertEqual(lines[0]['cwd'], dev[-1]['context']['code_path'])
+        expected = copy.deepcopy(PI_SAMPLE['session_entries'])
+        expected[0]['parentId'] = dev[0]['context']['attempt_id']
+        self.assertEqual(lines[2:-1], expected)
+        mapping = load_json(self.run / 'units/invite/sessions/developer.json')
+        self.assertTrue(mapping['ready'])
+        self.assertEqual((self.source / 'invites.py').read_bytes(), self.before)
 
     def test_two_business_repairs_resolution_observation_protection_finalization_export(self):
         d = self.execute()

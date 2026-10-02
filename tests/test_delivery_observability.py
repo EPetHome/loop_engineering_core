@@ -12,7 +12,7 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 import run_loop
-from test_pi_stream import wire, final_events
+from test_pi_stream import wire, final_events, compaction_events
 
 
 class BriefObservability(unittest.TestCase):
@@ -28,18 +28,22 @@ class BriefObservability(unittest.TestCase):
         (self.run / 'result.md').write_text('原始结果\n')
         self.before = (self.run / 'manifest.json').read_bytes()
 
-    def brief(self, failure=False):
+    def brief(self, failure=False, compaction=False):
         program = self.work / 'summary.py'
         usage = {'input': 9, 'output': 4, 'cacheRead': 1, 'cacheWrite': 0, 'cost': {'total': 0}}
+        events = final_events(text='只有简报正文，不是新的结论。', usage=usage)
+        if compaction:
+            events = events[:-1] + compaction_events(summary_retry=True) + events[-1:]
         program.write_text('import sys,os\n'
             'prompt=sys.stdin.read()\nassert "exact-run" in prompt\n'
             'os.write(2,b"diagnostics\\n")\n'
-            'os.write(1,' + repr(wire(final_events(text='只有简报正文，不是新的结论。', usage=usage))) + ')\n'
+            'os.write(1,' + repr(wire(events)) + ')\n'
             + ('sys.exit(7)\n' if failure else ''))
-        (self.run / 'stderr.log').write_text('x' * (run_loop.LONG_LOG_BYTES + 1))
-        with patch.object(run_loop, 'brief_command', return_value=[sys.executable, str(program)]), \
+        (self.run / 'stderr.log').write_text('x' * (65 * 1024))
+        with patch.object(run_loop, 'brief_command', return_value=[sys.executable, str(program)]) as command, \
              contextlib.redirect_stdout(io.StringIO()):
-            run_loop.deliver(self.run)
+            run_loop.deliver(self.run, brief=True)
+        self.assertEqual(command.call_count, 1)
         return json.loads((self.run / 'delivery-overview.json').read_text())
 
     def test_packaged_prompt_and_original_command_contract(self):
@@ -56,7 +60,7 @@ class BriefObservability(unittest.TestCase):
             self.assertIn(boundary, prompt)
 
     def test_streamed_brief_usage_is_separate_and_manifest_unchanged(self):
-        overview = self.brief()
+        overview = self.brief(compaction=True)
         self.assertEqual((self.run / 'manifest.json').read_bytes(), self.before)
         self.assertEqual(overview['engine']['member_invocations'], 2)
         self.assertEqual(overview['engine']['wall_elapsed_seconds'], 12)
@@ -85,22 +89,53 @@ class BriefObservability(unittest.TestCase):
         self.assertTrue((self.run / 'brief-error.json').is_file())
         self.assertEqual((self.run / 'manifest.json').read_bytes(), self.before)
 
-    def test_short_run_has_zero_brief_invocations_unknown_usage_and_real_links(self):
-        with patch.object(run_loop, 'brief_command', side_effect=AssertionError('no model allowed')), \
+    def test_default_short_and_long_runs_have_zero_brief_invocations_unknown_usage_and_real_links(self):
+        for size in (10, 65 * 1024):
+            with self.subTest(log_bytes=size):
+                (self.run / 'stderr.log').write_text('x' * size)
+                with patch.object(run_loop, 'brief_command', side_effect=AssertionError('no model allowed')) as command, \
+                     patch.object(run_loop, 'make_brief', side_effect=AssertionError('no brief allowed')) as summary, \
+                     patch.object(Path, 'rglob', side_effect=AssertionError('no log scan allowed')), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    run_loop.deliver(self.run)
+                command.assert_not_called()
+                summary.assert_not_called()
+                overview = json.loads((self.run / 'delivery-overview.json').read_text())
+                self.assertEqual(overview['brief']['process_invocations'], 0)
+                self.assertEqual(overview['brief']['elapsed_seconds'], 0)
+                self.assertEqual(overview['brief']['reason'], 'not_invoked')
+                self.assertIsNone(overview['brief']['usage']['tokens']['input'])
+                entry = (self.run / '交付结果.md').read_text()
+                self.assertIn('未请求 AI 简报', entry)
+                self.assertNotIn('日志较短', entry)
+                self.assertNotIn('[完整报告]', entry)
+                self.assertNotIn('[查看日志简报]', entry)
+                paths = re.findall(r'\]\(([^)]+)\)', entry)
+                self.assertIn('result.md', paths)
+                self.assertIn('manifest.json', paths)
+                self.assertIn('delivery-overview.json', paths)
+                for path in paths:
+                    self.assertTrue((self.run / path).is_file(), path)
+                self.assertIn('真实成员', entry)
+                self.assertIn('人工验收未由简报执行', entry)
+                self.assertEqual((self.run / 'manifest.json').read_bytes(), self.before)
+                self.assertFalse((self.run / 'brief-job').exists())
+
+    def test_existing_brief_records_are_history_not_new_default_invocations(self):
+        original_overview = self.brief()
+        paths = [self.run / 'brief.md', *(self.run / 'brief-job').iterdir()]
+        original = {path: path.read_bytes() for path in paths if path.is_file()}
+        with patch.object(run_loop, 'make_brief', side_effect=AssertionError('no new invocation')) as summary, \
+             patch.object(Path, 'rglob', side_effect=AssertionError('no log scan allowed')), \
              contextlib.redirect_stdout(io.StringIO()):
             run_loop.deliver(self.run)
-        overview = json.loads((self.run / 'delivery-overview.json').read_text())
-        self.assertEqual(overview['brief']['process_invocations'], 0)
-        self.assertEqual(overview['brief']['elapsed_seconds'], 0)
-        self.assertIsNone(overview['brief']['usage']['tokens']['input'])
-        entry = (self.run / '交付结果.md').read_text()
-        self.assertNotIn('[完整报告]', entry)
-        self.assertNotIn('[查看日志简报]', entry)
-        for path in re.findall(r'\]\(([^)]+)\)', entry):
-            self.assertTrue((self.run / path).is_file(), path)
-        self.assertIn('真实成员', entry)
-        self.assertIn('人工验收未由简报执行', entry)
+        summary.assert_not_called()
+        self.assertEqual(json.loads((self.run / 'delivery-overview.json').read_text()), original_overview)
+        self.assertEqual({path: path.read_bytes() for path in original}, original)
         self.assertEqual((self.run / 'manifest.json').read_bytes(), self.before)
+        entry = (self.run / '交付结果.md').read_text()
+        self.assertIn('未请求 AI 简报', entry)
+        self.assertIn('含已有记录；不代表本次交付新增调用数', entry)
 
     def test_long_run_links_resolve_to_corresponding_files(self):
         self.brief()

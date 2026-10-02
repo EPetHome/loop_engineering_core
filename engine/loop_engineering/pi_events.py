@@ -78,6 +78,7 @@ class PiEvents:
         self.retries, self.compactions = 0, 0
         self.candidate, self.settled = None, False
         self.pending_work = False
+        self.compaction_reason = None
         self.activity = {'phase': 'unknown', 'basis': None, 'last_event_at': None,
                          'last_event_type': None, 'running': True, 'tool_calls': [],
                          'note': 'No event evidence yet; phase is the last observed stage, not a liveness claim.'}
@@ -198,8 +199,15 @@ class PiEvents:
                 self.phase('tools' if self.active_tools else 'waiting', kind)
             else:
                 self.phase('tools', kind)
-        elif kind in ('auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'):
+        elif kind == 'auto_retry_start':
             self.new_work()
+            self.retries += 1
+            self.phase('waiting', kind)
+        elif kind in ('summarization_retry_scheduled', 'summarization_retry_attempt_start'):
+            # A summary request can retry without rerunning the completed turn.
+            if self.compaction_reason is None or (kind == 'summarization_retry_attempt_start' and
+                    (event.get('source') != 'compaction' or event.get('reason') != self.compaction_reason)):
+                self.new_work()
             self.retries += 1
             self.phase('waiting', kind)
         elif kind == 'auto_retry_end':
@@ -207,19 +215,33 @@ class PiEvents:
                 self.new_work()
                 self.phase('unknown', kind)
         elif kind == 'compaction_start':
-            self.new_work()
+            if self.compaction_reason is not None:
+                self.new_work()  # Overlapping maintenance cannot certify an old reply.
+            self.compaction_reason = event.get('reason') or 'unknown'
+            self.settled = False
             self.compactions += 1
             self.phase('waiting', kind)
         elif kind == 'compaction_end':
-            # Summarization is not a final assistant delivery, nor a measured HTTP request.
-            self.new_work()
+            result = event.get('result')
+            completed = (self.compaction_reason in ('threshold', 'overflow', 'manual')
+                         and event.get('reason') == self.compaction_reason
+                         and event.get('aborted') is False and event.get('willRetry') is False
+                         and event.get('errorMessage') is None and isinstance(result, dict)
+                         and isinstance(result.get('summary'), str)
+                         and isinstance(result.get('firstKeptEntryId'), str)
+                         and number(result.get('tokensBefore')))
+            self.compaction_reason = None
+            self.settled = False
+            if not completed:
+                self.new_work()
             self.phase('waiting' if event.get('result') else 'unknown', kind)
         elif kind == 'agent_end':
             if event.get('willRetry') is True:
                 self.new_work()
             self.phase('waiting', kind)
         elif kind == 'agent_settled':
-            self.settled = bool(self.candidate and not self.pending_work and not self.active_tools)
+            self.settled = bool(self.candidate and not self.pending_work and not self.active_tools
+                                and self.compaction_reason is None)
             self.phase('completed' if self.settled else 'unknown', kind)
         elif kind not in ('session', 'turn_end', 'queue_update', 'entry_appended',
                           'session_info_changed', 'thinking_level_changed', 'summarization_retry_finished'):
