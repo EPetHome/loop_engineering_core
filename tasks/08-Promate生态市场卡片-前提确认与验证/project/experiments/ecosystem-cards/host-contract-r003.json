@@ -1,0 +1,93 @@
+{
+  "attempt_id": "developer-r003-d9bd63d9c00c",
+  "capturedAt": "2026-10-01T18:02:01.065Z",
+  "kind": "original host static source excerpts; NOT a desktop result",
+  "hostVersion": "5.6.2",
+  "infoPlistSha256": "1b7aeac8793e8cd61e1975222714a0f576197a454f5085c05692f0ee6468b7e2",
+  "asarHeaderSha256": "72df4e8ec84f4058b33df8357abd5a6c0bf18c67cd1d750e8b7c35cd5d6ac21c",
+  "sources": [
+    {
+      "path": "renderer/assets/lib-chat-ui-C7y1ZM_R.js",
+      "sha256": "ae57e8dc763ad67a82bc39979d096d58ebc0548cb3bf0f521de9c76727393c09",
+      "excerpts": [
+        {
+          "anchor": "className: \"cb-plugins-card-name\"",
+          "offset": 10700047,
+          "raw": "\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: \"cb-plugins-card-name\",\n\t\t\t\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t\t\t\t}), scopeLabels.map((scopeLabel) => /* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: (0, import_classnames$3.de"
+        },
+        {
+          "anchor": "className: \"cb-plugin-detail-title\"",
+          "offset": 10680254,
+          "raw": "\",\n\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"h1\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-title\",\n\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t}), /* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-actions\",\n\t\t\t\t\t\tchildren: isInstalled ? /* @__PURE"
+        }
+      ]
+    },
+    {
+      "path": "renderer/assets/plugins-xKLHRllH.js",
+      "sha256": "1beb4a72406c23354ac6256a84410952ddf59e7003703b74dbe47934c9d474d1",
+      "excerpts": [
+        {
+          "anchor": "const loadInstalledPlugins =",
+          "offset": 13830,
+          "raw": "const loadInstalledPlugins = (0, import_react$1.useCallback)(async (forceRefresh = false) => {\n\t\t\ttry {\n\t\t\t\tif (adapter?.getInstalledPlugins) {\n\t\t\t\t\tconst pluginsList = (await adapter.getInstalledPlugins(forceRefresh)).map((p) => {\n\t\t\t\t\t\tconst mapScope = (scope) => {\n\t\t\t\t\t\t\tif (scope === \"local\") return \"project-local\";\n\t\t\t\t\t\t\treturn scope || \"user\";\n\t\t\t\t\t\t};\n\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\tname: p.name,\n\t\t\t\t\t\t\tmarketplaceName: p.marketplaceName || \"local\",\n\t\t\t\t\t\t\tdescription: p.description,\n\t\t\t\t\t\t\tversion: p.version,\n\t\t\t\t\t\t\tstatus: p.status,\n\t\t\t\t\t\t\tinstalledScopes: p.installedScopes?.map(mapScope) || (p.installScope ? [mapScope(p.installScope)] : [\"user\"]),\n\t\t\t\t\t\t\tinstalledScopesStatus: p.installedScopesStatus,\n\t\t\t\t\t\t\tinstalledPath: p.installedPath,\n\t\t\t\t\t\t\tsource: \"\",\n\t\t\t\t\t\t\tagents: p.agents,\n\t\t\t\t\t\t\tcommands: p.commands,\n\t\t\t\t\t\t\tskills: p.skills,\n\t\t\t\t\t\t\tmcpServers: p.mcpServers,\n\t\t\t\t\t\t\thooks: p.hooks,\n\t\t\t\t\t\t\trules: p.rules,\n\t\t\t\t\t\t\tcanRemove: p.canRemove,\n\t\t\t\t\t\t\tcanSwitchoff: p.canSwitchoff,\n\t\t\t\t\t\t\tcanEdit: p.canEdit\n\t\t\t\t\t\t};\n\t\t\t\t\t});\n\t\t\t\t\tsetInstalledPlugins(pluginsList);\n\t\t\t\t\twriteCache(CACHE_KEY_INSTALLED, pluginsList);\n\t\t\t\t\treturn pluginsList;\n\t\t\t\t}\n\t\t\t\treturn [];\n\t\t\t} catch (error) {\n\t\t\t\treturn [];\n\t\t\t}\n\t\t}, [adapter]);\n\t\t/**\n\t\t* 加载市场中的插件列表\n\t\t*\n\t\t* 入参 marketplaceName 是 UI 一直在用的展示名（也是 PluginViewConfig.marketplaceName 的值）；\n\t\t* 调用 sidecar 时翻译成稳定 ID（storageName），避免名称带空格 / 中文 / 特殊字符\n\t\t* 时被 URL 编码后下游 marketplace 查找失败。\n\t\t*/\n\t\tconst loadMarketplacePlugins = (0, import_react$1.useCallback)(async (marketplaceName, forceRefresh = false) => {\n\t\t\tif (!adapter?.getMarketp"
+        },
+        {
+          "anchor": "const loadMarketplacePlugins =",
+          "offset": 15267,
+          "raw": "const loadMarketplacePlugins = (0, import_react$1.useCallback)(async (marketplaceName, forceRefresh = false) => {\n\t\t\tif (!adapter?.getMarketplacePlugins) return installedPlugins;\n\t\t\ttry {\n\t\t\t\tconst currentSearchText = searchTextRef.current;\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(marketplaceName);\n\t\t\t\treturn (await adapter.getMarketplacePlugins(marketplaceId, forceRefresh, currentSearchText || void 0)).map((p) => ({\n\t\t\t\t\tname: p.name,\n\t\t\t\t\tmarketplaceName: p.marketplaceName,\n\t\t\t\t\tdescription: p.description,\n\t\t\t\t\tversion: p.version,\n\t\t\t\t\tauthor: p.author,\n\t\t\t\t\thomepage: p.homepage,\n\t\t\t\t\tstatus: mapPluginStatus(p.status),\n\t\t\t\t\tinstalledScopes: p.installedScopes,\n\t\t\t\t\tinstalledScopesStatus: p.installedScopesStatus,\n\t\t\t\t\tinstalledPath: p.installedPath,\n\t\t\t\t\thasUpdate: p.hasUpdate,\n\t\t\t\t\tsource: \"\",\n\t\t\t\t\tagents: p.agents,\n\t\t\t\t\tcommands: p.commands,\n\t\t\t\t\tskills: p.skills,\n\t\t\t\t\tmcpServers: p.mcpServers,\n\t\t\t\t\thooks: p.hooks,\n\t\t\t\t\trules: p.rules\n\t\t\t\t}));\n\t\t\t} catch (error) {\n\t\t\t\treturn [];\n\t\t\t}\n\t\t}, [adapter, installedPlugins]);\n\t\t/**\n\t\t* 加载市场插件列表（不刷新已安装列表）\n\t\t* @param marketplaceName 市场名称\n\t\t* @param showLoading 是否显示 loading 遮罩\n\t\t* @param forceRefresh 是否让后端绕过缓存强制拉取最新数据（刷新市场后必须为 true）\n\t\t*/\n\t\tconst loadMarketplacePluginsOnly = (0, import_react$1.useCallback)(async (marketplaceName, showLoading = false, forceRefresh = false) => {\n\t\t\tif (showLoading) setLoading(true"
+        },
+        {
+          "anchor": "adapter.installPlugins([plugin.name]",
+          "offset": 33938,
+          "raw": "Install = (0, import_react$1.useCallback)(async (plugin, scope) => {\n\t\t\tif (adapter?.installPlugins) {\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(plugin.marketplaceName);\n\t\t\t\tconst result = await adapter.installPlugins([plugin.name], marketplaceId, scope === \"project-local\" ? \"project\" : scope);\n\t\t\t\tif (result.success) {\n\t\t\t\t\treportPluginAction(plugin, \"install\", scope, true);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: t(\"plugins.installSuccess\", { name: plugin.name }),\n\t\t\t\t\t\ttype: \"success\"\n\t\t\t\t\t});\n\t\t\t\t} else {\n\t\t\t\t\treportPluginAction(plug"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs",
+      "sha256": "b340564b2410d99846397776a25fd99e11d86647a7c219ad06fedc441e364ddd",
+      "excerpts": [
+        {
+          "anchor": "name:es.name,description:es.description,version:es.version,marketplaceName:this.storageName||this.name",
+          "offset": 5781449,
+          "raw": "anifest.plugins)return ei;for(let es of this.manifest.plugins)try{let ea={...es,name:es.name,description:es.description,version:es.version,marketplaceName:this.storageName||this.name,source:es.source};ei.push(ea)}catch(ei){ea.error(`Failed to read plugin ${es.name}:`,ei)}}catch(ei){ea.error(`Failed to list plugins from marketplace ${this.name}:`,ei)}return ei}"
+        },
+        {
+          "anchor": "getPluginId(ei,ea){return`${ei}@${ea}`}",
+          "offset": 5931723,
+          "raw": "ketplacePluginsLoading.get(ea)===eh&&this.marketplacePluginsLoading.delete(ea)}}getPluginId(ei,ea){return`${ei}@${ea}`}getHomePluginsDir(){return tK.PathUtils.getHomePluginsDir()}getInstalledPluginsRegistryPath(){return tz.join(this.getHomePluginsDir(),tD.Tn)}getInstalledPluginsRegistryLockName(){l"
+        }
+      ]
+    },
+    {
+      "path": "main/index.js",
+      "sha256": "586ef7f83fbe34834ff5c4de899c7f0647100643c4dded89d49556c8690d55e7",
+      "excerpts": [
+        {
+          "anchor": "const gotTheLock = electron.app.requestSingleInstanceLock();",
+          "offset": 2166194,
+          "raw": "returns 是否拿到锁；false 时调用方需 return 中断 main() 后续装配\n\t*/\n\tacquireSingletonLock() {\n\t\tconst gotTheLock = electron.app.requestSingleInstanceLock();\n\t\tthis.startupLog(`Phase: single instance lock, gotTheLock=${gotTheLock}`);\n\t\tmarkStartup(\"A8\");\n\t\tif (!gotTheLock) {\n\t\t\tthis.startupLog(\"SingletonLock failed: another instance ru"
+        },
+        {
+          "anchor": "if (process.env.WB_E2E_DISABLE_STARTUP_REPAIR === \"true\")",
+          "offset": 2110310,
+          "raw": "ss.platform !== \"darwin\") return;\n}\nfunction runEarlyPreflightAndMaybeBail() {\n\tif (process.env.WB_E2E_DISABLE_STARTUP_REPAIR === \"true\") return \"platform-skip\";\n\tif (process.platform === \"win32\") return runEarlyPreflightAndMaybeBailWin32();\n\tif (process.platform !== \"darwin\") return \"platform-skip\";\n\ttry {\n\t\tconst "
+        },
+        {
+          "anchor": "function createSecureWebPreferences(kind, options = {})",
+          "offset": 1458492,
+          "raw": "function createSecureWebPreferences(kind, options = {}) {\n\tswitch (kind) {\n\t\tcase \"main\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: true,\n\t\t\tnodeIntegration: false,\n\t\t\tnodeIntegrationInSubFrames: true,\n\t\t\twebviewTag: true\n\t\t};\n\t\tcase \"first-party-window\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: true,\n\t\t\tnodeIntegration: false,\n\t\t\tbackgroundThrottling: false\n\t\t};\n\t\tcase \"guest-popup\": return {\n\t\t\tsandbox: true,\n\t\t\tcontextIsolation: true,\n\t\t\tnodeIntegration: false\n\t\t};\n\t\tcase \"image-decoder\":\n\t\t\tif (!options.partition) throw new Error(\"[SecureWebPreferences] image-decoder kind requires options.partition\");\n\t\t\treturn {\n\t\t\t\tpartition: options.partition,\n\t\t\t\twebSecurity: false,\n\t\t\t\tnodeIntegration: false,\n\t\t\t\tcontextIsolation: true,\n\t\t\t\tsandbox: false,\n\t\t\t\tbackgroundThrottling: false\n\t\t\t};\n\t\tcase \"splash\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: false,\n\t\t\tnodeIntegration: false\n\t\t};\n\t\tcase \"no-preload-guest\": return {\n\t\t\tsandbox: true,\n\t\t\tcontextIsolation: true,\n\t\t\tnodeIntegration: false\n\t\t};\n\t}\n}\n//#endregion\n//#region src/main/window"
+        }
+      ]
+    }
+  ],
+  "observed": {
+    "cardAndDetailTitleUseName": true,
+    "nativeIdUsesNameAtMarket": true,
+    "installedAndMarketplacePanelCopyNameVerbatim": true,
+    "panelDisplayNameOccurrences": 0,
+    "displayNameHonoredOnInspectedPanelPath": false,
+    "mutableDisplayNameSupport": null
+  },
+  "note": "当前5.6.2面板将p.name原样映射为卡片name，未传入displayName；安装也直接使用plugin.name。生成器的displayName不能当作名称展示通过。未发现可变标题与固定插件身份分离的原生接法；不修改宿主、DOM或登记补齐。静态映射不替代本次桌面截图。"
+}

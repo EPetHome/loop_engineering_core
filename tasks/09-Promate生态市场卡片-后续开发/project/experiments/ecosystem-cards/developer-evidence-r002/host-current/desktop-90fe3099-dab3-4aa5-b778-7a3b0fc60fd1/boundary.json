@@ -1,0 +1,12 @@
+{
+  "pid": 22517,
+  "code": 0,
+  "signal": null,
+  "timedOut": false,
+  "stdout": "{\"node\":\"v22.21.1\",\"electron\":\"37.10.3\",\"uid\":502,\"checks\":{\"outsideRead\":true,\"symlinkRead\":true,\"outsideWrite\":true,\"insideReadWrite\":true,\"inheritedChildBoundary\":true,\"ownedLoopback\":true,\"otherLoopbackDenied\":true,\"ownedUnixSocket\":true,\"otherUnixSocketDenied\":true}}\n",
+  "stderr": "[1001/132629.055538:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+  "canaryUnchanged": true,
+  "pass": true,
+  "canaryRoot": "/private/tmp/loop-card-canary-rXOLMu",
+  "sandboxPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:55360\")) (require-not (remote ip \"localhost:55362\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:55360\")) (require-not (local ip \"localhost:55362\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:55360\")) (require-not (local ip \"localhost:55362\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n"
+}

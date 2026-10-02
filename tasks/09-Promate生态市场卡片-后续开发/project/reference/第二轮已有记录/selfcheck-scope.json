@@ -1,0 +1,22 @@
+{
+  "attempt_id": "developer-r001-b84279cb5d8a",
+  "capturedAt": "2026-10-02T02:20:44.833Z",
+  "codeRoot": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+  "readOnlyComparison": "/Users/Admin/Desktop/loop/loop-data/snapshots/promate-ecology-cards-02-20261002T020406-04362206/unit-host-ready",
+  "status": "PASS",
+  "scope": "allowed diff and delivery identity only, NOT H0",
+  "changes": [
+    "experiments/ecosystem-cards/integration/index.mjs",
+    "experiments/ecosystem-cards/integration/isolation.mjs",
+    "experiments/ecosystem-cards/integration/preflight-mode-test.mjs",
+    "experiments/ecosystem-cards/integration/preflight-test.mjs",
+    "experiments/ecosystem-cards/integration/preflight.mjs",
+    "experiments/ecosystem-cards/integration/readiness-inspect.mjs",
+    "experiments/ecosystem-cards/readiness-findings.md",
+    "experiments/ecosystem-cards/readiness-source.json"
+  ],
+  "violations": [],
+  "candidateStillMatchesSelfcheck": true,
+  "candidateLocalDigest": "eb3929df92181b3ff1458fcc50fae99fc6dd8d07487ecef21b7a6a74776f761e",
+  "unchangedInputFiles": 166
+}

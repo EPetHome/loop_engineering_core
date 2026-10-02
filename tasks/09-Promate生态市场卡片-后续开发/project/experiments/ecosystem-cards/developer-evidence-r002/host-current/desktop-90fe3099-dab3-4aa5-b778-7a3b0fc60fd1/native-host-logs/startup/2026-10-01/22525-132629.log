@@ -1,0 +1,22 @@
+[2026-10-01T17:26:29.595Z] [+3ms] === Process started === pid=22525 argv=["/Applications/WorkBuddy.app/Contents/MacOS/Electron","--user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data"]
+[2026-10-01T17:26:29.595Z] [+3ms] platform=darwin arch=arm64 node=v22.21.1 execPath=/Applications/WorkBuddy.app/Contents/MacOS/Electron
+[2026-10-01T17:26:29.595Z] [+3ms] cwd=/private/tmp/loop-card-host-ThnfSM/workspace resourcesPath=/Applications/WorkBuddy.app/Contents/Resources
+[2026-10-01T17:26:29.595Z] [+3ms] env.APPDATA=N/A env.USERPROFILE=N/A
+[2026-10-01T17:26:29.595Z] [+3ms] Phase: all imports completed OK
+[2026-10-01T17:26:29.597Z] [+5ms] Phase: [CodeCache] enabled {"processName":"main","status":"enabled","statusRaw":1,"dir":"/private/tmp/loop-card-host-ThnfSM/user-data/CodeCache/5.6.2_13.8.258.32-electron.0/main","appVersion":"5.6.2","v8Version":"13.8.258.32-electron.0","nodeVersion":"22.21.1","versionKey":"5.6.2_13.8.258.32-electron.0","elapsedMs":1,"resolvedDirectory":"/private/tmp/loop-card-host-ThnfSM/user-data/CodeCache/5.6.2_13.8.258.32-electron.0/main"}
+[2026-10-01T17:26:29.598Z] [+6ms] Phase: electron-log initialized, logFilePath=/private/tmp/loop-card-host-ThnfSM/profile/logs/main.log
+[2026-10-01T17:26:29.608Z] [+16ms] Phase: credential protection ready
+[2026-10-01T17:26:29.619Z] [+27ms] Phase: WORKBUDDY_DISABLE_SYSTEM_CA=1 auto-set (darwin=25 arm64, #62883 keychain crash workaround)
+[2026-10-01T17:26:29.682Z] [+90ms] Phase: configureElectronApp done
+[2026-10-01T17:26:29.683Z] [+91ms] host platform detected: hostArch=arm64 via=non-windows cost=0ms
+[2026-10-01T17:26:29.685Z] [+93ms] Phase: early preflight outcome=platform-skip
+[2026-10-01T17:26:29.686Z] [+94ms] Phase: single instance lock, gotTheLock=true
+[2026-10-01T17:26:29.777Z] [+185ms] Phase: app.whenReady fired
+[2026-10-01T17:26:29.779Z] [+187ms] Phase: PAC prewarm — session.defaultSession.resolveProxy fired
+[2026-10-01T17:26:29.802Z] [+210ms] Phase: [CodeCache] disk state {"processName":"main","processDir":"/private/tmp/loop-card-host-ThnfSM/user-data/CodeCache/5.6.2_13.8.258.32-electron.0/main","cacheFileCount":0,"cacheSizeBytes":0,"cacheSizeMB":0}
+[2026-10-01T17:26:29.879Z] [+287ms] Phase: PAC prewarm done (100ms rule="")
+[2026-10-01T17:26:29.879Z] [+287ms] Splash crash guard: crashCount=0, skipSplash=false
+[2026-10-01T17:26:29.882Z] [+290ms] Phase: vendor extract check, assetsCount=7
+[2026-10-01T17:26:29.883Z] [+291ms] Phase: vendor isExtractNeeded=true (checkMs=0)
+[2026-10-01T17:26:29.883Z] [+291ms] showSplashIfNeeded: creating SplashWindow
+[2026-10-01T17:26:29.883Z] [+291ms] showSplashIfNeeded: calling splashWindow.show()

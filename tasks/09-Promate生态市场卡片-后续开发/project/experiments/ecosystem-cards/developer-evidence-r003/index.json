@@ -1,0 +1,178 @@
+{
+  "attempt_id": "developer-r003-d9bd63d9c00c",
+  "kind": "byte-exact developer evidence copies, NOT engine gate evidence",
+  "originalWorkspace": "/private/tmp/loop-card-r003-desktop-UQMctc",
+  "copies": [
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/controller-result.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/controller-result.json",
+      "sha256": "71782140fd9e96f099f0458fb0c03a47b67cd2b9215cecc9c3fe7829aacc5f96",
+      "bytes": 80
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/controller.stderr.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/controller.stderr.log",
+      "sha256": "2d47e1ef9b238e5d251731736d3eaa3687ab36028c62262a72ba75a3b3785b2f",
+      "bytes": 62
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/controller.stdout.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/controller.stdout.log",
+      "sha256": "e4d23c817cc7c639fb34dd8db4af3a8e75c7c4ba6a0198850db6c1bcb78bbb04",
+      "bytes": 344
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/boundary.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/boundary.json",
+      "sha256": "8a79d0db26e7149eba4021bd238785790a3c0503b3e12b3b7ff0797b6c129b4c",
+      "bytes": 2241
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stderr.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stderr.log",
+      "sha256": "78b18a516cb5fbed5cd895dccbe35757dc58d9f5196dd995c3db1948025050e5",
+      "bytes": 5559
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stdout.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stdout.log",
+      "sha256": "6daa666480e02548642273db894ad78664778535fa515337804b78ae7e2b0e63",
+      "bytes": 6140
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/disable.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/disable.json",
+      "sha256": "495a7503f975b54864e8a833010e18bbb4fce82b226167d6f4e0d6e911781f38",
+      "bytes": 17115
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/enable.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/enable.json",
+      "sha256": "c598a53d83d5267a9c720e5735d571af68aa812471589922f04314c0c484995d",
+      "bytes": 17114
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/foreign-after.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/foreign-after.json",
+      "sha256": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+      "bytes": 174
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/foreign-before.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/foreign-before.json",
+      "sha256": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+      "bytes": 174
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/install.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/install.json",
+      "sha256": "7fdfa971871d9e01c583f407f58bb2522b3d653da74b28e16da8f9868795105e",
+      "bytes": 17115
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/market-visible.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/market-visible.json",
+      "sha256": "54c1377adb914efa5c8ac4e731f6c08b7fd1b9d1e53bb9ca17e8cb622fc8604a",
+      "bytes": 17122
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/AppStartup.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/AppStartup.log",
+      "sha256": "84a9cd017a38d7cdc02ae63b77528b26949aaa4fc03ad38f6e6a239570902ba4",
+      "bytes": 283
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/main.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/main.log",
+      "sha256": "e48f8e39f096aa868ccdf7759fab4b4934df3785e895777273f218b725067440",
+      "bytes": 4593
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/.splash-crash-guard",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/.splash-crash-guard",
+      "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "bytes": 1
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/2026-10-01/40770-140311.jsonl",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/2026-10-01/40770-140311.jsonl",
+      "sha256": "40fa31ba909cf86bb425d40bfbbbfcb7cd237666e4879e67beb81aeeae711119",
+      "bytes": 2502
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/2026-10-01/40770-140311.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/2026-10-01/40770-140311.log",
+      "sha256": "e3f3cfd9fe7547c0fcb99f6d64849a320a7e76b2abcebf8bf6f779d2d33febb0",
+      "bytes": 2780
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/update/update-20261001.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/update/update-20261001.log",
+      "sha256": "b6b0d754720649024138f92dd99538f8ab110206e275edd787d25d984b426610",
+      "bytes": 556
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/vendor-extract.log",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/vendor-extract.log",
+      "sha256": "368baa63b5a18410c648b55e58eeecbd057fd4860d388e0cc1ca55224547d3c3",
+      "bytes": 3730
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/recovery.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/recovery.json",
+      "sha256": "bbad486661ce4d2f052f3247ad66f3c6522aa60d3ad784bc259c34410fcd1a07",
+      "bytes": 356
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/reinstall.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/reinstall.json",
+      "sha256": "7896feda179590c3931a9320643bc6cc56b26cb4abac3e34517f8d7b748d18fe",
+      "bytes": 17117
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/resource-protection.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/resource-protection.json",
+      "sha256": "d978e4ed1acb1f04206d4761039f9533db11c367bbd50662900bc2837b5c8bc8",
+      "bytes": 221
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/sandbox-nesting.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/sandbox-nesting.json",
+      "sha256": "5bfe97e8cfcd3af0838d02f0fc96a96d41e4634859a0bc5d83720e3cda6d16b8",
+      "bytes": 6085
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/uninstall.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/uninstall.json",
+      "sha256": "950f153f61c2bc27e04dde7345a15334bd984e21928b9976c4d22bd579ac2de8",
+      "bytes": 17117
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/upgrade.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/upgrade.json",
+      "sha256": "8359021c3fc75a58d52038abbcd57359ee8f1511cc7ff7493a67459c0691b6fa",
+      "bytes": 17115
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/host-result.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/host-result.json",
+      "sha256": "f7a43636cdbd0fd7f37d7bc740e9d0363396da142e96abe88637be7e216c51cb",
+      "bytes": 48160
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-desktop-UQMctc/invocation.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/host/invocation.json",
+      "sha256": "1fd9e84452b8ae9c446a45d0f105f334b90d4a131933af45d86888210915f963",
+      "bytes": 714
+    },
+    {
+      "source": "/private/tmp/loop-card-r003-check-WoCwri/nesting/nested-sandbox.json",
+      "codeRelativePath": "experiments/ecosystem-cards/developer-evidence-r003/nested-sandbox.json",
+      "sha256": "5a9dff77636fc439572ad0bcc1189d5e0997ebe61fd7c5673e29ae7048cbb914",
+      "bytes": 10921
+    }
+  ],
+  "sourceModulesUnchangedAfterHostCheck": 18,
+  "changedSources": [],
+  "postHostChanges": "README and new evidence/audit artifacts only; not a frozen engine candidate"
+}

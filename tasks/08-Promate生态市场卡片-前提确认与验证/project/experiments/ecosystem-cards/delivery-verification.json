@@ -1,0 +1,11 @@
+{
+  "attempt_id": "developer-r002-fbb5f7c4499a",
+  "kind": "final raw-artifact/source consistency check; not a gate or desktop success",
+  "status": "PASS",
+  "verifiedRawFiles": 25,
+  "boundSourceFiles": 14,
+  "protectedInputs": 52,
+  "hostStatus": "UNKNOWN",
+  "hostReason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED",
+  "note": "所有实验mjs/JXA及README仍与最后实际宿主运行的源摘要一致；原始证据副本逐字节一致。新增交付记录不是冻结候选宿主证据。"
+}

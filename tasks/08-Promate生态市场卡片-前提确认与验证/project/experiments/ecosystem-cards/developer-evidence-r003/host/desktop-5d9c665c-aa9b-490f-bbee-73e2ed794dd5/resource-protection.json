@@ -1,0 +1,8 @@
+{
+  "status": "UNKNOWN",
+  "otherResourcesUnchanged": null,
+  "diagnosticBeforeAfterUnchanged": true,
+  "completedActions": [],
+  "operationCoverageConfirmed": false,
+  "reason": "DESKTOP_OPERATION_PROTECTION_UNPROVEN"
+}

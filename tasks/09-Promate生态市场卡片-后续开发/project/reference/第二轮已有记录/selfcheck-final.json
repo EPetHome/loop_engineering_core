@@ -1,0 +1,32 @@
+{
+  "attempt_id": "developer-r001-b84279cb5d8a",
+  "capturedAt": "2026-10-02T02:20:44.833Z",
+  "status": "PASS",
+  "scope": "final evidence/scope/cleanup invariants only",
+  "readinessStatus": "UNKNOWN",
+  "blockingReason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED",
+  "noDesktopLaunch": true,
+  "noBusinessOperations": true,
+  "noPngCreated": true,
+  "sourceAndHostUnchanged": true,
+  "diagnosticPids": [
+    94891,
+    94913,
+    94914
+  ],
+  "diagnosticPidsNoLongerLive": true,
+  "exactPidObservation": {
+    "argv": [
+      "/bin/ps",
+      "-p",
+      "94891,94913,94914",
+      "-o",
+      "pid=,uid=,lstart=,command="
+    ],
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": ""
+  },
+  "recoveryRoot": "/private/tmp/loop-card-host-4rzNEV",
+  "originalReportPath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/preflight-result.json"
+}

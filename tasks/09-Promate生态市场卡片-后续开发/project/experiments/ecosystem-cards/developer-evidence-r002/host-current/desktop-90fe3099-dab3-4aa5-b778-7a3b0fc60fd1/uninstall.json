@@ -1,0 +1,179 @@
+{
+  "action": "uninstall",
+  "status": "UNKNOWN",
+  "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED",
+  "attempted": false,
+  "candidateDigest": "fea6f1abbcba4ea93715d286f2eacb9a46dffe2691d2517936d72702bcee5f3c",
+  "originalOutputPaths": {
+    "stdout": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/desktop.stdout.log",
+    "stderr": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/desktop.stderr.log"
+  },
+  "boundary": {
+    "pid": 22517,
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "{\"node\":\"v22.21.1\",\"electron\":\"37.10.3\",\"uid\":502,\"checks\":{\"outsideRead\":true,\"symlinkRead\":true,\"outsideWrite\":true,\"insideReadWrite\":true,\"inheritedChildBoundary\":true,\"ownedLoopback\":true,\"otherLoopbackDenied\":true,\"ownedUnixSocket\":true,\"otherUnixSocketDenied\":true}}\n",
+    "stderr": "[1001/132629.055538:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+    "canaryUnchanged": true,
+    "pass": true,
+    "canaryRoot": "/private/tmp/loop-card-canary-rXOLMu",
+    "sandboxPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:55360\")) (require-not (remote ip \"localhost:55362\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:55360\")) (require-not (local ip \"localhost:55362\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:55360\")) (require-not (local ip \"localhost:55362\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n"
+  },
+  "cleanup": {
+    "stopped": true,
+    "remaining": [],
+    "exit": {
+      "code": null,
+      "signal": "SIGKILL"
+    },
+    "processes": [
+      {
+        "pid": 22525,
+        "ppid": 22513,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/MacOS/Electron --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data"
+      },
+      {
+        "pid": 22539,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 22555,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22556,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22560,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 22561,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump"
+      },
+      {
+        "pid": 22562,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "grep -E ^(bundle id:|path:)"
+      },
+      {
+        "pid": 22563,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "grep -A 1 bundle id:.*WorkBuddy"
+      },
+      {
+        "pid": 22564,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "grep path:"
+      },
+      {
+        "pid": 22565,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "sort -u"
+      },
+      {
+        "pid": 22575,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper (Renderer).app/Contents/MacOS/WorkBuddy Helper (Renderer) --type=renderer --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data --standard-schemes=wb-cover,local-file,vscode-file,wb-extension --secure-schemes=wb-cover,local-file,vscode-file,wb-extension --cors-schemes=vscode-file,wb-extension --fetch-schemes=wb-cover,local-file,vscode-file,wb-extension --streaming-schemes=local-file --app-path=/Applications/WorkBuddy.app/Contents/Resources/app.asar --no-sandbox --no-zygote --remote-debugging-port=55360 --js-flags=--regexp-interpret-all --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=8 --time-ticks-at-unix-epoch=-1790828104370417 --launch-time-ticks=47485562384 --shared-files --field-trial-handle=1718379636,r,730320512863831107,2522690884632101985,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version"
+      },
+      {
+        "pid": 22576,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22577,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22582,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=network --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data --standard-schemes=wb-cover,local-file,vscode-file,wb-extension --secure-schemes=wb-cover,local-file,vscode-file,wb-extension --cors-schemes=vscode-file,wb-extension --fetch-schemes=wb-cover,local-file,vscode-file,wb-extension --streaming-schemes=local-file --shared-files --field-trial-handle=1718379636,r,730320512863831107,2522690884632101985,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version --seatbelt-client=49"
+      },
+      {
+        "pid": 22583,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper (GPU).app/Contents/MacOS/WorkBuddy Helper (GPU) --type=gpu-process --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data --gpu-preferences=UAAAAAAAAAAgAAAEAAAAAAAAAAAAAAAAAABgAAEAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA --shared-files --field-trial-handle=1718379636,r,730320512863831107,2522690884632101985,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version --seatbelt-client=49"
+      },
+      {
+        "pid": 22588,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:30 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22589,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:30 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22612,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:30 2026",
+        "command": "<defunct>"
+      }
+    ],
+    "parentProcessGroup": 22511,
+    "detachedDetected": false
+  }
+}

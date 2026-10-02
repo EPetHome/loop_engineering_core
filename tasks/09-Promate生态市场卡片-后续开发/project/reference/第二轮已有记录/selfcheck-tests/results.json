@@ -1,0 +1,123 @@
+{
+  "attempt_id": "developer-r001-b84279cb5d8a",
+  "candidateCodeRoot": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+  "capturedAt": "2026-10-02T02:18:32.912Z",
+  "status": "PASS",
+  "scope": "targeted syntax/logical/source checks only, NOT H0 or desktop acceptance",
+  "sourceChecks": {
+    "attemptBinding": true,
+    "runBinding": true,
+    "hostVersion": true,
+    "displayNameNotUsed": true,
+    "localNameChecked": true,
+    "chineseRestriction": true,
+    "nativeConfiguration": true
+  },
+  "results": [
+    {
+      "kind": "syntax",
+      "file": "index.mjs",
+      "argv": [
+        "--check",
+        "experiments/ecosystem-cards/integration/index.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "syntax",
+      "file": "isolation.mjs",
+      "argv": [
+        "--check",
+        "experiments/ecosystem-cards/integration/isolation.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "syntax",
+      "file": "readiness-inspect.mjs",
+      "argv": [
+        "--check",
+        "experiments/ecosystem-cards/integration/readiness-inspect.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "syntax",
+      "file": "preflight.mjs",
+      "argv": [
+        "--check",
+        "experiments/ecosystem-cards/integration/preflight.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "syntax",
+      "file": "preflight-test.mjs",
+      "argv": [
+        "--check",
+        "experiments/ecosystem-cards/integration/preflight-test.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "syntax",
+      "file": "preflight-mode-test.mjs",
+      "argv": [
+        "--check",
+        "experiments/ecosystem-cards/integration/preflight-mode-test.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "logical-fixture",
+      "file": "preflight-test.mjs",
+      "argv": [
+        "experiments/ecosystem-cards/integration/preflight-test.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "{\"status\":\"PASS\",\"checks\":7,\"scope\":\"filesystem alias identity and preflight failure reports; no desktop started\"}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "logical-fixture",
+      "file": "preflight-mode-test.mjs",
+      "argv": [
+        "experiments/ecosystem-cards/integration/preflight-mode-test.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "{\"status\":\"PASS\",\"checks\":37,\"scope\":\"readiness completion, no-operation guard, native compatibility stop, isolated launch allowlist; no desktop started\"}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "logical-fixture",
+      "file": "resource-protection-test.mjs",
+      "argv": [
+        "experiments/ecosystem-cards/integration/resource-protection-test.mjs"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "stdout": "{\"status\":\"PASS\",\"checks\":13,\"scope\":\"report classification fixtures ONLY; no desktop or resource mutation evidence\"}\n",
+      "stderr": ""
+    }
+  ]
+}

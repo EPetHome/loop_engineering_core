@@ -1,0 +1,898 @@
+{
+  "mode": "preflight",
+  "phase": "finished",
+  "candidateCodeRoot": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+  "candidateDigest": "eb3929df92181b3ff1458fcc50fae99fc6dd8d07487ecef21b7a6a74776f761e",
+  "candidateFiles": {
+    "AGENTS.md": "bf68365c459c57c3657d42ffba4cea462c1ca22bf9d44da15cf07252128522c6",
+    "CLAUDE.md": "7728e058722a05dbb207cb3f07fbd2ea35a2f44464874ffe372ab0aca86c56d2",
+    "TASK.md": "c50e08907b63143b0e1c7b39d098d449b422c8d0d6fbfae756b81433077fb1bf",
+    "acceptance/check.mjs": "aa3f24ddeb158f900db07f698d12158259c5a2e2bcf06052b11c6fdf009b29cd",
+    "experiments/ecosystem-cards/README.md": "1597dbfef936ccf30503e3517912ef9d0ab7bfd922bdf36b4dc8282554608871",
+    "experiments/ecosystem-cards/card-generation/index.mjs": "6eb16976aefa6e622e726f43c5be315034290efdad3aa33a1dd9255af63c479e",
+    "experiments/ecosystem-cards/card-state/index.mjs": "b459b793322438a4bf7f1932bc6a0fde9616de5666963332139838b162274137",
+    "experiments/ecosystem-cards/delivery-verification.json": "4c24e2070b98b87c7543ae4685db80b90217c5540afa5cacb61d2d3517523507",
+    "experiments/ecosystem-cards/developer-evidence-r002/affected-checks.json": "4ce7f21d30e09195f798099f92c7da80424e1e71852f069dbd30fa43a06ea50b",
+    "experiments/ecosystem-cards/developer-evidence-r002/core-final.json": "c64498bf08fe042427c2f1aa6699baa3f62e775aaa4b3dbd0e2b98084e773bfd",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/controller.stderr.log": "2d47e1ef9b238e5d251731736d3eaa3687ab36028c62262a72ba75a3b3785b2f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/controller.stdout.log": "b758a06a3d0787e3bd29aa3a1baab12e6d69fed981ef30619b3d3f6899bef606",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/boundary.json": "d854cc9a410920aef2e4770a19168ac6add76f63ae48ebd3ec3140a51b8a0753",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/desktop.stderr.log": "e51b86c85d932d59ba3f51337c8414ab67d7ca999a2e8abf90d1b683055a1ac4",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/desktop.stdout.log": "11f2b4e15f4c7eddee4911578748ed292a0901e105993e2f1c9564262ee10a3b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/disable.json": "d27e56210dca9656e013804bba472faa4624e786c61741c4c3c8a3900c26a8a0",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/enable.json": "387e285349676242982f21c4e818219e2c9995214e39a389c392265c3abb3c02",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/foreign-after.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/foreign-before.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/install.json": "52ad5768bc84b0d92cd053ad191eedc0699d1a27bd98e6867c6cc9211769c4f8",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/market-visible.json": "e59c58d30af40bf20c6f883e2ea525e0a1a107b671ac532b120fbf05a133b6e3",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/AppStartup.log": "03406a8d07d880af929cb6a6da86238911ff307753b02cf9f3db50effe1c5705",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/main.log": "a36c7c2a9ef7e2fe95c68b9196f0de61fad25e7520f94ea40f32000e6a5d3a76",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/startup/.splash-crash-guard": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/startup/2026-10-01/16924-132119.jsonl": "38978a83633539122a75993f21f9613f1bb3679b1e65ffceb34fbf59feed629f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/startup/2026-10-01/16924-132119.log": "412e9df0f3e69b3b707a7d986f64abb85a4f13bc56678402116af536bdae466b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/update/update-20261001.log": "a68b93a4a32f087bb694b2c807c2808448b9a3031d0c23a95f6607a18abc9600",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/vendor-extract.log": "e895dd7f9afcbbfe98d16f5fbddbece03a82b6bd5fbcf91e811185bb211f453a",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/recovery.json": "c4650b9482491a9d57cf83251b0905d3cf33c17a825db775889e7b68b85b8c54",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/reinstall.json": "4ca78561db7ae0954b64c20baabca8c7bd0ddf261f06d1387c4172164437c88b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/uninstall.json": "37f6e86ffbf744443d37d696d66ea8533bbfb91c0fe7f25d33ee8e7a4e622c3f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/upgrade.json": "33768bf35d6cd7892845d53a785d9b530bef12d5f6daf5b231f2ef819f0df57b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/host-result.json": "331a4383e3d52577149c309cebb9c631fc918a62ff97039eeab92416f3c8124b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/invocation.json": "f83770614269bad11547751d649716c162254a0c4ad8b4b9d69b7d29409d3e0c",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/controller.stderr.log": "2d47e1ef9b238e5d251731736d3eaa3687ab36028c62262a72ba75a3b3785b2f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/controller.stdout.log": "587ea44ce4546b70c614181b904b74ab638b0afd33bb05983108434fff7a9627",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/boundary.json": "9a3b722877dc57291b7dc267caf14b28c3447b9787b538bf70d6f3393bd56806",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/desktop.stderr.log": "66bb7d217283681fe6b1f33999e63cbf70e5c471fd1feb9b65afcccb95b9da16",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/desktop.stdout.log": "476fb7e234ef3893c24803782f931d78ae6d301c86fd3fd22ea0c18a20e46fb6",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/disable.json": "e74daaf52210f7730e30410432e0a4a546eef94e0008cffe40441a2c81706c5c",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/enable.json": "7166f095f2453430180b4770d4d3a6d8d1d296ea3321f594a4a9af87a33917cf",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/foreign-after.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/foreign-before.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/install.json": "840cc1e6ae2c30a7478cf1cd2ca1de7a314a772e67752805bcf4e1336b53f8cc",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/market-visible.json": "1a61f601d6c57d38ae24cc8806b2fe47c5e4e28f19c12067469ca2d2bcb12746",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/AppStartup.log": "f4aac675a9b32934715c32e5bd645eb995d60a68ea9293c78627d15967627840",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/main.log": "ae353b86c6ebb4453db9047044ac8987a5e0e85c07a2b95055b491f345e4ce7c",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/startup/.splash-crash-guard": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/startup/2026-10-01/22525-132629.jsonl": "badaaec2db77d9e0b5580129d9b3fd08429e76222a291fe069a8a1ec74bb6f81",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/startup/2026-10-01/22525-132629.log": "d602e5fe38b70b6da6e60e4808b2c07052900814e3b7302632b398ff33423168",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/update/update-20261001.log": "5d7736d1eec0f4a19a82e1a372de6eb8481c51aa885ebc1a86fa0bfd3065f853",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/vendor-extract.log": "5a740d770792005c915d4c6d5488a0f7d71b4e9844bfdb78b94c8130a467fa6e",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/recovery.json": "4d843c6cc6b5e25d84a3cb0fd22a496fe647413b3f352e969379b9707afa6862",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/reinstall.json": "e6add63163c0d28e3e2566a962de91870ec4f4a3054be72be4f70d4d87843dd6",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/uninstall.json": "79a0de72b7141206c9bbd156183096079bf7e5d6bafd6ba8ca4584a40bd21a7e",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/upgrade.json": "3ed0326d71952390300767cd1cfab3c6625eaa9c9806d5a7b3ae721d80730545",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/host-result.json": "4c0ad154425064ffc1aea14914faff593d96c2147de1d39502487d996018c8ec",
+    "experiments/ecosystem-cards/developer-evidence-r002/host-current/invocation.json": "1678c6dd0b7dafd9cdee90215ba9ae8212ff3df845e5993c93ecd39075aea10c",
+    "experiments/ecosystem-cards/developer-evidence-r002/index-current.json": "abbcb81c84524d037712171b7730197647ff6eecc67e83a4b1b50161282ac8ea",
+    "experiments/ecosystem-cards/developer-evidence-r002/index.json": "d35c4b9b21e665a08c1104f63a23ee16348ac6f84bdc96450390c82af023449e",
+    "experiments/ecosystem-cards/developer-evidence-r002/window-helper-check-final.json": "c1d4beb5611fad518680465251b1788b3deac5e7cdceeff6fdbefc338ffb2767",
+    "experiments/ecosystem-cards/developer-evidence-r003/affected-checks.json": "49884132597eee4e721e23ac7f621467acbef03bfa8ab336f0a2340e6097c9ee",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/controller-result.json": "71782140fd9e96f099f0458fb0c03a47b67cd2b9215cecc9c3fe7829aacc5f96",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/controller.stderr.log": "2d47e1ef9b238e5d251731736d3eaa3687ab36028c62262a72ba75a3b3785b2f",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/controller.stdout.log": "e4d23c817cc7c639fb34dd8db4af3a8e75c7c4ba6a0198850db6c1bcb78bbb04",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/boundary.json": "8a79d0db26e7149eba4021bd238785790a3c0503b3e12b3b7ff0797b6c129b4c",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stderr.log": "78b18a516cb5fbed5cd895dccbe35757dc58d9f5196dd995c3db1948025050e5",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stdout.log": "6daa666480e02548642273db894ad78664778535fa515337804b78ae7e2b0e63",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/disable.json": "495a7503f975b54864e8a833010e18bbb4fce82b226167d6f4e0d6e911781f38",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/enable.json": "c598a53d83d5267a9c720e5735d571af68aa812471589922f04314c0c484995d",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/foreign-after.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/foreign-before.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/install.json": "7fdfa971871d9e01c583f407f58bb2522b3d653da74b28e16da8f9868795105e",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/market-visible.json": "54c1377adb914efa5c8ac4e731f6c08b7fd1b9d1e53bb9ca17e8cb622fc8604a",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/AppStartup.log": "84a9cd017a38d7cdc02ae63b77528b26949aaa4fc03ad38f6e6a239570902ba4",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/main.log": "e48f8e39f096aa868ccdf7759fab4b4934df3785e895777273f218b725067440",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/.splash-crash-guard": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/2026-10-01/40770-140311.jsonl": "40fa31ba909cf86bb425d40bfbbbfcb7cd237666e4879e67beb81aeeae711119",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/startup/2026-10-01/40770-140311.log": "e3f3cfd9fe7547c0fcb99f6d64849a320a7e76b2abcebf8bf6f779d2d33febb0",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/update/update-20261001.log": "b6b0d754720649024138f92dd99538f8ab110206e275edd787d25d984b426610",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/native-host-logs/vendor-extract.log": "368baa63b5a18410c648b55e58eeecbd057fd4860d388e0cc1ca55224547d3c3",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/recovery.json": "bbad486661ce4d2f052f3247ad66f3c6522aa60d3ad784bc259c34410fcd1a07",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/reinstall.json": "7896feda179590c3931a9320643bc6cc56b26cb4abac3e34517f8d7b748d18fe",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/resource-protection.json": "d978e4ed1acb1f04206d4761039f9533db11c367bbd50662900bc2837b5c8bc8",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/sandbox-nesting.json": "5bfe97e8cfcd3af0838d02f0fc96a96d41e4634859a0bc5d83720e3cda6d16b8",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/uninstall.json": "950f153f61c2bc27e04dde7345a15334bd984e21928b9976c4d22bd579ac2de8",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/upgrade.json": "8359021c3fc75a58d52038abbcd57359ee8f1511cc7ff7493a67459c0691b6fa",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/host-result.json": "f7a43636cdbd0fd7f37d7bc740e9d0363396da142e96abe88637be7e216c51cb",
+    "experiments/ecosystem-cards/developer-evidence-r003/host/invocation.json": "1fd9e84452b8ae9c446a45d0f105f334b90d4a131933af45d86888210915f963",
+    "experiments/ecosystem-cards/developer-evidence-r003/host-investigation.json": "7f42b1b4a6a942d7d57438d5a9c51d55939b4e3a893ba8a5e2d80a45973d5302",
+    "experiments/ecosystem-cards/developer-evidence-r003/host-plugin-paths.json": "e399cc8a6792950b493fbded4b8a8aa7008baf404d1143f1629634a08c6a851e",
+    "experiments/ecosystem-cards/developer-evidence-r003/index.json": "0ea55cabafe1461b90c09c6d21a9923cbf98e36520e3769a2c80c8bfce44c095",
+    "experiments/ecosystem-cards/developer-evidence-r003/nested-sandbox.json": "5a9dff77636fc439572ad0bcc1189d5e0997ebe61fd7c5673e29ae7048cbb914",
+    "experiments/ecosystem-cards/developer-selfcheck-r002.json": "546637ab0eeb36f999e9bb6f8ce6e1fd04c4a2ba63b7f87ae0ac04a1768457c1",
+    "experiments/ecosystem-cards/developer-selfcheck-r003.json": "eca745d8f0ccb3dbe0a56d73e96b2eaa9f412d51347600ea2266297e51755d59",
+    "experiments/ecosystem-cards/developer-selfcheck.json": "8a5c444925cb0ba08a8545015e2990da1febe81d0c42c4c3d0e03ae37be0fdfd",
+    "experiments/ecosystem-cards/fs-safety.mjs": "30fdc232ce6b3670ef9b2aa498b228cf425e1fa367425375a8c60f93e07e43bb",
+    "experiments/ecosystem-cards/host-contract-check.mjs": "c587db7fd6e476e69153ac4a737651d5e952ef562bd2cd6261da2db8917dcca5",
+    "experiments/ecosystem-cards/host-contract-r003.json": "ce5dd8f06448d93133aa3979732062369a72552c6afd909ae69dd9e1423d5f22",
+    "experiments/ecosystem-cards/host-contract.json": "d67ac02095212e5af52fdac4abecea1e113d1732bc6463271c406f591de0be0d",
+    "experiments/ecosystem-cards/host-source.mjs": "7c59187fa8f32763556ba448e6c2756ccec813b3660339e1ca5d4df84c6694aa",
+    "experiments/ecosystem-cards/integration/candidate.mjs": "fc974e66b1d8cd48357de1aebb8a523c7e200e0b10e28306ee5346c287a35249",
+    "experiments/ecosystem-cards/integration/cdp-selection-test.mjs": "413eb57a47714900cce935fa8913821b30aacf26d1daf1cd55e04450cac84b94",
+    "experiments/ecosystem-cards/integration/cdp.mjs": "c75671df420455a10acb9d753c7267bed659abf8b32fe2c1f727729315dbdbac",
+    "experiments/ecosystem-cards/integration/evidence.mjs": "bd8280b5776aa9eff0226acab2d124ce017ecf10a6ed07f6af5d56176ddecf7d",
+    "experiments/ecosystem-cards/integration/index.mjs": "67c19d9f46d5e26ce053eafd30b1cf5db7da823604947107ef2ba84125921043",
+    "experiments/ecosystem-cards/integration/isolation.mjs": "fd1aa8eae068ebeb6877b501856a2a1ab349a640cff374ce0cd111449dd62a22",
+    "experiments/ecosystem-cards/integration/nested-sandbox-test.mjs": "36045099e812f212e476d33fc9af3fae4c3092f069232396e0f7e8d6a0de1ca2",
+    "experiments/ecosystem-cards/integration/preflight-mode-test.mjs": "73114aa3a0de00e9970dbb111ac97dfc891854492aa9d200454c8ac10340dd4b",
+    "experiments/ecosystem-cards/integration/preflight-test.mjs": "d5856927b63bac71db8a6694d7f79463f3d14e4d1a99892bb80caa36afe76606",
+    "experiments/ecosystem-cards/integration/preflight.mjs": "a03476b0940596012b5c917ebf7a9e17e54a998102155266a7e0e075d492c010",
+    "experiments/ecosystem-cards/integration/readiness-inspect.mjs": "3344514f4778d0c6e2b0ab1a7348c0af2a82b3e6d8f9dd58d92a8c5cb01fbd93",
+    "experiments/ecosystem-cards/integration/resource-protection-test.mjs": "5855e116cb1812c7f9436de59e9a627c1ba0cc1edc505b1d3f751394a545b08d",
+    "experiments/ecosystem-cards/integration/sandbox-nesting.mjs": "96e1978f3388deb7f6773693039d73a96ce02b1cb42248c9eaa750bcee9bdd92",
+    "experiments/ecosystem-cards/integration/window.jxa": "a9793e506880708156480cac2dcb51d21fd79e5218cad12ee17547ee2be45e90",
+    "experiments/ecosystem-cards/protected-after.json": "c102e4fab3dd250cb0e8ebd60c5c2c3b67824d26b28849608a5b17aec33d367a",
+    "experiments/ecosystem-cards/protected-audit.mjs": "a80186b259469886ce52381654fc5787e8a74b73fbb120967ba86b22d59dcd55",
+    "experiments/ecosystem-cards/protected-before.json": "98b9327dbe4db9585367e751f4e180f585a88de5df96052c00c71e1fee514dc9",
+    "experiments/ecosystem-cards/protected-r003-after.json": "db7b75603a1c8804df682950b354b6d54ed19e9ca9654ed647f7cd9193a031e6",
+    "experiments/ecosystem-cards/protected-r003-before.json": "c3db0a21b7190b7978fa60a2c4f675bc0f76b5319cba6def5a92a1650a658d6d",
+    "experiments/ecosystem-cards/readiness-findings.md": "ed854ae37332b7b7c861a9fe115e917b93a99973f9b100598d1c2d9de85d9e46",
+    "experiments/ecosystem-cards/readiness-source.json": "bde5dddb99b92868a57f97de2dc7c042d8da050edd1db5207a55945abd9baa77",
+    "experiments/ecosystem-cards/self-test.mjs": "a32e6fbc7a51e32415313a9bf96e81cebc50efcb620dcb69a4ef8c91b24a5b5a",
+    "first-connect/bootstrap-template.mjs": "aebeffa22fdcd827c86bca083d9b94899016ef709e5582cd9fe75af9c7fd6d01",
+    "first-connect/desktop-preflight.mjs": "fa12945ff8ce91b58cdb2b3a6a7d5810a625416cf6cb224195d32d00225ac009",
+    "first-connect/native-install.mjs": "a1b1d81aa949721bb9c08deb3e3f5a205a7e56c8986d0a48904de7cfb1680756",
+    "first-connect/pilot.mjs": "168fd5535f805833bb49b557a4dc2e544bd71350e0731ea5cf01b86af08ba28b",
+    "marketplace/.codebuddy-plugin/marketplace.json": "a32fac6d71c60bbb918f779014d222d925e2457197b8aea8a7be8640d268a5bb",
+    "marketplace/plugins/promate/.codebuddy-plugin/plugin.json": "4150017948df24cee95b536142ec8a66fc9466cc5b25d8c00d7a4c9c5f7637e6",
+    "marketplace/plugins/promate/README.md": "ca368fdfa3a292a406e789413467b1372159ad3c80538de51d768d5f18854d89",
+    "marketplace/plugins/promate/configure.mjs": "ba549b7f07234816b607c20fa01455b13532561528670f0adfebcc1f95ac71d7",
+    "marketplace/plugins/promate/hooks/confirm.mjs": "420f0a6da87013a9cc25d3173afb145f6195b42044fff1907028c0e139cb4131",
+    "marketplace/plugins/promate/hooks/first-connect.mjs": "9264c8c691f90f2f36a7a5677a2ca821603e0f3026bd25088e235a83489dbec0",
+    "marketplace/plugins/promate/hooks/guard.mjs": "8d76bf9ef65220c3f36b41d1a2137afa610c2b8265dfd374d5410bdc6b309d26",
+    "marketplace/plugins/promate/hooks/hooks.json": "c638d45b2c29169b943439648de32d870e66a0b276cccee1b8684ed5bc65ca8a",
+    "marketplace/plugins/promate/hooks/lib.mjs": "4b959173dd8780ba5d5453c100063474326a890d1510fe11420341a6cef8f3a4",
+    "marketplace/plugins/promate/hooks/load.mjs": "cd2ae6de4a733414c899c5e40fe68e92ea5fbe55cf482183638b0136df374a12",
+    "marketplace/plugins/promate/hooks/mark.mjs": "a1b6762f044727beb83d38b98529e64711867264c10b42359470c370e0759d2e",
+    "marketplace/plugins/promate/hooks/route.mjs": "e2f772e9fbca877918ca132e3e2e2d765c02ca36d046586a748caa207b20dbf0",
+    "marketplace/plugins/promate/hooks/version.mjs": "c12521ee3869f8278433719aa178b51659ac81916db4575bb03d95b44e83dcf8",
+    "marketplace/plugins/promate/mcp/approval.mjs": "007088744acfdc306178d5fce42e4db67f7f5f880ee45d61975039d056a16f3d",
+    "marketplace/plugins/promate/mcp/client.mjs": "95ac80ee5fa9888d7e9713cfda9204e87a6708e606894b440c2a20342f68eb48",
+    "marketplace/plugins/promate/mcp/first-connect.mjs": "566f28c3f3f088ef1e0d47023fada8755730074e3ef81721d35757d2924dde63",
+    "marketplace/plugins/promate/mcp/handoff-page.mjs": "adea2aee380376f777e132f0e628794c5fb5c61f4a280a385fa1bfe3dd64d5c8",
+    "marketplace/plugins/promate/mcp/local-config.mjs": "2b209d8f33d8e6c80eb8858c9e47d1504b1d67b54b51f7c5f16077ba579de583",
+    "marketplace/plugins/promate/mcp/packages.mjs": "57e179756ebf6a7d06c27929d619e248653a8f6c70e2fb18a98ae78b7c0cc001",
+    "marketplace/plugins/promate/mcp/proxy.mjs": "1d87879f50a9125a0f77433015bef953df8c02d6cd30888392105d1a4979a73e",
+    "marketplace/plugins/promate/mcp/recovery-page.mjs": "773acf85b5b072647fe9e824ad4a60ad793fa8136f7110fca11286ee72bbf49b",
+    "marketplace/plugins/promate/mcp/resources.mjs": "df03694dd5c021405a00b884c1cae98086636c85bb2d29f4e2fda9bf5a0cf724",
+    "marketplace/plugins/promate/mcp/snapshots.mjs": "7c24f646f44024afa09c51c3fac1bab30b809ebfcb4eb6928845494bedadc18f",
+    "marketplace/plugins/promate/mcp/tools.json": "053074f58dc4903750fb5a6d72c419cd40daf6870e8cceb7f42f3b60abb6097a",
+    "marketplace/plugins/promate/skills/promate/SKILL.md": "3dc2af102ee3ba2610fb93031802d3fd2034c21713756ff82f1934b4a11bece6",
+    "reference/host-isolation.py": "1faea51904475d9765ea5569e51f650a5ded14b5644bd9763618a309185fb5c8",
+    "reference/上轮最终评审.json": "006445b5ff5c5ec107fcb7a6abf0e8f9f863bcffda4e56ec25979a50ed1ff160",
+    "reference/既有宿主研究.md": "1727d46f1c20730c60d6dfeb801f9aed0840f8c8e16f683f92ede279a9808bd3",
+    "reference/续接基线.md": "1f55d35943b66ae3b66f99da9fe76c1da4e959fa6b4678a997835ee6ad796974",
+    "reference/续接来源.json": "2efdb73f0493f4d18bc9428caccc008590b2425d4cd3ec2f7809ec76ac75f077",
+    "reference/需求原文.md": "522cb41378dc88bf2f4d129f07636415a8bacb9f1a11004b48ec472ce55fcb18",
+    "tests/desktop-preflight.test.mjs": "f79a269b66eb4910b1439828724980b60038c72276b27c6beec0c81bc9b9e0a6",
+    "tests/first-connect.test.mjs": "a42a9b49840e0f0a93a030d03ae6898eb6dbaad0e0d29c991656cea335a4719e",
+    "tests/helpers.mjs": "d055f9f415a8d50f8574bb24e1a843a81b9d70495041fb172027612bfd7cb37f",
+    "tests/hooks-confirm.test.mjs": "5d8bd7fd761f47a71e6d5b9098a945b2881315c100e9d1e851af0438ec866f0e",
+    "tests/hooks-guard.test.mjs": "7669b6a504aed0fb592f0053dc2b7e210e61cfa4c667810bb9641048cbe1f528",
+    "tests/hooks-route.test.mjs": "a4b115db61f0f5f9b072e1e7ec31767457d4d47c045401ad763360dbcc4e42b4",
+    "tests/hooks-version.test.mjs": "9294fd399bd1d6220cf1fffc270171a80fe2ba4760487f1eaf14baa722299dd1",
+    "tests/index.mjs": "06f91d78bb2d12ab0785fabcb9bf5aef2a0c44e10d6f1b1bc90d4a812c6e5c52",
+    "tests/install-safety.test.mjs": "092052a00a8913fc861b01a4360c033b534ecc1551e95b2f6acddcf79ce41feb",
+    "tests/local-config.test.mjs": "88d02b507e8bf204a9e60c9fb7099e8974682f2ce4a82a5b350c1be3738c9603",
+    "tests/native-install.test.mjs": "aae8cba9c0b956d448e1a82e489f421241dddca26a51a54b517755bfcf715a5f",
+    "tests/package.json": "3e424eab9f1247d21a5435f8223d9a81a8602bf9fab200684c6f2ab6726a9276",
+    "tests/proxy.test.mjs": "8ce8bf6a73dcd8cb1d0b2a40ebec5048d186695d3cc0503eb646f873170b1508",
+    "tests/recovery-page.test.mjs": "6dc790321dc901176bfc59cd264776c1bafac5e9ea13d87657ed3d49a996598f",
+    "tests/resource-packages.test.mjs": "c61f12eee5738b1fccf3a3057d28f0816cc609d152142528b4f9a021ee8cb7a2",
+    "tests/resources.test.mjs": "6fc75d8744579e1836c33028187a85ee1b33410547ffbc424f92561232a95116"
+  },
+  "preflight": {
+    "profileIsolated": null,
+    "nativeProtectionRetained": null,
+    "marketPanelVisible": null,
+    "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/preflight.json",
+    "screenshotPath": null,
+    "nameMappingSource": "experiments/ecosystem-cards/readiness-source.json",
+    "profileAfter": {
+      "plugins/known_marketplaces.json": null,
+      "plugins/installed_plugins.json": null,
+      "settings.json": null
+    },
+    "assessment": {
+      "status": "UNKNOWN",
+      "checks": {
+        "correctMode": true,
+        "candidate": true,
+        "host": true,
+        "boundary": true,
+        "isolatedProfile": false,
+        "nativeProtection": false,
+        "visibleMarketplace": false,
+        "realCapture": false,
+        "originalEvidence": true,
+        "noBusinessSteps": true,
+        "cleanup": true,
+        "noFailure": false
+      },
+      "reason": "PREFLIGHT_INCOMPLETE",
+      "otherResourcesUnchanged": null
+    }
+  },
+  "candidateInvocation": {
+    "entryPath": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/integration/index.mjs",
+    "moduleURL": "file:///Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/integration/index.mjs",
+    "cwd": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a"
+  },
+  "candidateUnchanged": true,
+  "hostBuildUnchanged": true,
+  "candidateBoundaryConfirmed": true,
+  "desktopStartAttempted": false,
+  "status": "UNKNOWN",
+  "hostVersion": "5.6.2",
+  "profile": "/private/tmp/loop-card-host-4rzNEV/profile",
+  "isolationRoot": "/private/tmp/loop-card-host-4rzNEV",
+  "otherResourcesUnchanged": null,
+  "resourceProtection": {
+    "status": "UNKNOWN",
+    "otherResourcesUnchanged": null,
+    "diagnosticBeforeAfterUnchanged": null,
+    "completedActions": [],
+    "operationCoverageConfirmed": false,
+    "reason": "RESOURCE_COMPARISON_UNAVAILABLE"
+  },
+  "managedProcessesStopped": true,
+  "evidenceRoot": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e",
+  "startedAt": "2026-10-02T02:19:04.348Z",
+  "steps": [
+    {
+      "action": "market-visible",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/market-visible.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    },
+    {
+      "action": "install",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/install.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    },
+    {
+      "action": "disable",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/disable.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    },
+    {
+      "action": "enable",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/enable.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    },
+    {
+      "action": "uninstall",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/uninstall.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    },
+    {
+      "action": "reinstall",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/reinstall.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    },
+    {
+      "action": "upgrade",
+      "attempted": false,
+      "status": "UNKNOWN",
+      "foreignResourcesUnchanged": null,
+      "rawEvidencePath": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/upgrade.json",
+      "screenshotPath": null,
+      "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED"
+    }
+  ],
+  "candidateIdentity": {
+    "candidateCodeRoot": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+    "moduleFile": {
+      "path": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/integration/index.mjs",
+      "dev": "16777233",
+      "ino": "45861798",
+      "uid": "502"
+    },
+    "entryFile": {
+      "path": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/integration/index.mjs",
+      "dev": "16777233",
+      "ino": "45861798",
+      "uid": "502"
+    },
+    "moduleRoot": {
+      "path": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+      "dev": "16777233",
+      "ino": "45861666",
+      "uid": "502"
+    },
+    "entryRoot": {
+      "path": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+      "dev": "16777233",
+      "ino": "45861666",
+      "uid": "502"
+    },
+    "workingRoot": {
+      "path": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+      "dev": "16777233",
+      "ino": "45861666",
+      "uid": "502"
+    },
+    "agreement": "same dev/ino/uid; each path independently checked for symlinks"
+  },
+  "freshIsolation": [
+    {
+      "path": "/private/tmp/loop-card-host-4rzNEV/home",
+      "uid": 502,
+      "mode": 448,
+      "dev": "16777233",
+      "ino": "45901695",
+      "empty": true,
+      "noSymlink": true
+    },
+    {
+      "path": "/private/tmp/loop-card-host-4rzNEV/profile",
+      "uid": 502,
+      "mode": 448,
+      "dev": "16777233",
+      "ino": "45901696",
+      "empty": true,
+      "noSymlink": true
+    },
+    {
+      "path": "/private/tmp/loop-card-host-4rzNEV/user-data",
+      "uid": 502,
+      "mode": 448,
+      "dev": "16777233",
+      "ino": "45901697",
+      "empty": true,
+      "noSymlink": true
+    },
+    {
+      "path": "/private/tmp/loop-card-host-4rzNEV/workspace",
+      "uid": 502,
+      "mode": 448,
+      "dev": "16777233",
+      "ino": "45901699",
+      "empty": true,
+      "noSymlink": true
+    }
+  ],
+  "profileBefore": {
+    "plugins/known_marketplaces.json": null,
+    "plugins/installed_plugins.json": null,
+    "settings.json": null
+  },
+  "hostArtifacts": {
+    "infoPlist": "1b7aeac8793e8cd61e1975222714a0f576197a454f5085c05692f0ee6468b7e2",
+    "asarHeader": "72df4e8ec84f4058b33df8357abd5a6c0bf18c67cd1d750e8b7c35cd5d6ac21c",
+    "cliBundle": "b340564b2410d99846397776a25fd99e11d86647a7c219ad06fedc441e364ddd"
+  },
+  "currentHostSource": {
+    "capturedAt": "2026-10-02T02:19:04.503Z",
+    "kind": "CURRENT installed host static source; NOT desktop or install evidence",
+    "authorizedReadRoot": "/Applications/WorkBuddy.app/Contents",
+    "hostVersion": "5.6.2",
+    "hostBundleVersion": "5.6.2",
+    "infoPlistSha256": "1b7aeac8793e8cd61e1975222714a0f576197a454f5085c05692f0ee6468b7e2",
+    "asarHeaderSha256": "72df4e8ec84f4058b33df8357abd5a6c0bf18c67cd1d750e8b7c35cd5d6ac21c",
+    "sources": [
+      {
+        "path": "Resources/app.asar/renderer/assets/lib-chat-ui-C7y1ZM_R.js",
+        "sha256": "ae57e8dc763ad67a82bc39979d096d58ebc0548cb3bf0f521de9c76727393c09",
+        "excerpts": [
+          {
+            "anchor": "className: \"cb-plugins-card-name\"",
+            "offset": 10700047,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: \"cb-plugins-card-name\",\n\t\t\t\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t\t\t\t}), scopeLabels.map((scopeLabel) => /* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: (0, import_classnames$3.default)(\"cb-plugins-c"
+          },
+          {
+            "anchor": "className: \"cb-plugin-detail-title\"",
+            "offset": 10680254,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "\",\n\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"h1\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-title\",\n\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t}), /* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-actions\",\n\t\t\t\t\t\tchildren: isInstalled ? /* @__PURE__ */ (0, import_jsx"
+          },
+          {
+            "anchor": "className: \"cb-plugins-header\"",
+            "offset": 10714984,
+            "offsetUnit": "UTF-16 code units",
+            "raw": ")(\"div\", {\n\t\t\tclassName: \"cb-plugins\",\n\t\t\tchildren: [\n\t\t\t\t/* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\tclassName: \"cb-plugins-header\",\n\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-plugins-header-left\",\n\t\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"h1\", {\n\t\t\t\t\t\t\tclassName: \"cb-plugins-title\",\n\t\t\t\t\t\t\tchildren: t$1(\"plugins.management\")\n\t\t\t\t\t\t}), /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"p\", {\n\t\t\t\t\t\t\tclassName: \"cb-plugins-subtitle\",\n\t\t\t\t\t\t\tchildren: t$1(\"plugins.help\", { name: productName })\n\t\t\t\t\t\t})]\n\t\t\t\t\t}), showMcpButton && /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-p"
+          },
+          {
+            "anchor": "className: \"cb-plugins-marketplace-tabs\"",
+            "offset": 10717889,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "\t!isSearchMode && /* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\tclassName: \"cb-plugins-marketplace-tabs\",\n\t\t\t\t\tchildren: [marketplaces.map((marketplace) => /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(MarketplaceTab, {\n\t\t\t\t\t\tmarketplace,\n\t\t\t\t\t\tisActive: currentMarketplace === marketplace.name || currentMarketplace === marketplace.storageName,\n\t\t\t\t\t\tisRefreshing: refreshingMarketplaces.has(marketplace.name),\n\t\t\t\t\t\tonClick: () => onMarketplaceSelect?.(marketplace),\n\t\t\t\t\t\tonDelete: () => onDeleteMarketplace?.(marketplace),\n\t\t\t\t\t\tonRefresh: () => onRefreshMarketplace?.(marketplace)\n\t\t\t\t\t}, marketplace.name)), /* @__PURE__ */ (0, import_jsx_runtime$"
+          },
+          {
+            "anchor": "className: \"cb-plugins-marketplace-add-btn\"",
+            "offset": 10718505,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "tplace.name)), /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"button\", {\n\t\t\t\t\t\tclassName: \"cb-plugins-marketplace-add-btn\",\n\t\t\t\t\t\tonClick: () => setShowAddMarketplaceModal(true),\n\t\t\t\t\t\ttitle: t$1(\"plugins.addMarketplace\"),\n\t\t\t\t\t\tchildren: /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(AddIcon, {})\n\t\t\t\t\t})]\n\t\t\t\t}),\n\t\t\t\tloading && /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"div\", {\n\t\t\t\t\tclassName: \"cb-plugins-loading-overlay\",\n\t\t\t\t\tchildren: /* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\t\tclassName: "
+          }
+        ]
+      },
+      {
+        "path": "Resources/app.asar/renderer/assets/plugins-xKLHRllH.js",
+        "sha256": "1beb4a72406c23354ac6256a84410952ddf59e7003703b74dbe47934c9d474d1",
+        "excerpts": [
+          {
+            "anchor": "const resolveMarketplaceId =",
+            "offset": 12560,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "const resolveMarketplaceId = (0, import_react$1.useCallback)((marketplaceName) => {\n\t\t\treturn marketplacesRef.current.find((m) => m.name === marketplaceName)?.storageName || marketplaceName;\n\t\t}, []);\n\t\tconst [allPluginsCache, setAllPluginsCache] = (0, import_react$1.useState)([]);\n\t\tconst [selectedPluginKey, setSelectedPlugin"
+          },
+          {
+            "anchor": "const loadInstalledPlugins =",
+            "offset": 13830,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "const loadInstalledPlugins = (0, import_react$1.useCallback)(async (forceRefresh = false) => {\n\t\t\ttry {\n\t\t\t\tif (adapter?.getInstalledPlugins) {\n\t\t\t\t\tconst pluginsList = (await adapter.getInstalledPlugins(forceRefresh)).map((p) => {\n\t\t\t\t\t\tconst mapScope = (scope) => {\n\t\t\t\t\t\t\tif (scope === \"local\") return \"project-local\";\n\t\t\t\t\t\t\treturn scope || \"user\";\n\t\t\t\t\t\t};\n\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\tname: p.name,\n\t\t\t\t\t\t\tmarketplaceName: p.marketplaceName || \"local\",\n\t\t\t\t\t\t\tdescription: p.description,\n\t\t\t\t\t\t\tversion: p.version,\n\t\t\t\t\t\t\tstatus: p.status,\n\t\t\t\t\t\t\tinstalledScopes: p.installedScopes?.map(mapScope) || (p.installScope ? [mapScope(p.installScope)] : [\"user\"]),\n\t\t\t\t\t\t\tinstalledScopesStatus: p.installedScopesStatus,\n\t\t\t\t\t\t\tinstalledPath: p.installedPath,\n\t\t\t\t\t\t\tsource: \"\",\n\t\t\t\t\t\t\tagents: p.agents,\n\t\t\t\t\t\t\tcommands: p.commands,\n\t\t\t\t\t\t\tskills: p.skills,\n\t\t\t\t\t\t\tmcpServers: p.mcpServers,\n\t\t\t\t\t\t\thooks: p.hooks,\n\t\t\t\t\t\t\trules: p.rules,\n\t\t\t\t\t\t\tcanRemove: p.canRemove,\n\t\t\t\t\t\t\tcanSwitchoff: p.canSwitchoff,\n\t\t\t\t\t\t\tcanEdit: p.canEdit\n\t\t\t\t\t\t};\n\t\t\t\t\t});\n\t\t\t\t\tsetInstalledPlugins(pluginsList);\n\t\t\t\t\twriteCache(CACHE_KEY_INSTALLED, pluginsList);\n\t\t\t\t\treturn pluginsList;\n\t\t\t\t}\n\t\t\t\treturn [];\n\t\t\t} catch (error) {\n\t\t\t\treturn [];\n\t\t\t}\n\t\t}, [adapter]);\n\t\t/**\n\t\t* 加载市场中的插件列表\n\t\t*\n\t\t* 入参 marketplaceName 是 UI 一直在用的展示名（也是 PluginViewConfig.marketplaceName 的值）；\n\t\t* 调用 sidecar 时翻译成稳定 ID（storageName），避免名称带空格 / 中文 / 特殊字符\n\t\t* 时被 URL 编码后下游 marketplace 查找失败。\n\t\t*/\n\t\tconst loadMarketplacePlugins = (0, import_react$1.useCallback)(async (marketplaceName, forceRefresh = false) => {\n\t\t\tif (!adapter?.getMarketp"
+          },
+          {
+            "anchor": "const loadMarketplacePlugins =",
+            "offset": 15267,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "const loadMarketplacePlugins = (0, import_react$1.useCallback)(async (marketplaceName, forceRefresh = false) => {\n\t\t\tif (!adapter?.getMarketplacePlugins) return installedPlugins;\n\t\t\ttry {\n\t\t\t\tconst currentSearchText = searchTextRef.current;\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(marketplaceName);\n\t\t\t\treturn (await adapter.getMarketplacePlugins(marketplaceId, forceRefresh, currentSearchText || void 0)).map((p) => ({\n\t\t\t\t\tname: p.name,\n\t\t\t\t\tmarketplaceName: p.marketplaceName,\n\t\t\t\t\tdescription: p.description,\n\t\t\t\t\tversion: p.version,\n\t\t\t\t\tauthor: p.author,\n\t\t\t\t\thomepage: p.homepage,\n\t\t\t\t\tstatus: mapPluginStatus(p.status),\n\t\t\t\t\tinstalledScopes: p.installedScopes,\n\t\t\t\t\tinstalledScopesStatus: p.installedScopesStatus,\n\t\t\t\t\tinstalledPath: p.installedPath,\n\t\t\t\t\thasUpdate: p.hasUpdate,\n\t\t\t\t\tsource: \"\",\n\t\t\t\t\tagents: p.agents,\n\t\t\t\t\tcommands: p.commands,\n\t\t\t\t\tskills: p.skills,\n\t\t\t\t\tmcpServers: p.mcpServers,\n\t\t\t\t\thooks: p.hooks,\n\t\t\t\t\trules: p.rules\n\t\t\t\t}));\n\t\t\t} catch (error) {\n\t\t\t\treturn [];\n\t\t\t}\n\t\t}, [adapter, installedPlugins]);\n\t\t/**\n\t\t* 加载市场插件列表（不刷新已安装列表）\n\t\t* @param marketplaceName 市场名称\n\t\t* @param showLoading 是否显示 loading 遮罩\n\t\t* @param forceRefresh 是否让后端绕过缓存强制拉取最新数据（刷新市场后必须为 true）\n\t\t*/\n\t\tconst loadMarketplacePluginsOnly = (0, import_react$1.useCallback)(async (marketplaceName, showLoading = false, forceRefresh"
+          },
+          {
+            "anchor": "adapter.installPlugins([plugin.name]",
+            "offset": 33938,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "_react$1.useCallback)(async (plugin, scope) => {\n\t\t\tif (adapter?.installPlugins) {\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(plugin.marketplaceName);\n\t\t\t\tconst result = await adapter.installPlugins([plugin.name], marketplaceId, scope === \"project-local\" ? \"project\" : scope);\n\t\t\t\tif (result.success) {\n\t\t\t\t\treportPluginAction(plugin, \"install\", scope, true);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: t(\"plugins.installSuccess\", { name: plugin.name }),\n\t\t\t\t\t\ttype: \"success\"\n\t\t\t\t\t});\n\t\t\t\t} else {\n\t\t\t\t\treportPluginAction(plugin, \"install\", scope, false);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tm"
+          },
+          {
+            "anchor": "const handleUpdate =",
+            "offset": 35385,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "const handleUpdate = (0, import_react$1.useCallback)(async (plugin) => {\n\t\t\tif (adapter?.updatePlugin) {\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(plugin.marketplaceName);\n\t\t\t\tconst result = await adapter.updatePlugin(plugin.name, marketplaceId);\n\t\t\t\tif (result.success) {\n\t\t\t\t\treportPluginAction(plugin, \"update\", \"user\", true);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: t(\"plugins.updateSuccess\", { name: plugin.name }),\n\t\t\t\t\t\ttype: \"success\"\n\t\t\t\t\t});\n\t\t\t\t} else {\n\t\t\t\t\treportPluginAction(plugin, \"update\", \"user\", false);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: result.error || t(\"plugins.updateFailed\", { error: \"Unknown error\" }),\n\t\t\t\t\t\ttype: \"error\"\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t} else toast({\n\t\t"
+          }
+        ]
+      },
+      {
+        "path": "Resources/app.asar/preload/index.js",
+        "sha256": "c43230a9022b5807c468d46cd7196808aefceee1658219109c4be934ef9e6d40",
+        "excerpts": [
+          {
+            "anchor": "GET_INSTALLED: \"plugin:getInstalled\"",
+            "offset": 43514,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "smMin((() => {\n\tPLUGIN_RPC_CHANNELS = {\n\t\tBATCH_TOGGLE: \"plugin:batchToggle\",\n\t\tGET_INSTALLED: \"plugin:getInstalled\",\n\t\tINSTALL: \"plugin:install\",\n\t\tUNINSTALL: \"plugin:uninstall\",\n\t\tUPDATE: \"plugin:update\",\n\t\tSET_MARKETPLACE_AUTO_UPDATE: \"plugin:setMarketplaceAutoUpdate\",\n\t\tGET_MARKETPLACES: \"plugin:getMarketplaces\",\n\t\tGET_MARKETPLACE_PLUGINS: \"plugin:getMarketplacePlugins\",\n\t\tGET_DETAIL: \"plugin:getDetail\",\n\t\tADD_MARKETPLACE: \"plugin:addMarketplace\",\n\t\tREMOVE_MARKETPLACE: \"plugin:removeMarketplace\",\n\t\tREFRESH_MARKETPLACE: \"plugin:refreshMarketplace\",\n\t\tRELOAD_RUNTIME_PLUGINS: \"plugin:reloadRuntimePlugins\",\n\t\tCHANGED: \"plugin:changed\"\n\t};\n}));\n//#endregion\n//#region ../../packages/workbuddy-server/src/power/contract.ts\nvar POWER_RPC_CHANNELS;\nvar init_contract$25 = __esmMin((() => {\n\tPOWER_RPC_CHANNELS = {\n\t\t/** 旧版 boolean 通道，保留给旧 renderer。 */\n\t\tSET_POWER_SAVE_BLOCKER: \"window:setPowerSaveBlocker\",\n\t\t/** 三态模式通道，避免对象参数被旧宿主误判为 true。 */\n\t\tSET_POWER_SAVE_B"
+          },
+          {
+            "anchor": "getInstalledPlugins: invoke(PLUGIN_RPC_CHANNELS.GET_INSTALLED)",
+            "offset": 86914,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "act$26();\n\tPLUGIN_CHANNEL_MAP = {\n\t\tbatchTogglePlugins: invoke(PLUGIN_RPC_CHANNELS.BATCH_TOGGLE),\n\t\tgetInstalledPlugins: invoke(PLUGIN_RPC_CHANNELS.GET_INSTALLED),\n\t\tinstallPlugins: invoke(PLUGIN_RPC_CHANNELS.INSTALL),\n\t\tuninstallPlugin: invoke(PLUGIN_RPC_CHANNELS.UNINSTALL),\n\t\tupdatePlugin: invoke(PLUGIN_RPC_CHANNELS.UPDATE),\n\t\tgetPluginMarketplaces: invoke(PLUGIN_RPC_CHANNELS.GET_MARKETPLACES),\n\t\tgetMarketplacePlugins: invoke(PLUGIN_RPC_CHANNELS.GET_MARKETPLACE_PLUGINS),\n\t\tgetPluginDetail: invoke(PLUGIN_RPC_CHANNELS.GET_DETAIL),\n\t\taddPluginMarketplace: invoke(PLUGIN_RPC_CHANNELS.ADD_MARKETPLACE),\n\t\tremovePluginMarketplace: invoke(PLUGIN_RPC_CHANNELS.REMOVE_MARKETPLACE),\n\t\trefreshPluginMarketplace: invoke(PLUGIN_RPC_CHANNELS.REFRESH_MARKETPLACE),\n\t\treloadRuntimePlugins: invoke(PLUGIN_RPC_CHANNELS.RELOAD_RUNTIME_PLUGINS),\n\t\tsetMarketplaceAutoUpdate: invoke(PLUGIN_RPC_CHANNELS.SET_MARKETPLACE_AUTO_UPDATE),\n\t\tonPluginsChanged: listener(PLUGIN_RPC_CHANNELS.CHANGED)\n\t};\n}));\n//#endregion\n//#region ../../packages/workbuddy-server/src/plugin-recommendation/contract.ts\nvar PLUGIN_RECOMMENDATION_RPC_CHANNELS;\nvar init_contract$5 = __esmMin((() => {\n\tPLUGIN_RECOMMENDATION_RPC_CHANNELS = { \n\t/** Kept wire-compatible with existing renderer clients. */\nANSWER: \"session:answerPluginRecommendation\" };\n}))"
+          },
+          {
+            "anchor": "electron.contextBridge.exposeInMainWorld(\"__wbInvoke\", exposedWbInvoke)",
+            "offset": 398779,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "nvoke(electron.ipcRenderer);\n\texposedWbInvoke = (channel, context, ...args) => wbIpcInvoke(channel, context, ...args);\n\telectron.contextBridge.exposeInMainWorld(\"__wbInvoke\", exposedWbInvoke);\n\twbEventListeners = /* @__PURE__ */ new Map();\n\telectron.contextBridge.exposeInMainWorld(\"__wbOn\", (channel, listener) => {\n\t\tconst ipcListener = (_event, ...payload) => listener(...payload);\n\t\tif (!wbEventListeners.has(channel)) wbEventListeners.s"
+          }
+        ]
+      },
+      {
+        "path": "Resources/app.asar/main/server.js",
+        "sha256": "ba99f1dc4ca233d25d5cb1f68273b1c07e3fce96b151bed0f524ba5adcf1fef6",
+        "excerpts": [
+          {
+            "anchor": "function registerPluginHandlers(registry, deps)",
+            "offset": 4958976,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "function registerPluginHandlers(registry, deps) {\n\tconst pluginService = Promise.resolve(deps.pluginService);\n\tconst reporter = deps.reporter;\n\trequire_handler_registry.handleRpc(registry, \"batchTogglePlugins\", async (request) => withPluginToggleMetric(reporter, async () => (await pluginService).batchTogglePlugins(request)));\n\trequire_handler_registry.handleRpc(registry, \"getInstalledPlugins\", async (forceRefresh) => (await (await pluginService).getInstalledPlugins(forceRefresh)).filter((plugin) => !require_log_acl_guard.isConnectorPluginMarketplace(plugin.marketplaceName)));\n\tregistry.handle(\"plugin:install\", async (pluginNames, marketplaceName, installScope, marketplaceSource, workspacePath, sessionId) => {\n\t\tconst names = Array.isArray(pluginNames) ? pluginNames : [];\n\t\treturn withPluginInstallMetric(reporter, marketplaceName, installScope, names, async () => (await pluginService).installPlugins(names, marketplaceName, installScope, marketplaceSource, workspacePath, sessionId));\n\t});\n\trequire_handler_registry.handleRpc(registry, \"uninstallPlugin\", async (pluginName, marketplaceName, scope) => withPluginUninstallMetric(reporter, marketplaceName, scope, pluginName, async () => (await pluginService).uninstallPlugin(pluginName, marketplaceName, scope)));\n\trequire_handler_registry.handleRpc(registry, \"updatePlugin\", async (pluginName, marketplaceName) => (await pluginService).updatePlugin(pluginName, marketplaceName));\n\trequire_handler_registry.handleRpc(registry, \"getPluginMarketplaces\", async (forceRefresh) => (await (await pluginService).getPluginMarketplaces(forceRefresh)).filter((marketplace) => !require_log_acl_guard.isConnectorPluginMarketplace(marketplace.name)));\n\trequire_handler_registry.handleRpc(registry, \"getMarketplacePlugins\", async (marketplaceName, forceRefresh, searchText) => require_log_acl_guard.isConnectorPluginMarketplace(marketplaceName) ? [] : (await pluginService).getMarketplacePlugins(marketplaceName, forceRefresh, searchText));\n\trequire_handler_registry.handleRpc(registry, \"getPluginDetail\", async (pluginName, marketplaceName) => (await pluginService).getPluginDetail(pluginName, marketplaceName));\n\trequire_handler_registry.handleRpc(registry, \"addPluginMarketplace\", async (source, name, autoUpdate) => withPluginMarketplaceAddMetric(reporter, source, name, async () => (await pluginService).addPluginMarketplace(source, name, autoUpdate)));\n\trequire_handler_registry.handleRpc(regist"
+          },
+          {
+            "anchor": "async loadPluginList()",
+            "offset": 4601384,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async loadPluginList() {\n\t\ttry {\n\t\t\tawait this.loadManifest();\n\t\t\tif (!this.manifest || !this.manifest.plugins) return [];\n\t\t\tconst concurrency = getPositiveIntegerEnv(\"CODEBUDDY_MARKETPLACE_PLUGIN_LOAD_CONCURRENCY\", 32);\n\t\t\tconst installers = this.context.installers;\n\t\t\treturn await mapWithConcurrency(this.manifest.plugins, concurrency, async (pluginEntry) => {\n\t\t\t\ttry {\n\t\t\t\t\tlet pluginPath = \"\";\n\t\t\t\t\tfor (const installer of installers) if (installer.support(pluginEntry.source)) {\n\t\t\t\t\t\tpluginPath = await installer.isInstalled(pluginEntry, this.installLocation) || \"\";\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}\n\t\t\t\t\tconst pluginInfo = {\n\t\t\t\t\t\t...pluginEntry,\n\t\t\t\t\t\tmarketplaceName: this.storageName || this.name,\n\t\t\t\t\t\tinstalledPath: pluginPath\n\t\t\t\t\t};\n\t\t\t\t\tif (pluginPath) {\n\t\t\t\t\t\tconst pluginJsonPath = await this.findPluginManifestPath(pluginPath);\n\t\t\t\t\t\tif (pluginJsonPath) {\n\t\t\t\t\t\t\tconst pluginManifest = await import_lib.readJSON(pluginJsonPath);\n\t\t\t\t\t\t\tif (pluginManifest) Object.assign(pluginInfo, {\n\t\t\t\t\t\t\t\t...pluginManifest,\n\t\t\t\t\t\t\t\tmarketplaceName: this.storageName || this.name,\n\t\t\t\t\t\t\t\tsourcePath: pluginEntry.source,\n\t\t\t\t\t\t\t\tinstalledPath: pluginPath\n\t\t\t\t\t\t\t});\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t\treturn pluginInfo;\n\t\t\t\t} catch (error) {\n\t\t\t\t\tthis.context.logger.error(`Failed to read plugin ${pluginEntry.name}:`, error);\n\t\t\t\t\treturn {\n\t\t\t\t\t\t...pluginEntry,\n\t\t\t\t\t\tmarketplaceName: this.storageName || this.name,\n\t\t\t\t\t\tinstalledPath: \"\"\n\t\t\t\t\t};\n\t\t\t\t}\n\t\t\t});\n\t\t} catch (error) {\n\t\t\tthis.context.logger.error(`Failed to list plugins from marketplace ${this.name}:`, error);\n\t\t\treturn [];\n\t\t}\n\t}\n\tasync findPluginManifestPath(pluginPath) {\n\t\tfor (const metadataDir of PLUGINS_METADATA_DIRS) {\n\t\t\tconst pluginJsonPath = (0, path.join)(pluginPath, metadataDir, PLUGIN_MANIFEST_FILE);\n\t\t\tif (await import_lib.pathExists(pluginJsonPath)) return pluginJsonPath;\n\t\t}\n\t}\n\tclonePlugins(plugins) {\n\t\treturn plugins.map((plugin) => ({ ...plugin }));\n\t}\n};\n//#endregion\n//#region ../../packages/workbuddy-server/src/plugin/management/marketplaces/github-marketplace.ts\n/**\n* 默认的 nano-spawn 选项，用于抑制交互式 git 提示\n* nano-spawn 自动继承 process.env，只需指定额外的环境变量\n*/"
+          },
+          {
+            "anchor": "getPluginId(pluginName, marketplaceName)",
+            "offset": 4720175,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "getPluginId(pluginName, marketplaceName) {\n\t\treturn `${pluginName}@${marketplaceName}`;\n\t}\n\tgetHomePluginsDir() {\n\t\treturn this.context.paths.getHomePluginsDir();\n\t}\n\tgetInstalledPluginsRegistryPath() {\n\t\treturn path.join(this.getHomePluginsDir(), INSTALLED_PLUGINS_FILE_NAME);\n\t}\n\tgetInstalledPluginsRegistryLockName() {\n\t\treturn `${INSTALLED_PLUGINS_LOCK_NAME}-${(0, crypto$1.createHash)(\"sha256\").update(path.resolve(this.getInstalledPluginsRegistryPath())).digest(\"hex\").slice(0, 16)}`;"
+          },
+          {
+            "anchor": "async installPlugins(pluginNames, marketplaceName, options)",
+            "offset": 4812515,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async installPlugins(pluginNames, marketplaceName, options) {\n\t\tthis.assertPluginManagementAllowed(\"installPlugins\");\n\t\ttry {\n\t\t\tlet marketplace = options?.marketplace ?? await this.getMarketplace(marketplaceName);\n\t\t\tif (!marketplace) throw new MarketplaceNotReadyError(marketplaceName);\n\t\t\tmarketplace = await this.selectCurrentCommittedMarketplace(marketplace);\n\t\t\tmarketplaceName = marketplace.storageName || marketplace.name;\n\t\t\tconst rootRefs = [];\n\t\t\tfor (const pluginName of pluginNames) {\n\t\t\t\tconst pluginId = this.getPluginId(pluginName, marketplaceName);\n\t\t\t\tconst rawPluginInfo = await marketplace.getPlugin(pluginName);\n\t\t\t\tconst pluginInfo = rawPluginInfo ? this.normalizePluginMarketplace(rawPluginInfo, marketplace) : void 0;\n\t\t\t\tif (!pluginInfo) throw new Error(`Plugin ${pluginName} is not found in marketplace ${marketplaceName}.`);\n\t\t\t\trootRefs.push({\n\t\t\t\t\tpluginId,\n\t\t\t\t\tplugin: pluginInfo,\n\t\t\t\t\tmarketplace\n\t\t\t\t});\n\t\t\t}\n\t\t\tconst resolvedRootRefs = await this.resolveRequestedPluginRefs(rootRefs);\n\t\t\tconst rootPluginIds = new Set(resolvedRootRefs.map((ref) => ref.pluginId));\n\t\t\tconst priorPluginStates = await this.getEnabledPlugins();\n\t\t\tconst installScope = options?.scope || SettingsScope.USER;\n\t\t\tconst knownPlugins = new Map(resolvedRootRefs.map((ref) => [ref.pluginId, ref]));\n\t\t\tconst dependencyRefs = /* @__PURE__ */ new Map();\n\t\t\tconst installedPluginRefs = [];\n\t\t\tinstalledPluginRefs.push(...await this.installDependencyClosure(knownPlugins, marketplace, dependencyRefs, {\n\t\t\t\t...options,\n\t\t\t\tautoEnable: options?.autoEnable !== false\n\t\t\t}));\n\t\t\tconst rootsToMaterialize = resolvedRootRefs.map((ref) => knownPlugins.get(ref.pluginId) || ref);\n\t\t\tconst installedRootRefs = await this.materializePluginRefs(rootsToMaterialize, o"
+          },
+          {
+            "anchor": "async updatePlugins(pluginNames, marketplaceName, options)",
+            "offset": 4823923,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async updatePlugins(pluginNames, marketplaceName, options) {\n\t\tthis.assertPluginManagementAllowed(\"updatePlugins\");\n\t\ttry {\n\t\t\tconst pluginIds = [];\n\t\t\tconst updatedPluginInfos = [];\n\t\t\tlet marketplace = options?.marketplace ?? await this.getMarketplace(marketplaceName);\n\t\t\tif (!marketplace) throw new Error(`Marketplace ${marketplaceName} is not found.`);\n\t\t\tmarketplaceName = marketplace.storageName || marketplace.name;\n\t\t\tconst installedBeforeMarketplaceSync = await this.getInstalledPlugins();\n\t\t\tconst installedBeforeMarketplaceSyncById = new Map(installedBeforeMarketplaceSync.map((plugin) => [this.getPluginId(plugin.name, plugin.marketplaceName), plugin]));\n\t\t\tif (this.marketplaceNeedsRemoteSync(marketplace) && !options?.skipMarketplaceSync) {\n\t\t\t\tthis.logger.info(`Syncing ${marketplace.type} marketplace ${marketplaceName} from remote before plugin update...`);\n\t\t\t\ttry {\n\t\t\t\t\tmarketplace = await this.updateMarketplace(marketplaceName, {\n\t\t\t\t\t\tmarketplace,\n\t\t\t\t\t\tskipDependencyResolution: true,\n\t\t\t\t\t\tskipInstalledPluginRefresh: true\n\t\t\t\t\t});\n\t\t\t\t\tthis.logger.info(`Marketplace ${marketplaceName} synced successfully`);\n\t\t\t\t} catch (error) {\n\t\t\t\t\tconst message = error instanceof Error ? error.message : String(error);\n\t\t\t\t\tthrow new Error(`Failed to sync marketplace ${marketplaceName} before updating plugins ${pluginNames.join(\",\")}: ${message}`);\n\t\t\t\t}\n\t\t\t}\n\t\t\tmarketplace = await this.selectCurrentCommittedMarketplace(marketplace);\n\t\t\tfor (const pluginName of pluginNames) {\n\t\t\t\tconst pluginId = `${pluginName}@${marketplaceName}`;\n\t\t\t\tpluginIds.push(pluginId);\n\t\t\t\tconst installedPlugin = await this.getPlugin(pluginName, marketplaceName) ?? installedBeforeMarketplaceSyncById.get(pluginId);\n\t\t\t\tif (!installedPlugin) throw new Error(`Plugin ${pluginId} is not installed.`);\n\t\t\t\tconst pluginInfo = await marketplace.getPlugin(pluginName);\n\t\t\t\tif (!pluginInfo) throw new Error(`Plugin ${pluginName} is not found in marketplace ${marketplaceName}.`);\n\t\t\t\tconst scope = options?.scope || installedPlugin.installScope || SettingsScope.USER;\n\t\t\t\tconst rootEnabled = (await this.getEnabledPlugins())[pluginId]?.enabled ?? installedPlugin.status === PluginStatus.Enabled;\n\t\t\t\tconst requestedRootRef = {\n\t\t\t\t\tpluginId,\n\t\t\t\t\tplugin: pluginInfo,\n\t\t\t\t\tmarketplace\n\t\t\t\t};\n\t\t\t\tconst [rootRef] = await this.resolveRequestedPluginRefs([requestedRootRef]);\n\t\t\t\tconst upToDateCache = options?.force ? void 0 : await this.resolveUpToDatePluginCache(rootRef, scope, options?.workspacePath);\n\t\t\t\tif (upToDateCache) {\n\t\t\t\t\tif (rootRef.cleanupMarketplaceLocation) await import_lib.remove(rootRef.cleanupMarketplaceLocation).catch(() => void 0);\n\t\t\t\t\tthis.logger.info(`Plugin ${pluginId} is already up to date at ${upToDateCache.installPath}`);\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tconst knownPlugins = /* @__PURE__ */ new Map([[pluginId, rootRef]]);\n\t\t\t\tconst dependency"
+          },
+          {
+            "anchor": "function assertSafePluginName(name)",
+            "offset": 4397593,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "_PROPERTY_NAMES.has(value.toLowerCase())) throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);\n}\n/**\n* Plugin names used in `join(marketplaceRoot, 'plugins', name)` must be a\n* single safe identifier (same rule as Local/Git installers).\n*/\nfunction assertSafePluginName(name) {\n\tif (typeof name !== \"string\" || !PLUGIN_NAME_PATTERN.test(name)) throw new Error(`Invalid plugin name: ${JSON.stringify(name)}`);\n}\n/**\n* Resolve `segments` under `baseDir` and reject any path that escapes the root\n* (Zip Slip / `../` / absolute segments). By default the result must be a\n* strict child of `baseDir` (the root itself is not a valid install target).\n*\n* Pass `{ allowRoot: true }` for local plugin sources like `\".\"` / `\"./\"` wher"
+          },
+          {
+            "anchor": "var LocalPluginInstaller = class",
+            "offset": 4420210,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "var LocalPluginInstaller = class {\n\tconstructor(context) {\n\t\tthis.context = context;\n\t}\n\tget errorCollector() {\n\t\treturn this.context.errorCollector;\n\t}\n\t/**\n\t* 判断是否支持该插件源\n\t* 支持:\n\t* 1. 字符串类型source(视为本地相对路径)\n\t* 2. PluginSource对象且source === 'local'\n\t*/\n\tsupport(pluginSource) {\n\t\tif (typeof pluginSource === \"string\") return true;\n\t\treturn pluginSource.source === PluginSourceType.Local;\n\t}\n\t/**\n\t* 安装本地插件\n\t* 本地插件无需实际安装,只需解析路径\n\t*/\n\tasync install(pluginEntry, targetDir, onProgress) {\n\t\tconst pluginName = pluginEntry.name;\n\t\tconst pluginSource = pluginEntry.source;\n\t\tassertSafePluginName(pluginName);\n\t\tconst source = this.normalizeSource(pluginSource);\n\t\tonProgress?.(`Resolving local plugin path for ${pluginName}...`);\n\t\tif (!source.path) {\n\t\t\tthis.errorCollector.addError({\n\t\t\t\ttype: PluginErrorType.InstallFailed,\n\t\t\t\tpluginName,\n\t\t\t\tmarketplaceName: \"\",\n\t\t\t\tmessage: `Local plugin source requires a path for '${pluginName}'`,\n\t\t\t\tdetails: \"Missing path in plugin source configuration\"\n\t\t\t});\n\t\t\tthrow new Error(`Local plugin source requires a path for ${pluginName}`);\n\t\t}\n\t\tconst pluginPath = await this.resolvePluginPath(pluginName, source.path, targetDir);\n\t\tif (!await import_lib.pathExists(pluginPath)) {\n\t\t\tthis.errorCollector.addError({\n\t\t\t\ttype: PluginErrorType.InstallFailed,\n\t\t\t\tpluginName,\n\t\t\t\tmarketplaceName: \"\",\n\t\t\t\tmessage: `Local plugin path does not exist for '${pluginName}'`,\n\t\t\t\tdetails: `Path: ${pluginPath}`\n\t\t\t});\n\t\t\tthrow new Error(`Local plugin path does not exist: ${pluginPath}`);\n\t\t}\n\t\tonProgress?.(`Local plugin ${pluginName} resolved at ${pluginPath}`);\n\t\treturn pluginPath;\n\t}\n\t/**\n\t* 更新本地插件\n\t* 本地插件无需更新,直接返回路径\n\t*/\n\tasync update(pluginEntry, installedPath, onProgress) {\n\t\tconst pluginName = pluginEntry.name;\n\t\tassertSafePluginName(pluginName);\n\t\tonProgress?.(`Local plugin ${pluginName} does not require updates`);\n\t\tif (!await import_lib.pathExists(installedPath)) {\n\t\t\tonProgress?.(\"Local plugin path no longer exists, re-resolving...\");\n\t\t\treturn this.install(pluginEntry, (0, path.join)(installedPath, \"..\", \"..\"), onProgress);\n\t\t}\n\t\treturn installedPath;\n\t}\n\t/**\n\t* 检查本地插件是否已安装(已解析)\n\t*/\n\tasync isInstalled(pluginEntry, marketplaceInstalledPath) {\n\t\tassertSafePluginName(pluginEntry.name);\n\t\tconst pluginSource = pluginEntry.source;\n\t\tlet relativePath = \"\";\n\t\tif (typeof pluginSource === \"string\") relativePath = pluginSource;\n\t\telse if (pluginSource.source === PluginSourceType.Local) relativePath = pluginSource.path || \"\";\n\t\tif (!relativePath) return;\n\t\tconst pluginPath = resolveContainedPathAllowingRoot(marketplaceInstalledPath, relativePath);\n\t\tif (await import_lib.pathExists(pluginPath)) return pluginPath;\n\t}\n\t/**\n\t* 解析插件的实际路径\n\t* 支持两种路径模式:\n\t* 1. 直接指向插件根目录: targetDir/path（含 \".\" / \"./\" = 市场根本身）\n\t* 2. 指向插件的父目录: targetDir/path/pluginName\n\t*/\n\tasync resolvePluginPath(pluginName, relativePath, targetDir) {\n\t\tlet pluginPath = resolveContainedPathAllowingRoot(targetDir, relativePath);\n\t\tif (await import_lib.pathExists(pluginPath)) return pluginPath;\n\t\tpluginPath = resolveContainedPathAllowingRoot(targetDir, (0, path.join)(relativePath, pluginName));\n\t\tif (await import_lib.pathExists(pluginPath)) return pluginPath;\n\t\treturn resolveContainedPathAllowingRoot(targetDir, relativePath);\n\t}\n\t/**\n\t* 标准化插件源为PluginSource对象\n\t*/\n\tnormalizeSource(pluginSource) {\n\t\tif (typeof pluginSource === \"string\") return {\n\t\t\tsource: PluginSourceType.Local,\n\t\t\tpath: pluginSource\n\t\t};\n\t\treturn pluginSource;\n\t}\n};\n//#endregion\n//#region ../../packages/workbuddy-server/src/plugin/management/installer"
+          },
+          {
+            "anchor": "PLUGIN_NAME_PATTERN =",
+            "offset": 4396047,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "PLUGIN_NAME_PATTERN = /^[A-Za-z0-9][-A-Za-z0-9._]*$/;\nvar MAGIC_OBJECT_PROPERTY_NAMES = /* @__PURE__ */ new Set([\n\t\"__proto__\",\n\t\"prototype\",\n\t\"constructor\"\n]);\nfunction getMarketplacesRoot(homePluginsDir) {\n\treturn path."
+          },
+          {
+            "anchor": "async getInstalledPluginsForWorkspaceState(",
+            "offset": 4805350,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async getInstalledPluginsForWorkspaceState(enabledPlugins, workspacePath, expandDependencies = false) {\n\t\tconst workspaceIdentity = await resolveWorkspaceProjectIdentity(await import_lib.realpath(workspacePath));\n\t\tconst registry = await this.readInstalledPluginsRegistry();\n\t\tconst installedIdentityCache = /* @__PURE__ */ new Map();\n\t\tconst resolveInstalledRecord = async (pluginId) => {\n\t\t\tfor (const record of registry.plugins[pluginId] || []) {\n\t\t\t\tlet applies = record.scope === \"user\" || record.scope === \"managed\";\n\t\t\t\tif (!applies && (record.scope === \"project\" || record.scope === \"local\") && record.projectPath) {\n\t\t\t\t\tlet identity = installedIdentityCache.get(record.projectPath);\n\t\t\t\t\tif (!identity) {\n\t\t\t\t\t\tidentity = resolveWorkspaceProjectIdentity(path.resolve(record.projectPath), { preserveNonGitPath: true }).catch(() => void 0);\n\t\t\t\t\t\tinstalledIdentityCache.set(record.projectPath, identity);\n\t\t\t\t\t}\n\t\t\t\t\tconst installedIdentity = await identity;\n\t\t\t\t\tapplies = installedIdentity?.kind === workspaceIdentity.kind && installedIdentity.path === workspaceIdentity.path;\n\t\t\t\t}\n\t\t\t\tif (applies && await import_lib.pathExists(record.installPath)) return { ...record };\n\t\t\t}\n\t\t};\n\t\tconst plugins = /* @__PURE__ */ new Map();\n\t\tconst queue = Object.entries(enabledPlugins).filter(([pluginId]) => pluginId.includes(\"@\") && !pluginId.endsWith(\"@inline\")).map(([pluginId, state]) => ({\n\t\t\tpluginId,\n\t\t\tstate\n\t\t}));\n\t\tconst visitedPriority = /* @__PURE__ */ new Map();\n\t\twhile (queue.length > 0) {\n\t\t\tconst candidates = [];\n\t\t\tfor (const { pluginId, state } of queue.splice(0)) {\n\t\t\t\tconst separator = pluginId.indexOf(\"@\");\n\t\t\t\tif (separator <= 0 || separator === pluginId.length - 1) continue;\n\t\t\t\tconst priority = this.getSettingsScopePriority(state.scope);\n\t\t\t\tif ((visitedPriority.get(pluginId) ?? -1) >= priority) continue;\n\t\t\t\tvisitedPriority.set(pluginId, priority);\n\t\t\t\tcandidates.push({\n\t\t\t\t\tmarketplaceName: pluginId.slice(separator + 1),\n\t\t\t\t\tname: pluginId.slice(0, separator),\n\t\t\t\t\tpluginId,\n\t\t\t\t\tpriority,\n\t\t\t\t\tstate\n\t\t\t\t});\n\t\t\t}\n\t\t\tconst loaded = await mapWithConcurrencyLimit(candidates, 16, async (candidate) => {\n\t\t\t\tconst resolution = await resolveInstalledRecord(candidate.pluginId);\n\t\t\t\tconst manifest = resolution ? await this.readPluginManifest(resolution.installPath) : void 0;\n\t\t\t\treturn resolution && manifest ? {\n\t\t\t\t\tcandidate,\n\t\t\t\t\tmanifest,\n\t\t\t\t\tresolution\n\t\t\t\t} : void 0;\n\t\t\t});\n\t\t\tfor (const item of loaded) {\n\t\t\t\tif (!item) continue;\n\t\t\t\tconst { candidate, manifest, resolution } = item;\n\t\t\t\tconst plugin = {\n\t\t\t\t\t...manifest,\n\t\t\t\t\tinstalledPath: resolution.installPath,\n\t\t\t\t\tinstallScope: candidate.state.scope,\n\t\t\t\t\tmarketplaceName: candidate.marketplaceName,\n\t\t\t\t\tname: candidate.name,\n\t\t\t\t\tsource: \"\",\n\t\t\t\t\tstatus: candidate.state.enabled ? PluginStatus.Enabled : PluginStatus.Disabled,\n\t\t\t\t\tregistryInstalled: true,\n\t\t\t\t\tresolvedVersion: resolution.resolvedVersion,\n\t\t\t\t\tgitCommitSha: resolution.gitCommitSha,\n\t\t\t\t\tautoInstalled: resolution.auto\n\t\t\t\t};\n\t\t\t\tthis.mergePluginDependencies(plugin, resolution.dependencies);\n\t\t\t\tplugins.set(candidate.pluginId, plugin);\n\t\t\t\tif (!expandDependencies || !candidate.state.enabled) continue;\n\t\t\t\tlet dependencies;\n\t\t\t\ttry {\n\t\t\t\t\tdependencies = this.normalizePluginDependencies(plugin.dependencies, plugin);\n\t\t\t\t} catch (error) {\n\t\t\t\t\tthis.logger.warn(`[PluginManager] Cache-first dependency metadata is invalid for ${candidate.pluginId}: ${error}`);\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tfor (const dependency of dependencies) {\n\t\t\t\t\tconst dependencyId = this.getPluginId(dependency.name, dependency.marketplaceName);\n\t\t\t\t\tconst configured = enabledPlugins[dependencyId];\n\t\t\t\t\tconst blockedByHigherScope = configured?.enabled === false && this.getSettingsScopePriority(configured.scope) > candidate.priority;\n\t\t\t\t\tqueue.push({\n\t\t\t\t\t\tpluginId: dependencyId,\n\t\t\t\t\t\tstate: blockedByHigherScope ? configured : {\n\t\t\t\t\t\t\tenabled: true,\n\t\t\t\t\t\t\tscope: candidate.state.scope\n\t\t\t\t\t\t}\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\treturn Array.from(plugins.values());\n\t}\n\t/**\n\t* 加载已安装插件\n\t*/\n\tasync loadInstalledPlugins(generation = this.cacheGeneration) {\n\t\tconst t0 = Date.now();\n\t\tconst enabledPlugins = await this.getEnabledPlugins();\n\t\tconst installedPlugins = await this.getInstalledPluginsForWorkspaceState(enabledPlugins, this.context.paths.getWorkDir(), true);\n\t\tthis.applyDependencyRuntimeGuards(installedPlugins);\n\t\tif (generation !== this.cacheGeneration) {\n\t\t\tthis.logger.debug(`[PluginManager] Discarding stale cache-first Plugin load generation=${generation}, current=${this.cacheGeneration}`);\n\t\t\treturn;\n\t\t}\n\t\tthis.installedPluginsCache = installedPlugins;\n\t\tthis.logger.info(`Loaded ${installedPlugins.length} installed Plugins from the installed registry in ${Date.now() - t0}ms`);\n\t}\n\tapplyDependencyRuntimeGuards(installedPlugins) {\n\t\tconst installedById = new Map(installedPlugin"
+          }
+        ]
+      },
+      {
+        "path": "Resources/app.asar/main/code-cache.js",
+        "sha256": "a5dc228e5b83e14d443045c5dfe032f906fac64e069495b5108e9c71e1517f36",
+        "excerpts": [
+          {
+            "anchor": "function resolveWorkbuddyConfigDir()",
+            "offset": 3228663,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "function resolveWorkbuddyConfigDir() {\n\tconst envDir = process.env.WORKBUDDY_CONFIG_DIR?.trim() || process.env.CODEBUDDY_CONFIG_DIR?.trim();\n\tif (envDir) return envDir;\n\treturn path.join(os.homedir(), resolveWorkbuddyDataFolderName());\n}\nfunction resolveAccProductConfigCachePath() {\n\treturn path.join(resolveWorkbuddyConfigDir(), \"cache\", \"acc-product-config-v3.json\");\n}\nfunction read"
+          },
+          {
+            "anchor": "function getWorkbuddyUserDataDir()",
+            "offset": 3248220,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "function getWorkbuddyUserDataDir() {\n\treturn process.env.WORKBUDDY_USER_DATA_DIR?.trim() || path.join(getWorkbuddyConfigDir(), \"app\");\n}\n/**\n* 安装目录（含可执行文件的目录）。\n* - 生产模式：返回 {安装目录}/（如 C:\\Program Files\\WorkBuddy）\n* - dev 模式：返回项目里 electron 二进制所在目录\n* - 支持环境变量 WORKBUDDY_INSTALL_DIR 覆盖（方便企业"
+          }
+        ]
+      },
+      {
+        "path": "Resources/app.asar/main/index.js",
+        "sha256": "586ef7f83fbe34834ff5c4de899c7f0647100643c4dded89d49556c8690d55e7",
+        "excerpts": [
+          {
+            "anchor": "function createSecureWebPreferences(kind, options = {})",
+            "offset": 1458492,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "function createSecureWebPreferences(kind, options = {}) {\n\tswitch (kind) {\n\t\tcase \"main\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: true,\n\t\t\tnodeIntegration: false,\n\t\t\tnodeIntegrationInSubFrames: true,\n\t\t\twebviewTag: true\n\t\t};\n\t\tcase \"first-party-window\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: true,\n\t\t\tnodeIntegration: false,\n\t\t\tbackgroundThrottling: false\n\t\t};\n\t\tcase \"guest-popup\": return {\n\t\t\tsandbox: true,\n\t\t\tcontextIsolation: true,\n\t\t\tnodeIntegration: false\n\t\t};\n\t\tcase \"image-decoder\":\n\t\t\tif (!options.partition) throw new Error(\"[SecureWebPreferences] image-decoder kind requires options.partition\");\n\t\t\treturn {\n\t\t\t\tpartition: options.partition,\n\t\t\t\twebSecurity: false,\n\t\t\t\tnodeIntegration: false,\n\t\t\t\tcontextIsolation: true,\n\t\t\t\tsandbox: false,\n\t\t\t\tbackgroundThrottling: false\n\t\t\t};\n\t\tcase \"splash\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: false,\n\t\t\tnodeIntegration: false\n\t\t};\n\t\tcase \"no-preload-guest\": return {\n\t\t\tsandbox: true,\n\t\t\tcontextIsolation: true,\n\t\t\tnodeIntegration: false\n\t\t};\n\t}\n}\n//#endregion\n//#region src/main/window/url-classifiers.ts\n/**\n* URL 分类判定 —— 纯函数集合，用于 guest webview 导航拦截与外链外抛决策。\n*\n* 覆盖场景：\n* - CodeBuddy OAuth 回跳链路（Lexiang OL / tdocs-app）\n* - 腾讯文档个人版导入 webview（persist:tdoc-import）的登录链路（QQ 登录 / 微信扫码 / QQ 互联）\n* - 腾讯文档同文档刷新识别（避免整页 reload 被误判外链）\n* - 企微 AIBot 授权弹窗（`https://work.weixin.qq.com/ai/qc/*` 留应用内，同 "
+          },
+          {
+            "anchor": "function applyCliCommandLineSwitches(deps)",
+            "offset": 2114117,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "function applyCliCommandLineSwitches(deps) {\n\tconst isPackagedRuntime = syncWorkbuddyPackagedRuntimeEnv(electron.app);\n\tif (process.platform === \"win32\") {\n\t\telectron.app.commandLine.appendSwitch(\"no-sandbox\");\n\t\tdeps.startupLog(\"Chromium sandbox disabled (Windows)\");\n\t}\n\tconst cdpPort = process.env.WORKBUDDY_REMOTE_DEBUGGING_PORT;\n\tif (cdpPort && /^\\d+$/.test(cdpPort)) {\n\t\tconst cdpAllowedOrigins = [\n\t\t\t\"http://127.0.0.1\",\n\t\t\t\"http://localhost\",\n\t\t\t`http://127.0.0.1:${cdpPort}`,\n\t\t\t`http://localhost:${cdpPort}`\n\t\t].join(\",\");\n\t\telectron.app.commandLine.appendSwitch(\"remote-debugging-port\", cdpPort);\n\t\telectron.app.commandLine.appendSwitch(\"remote-allow-origins\", cdpAllowedOrigins);\n\t\tdeps.logInfo(`[WorkBuddy] CDP remote debugging enabled on port ${cdpPort} (${cdpAllowedOrigins})`);\n\t}\n\tif (!isPackagedRuntime && deps.isDebugMode) electron.app.commandLine.appendSwitch(\"ignore-certificate-errors\");\n}\n//#endregion\n//#region src/main/system/cleanup/win32-fallback-env-normalizer.ts\nvar FALLBACK_CONFIG_ENV = \"WORKBUDDY_STALE_FALLBACK_CONFIG_DIR\";\nfunction normalizePathForCompare(value) {\n\treturn path.resolve(value).replace(/\\\\/g, \"/\").toLowerCase();\n}\nfunction isProgramDataFallba"
+          },
+          {
+            "anchor": "function runEarlyPreflightAndMaybeBail()",
+            "offset": 2110266,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "function runEarlyPreflightAndMaybeBail() {\n\tif (process.env.WB_E2E_DISABLE_STARTUP_REPAIR === \"true\") return \"platform-skip\";\n\tif (process.platform === \"win32\") return runEarlyPreflightAndMaybeBailWin32();\n\tif (process.platform !== \"darwin\") return \"platform-skip\";\n\ttry {\n\t\tconst helperPath = findHelperBinary();\n\t\tif (!helperPath) {\n\t\t\trequire_log_acl_guard.logger_default.info(\"[StartupRepair] early preflight: helper not found, skip\");\n\t\t\treturn \"no-helper\";\n\t\t}\n\t\tconst child = (0, node_child_process.spawn)(helperPath, [\"--preflight-only\"], {\n\t\t\tdetached: true,\n\t\t\tstdio: \"ignore\",\n\t\t\tcwd: \"/\",\n\t\t\tenv: {\n\t\t\t\tPATH: \"/usr/bin:/bin:/usr/sbin:/sbin\",\n\t\t\t\tHOME: process.env.HOME ?? \"\",\n\t\t\t\tUSER: process.env.USER ?? \"\",\n\t\t\t\tLANG: process.env.LANG ?? \"en_US.UTF-8\",\n\t\t\t\t__WB_REPAIR_INVOKED_FROM: \"time-a-pre-lock\",\n\t\t\t\t...process.env.WORKBUDDY_CONFIG_DIR ? { WORKBUDDY_CONFIG_DIR: process.env.WORKBUDDY_CONFIG_DIR } : {},\n\t\t\t\t...process.env.WORKBUDDY_APP_NAME ? { WORKBUDDY_APP_NAME: process.env.WORKBUDDY_APP_NAME } : {},\n\t\t\t\t...process.env.WORKBUDDY_APPLICATION_NAME ? { WORKBUDDY_APPLICATION_NAME: process.env.WORKBUDDY_APPLICATION_NAME } : {}\n\t\t\t}\n\t\t});\n\t\tchild.unref();\n\t\trequire_log_acl_guard.logger_default.info(\"[StartupRepair] early preflight: spawned --preflight-only\", {\n\t\t\thelperPath,\n\t\t\tpid: child.pid\n\t\t});\n\t\treturn \"spawned\";\n\t} catch (e) {\n\t\trequire_log_acl_guard.logger_default.warn(\"[StartupRepair] early preflight spawn failed (non-fatal, fall through to normal startup)\", e);\n\t\treturn \"spawn-failed\";\n\t}\n}\n/**\n* 时机 A (W"
+          },
+          {
+            "anchor": "WORKBUDDY_CONFIG_DIR: platform.configDir",
+            "offset": 1052343,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "entialProtectionPolicy,\n\t\tWORKBUDDY_APP_NAME: require_code_cache.getWorkbuddyAppName(),\n\t\tWORKBUDDY_APP_PATH: platform.appRootPath,\n\t\tWORKBUDDY_APP_VERSION: platform.appVersion,\n\t\tWORKBUDDY_CONFIG_DIR: platform.configDir,\n\t\t[require_code_cache.WORKBUDDY_PROCESS_ROLE_ENV]: require_code_cache.WORKBUDDY_DAEMON_ROLE_VALUE,\n\t\tWORKBUDDY_IS_PACKAGED: platform.isPackaged ? \"1\" : \"0\",\n\t\tWORKBUDDY_LOCALE: platform.appLocale(),\n\t\tWORKBUDDY_MENU_LOCALE: menuLocale,\n\t\tWORKBUDDY_PROMPT_TEMPLATES_DIR: promptTemplatesDir,\n\t\tWORKBUDDY_PRODUCT_NAME: productName,\n\t\tWORKBUDDY_RESOURCES_PATH: platform.resourcesPath,\n\t\tWORKBUDDY_USER_DATA_DIR: platform.dataDir,\n\t\t...legacyLocalStorageMigrationResultPath ? { WORKBUDDY_LEGACY_LOCALSTORAGE_MIGRATION_RESULT_PATH: legacyLocalStorageMigrationResultPath } : {},\n\t\t...qimei36 ? { CODEBUDDY_QIMEI36: qimei36 } : {}\n\t};\n}\n/**\n* daemon 崩溃恢复回调：DaemonAppServerProcessManager 会按\n* `onCrash → onR"
+          },
+          {
+            "anchor": "const gotTheLock = electron.app.requestSingleInstanceLock();",
+            "offset": 2166194,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "returns 是否拿到锁；false 时调用方需 return 中断 main() 后续装配\n\t*/\n\tacquireSingletonLock() {\n\t\tconst gotTheLock = electron.app.requestSingleInstanceLock();\n\t\tthis.startupLog(`Phase: single instance lock, gotTheLock=${gotTheLock}`);\n\t\tmarkStartup(\"A8\");\n\t\tif (!gotTheLock) {\n\t\t\tthis.startupLog(\"SingletonLock failed: another instance running or userData dir inaccessible (preflight already handled)\");\n\t\t\tthis.startupLog(\"EXITING: SingletonLock not acquire"
+          }
+        ]
+      },
+      {
+        "path": "Resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs",
+        "sha256": "b340564b2410d99846397776a25fd99e11d86647a7c219ad06fedc441e364ddd",
+        "excerpts": [
+          {
+            "anchor": "getPluginId(ei,ea){return`${ei}@${ea}`}",
+            "offset": 5931723,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "getPluginId(ei,ea){return`${ei}@${ea}`}getHomePluginsDir(){return tK.PathUtils.getHomePluginsDir()}getInstalledPluginsRegistryPath(){return tz.join(this.getHomePluginsDir(),tD.Tn)}getInstalledPluginsRegistryLockName(){let ei=(0,rj.createHash)(\"sha256\").update(tz.resolve(this.getInstalledPluginsRegistryPath())).digest(\"hex\").slice(0,16);return`${iM}-${ei}`}getMarketplaceMutationLockName(ei){let ea=(0,rj.createHash)(\"sha256\").update(`${t"
+          },
+          {
+            "anchor": "async loadPluginList(){",
+            "offset": 5783414,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async loadPluginList(){try{if(await this.loadManifest(),!this.manifest||!this.manifest.plugins)return[];let ei=(0,tX.l)(\"CODEBUDDY_MARKETPLACE_PLUGIN_LOAD_CONCURRENCY\",32),ea=tH.ContainerUtil.getAll(tD.I2);return await (0,tX.W)(this.manifest.plugins,ei,async ei=>{try{let es=\"\";for(let el of ea)if(el.support(ei.source)){es=await el.isInstalled(ei,this.installLocation)||\"\";break}let el={...ei,marketplaceName:this.storageName||this.name,installedPath:es};if(es){let ea=await this.findPluginManifestPath(es);if(ea){let ec=await tG.readJSON(ea);ec&&Object.assign(el,{...ec,marketplaceName:this.storageName||this.name,sourcePath:ei.source,installedPath:es})}}return el}catch(ea){return tH.ContainerUtil.get(tq.Logger).error(`Failed to read plugin ${ei.name}:`,ea),{...ei,marketplaceName:this.storageName||this.name,installedPath:\"\"}}})}catch(ei){return tH.ContainerUtil.get(tq.Logger).error(`Failed to list plugins from marketplace ${this.name}:`,ei),[]}}async findPluginManifestPath(ei){for(let ea of tD.iJ){let es=(0,tz.join)(ei,ea,tD.po);if(await tG.pathExists(es))return es}}clonePlugins(ei){return ei.map(ei=>({...ei}))}};t0=directory_marketplace_decorate([(0,tH.Component)({id:t0,scope:tH.Scope.Transient})],t0);var t1=es(93590),github_marketplace_decorate=function(ei,ea,es,el){var ec,eu=arguments.length,ed=eu<3?ea:null===el?el=Object.getOwnPropertyDescriptor(ea,es):el;if(\"object\"==typeof Reflect&&\"function\"==typeof Reflect.decorate)ed=Reflect.decorate(ei,ea,es,el);else for(var ep=ei.length-1;ep>=0;ep--)(ec=ei[ep]"
+          },
+          {
+            "anchor": "let tJ=/^[A-Za-z0-9][-A-Za-z0-9._]*$/",
+            "offset": 5775024,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "let tJ=/^[A-Za-z0-9][-A-Za-z0-9._]*$/,tY=new Set([\"__proto__\",\"prototype\",\"constructor\"]);function getMarketplacesRoot(ei){return tz.join(ei??tK.PathUtils.getHomePluginsDir(),tD.bh)}function isPathContainedInRoot(ei,ea,es=!1){let el=tz.relative(ei,ea);return el?\"..\"!==el&&!el.startsWith(`..${tz.sep}`)&&!tz.isAbsolute(el):es}function assertSafePathSegment(ei,ea=\"marketplace name\"){if(\"string\"!=typeof ei||!ei||ei!==ei.trim()||\".\"===ei||\"..\"===ei||ei.includes(\"/\")||ei.includes(\"\\\\\")||ei.includes(\"\\0\")||ei.includes(\":\")||tz.isAbsolute(ei)||tz.basename(ei)!==ei||tz.normalize(ei)!==ei||tY.has(ei.toLowerCase()))throw Error(`Invalid ${ea}: ${JSON.stringify(ei)}`)}function assertSafePluginName(ei){if(\"string\"!=typeof ei||!tJ.test(ei))throw Error(`Invalid plugin name: ${JSON.stringify(ei)}`)}function resolveContainedPath(ei,...ea){return resolvePathUnderRoot(ei,ea,!1)}function resolveContainedPathAllowingRoot(ei,...ea){return resolvePathUnderRoot(ei,ea,!0)}function resolvePathUnderRoot(ei,ea,es){let el=tz.resolve(ei),ec=tz.resolve("
+          },
+          {
+            "anchor": "let i3=class{support(ei){return\"string\"==typeof ei||ei.source===tD.R7.Local}",
+            "offset": 6096753,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "let i3=class{support(ei){return\"string\"==typeof ei||ei.source===tD.R7.Local}async install(ei,ea,es){let el=ei.name,ec=ei.source;assertSafePluginName(el);let eu=this.normalizeSource(ec);if(es?.(`Resolving local plugin path for ${el}...`),!eu.path)throw this.errorCollector.addError({type:tD.mq.InstallFailed,pluginName:el,marketplaceName:\"\",message:`Local plugin source requires a path for '${el}'`,details:\"Missing path in plugin source configuration\"}),Error(`Local plugin source requires a path for ${el}`);let ed=await this.resolvePluginPath(el,eu.path,ea);if(!await tG.pathExists(ed))throw this.errorCollector.addError({type:tD.mq.InstallFailed,pluginName:el,marketplaceName:\"\",message:`Local plugin path does not exist for '${el}'`,details:`Path: ${ed}`}),Error(`Local plugin path does not exist: ${ed}`);return es?.(`Local plugin ${el} resolved at ${ed}`),ed}async update(ei,ea,es){let el=ei.name;return(assertSafePluginName(el),es?.(`Local plugin ${el} does not require updates`),await tG.pathExists(ea))?ea:(es?.(\"Local plugin path no longer exists, re-resolving...\"),this.install(ei,(0,tz.join)(ea,\"..\",\"..\"),es))}async isInstalled(ei,ea){assertSafePluginName(ei.name);let es=ei.source,el=\"\";if(\"string\"==typeof es?el=es:es.source===tD.R7.Local&&(el=es.path||\"\"),!el)return;let ec=resolveContainedPathAllowingRoot(ea,el);if(await tG.pathExists(ec))return ec}async resolvePluginPath(ei,ea,es){let el=resolveContainedPathAllowingRoot(es,ea);return await tG.pathExists(el)||(el=resolveContainedPathAllowingRoot(es,(0,tz.join)(ea,ei)),await tG.pathExists(el))?el:resolveContainedPathAllowingRoot(es,ea)}normalizeSource(ei){return\"string\"==typeof ei?{source:tD.R7.Local,path:ei}:ei}};local_plugin_installer_decorate([(0,tH.Autowired)(tD.nQ),local_plugin_installer_metadata(\"design:type\",\"function\"==typeof(tA=void 0!==tD.nQ&&tD.nQ)?tA:Object)],i3.prototype,\"errorCollector\",void 0),i3=local_plugin_installer_decorate([(0,tH.Component)(tD.I2)],i3);var git_plugin_installer_decorate=function(ei,ea,es,el){var ec,eu=arguments.length,ed=eu<3?ea:null===el?el=Object.getOwnPropertyDescriptor(ea,es):el;if(\"object\"==typeof Reflect&&\"function\"==typeof Reflect.decorate)ed=Reflect.decorate(ei,ea,es,el);else for(var ep=ei.length-1;ep>=0;ep--)(ec=ei[ep])&&(ed=(eu<3?ec(ed):eu>3?ec(ea,es,ed):ec(ea,es))||ed);return eu>3&&ed&&Object.defineProperty(ea,es,ed),ed},git_plugin_installer_m"
+          },
+          {
+            "anchor": "async installPlugins(ei,ea,es)",
+            "offset": 5990278,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async installPlugins(ei,ea,es){this.assertPluginManagementAllowed(\"installPlugins\");try{let el=es?.marketplace??await this.getMarketplace(ea);if(!el)throw new tD.gw(ea);ea=(el=await this.selectCurrentCommittedMarketplace(el)).storageName||el.name;let ec=[];for(let es of ei){let ei=this.getPluginId(es,ea),eu=await el.getPlugin(es),ed=eu?this.normalizePluginMarketplace(eu,el):void 0;if(!ed)throw Error(`Plugin ${es} is not found in marketplace ${ea}.`);ec.push({pluginId:ei,plugin:ed,marketplace:el})}let eu=await this.resolveRequestedPluginRefs(ec),ed=new Set(eu.map(ei=>ei.pluginId)),ep=await this.getEnabledPlugins(),eh=es?.scope||rb.I7.USER,ef=new Map(eu.map(ei=>[ei.pluginId,ei])),em=new Map,eg=[];eg.push(...await this.installDependencyClosure(ef,el,em,{...es,autoEnable:es?.autoEnable!==!1}));let ey=eu.map(ei=>ef.get(ei.pluginId)||ei),e_=await this.materializePluginRefs(ey,es);for(let ei of e_)ef.set(ei.pluginId,ei),eg.push(ei);eg.push(...await this.installDependencyClosure(ef,el,em,{...es,autoEnable:es?.autoEnable!==!1}));let ev=Array.from(em.keys()).filter(ei=>!ed.has(ei)),eb=[...ev,...Array.from(ed)],ew=new Map(e_.map(ei=>[ei.pluginId,es?.preserveExistingEnabledState&&void 0!==ep[ei.pluginId]?ep[ei.pluginId].enabled:es?.autoEnable!==void 0?es.autoEnable:ep[ei.pluginId]?.enabled??!1!==ei.plugin.defaultEnabled])),eS=new Set;for(let ei of e_)if(ew.get(ei.pluginId))for(let ea of this.collectKnownDependencyIds(e"
+          },
+          {
+            "anchor": "async updatePlugins(ei,ea,es)",
+            "offset": 5996695,
+            "offsetUnit": "UTF-16 code units",
+            "raw": "async updatePlugins(ei,ea,es){this.assertPluginManagementAllowed(\"updatePlugins\");try{let el=[],ec=[],eu=es?.marketplace??await this.getMarketplace(ea);if(!eu)throw Error(`Marketplace ${ea} is not found.`);ea=eu.storageName||eu.name;let ed=await this.getInstalledPlugins(),ep=new Map(ed.map(ei=>[this.getPluginId(ei.name,ei.marketplaceName),ei]));if(this.marketplaceNeedsRemoteSync(eu)&&!es?.skipMarketplaceSync){this.logger.info(`Syncing ${eu.type} marketplace ${ea} from remote before plugin update...`);try{eu=await this.updateMarketplace(ea,{marketplace:eu,skipDependencyResolution:!0,skipInstalledPluginRefresh:!0}),this.logger.info(`Marketplace ${ea} synced successfully`)}catch(el){let es=el instanceof Error?el.message:String(el);throw Error(`Failed to sync marketplace ${ea} before updating plugins ${ei.join(\",\")}: ${es}`)}}for(let ed of(eu=await this.selectCurrentCommittedMarketplace(eu),ei)){let ei=`${ed}@${ea}`;el.push(ei);let eh=await this.getPlugin(ed,ea)??ep.get(ei);if(!eh)throw Error(`Plugin ${ei} is not installed.`);let ef=await eu.getPlugin(ed);if(!ef)throw Error(`Plugin ${ed} is not found in marketplace ${ea}.`);let em=es?.scope||eh.installScope||rb.I7.USER,eg=(await this.getEnabledPlugins())[ei],ey=eg?.enabled??eh.status===tD.u8.Enabled,e_={pluginId:ei,plugin:ef,marketplace:eu},[ev]=await this.resolveRequestedPluginRefs([e_]),eb=es?.force?void 0:await this.resolveUpToDatePluginCache(ev,em,es?.workspacePath);if(eb){ev.cleanupMarketplaceLocation&&await tG.remove(ev.cleanupMarketplaceLocation).catch(()=>void 0),this.logger.info(`Plugin ${ei} is already up to date at ${eb.installPath}`);continue}let ew=new Map([[ei,ev]]),eS={...es,autoEnable:ey,scope:em};await this.installDependencyClosure(ew,eu,new Map,eS),this.logger.info(`Updating plugin ${ei}...`);let[eE]=await this.materializePluginRefs([ew.get(ei)||ev],{...es,refreshMutableIdentity:!0,autoEnable:ey,autoInstalled:eh.autoInstalled,scope:em}),eT=eE.plugin.installedPath,ek={...eE.plugin,installScope:em};ew.set(ei,{...eE,plugin:ek}),await this.installDependencyClosure(ew,eu,new Map,eS),ec.push({plugin:ek,scope:em}),this.logger.info(`Plu"
+          }
+        ]
+      }
+    ],
+    "observed": {
+      "panelDisplayNameOccurrences": 0,
+      "cardAndDetailTitleUseName": true,
+      "installedAndMarketplacePanelCopyNameVerbatim": true,
+      "nativeIdUsesNameAtMarket": true,
+      "updateUsesSameNameAtMarket": true,
+      "displayNameHonoredOnInspectedPanelPath": false,
+      "localNamePattern": "^[A-Za-z0-9][-A-Za-z0-9._]*$",
+      "originalChineseProbe": {
+        "name": "Loop 空壳卡片",
+        "acceptedByLocalNamePattern": false
+      },
+      "localInstallerChecksNameOnInstallAndIsInstalled": true,
+      "mainWindowNativeProtectionConfigured": true,
+      "macOSDoesNotUseWindowsNoSandboxBranch": true
+    },
+    "unknown": [
+      "真实窗口、市场可见、中文卡片安装及同身份升级尚须本轮隔离桌面验证。",
+      "尚无已证实的显示名称与插件安装键分离接法；改名保持身份本轮待定。",
+      "目录源直接以中文 name 接入已检查的 LocalPluginInstaller 会遇到 ASCII 名称校验；未执行安装验证，不据此断言所有其它原生接法不可能。"
+    ]
+  },
+  "cdpPort": 62490,
+  "desktopLaunchPlan": {
+    "executable": "/usr/bin/sandbox-exec",
+    "argv": [
+      "-f",
+      "/private/tmp/loop-card-host-4rzNEV/sandbox.sb",
+      "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+      "--user-data-dir=/private/tmp/loop-card-host-4rzNEV/user-data"
+    ],
+    "cwd": "/private/tmp/loop-card-host-4rzNEV/workspace",
+    "env": {
+      "HOME": "/private/tmp/loop-card-host-4rzNEV/home",
+      "USER": "loop-card-test",
+      "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+      "SHELL": "/bin/bash",
+      "LANG": "en_US.UTF-8",
+      "TMPDIR": "/private/tmp/loop-card-host-4rzNEV/tmp",
+      "TMP": "/private/tmp/loop-card-host-4rzNEV/tmp",
+      "TEMP": "/private/tmp/loop-card-host-4rzNEV/tmp",
+      "MAC_CHROMIUM_TMPDIR": "/private/tmp/loop-card-host-4rzNEV/tmp",
+      "WORKBUDDY_CONFIG_DIR": "/private/tmp/loop-card-host-4rzNEV/profile",
+      "CODEBUDDY_CONFIG_DIR": "/private/tmp/loop-card-host-4rzNEV/profile",
+      "WORKBUDDY_USER_DATA_DIR": "/private/tmp/loop-card-host-4rzNEV/user-data",
+      "WORKBUDDY_REMOTE_DEBUGGING_PORT": "62490",
+      "WB_E2E_DISABLE_STARTUP_REPAIR": "true",
+      "CODEBUDDY_DATA_ROOT": "/private/tmp/loop-card-host-4rzNEV/data",
+      "XDG_CONFIG_HOME": "/private/tmp/loop-card-host-4rzNEV/xdg",
+      "XDG_CACHE_HOME": "/private/tmp/loop-card-host-4rzNEV/xdg/cache",
+      "CODEBUDDY_DISABLE_COMPILE_CACHE": "1",
+      "CODEBUDDY_CREDENTIALS_IN_MEMORY": "1",
+      "CODEBUDDY_API_KEY_HELPER_DISABLED": "1",
+      "CODEBUDDY_DISABLE_LOCAL_STORAGE": "1",
+      "CODEBUDDY_SKIP_BUILTIN_MARKETPLACE": "1",
+      "DISABLE_TELEMETRY": "1"
+    },
+    "detached": false
+  },
+  "boundary": {
+    "command": {
+      "executable": "/usr/bin/sandbox-exec",
+      "argv": [
+        "-f",
+        "/private/tmp/loop-card-host-4rzNEV/sandbox.sb",
+        "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+        "-e",
+        "\nconst fs=require('fs'),cp=require('child_process'),net=require('net');\nconst [root,canary,link,allowPort,blockedPort,outsideSocket]=process.argv.slice(1), result={};\nconst denied=operation=>{try{operation();return false;}catch(e){return ['EPERM','EACCES'].includes(e.code);}};\nresult.outsideRead=denied(()=>fs.readFileSync(canary)); result.symlinkRead=denied(()=>fs.readFileSync(link));\nresult.outsideWrite=denied(()=>fs.writeFileSync(canary,'forbidden'));\nfs.writeFileSync(root+'/inside-canary','owned');result.insideReadWrite=fs.readFileSync(root+'/inside-canary','utf8')==='owned';\nconst c=cp.spawnSync('/bin/cat',[canary],{encoding:'utf8'});result.inheritedChildBoundary=c.status!==0&&!c.stdout&&/permitted|denied/i.test(c.stderr);\nasync function connect(port,allowed){return new Promise(resolve=>{const c=net.connect({host:'127.0.0.1',port:Number(port)});let text='';c.on('data',b=>text+=b);c.on('end',()=>resolve(allowed&&text==='owned-loopback'));c.on('error',e=>resolve(!allowed&&['EPERM','EACCES'].includes(e.code)));c.setTimeout(2000,()=>{c.destroy();resolve(false);});});}\nasync function unixRoundtrip(){const path=root+'/tmp/boundary.sock',server=net.createServer(c=>c.end('owned-unix'));return new Promise(resolve=>{server.on('error',()=>resolve(false));server.listen(path,()=>{const c=net.connect(path);let text='';c.on('data',b=>text+=b);c.on('end',()=>server.close(()=>resolve(text==='owned-unix')));c.on('error',()=>server.close(()=>resolve(false)));});});}\nasync function deniedUnix(){return new Promise(resolve=>{const c=net.connect(outsideSocket);c.on('connect',()=>{c.destroy();resolve(false);});c.on('error',e=>resolve(['EPERM','EACCES'].includes(e.code)));c.setTimeout(2000,()=>{c.destroy();resolve(false);});});}\n(async()=>{result.ownedLoopback=await connect(allowPort,true);result.otherLoopbackDenied=await connect(blockedPort,false);result.ownedUnixSocket=await unixRoundtrip();result.otherUnixSocketDenied=await deniedUnix();console.log(JSON.stringify({node:process.version,electron:process.versions.electron,uid:process.getuid(),checks:result}));process.exit(Object.values(result).every(Boolean)?0:1);})();\n",
+        "/private/tmp/loop-card-host-4rzNEV",
+        "/private/tmp/loop-card-canary-3NiHUG/fictional.txt",
+        "/private/tmp/loop-card-host-4rzNEV/outside-link",
+        "62492",
+        "62491",
+        "/private/tmp/loop-card-canary-3NiHUG/outside.sock"
+      ],
+      "cwd": "/private/tmp/loop-card-host-4rzNEV/workspace",
+      "detached": false
+    },
+    "pid": 94891,
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "{\"node\":\"v22.21.1\",\"electron\":\"37.10.3\",\"uid\":502,\"checks\":{\"outsideRead\":true,\"symlinkRead\":true,\"outsideWrite\":true,\"insideReadWrite\":true,\"inheritedChildBoundary\":true,\"ownedLoopback\":true,\"otherLoopbackDenied\":true,\"ownedUnixSocket\":true,\"otherUnixSocketDenied\":true}}\n",
+    "stderr": "[1001/221906.518450:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+    "canaryUnchanged": true,
+    "pass": true,
+    "canaryRoot": "/private/tmp/loop-card-canary-3NiHUG",
+    "sandboxPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote ip \"localhost:62492\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local ip \"localhost:62492\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local ip \"localhost:62492\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n"
+  },
+  "desktopPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+  "sandboxNesting": {
+    "kind": "distinct-policy nesting diagnostic; NOT desktop evidence",
+    "canary": "/private/tmp/loop-card-host-4rzNEV/nested-canary-d906ff69-96b6-4d9a-9d4a-f366115fcc82",
+    "innerPath": "/private/tmp/loop-card-host-4rzNEV/nested-inner-d906ff69-96b6-4d9a-9d4a-f366115fcc82.sb",
+    "startedAt": "2026-10-02T02:19:06.575Z",
+    "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+    "innerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n\n(deny file-read-data (literal \"/private/tmp/loop-card-host-4rzNEV/nested-canary-d906ff69-96b6-4d9a-9d4a-f366115fcc82\"))\n",
+    "runs": [
+      {
+        "label": "full-boundary",
+        "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+        "command": {
+          "executable": "/usr/bin/sandbox-exec",
+          "argv": [
+            "-p",
+            "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+            "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+            "-e",
+            "const cp=require('child_process');const run=cp.spawnSync('/usr/bin/sandbox-exec',['-f',\"/private/tmp/loop-card-host-4rzNEV/nested-inner-d906ff69-96b6-4d9a-9d4a-f366115fcc82.sb\",\"/Applications/WorkBuddy.app/Contents/MacOS/Electron\",'-e',\"const fs=require('fs');try{fs.readFileSync(\\\"/private/tmp/loop-card-host-4rzNEV/nested-canary-d906ff69-96b6-4d9a-9d4a-f366115fcc82\\\");console.log('INNER_DENIAL_NOT_APPLIED');process.exit(2);}catch(e){console.log(JSON.stringify({innerDenial:e.code}));process.exit(['EPERM','EACCES'].includes(e.code)?0:3);}\"],{encoding:'utf8',timeout:5000});console.log(JSON.stringify({status:run.status,signal:run.signal,error:run.error?.message,stdout:run.stdout,stderr:run.stderr}));process.exit(run.status===0?0:1);"
+          ],
+          "cwd": "/private/tmp/loop-card-host-4rzNEV",
+          "detached": false
+        },
+        "pid": 94914,
+        "code": 1,
+        "signal": null,
+        "timedOut": false,
+        "stdout": "{\"status\":71,\"signal\":null,\"stdout\":\"\",\"stderr\":\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"}\n",
+        "stderr": "[1001/221906.672256:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+        "nested": {
+          "status": 71,
+          "signal": null,
+          "stdout": "",
+          "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+        }
+      }
+    ],
+    "innerControl": {
+      "command": {
+        "executable": "/usr/bin/sandbox-exec",
+        "argv": [
+          "-f",
+          "/private/tmp/loop-card-host-4rzNEV/nested-inner-d906ff69-96b6-4d9a-9d4a-f366115fcc82.sb",
+          "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+          "-e",
+          "const fs=require('fs');try{fs.readFileSync(\"/private/tmp/loop-card-host-4rzNEV/nested-canary-d906ff69-96b6-4d9a-9d4a-f366115fcc82\");console.log('INNER_DENIAL_NOT_APPLIED');process.exit(2);}catch(e){console.log(JSON.stringify({innerDenial:e.code}));process.exit(['EPERM','EACCES'].includes(e.code)?0:3);}"
+        ],
+        "cwd": "/private/tmp/loop-card-host-4rzNEV",
+        "detached": false
+      },
+      "pid": 94913,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "stdout": "{\"innerDenial\":\"EPERM\"}\n",
+      "stderr": "[1001/221906.608364:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n"
+    },
+    "innerControlConfirmed": true,
+    "distinctPolicyNestingConfirmed": false,
+    "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED",
+    "finishedAt": "2026-10-02T02:19:06.709Z",
+    "note": "Control policies apply only to fixed fictional-canary probes. WorkBuddy desktop always retains the full outer boundary and all original Chromium protection; this diagnostic does not authorize a relaxed host launch."
+  },
+  "failure": {
+    "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED",
+    "stack": "Error: DISTINCT_NATIVE_SANDBOX_LAYER_DENIED\n    at requireSafe (file:///Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/fs-safety.mjs:5:58)\n    at requireCompatibleNesting (file:///Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/integration/preflight.mjs:10:3)\n    at file:///Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a/experiments/ecosystem-cards/integration/index.mjs:174:3\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)",
+    "phase": "native-compatibility-probed",
+    "classification": "environment-precondition",
+    "interrupted": false,
+    "originalOutputPaths": {
+      "stdout": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/desktop.stdout.log",
+      "stderr": "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e/desktop.stderr.log"
+    }
+  },
+  "cleanup": {
+    "stopped": true,
+    "processes": [],
+    "remaining": [],
+    "detachedDetected": false,
+    "reason": "DESKTOP_NOT_STARTED",
+    "diagnostics": [
+      {
+        "pid": 94891,
+        "code": 0,
+        "signal": null,
+        "timedOut": false,
+        "command": {
+          "executable": "/usr/bin/sandbox-exec",
+          "argv": [
+            "-f",
+            "/private/tmp/loop-card-host-4rzNEV/sandbox.sb",
+            "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+            "-e",
+            "\nconst fs=require('fs'),cp=require('child_process'),net=require('net');\nconst [root,canary,link,allowPort,blockedPort,outsideSocket]=process.argv.slice(1), result={};\nconst denied=operation=>{try{operation();return false;}catch(e){return ['EPERM','EACCES'].includes(e.code);}};\nresult.outsideRead=denied(()=>fs.readFileSync(canary)); result.symlinkRead=denied(()=>fs.readFileSync(link));\nresult.outsideWrite=denied(()=>fs.writeFileSync(canary,'forbidden'));\nfs.writeFileSync(root+'/inside-canary','owned');result.insideReadWrite=fs.readFileSync(root+'/inside-canary','utf8')==='owned';\nconst c=cp.spawnSync('/bin/cat',[canary],{encoding:'utf8'});result.inheritedChildBoundary=c.status!==0&&!c.stdout&&/permitted|denied/i.test(c.stderr);\nasync function connect(port,allowed){return new Promise(resolve=>{const c=net.connect({host:'127.0.0.1',port:Number(port)});let text='';c.on('data',b=>text+=b);c.on('end',()=>resolve(allowed&&text==='owned-loopback'));c.on('error',e=>resolve(!allowed&&['EPERM','EACCES'].includes(e.code)));c.setTimeout(2000,()=>{c.destroy();resolve(false);});});}\nasync function unixRoundtrip(){const path=root+'/tmp/boundary.sock',server=net.createServer(c=>c.end('owned-unix'));return new Promise(resolve=>{server.on('error',()=>resolve(false));server.listen(path,()=>{const c=net.connect(path);let text='';c.on('data',b=>text+=b);c.on('end',()=>server.close(()=>resolve(text==='owned-unix')));c.on('error',()=>server.close(()=>resolve(false)));});});}\nasync function deniedUnix(){return new Promise(resolve=>{const c=net.connect(outsideSocket);c.on('connect',()=>{c.destroy();resolve(false);});c.on('error',e=>resolve(['EPERM','EACCES'].includes(e.code)));c.setTimeout(2000,()=>{c.destroy();resolve(false);});});}\n(async()=>{result.ownedLoopback=await connect(allowPort,true);result.otherLoopbackDenied=await connect(blockedPort,false);result.ownedUnixSocket=await unixRoundtrip();result.otherUnixSocketDenied=await deniedUnix();console.log(JSON.stringify({node:process.version,electron:process.versions.electron,uid:process.getuid(),checks:result}));process.exit(Object.values(result).every(Boolean)?0:1);})();\n",
+            "/private/tmp/loop-card-host-4rzNEV",
+            "/private/tmp/loop-card-canary-3NiHUG/fictional.txt",
+            "/private/tmp/loop-card-host-4rzNEV/outside-link",
+            "62492",
+            "62491",
+            "/private/tmp/loop-card-canary-3NiHUG/outside.sock"
+          ],
+          "cwd": "/private/tmp/loop-card-host-4rzNEV/workspace",
+          "detached": false
+        },
+        "closeAwaited": true
+      },
+      {
+        "pid": 94913,
+        "code": 0,
+        "signal": null,
+        "timedOut": false,
+        "command": {
+          "executable": "/usr/bin/sandbox-exec",
+          "argv": [
+            "-f",
+            "/private/tmp/loop-card-host-4rzNEV/nested-inner-d906ff69-96b6-4d9a-9d4a-f366115fcc82.sb",
+            "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+            "-e",
+            "const fs=require('fs');try{fs.readFileSync(\"/private/tmp/loop-card-host-4rzNEV/nested-canary-d906ff69-96b6-4d9a-9d4a-f366115fcc82\");console.log('INNER_DENIAL_NOT_APPLIED');process.exit(2);}catch(e){console.log(JSON.stringify({innerDenial:e.code}));process.exit(['EPERM','EACCES'].includes(e.code)?0:3);}"
+          ],
+          "cwd": "/private/tmp/loop-card-host-4rzNEV",
+          "detached": false
+        },
+        "closeAwaited": true
+      },
+      {
+        "pid": 94914,
+        "code": 1,
+        "signal": null,
+        "timedOut": false,
+        "nested": {
+          "status": 71,
+          "signal": null,
+          "stdout": "",
+          "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+        },
+        "command": {
+          "executable": "/usr/bin/sandbox-exec",
+          "argv": [
+            "-p",
+            "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-4rzNEV\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:62490\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:62490\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-4rzNEV\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+            "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+            "-e",
+            "const cp=require('child_process');const run=cp.spawnSync('/usr/bin/sandbox-exec',['-f',\"/private/tmp/loop-card-host-4rzNEV/nested-inner-d906ff69-96b6-4d9a-9d4a-f366115fcc82.sb\",\"/Applications/WorkBuddy.app/Contents/MacOS/Electron\",'-e',\"const fs=require('fs');try{fs.readFileSync(\\\"/private/tmp/loop-card-host-4rzNEV/nested-canary-d906ff69-96b6-4d9a-9d4a-f366115fcc82\\\");console.log('INNER_DENIAL_NOT_APPLIED');process.exit(2);}catch(e){console.log(JSON.stringify({innerDenial:e.code}));process.exit(['EPERM','EACCES'].includes(e.code)?0:3);}\"],{encoding:'utf8',timeout:5000});console.log(JSON.stringify({status:run.status,signal:run.signal,error:run.error?.message,stdout:run.stdout,stderr:run.stderr}));process.exit(run.status===0?0:1);"
+          ],
+          "cwd": "/private/tmp/loop-card-host-4rzNEV",
+          "detached": false
+        },
+        "closeAwaited": true
+      }
+    ]
+  },
+  "finishedAt": "2026-10-02T02:19:06.736Z",
+  "recovery": {
+    "isolationRoot": "/private/tmp/loop-card-host-4rzNEV",
+    "ownerToken": "8531a5c4-a5df-4d90-94e0-b830a5447f96",
+    "retained": true,
+    "desktopStartAttempted": false,
+    "instruction": "保留整个隔离根和本次证据；不得删除用户资料、未知进程或未知临时目录。只按cleanup中的精确PID和启动时间核对本次进程。"
+  }
+}

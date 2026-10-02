@@ -1,0 +1,25 @@
+{"timestamp":"2026-10-01T18:03:11.847Z","level":"info","scope":"window","message":["isDev=false, ELECTRON_RENDERER_URL=(not set)"]}
+{"timestamp":"2026-10-01T18:03:11.850Z","level":"info","scope":"main","message":["[shell-env-async] Loading environment from /bin/bash"]}
+{"timestamp":"2026-10-01T18:03:11.864Z","level":"info","scope":"main","message":["[CredentialBootstrap] main bootstrap created",{"eventAtMs":1790877791864,"policy":"fields","symmetricAvailable":true,"asymmetricMaterialAvailable":true}]}
+{"timestamp":"2026-10-01T18:03:11.864Z","level":"info","scope":"main","message":["[WorkBuddy] CDP remote debugging enabled on port 57991 (http://127.0.0.1,http://localhost,http://127.0.0.1:57991,http://localhost:57991)"]}
+{"timestamp":"2026-10-01T18:03:11.864Z","level":"info","scope":"main","message":["[startup-proxy] no persisted settings; falling back to injectSystemProxyToEnv()"]}
+{"timestamp":"2026-10-01T18:03:11.864Z","level":"info","scope":"main","message":["[system-proxy] entry env: HTTP_PROXY=(unset), HTTPS_PROXY=(unset), NO_PROXY=(unset)"]}
+{"timestamp":"2026-10-01T18:03:11.877Z","level":"info","scope":"main","message":["[system-proxy] detectSystemProxy result: httpProxy=127.0.0.1:7892, bypass=[*zhihu.com,*zhimg.com,*jd.com,100ime-iat-api.xfyun.cn,*360buyimg.com,localhost,*.local,127.*,10.*,172.16.*,172.17.*,172.18.*,172.19.*,172.2*,172.30.*,172.31.*,192.168.*]"]}
+{"timestamp":"2026-10-01T18:03:11.877Z","level":"info","scope":"main","message":["[system-proxy] injected 127.0.0.1:7892 (bypass=*zhihu.com,*zhimg.com,*jd.com,100ime-iat-api.xfyun.cn,*360buyimg.com,localhost,*.local,127.*,10.*,172.16.*,172.17.*,172.18.*,172.19.*,172.2*,172.30.*,172.31.*,192.168.*)"]}
+{"timestamp":"2026-10-01T18:03:11.877Z","level":"info","scope":"main","message":["[system-proxy] post env: HTTP_PROXY=127.0.0.1:7892, HTTPS_PROXY=127.0.0.1:7892, NO_PROXY=*zhihu.com,*zhimg.com,*jd.com,100ime-iat-api.xfyun.cn,*360buyimg.com,localhost,*.local,127.*,10.*,172.16.*,172.17.*,172.18.*,172.19.*,172.2*,172.30.*,172.31.*,192.168.*"]}
+{"timestamp":"2026-10-01T18:03:11.877Z","level":"info","scope":"main","message":["[WorkBuddy] Chromium proxy will use explicit: 127.0.0.1:7892"]}
+{"timestamp":"2026-10-01T18:03:11.921Z","level":"info","scope":"firstscreen","message":["[FirstScreen] MARK A7(electron_app_configured) proc=main elapsed=71.78ms delta=69.43ms pid=40770 epoch=1790877791921"]}
+{"timestamp":"2026-10-01T18:03:11.921Z","level":"info","message":["[HostPlatform] hostArch=arm64 via=non-windows elapsed=0ms",{"processArch":"arm64","envW6432":null,"envArch":null,"envIdentifier":null,"registryParsed":null,"registryError":null}]}
+{"timestamp":"2026-10-01T18:03:11.921Z","level":"info","scope":"main","message":["[CrashTest] Debug Hub disabled in production package"]}
+{"timestamp":"2026-10-01T18:03:11.921Z","level":"info","scope":"main","message":["[ResourceMonitor] IPC registered"]}
+{"timestamp":"2026-10-01T18:03:11.924Z","level":"info","scope":"firstscreen","message":["[FirstScreen] MARK A8(single_instance_locked) proc=main elapsed=75.12ms delta=3.34ms pid=40770 epoch=1790877791924"]}
+{"timestamp":"2026-10-01T18:03:12.067Z","level":"info","scope":"main","message":["App ready, initializing..."]}
+{"timestamp":"2026-10-01T18:03:12.067Z","level":"info","scope":"firstscreen","message":["[FirstScreen] MARK A9(app_ready) proc=main elapsed=218.36ms delta=143.24ms pid=40770 epoch=1790877792067"]}
+{"timestamp":"2026-10-01T18:03:12.074Z","level":"info","scope":"main","message":["[wb-extension] scheme handler registered (default + extra partitions)"]}
+{"timestamp":"2026-10-01T18:03:12.075Z","level":"info","scope":"main","message":["[wb-extension] handler attached to partition: persist:agent-browser-preview-webview"]}
+{"timestamp":"2026-10-01T18:03:12.075Z","level":"info","scope":"main","message":["[wb-cover] scheme handler registered"]}
+{"timestamp":"2026-10-01T18:03:12.076Z","level":"info","scope":"main","message":["[early-silent-startup-update] enabled=true source=product-base"]}
+{"timestamp":"2026-10-01T18:03:12.080Z","level":"info","scope":"main","message":["[shell-env-async] Loaded 11 environment variables"]}
+{"timestamp":"2026-10-01T18:03:12.081Z","level":"info","scope":"main","message":["[shell-env-async] PATH has 12 entries"]}
+{"timestamp":"2026-10-01T18:03:12.090Z","level":"info","scope":"main","message":["[Crash] crash reports for this launch -> /private/tmp/loop-card-host-HPiR04/profile/logs/Crash-Log"]}
+{"timestamp":"2026-10-01T18:03:12.212Z","level":"info","scope":"main","message":["[WorkBuddy] session.setProxy: explicit proxy=127.0.0.1:7892"]}

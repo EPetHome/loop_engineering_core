@@ -1,0 +1,287 @@
+{
+  "attempt_id": "developer-r001-b84279cb5d8a",
+  "run_id": "promate-ecology-cards-02-20261002T020406-04362206",
+  "sourceCodeRoot": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+  "capturedAt": "2026-10-02T02:18:32.632Z",
+  "kind": "CURRENT installed host static source; NOT desktop or install evidence",
+  "authorizedReadRoot": "/Applications/WorkBuddy.app/Contents",
+  "hostVersion": "5.6.2",
+  "hostBundleVersion": "5.6.2",
+  "infoPlistSha256": "1b7aeac8793e8cd61e1975222714a0f576197a454f5085c05692f0ee6468b7e2",
+  "asarHeaderSha256": "72df4e8ec84f4058b33df8357abd5a6c0bf18c67cd1d750e8b7c35cd5d6ac21c",
+  "sources": [
+    {
+      "path": "Resources/app.asar/renderer/assets/lib-chat-ui-C7y1ZM_R.js",
+      "sha256": "ae57e8dc763ad67a82bc39979d096d58ebc0548cb3bf0f521de9c76727393c09",
+      "excerpts": [
+        {
+          "anchor": "className: \"cb-plugins-card-name\"",
+          "offset": 10700047,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: \"cb-plugins-card-name\",\n\t\t\t\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t\t\t\t}), scopeLabels.map((scopeLabel) => /* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: (0, import_classnames$3.default)(\"cb-plugins-c"
+        },
+        {
+          "anchor": "className: \"cb-plugin-detail-title\"",
+          "offset": 10680254,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "\",\n\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"h1\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-title\",\n\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t}), /* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-actions\",\n\t\t\t\t\t\tchildren: isInstalled ? /* @__PURE__ */ (0, import_jsx"
+        },
+        {
+          "anchor": "className: \"cb-plugins-header\"",
+          "offset": 10714984,
+          "offsetUnit": "UTF-16 code units",
+          "raw": ")(\"div\", {\n\t\t\tclassName: \"cb-plugins\",\n\t\t\tchildren: [\n\t\t\t\t/* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\tclassName: \"cb-plugins-header\",\n\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-plugins-header-left\",\n\t\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"h1\", {\n\t\t\t\t\t\t\tclassName: \"cb-plugins-title\",\n\t\t\t\t\t\t\tchildren: t$1(\"plugins.management\")\n\t\t\t\t\t\t}), /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"p\", {\n\t\t\t\t\t\t\tclassName: \"cb-plugins-subtitle\",\n\t\t\t\t\t\t\tchildren: t$1(\"plugins.help\", { name: productName })\n\t\t\t\t\t\t})]\n\t\t\t\t\t}), showMcpButton && /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-p"
+        },
+        {
+          "anchor": "className: \"cb-plugins-marketplace-tabs\"",
+          "offset": 10717889,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "\t!isSearchMode && /* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\tclassName: \"cb-plugins-marketplace-tabs\",\n\t\t\t\t\tchildren: [marketplaces.map((marketplace) => /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(MarketplaceTab, {\n\t\t\t\t\t\tmarketplace,\n\t\t\t\t\t\tisActive: currentMarketplace === marketplace.name || currentMarketplace === marketplace.storageName,\n\t\t\t\t\t\tisRefreshing: refreshingMarketplaces.has(marketplace.name),\n\t\t\t\t\t\tonClick: () => onMarketplaceSelect?.(marketplace),\n\t\t\t\t\t\tonDelete: () => onDeleteMarketplace?.(marketplace),\n\t\t\t\t\t\tonRefresh: () => onRefreshMarketplace?.(marketplace)\n\t\t\t\t\t}, marketplace.name)), /* @__PURE__ */ (0, import_jsx_runtime$"
+        },
+        {
+          "anchor": "className: \"cb-plugins-marketplace-add-btn\"",
+          "offset": 10718505,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "tplace.name)), /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"button\", {\n\t\t\t\t\t\tclassName: \"cb-plugins-marketplace-add-btn\",\n\t\t\t\t\t\tonClick: () => setShowAddMarketplaceModal(true),\n\t\t\t\t\t\ttitle: t$1(\"plugins.addMarketplace\"),\n\t\t\t\t\t\tchildren: /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(AddIcon, {})\n\t\t\t\t\t})]\n\t\t\t\t}),\n\t\t\t\tloading && /* @__PURE__ */ (0, import_jsx_runtime$14.jsx)(\"div\", {\n\t\t\t\t\tclassName: \"cb-plugins-loading-overlay\",\n\t\t\t\t\tchildren: /* @__PURE__ */ (0, import_jsx_runtime$14.jsxs)(\"div\", {\n\t\t\t\t\t\tclassName: "
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar/renderer/assets/plugins-xKLHRllH.js",
+      "sha256": "1beb4a72406c23354ac6256a84410952ddf59e7003703b74dbe47934c9d474d1",
+      "excerpts": [
+        {
+          "anchor": "const resolveMarketplaceId =",
+          "offset": 12560,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "const resolveMarketplaceId = (0, import_react$1.useCallback)((marketplaceName) => {\n\t\t\treturn marketplacesRef.current.find((m) => m.name === marketplaceName)?.storageName || marketplaceName;\n\t\t}, []);\n\t\tconst [allPluginsCache, setAllPluginsCache] = (0, import_react$1.useState)([]);\n\t\tconst [selectedPluginKey, setSelectedPlugin"
+        },
+        {
+          "anchor": "const loadInstalledPlugins =",
+          "offset": 13830,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "const loadInstalledPlugins = (0, import_react$1.useCallback)(async (forceRefresh = false) => {\n\t\t\ttry {\n\t\t\t\tif (adapter?.getInstalledPlugins) {\n\t\t\t\t\tconst pluginsList = (await adapter.getInstalledPlugins(forceRefresh)).map((p) => {\n\t\t\t\t\t\tconst mapScope = (scope) => {\n\t\t\t\t\t\t\tif (scope === \"local\") return \"project-local\";\n\t\t\t\t\t\t\treturn scope || \"user\";\n\t\t\t\t\t\t};\n\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\tname: p.name,\n\t\t\t\t\t\t\tmarketplaceName: p.marketplaceName || \"local\",\n\t\t\t\t\t\t\tdescription: p.description,\n\t\t\t\t\t\t\tversion: p.version,\n\t\t\t\t\t\t\tstatus: p.status,\n\t\t\t\t\t\t\tinstalledScopes: p.installedScopes?.map(mapScope) || (p.installScope ? [mapScope(p.installScope)] : [\"user\"]),\n\t\t\t\t\t\t\tinstalledScopesStatus: p.installedScopesStatus,\n\t\t\t\t\t\t\tinstalledPath: p.installedPath,\n\t\t\t\t\t\t\tsource: \"\",\n\t\t\t\t\t\t\tagents: p.agents,\n\t\t\t\t\t\t\tcommands: p.commands,\n\t\t\t\t\t\t\tskills: p.skills,\n\t\t\t\t\t\t\tmcpServers: p.mcpServers,\n\t\t\t\t\t\t\thooks: p.hooks,\n\t\t\t\t\t\t\trules: p.rules,\n\t\t\t\t\t\t\tcanRemove: p.canRemove,\n\t\t\t\t\t\t\tcanSwitchoff: p.canSwitchoff,\n\t\t\t\t\t\t\tcanEdit: p.canEdit\n\t\t\t\t\t\t};\n\t\t\t\t\t});\n\t\t\t\t\tsetInstalledPlugins(pluginsList);\n\t\t\t\t\twriteCache(CACHE_KEY_INSTALLED, pluginsList);\n\t\t\t\t\treturn pluginsList;\n\t\t\t\t}\n\t\t\t\treturn [];\n\t\t\t} catch (error) {\n\t\t\t\treturn [];\n\t\t\t}\n\t\t}, [adapter]);\n\t\t/**\n\t\t* 加载市场中的插件列表\n\t\t*\n\t\t* 入参 marketplaceName 是 UI 一直在用的展示名（也是 PluginViewConfig.marketplaceName 的值）；\n\t\t* 调用 sidecar 时翻译成稳定 ID（storageName），避免名称带空格 / 中文 / 特殊字符\n\t\t* 时被 URL 编码后下游 marketplace 查找失败。\n\t\t*/\n\t\tconst loadMarketplacePlugins = (0, import_react$1.useCallback)(async (marketplaceName, forceRefresh = false) => {\n\t\t\tif (!adapter?.getMarketp"
+        },
+        {
+          "anchor": "const loadMarketplacePlugins =",
+          "offset": 15267,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "const loadMarketplacePlugins = (0, import_react$1.useCallback)(async (marketplaceName, forceRefresh = false) => {\n\t\t\tif (!adapter?.getMarketplacePlugins) return installedPlugins;\n\t\t\ttry {\n\t\t\t\tconst currentSearchText = searchTextRef.current;\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(marketplaceName);\n\t\t\t\treturn (await adapter.getMarketplacePlugins(marketplaceId, forceRefresh, currentSearchText || void 0)).map((p) => ({\n\t\t\t\t\tname: p.name,\n\t\t\t\t\tmarketplaceName: p.marketplaceName,\n\t\t\t\t\tdescription: p.description,\n\t\t\t\t\tversion: p.version,\n\t\t\t\t\tauthor: p.author,\n\t\t\t\t\thomepage: p.homepage,\n\t\t\t\t\tstatus: mapPluginStatus(p.status),\n\t\t\t\t\tinstalledScopes: p.installedScopes,\n\t\t\t\t\tinstalledScopesStatus: p.installedScopesStatus,\n\t\t\t\t\tinstalledPath: p.installedPath,\n\t\t\t\t\thasUpdate: p.hasUpdate,\n\t\t\t\t\tsource: \"\",\n\t\t\t\t\tagents: p.agents,\n\t\t\t\t\tcommands: p.commands,\n\t\t\t\t\tskills: p.skills,\n\t\t\t\t\tmcpServers: p.mcpServers,\n\t\t\t\t\thooks: p.hooks,\n\t\t\t\t\trules: p.rules\n\t\t\t\t}));\n\t\t\t} catch (error) {\n\t\t\t\treturn [];\n\t\t\t}\n\t\t}, [adapter, installedPlugins]);\n\t\t/**\n\t\t* 加载市场插件列表（不刷新已安装列表）\n\t\t* @param marketplaceName 市场名称\n\t\t* @param showLoading 是否显示 loading 遮罩\n\t\t* @param forceRefresh 是否让后端绕过缓存强制拉取最新数据（刷新市场后必须为 true）\n\t\t*/\n\t\tconst loadMarketplacePluginsOnly = (0, import_react$1.useCallback)(async (marketplaceName, showLoading = false, forceRefresh"
+        },
+        {
+          "anchor": "adapter.installPlugins([plugin.name]",
+          "offset": 33938,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "_react$1.useCallback)(async (plugin, scope) => {\n\t\t\tif (adapter?.installPlugins) {\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(plugin.marketplaceName);\n\t\t\t\tconst result = await adapter.installPlugins([plugin.name], marketplaceId, scope === \"project-local\" ? \"project\" : scope);\n\t\t\t\tif (result.success) {\n\t\t\t\t\treportPluginAction(plugin, \"install\", scope, true);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: t(\"plugins.installSuccess\", { name: plugin.name }),\n\t\t\t\t\t\ttype: \"success\"\n\t\t\t\t\t});\n\t\t\t\t} else {\n\t\t\t\t\treportPluginAction(plugin, \"install\", scope, false);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tm"
+        },
+        {
+          "anchor": "const handleUpdate =",
+          "offset": 35385,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "const handleUpdate = (0, import_react$1.useCallback)(async (plugin) => {\n\t\t\tif (adapter?.updatePlugin) {\n\t\t\t\tconst marketplaceId = resolveMarketplaceId(plugin.marketplaceName);\n\t\t\t\tconst result = await adapter.updatePlugin(plugin.name, marketplaceId);\n\t\t\t\tif (result.success) {\n\t\t\t\t\treportPluginAction(plugin, \"update\", \"user\", true);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: t(\"plugins.updateSuccess\", { name: plugin.name }),\n\t\t\t\t\t\ttype: \"success\"\n\t\t\t\t\t});\n\t\t\t\t} else {\n\t\t\t\t\treportPluginAction(plugin, \"update\", \"user\", false);\n\t\t\t\t\ttoast({\n\t\t\t\t\t\tmessage: result.error || t(\"plugins.updateFailed\", { error: \"Unknown error\" }),\n\t\t\t\t\t\ttype: \"error\"\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t} else toast({\n\t\t"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar/preload/index.js",
+      "sha256": "c43230a9022b5807c468d46cd7196808aefceee1658219109c4be934ef9e6d40",
+      "excerpts": [
+        {
+          "anchor": "GET_INSTALLED: \"plugin:getInstalled\"",
+          "offset": 43514,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "smMin((() => {\n\tPLUGIN_RPC_CHANNELS = {\n\t\tBATCH_TOGGLE: \"plugin:batchToggle\",\n\t\tGET_INSTALLED: \"plugin:getInstalled\",\n\t\tINSTALL: \"plugin:install\",\n\t\tUNINSTALL: \"plugin:uninstall\",\n\t\tUPDATE: \"plugin:update\",\n\t\tSET_MARKETPLACE_AUTO_UPDATE: \"plugin:setMarketplaceAutoUpdate\",\n\t\tGET_MARKETPLACES: \"plugin:getMarketplaces\",\n\t\tGET_MARKETPLACE_PLUGINS: \"plugin:getMarketplacePlugins\",\n\t\tGET_DETAIL: \"plugin:getDetail\",\n\t\tADD_MARKETPLACE: \"plugin:addMarketplace\",\n\t\tREMOVE_MARKETPLACE: \"plugin:removeMarketplace\",\n\t\tREFRESH_MARKETPLACE: \"plugin:refreshMarketplace\",\n\t\tRELOAD_RUNTIME_PLUGINS: \"plugin:reloadRuntimePlugins\",\n\t\tCHANGED: \"plugin:changed\"\n\t};\n}));\n//#endregion\n//#region ../../packages/workbuddy-server/src/power/contract.ts\nvar POWER_RPC_CHANNELS;\nvar init_contract$25 = __esmMin((() => {\n\tPOWER_RPC_CHANNELS = {\n\t\t/** 旧版 boolean 通道，保留给旧 renderer。 */\n\t\tSET_POWER_SAVE_BLOCKER: \"window:setPowerSaveBlocker\",\n\t\t/** 三态模式通道，避免对象参数被旧宿主误判为 true。 */\n\t\tSET_POWER_SAVE_B"
+        },
+        {
+          "anchor": "getInstalledPlugins: invoke(PLUGIN_RPC_CHANNELS.GET_INSTALLED)",
+          "offset": 86914,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "act$26();\n\tPLUGIN_CHANNEL_MAP = {\n\t\tbatchTogglePlugins: invoke(PLUGIN_RPC_CHANNELS.BATCH_TOGGLE),\n\t\tgetInstalledPlugins: invoke(PLUGIN_RPC_CHANNELS.GET_INSTALLED),\n\t\tinstallPlugins: invoke(PLUGIN_RPC_CHANNELS.INSTALL),\n\t\tuninstallPlugin: invoke(PLUGIN_RPC_CHANNELS.UNINSTALL),\n\t\tupdatePlugin: invoke(PLUGIN_RPC_CHANNELS.UPDATE),\n\t\tgetPluginMarketplaces: invoke(PLUGIN_RPC_CHANNELS.GET_MARKETPLACES),\n\t\tgetMarketplacePlugins: invoke(PLUGIN_RPC_CHANNELS.GET_MARKETPLACE_PLUGINS),\n\t\tgetPluginDetail: invoke(PLUGIN_RPC_CHANNELS.GET_DETAIL),\n\t\taddPluginMarketplace: invoke(PLUGIN_RPC_CHANNELS.ADD_MARKETPLACE),\n\t\tremovePluginMarketplace: invoke(PLUGIN_RPC_CHANNELS.REMOVE_MARKETPLACE),\n\t\trefreshPluginMarketplace: invoke(PLUGIN_RPC_CHANNELS.REFRESH_MARKETPLACE),\n\t\treloadRuntimePlugins: invoke(PLUGIN_RPC_CHANNELS.RELOAD_RUNTIME_PLUGINS),\n\t\tsetMarketplaceAutoUpdate: invoke(PLUGIN_RPC_CHANNELS.SET_MARKETPLACE_AUTO_UPDATE),\n\t\tonPluginsChanged: listener(PLUGIN_RPC_CHANNELS.CHANGED)\n\t};\n}));\n//#endregion\n//#region ../../packages/workbuddy-server/src/plugin-recommendation/contract.ts\nvar PLUGIN_RECOMMENDATION_RPC_CHANNELS;\nvar init_contract$5 = __esmMin((() => {\n\tPLUGIN_RECOMMENDATION_RPC_CHANNELS = { \n\t/** Kept wire-compatible with existing renderer clients. */\nANSWER: \"session:answerPluginRecommendation\" };\n}))"
+        },
+        {
+          "anchor": "electron.contextBridge.exposeInMainWorld(\"__wbInvoke\", exposedWbInvoke)",
+          "offset": 398779,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "nvoke(electron.ipcRenderer);\n\texposedWbInvoke = (channel, context, ...args) => wbIpcInvoke(channel, context, ...args);\n\telectron.contextBridge.exposeInMainWorld(\"__wbInvoke\", exposedWbInvoke);\n\twbEventListeners = /* @__PURE__ */ new Map();\n\telectron.contextBridge.exposeInMainWorld(\"__wbOn\", (channel, listener) => {\n\t\tconst ipcListener = (_event, ...payload) => listener(...payload);\n\t\tif (!wbEventListeners.has(channel)) wbEventListeners.s"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar/main/server.js",
+      "sha256": "ba99f1dc4ca233d25d5cb1f68273b1c07e3fce96b151bed0f524ba5adcf1fef6",
+      "excerpts": [
+        {
+          "anchor": "function registerPluginHandlers(registry, deps)",
+          "offset": 4958976,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "function registerPluginHandlers(registry, deps) {\n\tconst pluginService = Promise.resolve(deps.pluginService);\n\tconst reporter = deps.reporter;\n\trequire_handler_registry.handleRpc(registry, \"batchTogglePlugins\", async (request) => withPluginToggleMetric(reporter, async () => (await pluginService).batchTogglePlugins(request)));\n\trequire_handler_registry.handleRpc(registry, \"getInstalledPlugins\", async (forceRefresh) => (await (await pluginService).getInstalledPlugins(forceRefresh)).filter((plugin) => !require_log_acl_guard.isConnectorPluginMarketplace(plugin.marketplaceName)));\n\tregistry.handle(\"plugin:install\", async (pluginNames, marketplaceName, installScope, marketplaceSource, workspacePath, sessionId) => {\n\t\tconst names = Array.isArray(pluginNames) ? pluginNames : [];\n\t\treturn withPluginInstallMetric(reporter, marketplaceName, installScope, names, async () => (await pluginService).installPlugins(names, marketplaceName, installScope, marketplaceSource, workspacePath, sessionId));\n\t});\n\trequire_handler_registry.handleRpc(registry, \"uninstallPlugin\", async (pluginName, marketplaceName, scope) => withPluginUninstallMetric(reporter, marketplaceName, scope, pluginName, async () => (await pluginService).uninstallPlugin(pluginName, marketplaceName, scope)));\n\trequire_handler_registry.handleRpc(registry, \"updatePlugin\", async (pluginName, marketplaceName) => (await pluginService).updatePlugin(pluginName, marketplaceName));\n\trequire_handler_registry.handleRpc(registry, \"getPluginMarketplaces\", async (forceRefresh) => (await (await pluginService).getPluginMarketplaces(forceRefresh)).filter((marketplace) => !require_log_acl_guard.isConnectorPluginMarketplace(marketplace.name)));\n\trequire_handler_registry.handleRpc(registry, \"getMarketplacePlugins\", async (marketplaceName, forceRefresh, searchText) => require_log_acl_guard.isConnectorPluginMarketplace(marketplaceName) ? [] : (await pluginService).getMarketplacePlugins(marketplaceName, forceRefresh, searchText));\n\trequire_handler_registry.handleRpc(registry, \"getPluginDetail\", async (pluginName, marketplaceName) => (await pluginService).getPluginDetail(pluginName, marketplaceName));\n\trequire_handler_registry.handleRpc(registry, \"addPluginMarketplace\", async (source, name, autoUpdate) => withPluginMarketplaceAddMetric(reporter, source, name, async () => (await pluginService).addPluginMarketplace(source, name, autoUpdate)));\n\trequire_handler_registry.handleRpc(regist"
+        },
+        {
+          "anchor": "async loadPluginList()",
+          "offset": 4601384,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async loadPluginList() {\n\t\ttry {\n\t\t\tawait this.loadManifest();\n\t\t\tif (!this.manifest || !this.manifest.plugins) return [];\n\t\t\tconst concurrency = getPositiveIntegerEnv(\"CODEBUDDY_MARKETPLACE_PLUGIN_LOAD_CONCURRENCY\", 32);\n\t\t\tconst installers = this.context.installers;\n\t\t\treturn await mapWithConcurrency(this.manifest.plugins, concurrency, async (pluginEntry) => {\n\t\t\t\ttry {\n\t\t\t\t\tlet pluginPath = \"\";\n\t\t\t\t\tfor (const installer of installers) if (installer.support(pluginEntry.source)) {\n\t\t\t\t\t\tpluginPath = await installer.isInstalled(pluginEntry, this.installLocation) || \"\";\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}\n\t\t\t\t\tconst pluginInfo = {\n\t\t\t\t\t\t...pluginEntry,\n\t\t\t\t\t\tmarketplaceName: this.storageName || this.name,\n\t\t\t\t\t\tinstalledPath: pluginPath\n\t\t\t\t\t};\n\t\t\t\t\tif (pluginPath) {\n\t\t\t\t\t\tconst pluginJsonPath = await this.findPluginManifestPath(pluginPath);\n\t\t\t\t\t\tif (pluginJsonPath) {\n\t\t\t\t\t\t\tconst pluginManifest = await import_lib.readJSON(pluginJsonPath);\n\t\t\t\t\t\t\tif (pluginManifest) Object.assign(pluginInfo, {\n\t\t\t\t\t\t\t\t...pluginManifest,\n\t\t\t\t\t\t\t\tmarketplaceName: this.storageName || this.name,\n\t\t\t\t\t\t\t\tsourcePath: pluginEntry.source,\n\t\t\t\t\t\t\t\tinstalledPath: pluginPath\n\t\t\t\t\t\t\t});\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t\treturn pluginInfo;\n\t\t\t\t} catch (error) {\n\t\t\t\t\tthis.context.logger.error(`Failed to read plugin ${pluginEntry.name}:`, error);\n\t\t\t\t\treturn {\n\t\t\t\t\t\t...pluginEntry,\n\t\t\t\t\t\tmarketplaceName: this.storageName || this.name,\n\t\t\t\t\t\tinstalledPath: \"\"\n\t\t\t\t\t};\n\t\t\t\t}\n\t\t\t});\n\t\t} catch (error) {\n\t\t\tthis.context.logger.error(`Failed to list plugins from marketplace ${this.name}:`, error);\n\t\t\treturn [];\n\t\t}\n\t}\n\tasync findPluginManifestPath(pluginPath) {\n\t\tfor (const metadataDir of PLUGINS_METADATA_DIRS) {\n\t\t\tconst pluginJsonPath = (0, path.join)(pluginPath, metadataDir, PLUGIN_MANIFEST_FILE);\n\t\t\tif (await import_lib.pathExists(pluginJsonPath)) return pluginJsonPath;\n\t\t}\n\t}\n\tclonePlugins(plugins) {\n\t\treturn plugins.map((plugin) => ({ ...plugin }));\n\t}\n};\n//#endregion\n//#region ../../packages/workbuddy-server/src/plugin/management/marketplaces/github-marketplace.ts\n/**\n* 默认的 nano-spawn 选项，用于抑制交互式 git 提示\n* nano-spawn 自动继承 process.env，只需指定额外的环境变量\n*/"
+        },
+        {
+          "anchor": "getPluginId(pluginName, marketplaceName)",
+          "offset": 4720175,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "getPluginId(pluginName, marketplaceName) {\n\t\treturn `${pluginName}@${marketplaceName}`;\n\t}\n\tgetHomePluginsDir() {\n\t\treturn this.context.paths.getHomePluginsDir();\n\t}\n\tgetInstalledPluginsRegistryPath() {\n\t\treturn path.join(this.getHomePluginsDir(), INSTALLED_PLUGINS_FILE_NAME);\n\t}\n\tgetInstalledPluginsRegistryLockName() {\n\t\treturn `${INSTALLED_PLUGINS_LOCK_NAME}-${(0, crypto$1.createHash)(\"sha256\").update(path.resolve(this.getInstalledPluginsRegistryPath())).digest(\"hex\").slice(0, 16)}`;"
+        },
+        {
+          "anchor": "async installPlugins(pluginNames, marketplaceName, options)",
+          "offset": 4812515,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async installPlugins(pluginNames, marketplaceName, options) {\n\t\tthis.assertPluginManagementAllowed(\"installPlugins\");\n\t\ttry {\n\t\t\tlet marketplace = options?.marketplace ?? await this.getMarketplace(marketplaceName);\n\t\t\tif (!marketplace) throw new MarketplaceNotReadyError(marketplaceName);\n\t\t\tmarketplace = await this.selectCurrentCommittedMarketplace(marketplace);\n\t\t\tmarketplaceName = marketplace.storageName || marketplace.name;\n\t\t\tconst rootRefs = [];\n\t\t\tfor (const pluginName of pluginNames) {\n\t\t\t\tconst pluginId = this.getPluginId(pluginName, marketplaceName);\n\t\t\t\tconst rawPluginInfo = await marketplace.getPlugin(pluginName);\n\t\t\t\tconst pluginInfo = rawPluginInfo ? this.normalizePluginMarketplace(rawPluginInfo, marketplace) : void 0;\n\t\t\t\tif (!pluginInfo) throw new Error(`Plugin ${pluginName} is not found in marketplace ${marketplaceName}.`);\n\t\t\t\trootRefs.push({\n\t\t\t\t\tpluginId,\n\t\t\t\t\tplugin: pluginInfo,\n\t\t\t\t\tmarketplace\n\t\t\t\t});\n\t\t\t}\n\t\t\tconst resolvedRootRefs = await this.resolveRequestedPluginRefs(rootRefs);\n\t\t\tconst rootPluginIds = new Set(resolvedRootRefs.map((ref) => ref.pluginId));\n\t\t\tconst priorPluginStates = await this.getEnabledPlugins();\n\t\t\tconst installScope = options?.scope || SettingsScope.USER;\n\t\t\tconst knownPlugins = new Map(resolvedRootRefs.map((ref) => [ref.pluginId, ref]));\n\t\t\tconst dependencyRefs = /* @__PURE__ */ new Map();\n\t\t\tconst installedPluginRefs = [];\n\t\t\tinstalledPluginRefs.push(...await this.installDependencyClosure(knownPlugins, marketplace, dependencyRefs, {\n\t\t\t\t...options,\n\t\t\t\tautoEnable: options?.autoEnable !== false\n\t\t\t}));\n\t\t\tconst rootsToMaterialize = resolvedRootRefs.map((ref) => knownPlugins.get(ref.pluginId) || ref);\n\t\t\tconst installedRootRefs = await this.materializePluginRefs(rootsToMaterialize, o"
+        },
+        {
+          "anchor": "async updatePlugins(pluginNames, marketplaceName, options)",
+          "offset": 4823923,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async updatePlugins(pluginNames, marketplaceName, options) {\n\t\tthis.assertPluginManagementAllowed(\"updatePlugins\");\n\t\ttry {\n\t\t\tconst pluginIds = [];\n\t\t\tconst updatedPluginInfos = [];\n\t\t\tlet marketplace = options?.marketplace ?? await this.getMarketplace(marketplaceName);\n\t\t\tif (!marketplace) throw new Error(`Marketplace ${marketplaceName} is not found.`);\n\t\t\tmarketplaceName = marketplace.storageName || marketplace.name;\n\t\t\tconst installedBeforeMarketplaceSync = await this.getInstalledPlugins();\n\t\t\tconst installedBeforeMarketplaceSyncById = new Map(installedBeforeMarketplaceSync.map((plugin) => [this.getPluginId(plugin.name, plugin.marketplaceName), plugin]));\n\t\t\tif (this.marketplaceNeedsRemoteSync(marketplace) && !options?.skipMarketplaceSync) {\n\t\t\t\tthis.logger.info(`Syncing ${marketplace.type} marketplace ${marketplaceName} from remote before plugin update...`);\n\t\t\t\ttry {\n\t\t\t\t\tmarketplace = await this.updateMarketplace(marketplaceName, {\n\t\t\t\t\t\tmarketplace,\n\t\t\t\t\t\tskipDependencyResolution: true,\n\t\t\t\t\t\tskipInstalledPluginRefresh: true\n\t\t\t\t\t});\n\t\t\t\t\tthis.logger.info(`Marketplace ${marketplaceName} synced successfully`);\n\t\t\t\t} catch (error) {\n\t\t\t\t\tconst message = error instanceof Error ? error.message : String(error);\n\t\t\t\t\tthrow new Error(`Failed to sync marketplace ${marketplaceName} before updating plugins ${pluginNames.join(\",\")}: ${message}`);\n\t\t\t\t}\n\t\t\t}\n\t\t\tmarketplace = await this.selectCurrentCommittedMarketplace(marketplace);\n\t\t\tfor (const pluginName of pluginNames) {\n\t\t\t\tconst pluginId = `${pluginName}@${marketplaceName}`;\n\t\t\t\tpluginIds.push(pluginId);\n\t\t\t\tconst installedPlugin = await this.getPlugin(pluginName, marketplaceName) ?? installedBeforeMarketplaceSyncById.get(pluginId);\n\t\t\t\tif (!installedPlugin) throw new Error(`Plugin ${pluginId} is not installed.`);\n\t\t\t\tconst pluginInfo = await marketplace.getPlugin(pluginName);\n\t\t\t\tif (!pluginInfo) throw new Error(`Plugin ${pluginName} is not found in marketplace ${marketplaceName}.`);\n\t\t\t\tconst scope = options?.scope || installedPlugin.installScope || SettingsScope.USER;\n\t\t\t\tconst rootEnabled = (await this.getEnabledPlugins())[pluginId]?.enabled ?? installedPlugin.status === PluginStatus.Enabled;\n\t\t\t\tconst requestedRootRef = {\n\t\t\t\t\tpluginId,\n\t\t\t\t\tplugin: pluginInfo,\n\t\t\t\t\tmarketplace\n\t\t\t\t};\n\t\t\t\tconst [rootRef] = await this.resolveRequestedPluginRefs([requestedRootRef]);\n\t\t\t\tconst upToDateCache = options?.force ? void 0 : await this.resolveUpToDatePluginCache(rootRef, scope, options?.workspacePath);\n\t\t\t\tif (upToDateCache) {\n\t\t\t\t\tif (rootRef.cleanupMarketplaceLocation) await import_lib.remove(rootRef.cleanupMarketplaceLocation).catch(() => void 0);\n\t\t\t\t\tthis.logger.info(`Plugin ${pluginId} is already up to date at ${upToDateCache.installPath}`);\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tconst knownPlugins = /* @__PURE__ */ new Map([[pluginId, rootRef]]);\n\t\t\t\tconst dependency"
+        },
+        {
+          "anchor": "function assertSafePluginName(name)",
+          "offset": 4397593,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "_PROPERTY_NAMES.has(value.toLowerCase())) throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);\n}\n/**\n* Plugin names used in `join(marketplaceRoot, 'plugins', name)` must be a\n* single safe identifier (same rule as Local/Git installers).\n*/\nfunction assertSafePluginName(name) {\n\tif (typeof name !== \"string\" || !PLUGIN_NAME_PATTERN.test(name)) throw new Error(`Invalid plugin name: ${JSON.stringify(name)}`);\n}\n/**\n* Resolve `segments` under `baseDir` and reject any path that escapes the root\n* (Zip Slip / `../` / absolute segments). By default the result must be a\n* strict child of `baseDir` (the root itself is not a valid install target).\n*\n* Pass `{ allowRoot: true }` for local plugin sources like `\".\"` / `\"./\"` wher"
+        },
+        {
+          "anchor": "var LocalPluginInstaller = class",
+          "offset": 4420210,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "var LocalPluginInstaller = class {\n\tconstructor(context) {\n\t\tthis.context = context;\n\t}\n\tget errorCollector() {\n\t\treturn this.context.errorCollector;\n\t}\n\t/**\n\t* 判断是否支持该插件源\n\t* 支持:\n\t* 1. 字符串类型source(视为本地相对路径)\n\t* 2. PluginSource对象且source === 'local'\n\t*/\n\tsupport(pluginSource) {\n\t\tif (typeof pluginSource === \"string\") return true;\n\t\treturn pluginSource.source === PluginSourceType.Local;\n\t}\n\t/**\n\t* 安装本地插件\n\t* 本地插件无需实际安装,只需解析路径\n\t*/\n\tasync install(pluginEntry, targetDir, onProgress) {\n\t\tconst pluginName = pluginEntry.name;\n\t\tconst pluginSource = pluginEntry.source;\n\t\tassertSafePluginName(pluginName);\n\t\tconst source = this.normalizeSource(pluginSource);\n\t\tonProgress?.(`Resolving local plugin path for ${pluginName}...`);\n\t\tif (!source.path) {\n\t\t\tthis.errorCollector.addError({\n\t\t\t\ttype: PluginErrorType.InstallFailed,\n\t\t\t\tpluginName,\n\t\t\t\tmarketplaceName: \"\",\n\t\t\t\tmessage: `Local plugin source requires a path for '${pluginName}'`,\n\t\t\t\tdetails: \"Missing path in plugin source configuration\"\n\t\t\t});\n\t\t\tthrow new Error(`Local plugin source requires a path for ${pluginName}`);\n\t\t}\n\t\tconst pluginPath = await this.resolvePluginPath(pluginName, source.path, targetDir);\n\t\tif (!await import_lib.pathExists(pluginPath)) {\n\t\t\tthis.errorCollector.addError({\n\t\t\t\ttype: PluginErrorType.InstallFailed,\n\t\t\t\tpluginName,\n\t\t\t\tmarketplaceName: \"\",\n\t\t\t\tmessage: `Local plugin path does not exist for '${pluginName}'`,\n\t\t\t\tdetails: `Path: ${pluginPath}`\n\t\t\t});\n\t\t\tthrow new Error(`Local plugin path does not exist: ${pluginPath}`);\n\t\t}\n\t\tonProgress?.(`Local plugin ${pluginName} resolved at ${pluginPath}`);\n\t\treturn pluginPath;\n\t}\n\t/**\n\t* 更新本地插件\n\t* 本地插件无需更新,直接返回路径\n\t*/\n\tasync update(pluginEntry, installedPath, onProgress) {\n\t\tconst pluginName = pluginEntry.name;\n\t\tassertSafePluginName(pluginName);\n\t\tonProgress?.(`Local plugin ${pluginName} does not require updates`);\n\t\tif (!await import_lib.pathExists(installedPath)) {\n\t\t\tonProgress?.(\"Local plugin path no longer exists, re-resolving...\");\n\t\t\treturn this.install(pluginEntry, (0, path.join)(installedPath, \"..\", \"..\"), onProgress);\n\t\t}\n\t\treturn installedPath;\n\t}\n\t/**\n\t* 检查本地插件是否已安装(已解析)\n\t*/\n\tasync isInstalled(pluginEntry, marketplaceInstalledPath) {\n\t\tassertSafePluginName(pluginEntry.name);\n\t\tconst pluginSource = pluginEntry.source;\n\t\tlet relativePath = \"\";\n\t\tif (typeof pluginSource === \"string\") relativePath = pluginSource;\n\t\telse if (pluginSource.source === PluginSourceType.Local) relativePath = pluginSource.path || \"\";\n\t\tif (!relativePath) return;\n\t\tconst pluginPath = resolveContainedPathAllowingRoot(marketplaceInstalledPath, relativePath);\n\t\tif (await import_lib.pathExists(pluginPath)) return pluginPath;\n\t}\n\t/**\n\t* 解析插件的实际路径\n\t* 支持两种路径模式:\n\t* 1. 直接指向插件根目录: targetDir/path（含 \".\" / \"./\" = 市场根本身）\n\t* 2. 指向插件的父目录: targetDir/path/pluginName\n\t*/\n\tasync resolvePluginPath(pluginName, relativePath, targetDir) {\n\t\tlet pluginPath = resolveContainedPathAllowingRoot(targetDir, relativePath);\n\t\tif (await import_lib.pathExists(pluginPath)) return pluginPath;\n\t\tpluginPath = resolveContainedPathAllowingRoot(targetDir, (0, path.join)(relativePath, pluginName));\n\t\tif (await import_lib.pathExists(pluginPath)) return pluginPath;\n\t\treturn resolveContainedPathAllowingRoot(targetDir, relativePath);\n\t}\n\t/**\n\t* 标准化插件源为PluginSource对象\n\t*/\n\tnormalizeSource(pluginSource) {\n\t\tif (typeof pluginSource === \"string\") return {\n\t\t\tsource: PluginSourceType.Local,\n\t\t\tpath: pluginSource\n\t\t};\n\t\treturn pluginSource;\n\t}\n};\n//#endregion\n//#region ../../packages/workbuddy-server/src/plugin/management/installer"
+        },
+        {
+          "anchor": "PLUGIN_NAME_PATTERN =",
+          "offset": 4396047,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "PLUGIN_NAME_PATTERN = /^[A-Za-z0-9][-A-Za-z0-9._]*$/;\nvar MAGIC_OBJECT_PROPERTY_NAMES = /* @__PURE__ */ new Set([\n\t\"__proto__\",\n\t\"prototype\",\n\t\"constructor\"\n]);\nfunction getMarketplacesRoot(homePluginsDir) {\n\treturn path."
+        },
+        {
+          "anchor": "async getInstalledPluginsForWorkspaceState(",
+          "offset": 4805350,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async getInstalledPluginsForWorkspaceState(enabledPlugins, workspacePath, expandDependencies = false) {\n\t\tconst workspaceIdentity = await resolveWorkspaceProjectIdentity(await import_lib.realpath(workspacePath));\n\t\tconst registry = await this.readInstalledPluginsRegistry();\n\t\tconst installedIdentityCache = /* @__PURE__ */ new Map();\n\t\tconst resolveInstalledRecord = async (pluginId) => {\n\t\t\tfor (const record of registry.plugins[pluginId] || []) {\n\t\t\t\tlet applies = record.scope === \"user\" || record.scope === \"managed\";\n\t\t\t\tif (!applies && (record.scope === \"project\" || record.scope === \"local\") && record.projectPath) {\n\t\t\t\t\tlet identity = installedIdentityCache.get(record.projectPath);\n\t\t\t\t\tif (!identity) {\n\t\t\t\t\t\tidentity = resolveWorkspaceProjectIdentity(path.resolve(record.projectPath), { preserveNonGitPath: true }).catch(() => void 0);\n\t\t\t\t\t\tinstalledIdentityCache.set(record.projectPath, identity);\n\t\t\t\t\t}\n\t\t\t\t\tconst installedIdentity = await identity;\n\t\t\t\t\tapplies = installedIdentity?.kind === workspaceIdentity.kind && installedIdentity.path === workspaceIdentity.path;\n\t\t\t\t}\n\t\t\t\tif (applies && await import_lib.pathExists(record.installPath)) return { ...record };\n\t\t\t}\n\t\t};\n\t\tconst plugins = /* @__PURE__ */ new Map();\n\t\tconst queue = Object.entries(enabledPlugins).filter(([pluginId]) => pluginId.includes(\"@\") && !pluginId.endsWith(\"@inline\")).map(([pluginId, state]) => ({\n\t\t\tpluginId,\n\t\t\tstate\n\t\t}));\n\t\tconst visitedPriority = /* @__PURE__ */ new Map();\n\t\twhile (queue.length > 0) {\n\t\t\tconst candidates = [];\n\t\t\tfor (const { pluginId, state } of queue.splice(0)) {\n\t\t\t\tconst separator = pluginId.indexOf(\"@\");\n\t\t\t\tif (separator <= 0 || separator === pluginId.length - 1) continue;\n\t\t\t\tconst priority = this.getSettingsScopePriority(state.scope);\n\t\t\t\tif ((visitedPriority.get(pluginId) ?? -1) >= priority) continue;\n\t\t\t\tvisitedPriority.set(pluginId, priority);\n\t\t\t\tcandidates.push({\n\t\t\t\t\tmarketplaceName: pluginId.slice(separator + 1),\n\t\t\t\t\tname: pluginId.slice(0, separator),\n\t\t\t\t\tpluginId,\n\t\t\t\t\tpriority,\n\t\t\t\t\tstate\n\t\t\t\t});\n\t\t\t}\n\t\t\tconst loaded = await mapWithConcurrencyLimit(candidates, 16, async (candidate) => {\n\t\t\t\tconst resolution = await resolveInstalledRecord(candidate.pluginId);\n\t\t\t\tconst manifest = resolution ? await this.readPluginManifest(resolution.installPath) : void 0;\n\t\t\t\treturn resolution && manifest ? {\n\t\t\t\t\tcandidate,\n\t\t\t\t\tmanifest,\n\t\t\t\t\tresolution\n\t\t\t\t} : void 0;\n\t\t\t});\n\t\t\tfor (const item of loaded) {\n\t\t\t\tif (!item) continue;\n\t\t\t\tconst { candidate, manifest, resolution } = item;\n\t\t\t\tconst plugin = {\n\t\t\t\t\t...manifest,\n\t\t\t\t\tinstalledPath: resolution.installPath,\n\t\t\t\t\tinstallScope: candidate.state.scope,\n\t\t\t\t\tmarketplaceName: candidate.marketplaceName,\n\t\t\t\t\tname: candidate.name,\n\t\t\t\t\tsource: \"\",\n\t\t\t\t\tstatus: candidate.state.enabled ? PluginStatus.Enabled : PluginStatus.Disabled,\n\t\t\t\t\tregistryInstalled: true,\n\t\t\t\t\tresolvedVersion: resolution.resolvedVersion,\n\t\t\t\t\tgitCommitSha: resolution.gitCommitSha,\n\t\t\t\t\tautoInstalled: resolution.auto\n\t\t\t\t};\n\t\t\t\tthis.mergePluginDependencies(plugin, resolution.dependencies);\n\t\t\t\tplugins.set(candidate.pluginId, plugin);\n\t\t\t\tif (!expandDependencies || !candidate.state.enabled) continue;\n\t\t\t\tlet dependencies;\n\t\t\t\ttry {\n\t\t\t\t\tdependencies = this.normalizePluginDependencies(plugin.dependencies, plugin);\n\t\t\t\t} catch (error) {\n\t\t\t\t\tthis.logger.warn(`[PluginManager] Cache-first dependency metadata is invalid for ${candidate.pluginId}: ${error}`);\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tfor (const dependency of dependencies) {\n\t\t\t\t\tconst dependencyId = this.getPluginId(dependency.name, dependency.marketplaceName);\n\t\t\t\t\tconst configured = enabledPlugins[dependencyId];\n\t\t\t\t\tconst blockedByHigherScope = configured?.enabled === false && this.getSettingsScopePriority(configured.scope) > candidate.priority;\n\t\t\t\t\tqueue.push({\n\t\t\t\t\t\tpluginId: dependencyId,\n\t\t\t\t\t\tstate: blockedByHigherScope ? configured : {\n\t\t\t\t\t\t\tenabled: true,\n\t\t\t\t\t\t\tscope: candidate.state.scope\n\t\t\t\t\t\t}\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\treturn Array.from(plugins.values());\n\t}\n\t/**\n\t* 加载已安装插件\n\t*/\n\tasync loadInstalledPlugins(generation = this.cacheGeneration) {\n\t\tconst t0 = Date.now();\n\t\tconst enabledPlugins = await this.getEnabledPlugins();\n\t\tconst installedPlugins = await this.getInstalledPluginsForWorkspaceState(enabledPlugins, this.context.paths.getWorkDir(), true);\n\t\tthis.applyDependencyRuntimeGuards(installedPlugins);\n\t\tif (generation !== this.cacheGeneration) {\n\t\t\tthis.logger.debug(`[PluginManager] Discarding stale cache-first Plugin load generation=${generation}, current=${this.cacheGeneration}`);\n\t\t\treturn;\n\t\t}\n\t\tthis.installedPluginsCache = installedPlugins;\n\t\tthis.logger.info(`Loaded ${installedPlugins.length} installed Plugins from the installed registry in ${Date.now() - t0}ms`);\n\t}\n\tapplyDependencyRuntimeGuards(installedPlugins) {\n\t\tconst installedById = new Map(installedPlugin"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar/main/code-cache.js",
+      "sha256": "a5dc228e5b83e14d443045c5dfe032f906fac64e069495b5108e9c71e1517f36",
+      "excerpts": [
+        {
+          "anchor": "function resolveWorkbuddyConfigDir()",
+          "offset": 3228663,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "function resolveWorkbuddyConfigDir() {\n\tconst envDir = process.env.WORKBUDDY_CONFIG_DIR?.trim() || process.env.CODEBUDDY_CONFIG_DIR?.trim();\n\tif (envDir) return envDir;\n\treturn path.join(os.homedir(), resolveWorkbuddyDataFolderName());\n}\nfunction resolveAccProductConfigCachePath() {\n\treturn path.join(resolveWorkbuddyConfigDir(), \"cache\", \"acc-product-config-v3.json\");\n}\nfunction read"
+        },
+        {
+          "anchor": "function getWorkbuddyUserDataDir()",
+          "offset": 3248220,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "function getWorkbuddyUserDataDir() {\n\treturn process.env.WORKBUDDY_USER_DATA_DIR?.trim() || path.join(getWorkbuddyConfigDir(), \"app\");\n}\n/**\n* 安装目录（含可执行文件的目录）。\n* - 生产模式：返回 {安装目录}/（如 C:\\Program Files\\WorkBuddy）\n* - dev 模式：返回项目里 electron 二进制所在目录\n* - 支持环境变量 WORKBUDDY_INSTALL_DIR 覆盖（方便企业"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar/main/index.js",
+      "sha256": "586ef7f83fbe34834ff5c4de899c7f0647100643c4dded89d49556c8690d55e7",
+      "excerpts": [
+        {
+          "anchor": "function createSecureWebPreferences(kind, options = {})",
+          "offset": 1458492,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "function createSecureWebPreferences(kind, options = {}) {\n\tswitch (kind) {\n\t\tcase \"main\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: true,\n\t\t\tnodeIntegration: false,\n\t\t\tnodeIntegrationInSubFrames: true,\n\t\t\twebviewTag: true\n\t\t};\n\t\tcase \"first-party-window\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: true,\n\t\t\tnodeIntegration: false,\n\t\t\tbackgroundThrottling: false\n\t\t};\n\t\tcase \"guest-popup\": return {\n\t\t\tsandbox: true,\n\t\t\tcontextIsolation: true,\n\t\t\tnodeIntegration: false\n\t\t};\n\t\tcase \"image-decoder\":\n\t\t\tif (!options.partition) throw new Error(\"[SecureWebPreferences] image-decoder kind requires options.partition\");\n\t\t\treturn {\n\t\t\t\tpartition: options.partition,\n\t\t\t\twebSecurity: false,\n\t\t\t\tnodeIntegration: false,\n\t\t\t\tcontextIsolation: true,\n\t\t\t\tsandbox: false,\n\t\t\t\tbackgroundThrottling: false\n\t\t\t};\n\t\tcase \"splash\": return {\n\t\t\tpreload: options.preload,\n\t\t\tcontextIsolation: true,\n\t\t\tsandbox: false,\n\t\t\tnodeIntegration: false\n\t\t};\n\t\tcase \"no-preload-guest\": return {\n\t\t\tsandbox: true,\n\t\t\tcontextIsolation: true,\n\t\t\tnodeIntegration: false\n\t\t};\n\t}\n}\n//#endregion\n//#region src/main/window/url-classifiers.ts\n/**\n* URL 分类判定 —— 纯函数集合，用于 guest webview 导航拦截与外链外抛决策。\n*\n* 覆盖场景：\n* - CodeBuddy OAuth 回跳链路（Lexiang OL / tdocs-app）\n* - 腾讯文档个人版导入 webview（persist:tdoc-import）的登录链路（QQ 登录 / 微信扫码 / QQ 互联）\n* - 腾讯文档同文档刷新识别（避免整页 reload 被误判外链）\n* - 企微 AIBot 授权弹窗（`https://work.weixin.qq.com/ai/qc/*` 留应用内，同 "
+        },
+        {
+          "anchor": "function applyCliCommandLineSwitches(deps)",
+          "offset": 2114117,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "function applyCliCommandLineSwitches(deps) {\n\tconst isPackagedRuntime = syncWorkbuddyPackagedRuntimeEnv(electron.app);\n\tif (process.platform === \"win32\") {\n\t\telectron.app.commandLine.appendSwitch(\"no-sandbox\");\n\t\tdeps.startupLog(\"Chromium sandbox disabled (Windows)\");\n\t}\n\tconst cdpPort = process.env.WORKBUDDY_REMOTE_DEBUGGING_PORT;\n\tif (cdpPort && /^\\d+$/.test(cdpPort)) {\n\t\tconst cdpAllowedOrigins = [\n\t\t\t\"http://127.0.0.1\",\n\t\t\t\"http://localhost\",\n\t\t\t`http://127.0.0.1:${cdpPort}`,\n\t\t\t`http://localhost:${cdpPort}`\n\t\t].join(\",\");\n\t\telectron.app.commandLine.appendSwitch(\"remote-debugging-port\", cdpPort);\n\t\telectron.app.commandLine.appendSwitch(\"remote-allow-origins\", cdpAllowedOrigins);\n\t\tdeps.logInfo(`[WorkBuddy] CDP remote debugging enabled on port ${cdpPort} (${cdpAllowedOrigins})`);\n\t}\n\tif (!isPackagedRuntime && deps.isDebugMode) electron.app.commandLine.appendSwitch(\"ignore-certificate-errors\");\n}\n//#endregion\n//#region src/main/system/cleanup/win32-fallback-env-normalizer.ts\nvar FALLBACK_CONFIG_ENV = \"WORKBUDDY_STALE_FALLBACK_CONFIG_DIR\";\nfunction normalizePathForCompare(value) {\n\treturn path.resolve(value).replace(/\\\\/g, \"/\").toLowerCase();\n}\nfunction isProgramDataFallba"
+        },
+        {
+          "anchor": "function runEarlyPreflightAndMaybeBail()",
+          "offset": 2110266,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "function runEarlyPreflightAndMaybeBail() {\n\tif (process.env.WB_E2E_DISABLE_STARTUP_REPAIR === \"true\") return \"platform-skip\";\n\tif (process.platform === \"win32\") return runEarlyPreflightAndMaybeBailWin32();\n\tif (process.platform !== \"darwin\") return \"platform-skip\";\n\ttry {\n\t\tconst helperPath = findHelperBinary();\n\t\tif (!helperPath) {\n\t\t\trequire_log_acl_guard.logger_default.info(\"[StartupRepair] early preflight: helper not found, skip\");\n\t\t\treturn \"no-helper\";\n\t\t}\n\t\tconst child = (0, node_child_process.spawn)(helperPath, [\"--preflight-only\"], {\n\t\t\tdetached: true,\n\t\t\tstdio: \"ignore\",\n\t\t\tcwd: \"/\",\n\t\t\tenv: {\n\t\t\t\tPATH: \"/usr/bin:/bin:/usr/sbin:/sbin\",\n\t\t\t\tHOME: process.env.HOME ?? \"\",\n\t\t\t\tUSER: process.env.USER ?? \"\",\n\t\t\t\tLANG: process.env.LANG ?? \"en_US.UTF-8\",\n\t\t\t\t__WB_REPAIR_INVOKED_FROM: \"time-a-pre-lock\",\n\t\t\t\t...process.env.WORKBUDDY_CONFIG_DIR ? { WORKBUDDY_CONFIG_DIR: process.env.WORKBUDDY_CONFIG_DIR } : {},\n\t\t\t\t...process.env.WORKBUDDY_APP_NAME ? { WORKBUDDY_APP_NAME: process.env.WORKBUDDY_APP_NAME } : {},\n\t\t\t\t...process.env.WORKBUDDY_APPLICATION_NAME ? { WORKBUDDY_APPLICATION_NAME: process.env.WORKBUDDY_APPLICATION_NAME } : {}\n\t\t\t}\n\t\t});\n\t\tchild.unref();\n\t\trequire_log_acl_guard.logger_default.info(\"[StartupRepair] early preflight: spawned --preflight-only\", {\n\t\t\thelperPath,\n\t\t\tpid: child.pid\n\t\t});\n\t\treturn \"spawned\";\n\t} catch (e) {\n\t\trequire_log_acl_guard.logger_default.warn(\"[StartupRepair] early preflight spawn failed (non-fatal, fall through to normal startup)\", e);\n\t\treturn \"spawn-failed\";\n\t}\n}\n/**\n* 时机 A (W"
+        },
+        {
+          "anchor": "WORKBUDDY_CONFIG_DIR: platform.configDir",
+          "offset": 1052343,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "entialProtectionPolicy,\n\t\tWORKBUDDY_APP_NAME: require_code_cache.getWorkbuddyAppName(),\n\t\tWORKBUDDY_APP_PATH: platform.appRootPath,\n\t\tWORKBUDDY_APP_VERSION: platform.appVersion,\n\t\tWORKBUDDY_CONFIG_DIR: platform.configDir,\n\t\t[require_code_cache.WORKBUDDY_PROCESS_ROLE_ENV]: require_code_cache.WORKBUDDY_DAEMON_ROLE_VALUE,\n\t\tWORKBUDDY_IS_PACKAGED: platform.isPackaged ? \"1\" : \"0\",\n\t\tWORKBUDDY_LOCALE: platform.appLocale(),\n\t\tWORKBUDDY_MENU_LOCALE: menuLocale,\n\t\tWORKBUDDY_PROMPT_TEMPLATES_DIR: promptTemplatesDir,\n\t\tWORKBUDDY_PRODUCT_NAME: productName,\n\t\tWORKBUDDY_RESOURCES_PATH: platform.resourcesPath,\n\t\tWORKBUDDY_USER_DATA_DIR: platform.dataDir,\n\t\t...legacyLocalStorageMigrationResultPath ? { WORKBUDDY_LEGACY_LOCALSTORAGE_MIGRATION_RESULT_PATH: legacyLocalStorageMigrationResultPath } : {},\n\t\t...qimei36 ? { CODEBUDDY_QIMEI36: qimei36 } : {}\n\t};\n}\n/**\n* daemon 崩溃恢复回调：DaemonAppServerProcessManager 会按\n* `onCrash → onR"
+        },
+        {
+          "anchor": "const gotTheLock = electron.app.requestSingleInstanceLock();",
+          "offset": 2166194,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "returns 是否拿到锁；false 时调用方需 return 中断 main() 后续装配\n\t*/\n\tacquireSingletonLock() {\n\t\tconst gotTheLock = electron.app.requestSingleInstanceLock();\n\t\tthis.startupLog(`Phase: single instance lock, gotTheLock=${gotTheLock}`);\n\t\tmarkStartup(\"A8\");\n\t\tif (!gotTheLock) {\n\t\t\tthis.startupLog(\"SingletonLock failed: another instance running or userData dir inaccessible (preflight already handled)\");\n\t\t\tthis.startupLog(\"EXITING: SingletonLock not acquire"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs",
+      "sha256": "b340564b2410d99846397776a25fd99e11d86647a7c219ad06fedc441e364ddd",
+      "excerpts": [
+        {
+          "anchor": "getPluginId(ei,ea){return`${ei}@${ea}`}",
+          "offset": 5931723,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "getPluginId(ei,ea){return`${ei}@${ea}`}getHomePluginsDir(){return tK.PathUtils.getHomePluginsDir()}getInstalledPluginsRegistryPath(){return tz.join(this.getHomePluginsDir(),tD.Tn)}getInstalledPluginsRegistryLockName(){let ei=(0,rj.createHash)(\"sha256\").update(tz.resolve(this.getInstalledPluginsRegistryPath())).digest(\"hex\").slice(0,16);return`${iM}-${ei}`}getMarketplaceMutationLockName(ei){let ea=(0,rj.createHash)(\"sha256\").update(`${t"
+        },
+        {
+          "anchor": "async loadPluginList(){",
+          "offset": 5783414,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async loadPluginList(){try{if(await this.loadManifest(),!this.manifest||!this.manifest.plugins)return[];let ei=(0,tX.l)(\"CODEBUDDY_MARKETPLACE_PLUGIN_LOAD_CONCURRENCY\",32),ea=tH.ContainerUtil.getAll(tD.I2);return await (0,tX.W)(this.manifest.plugins,ei,async ei=>{try{let es=\"\";for(let el of ea)if(el.support(ei.source)){es=await el.isInstalled(ei,this.installLocation)||\"\";break}let el={...ei,marketplaceName:this.storageName||this.name,installedPath:es};if(es){let ea=await this.findPluginManifestPath(es);if(ea){let ec=await tG.readJSON(ea);ec&&Object.assign(el,{...ec,marketplaceName:this.storageName||this.name,sourcePath:ei.source,installedPath:es})}}return el}catch(ea){return tH.ContainerUtil.get(tq.Logger).error(`Failed to read plugin ${ei.name}:`,ea),{...ei,marketplaceName:this.storageName||this.name,installedPath:\"\"}}})}catch(ei){return tH.ContainerUtil.get(tq.Logger).error(`Failed to list plugins from marketplace ${this.name}:`,ei),[]}}async findPluginManifestPath(ei){for(let ea of tD.iJ){let es=(0,tz.join)(ei,ea,tD.po);if(await tG.pathExists(es))return es}}clonePlugins(ei){return ei.map(ei=>({...ei}))}};t0=directory_marketplace_decorate([(0,tH.Component)({id:t0,scope:tH.Scope.Transient})],t0);var t1=es(93590),github_marketplace_decorate=function(ei,ea,es,el){var ec,eu=arguments.length,ed=eu<3?ea:null===el?el=Object.getOwnPropertyDescriptor(ea,es):el;if(\"object\"==typeof Reflect&&\"function\"==typeof Reflect.decorate)ed=Reflect.decorate(ei,ea,es,el);else for(var ep=ei.length-1;ep>=0;ep--)(ec=ei[ep]"
+        },
+        {
+          "anchor": "let tJ=/^[A-Za-z0-9][-A-Za-z0-9._]*$/",
+          "offset": 5775024,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "let tJ=/^[A-Za-z0-9][-A-Za-z0-9._]*$/,tY=new Set([\"__proto__\",\"prototype\",\"constructor\"]);function getMarketplacesRoot(ei){return tz.join(ei??tK.PathUtils.getHomePluginsDir(),tD.bh)}function isPathContainedInRoot(ei,ea,es=!1){let el=tz.relative(ei,ea);return el?\"..\"!==el&&!el.startsWith(`..${tz.sep}`)&&!tz.isAbsolute(el):es}function assertSafePathSegment(ei,ea=\"marketplace name\"){if(\"string\"!=typeof ei||!ei||ei!==ei.trim()||\".\"===ei||\"..\"===ei||ei.includes(\"/\")||ei.includes(\"\\\\\")||ei.includes(\"\\0\")||ei.includes(\":\")||tz.isAbsolute(ei)||tz.basename(ei)!==ei||tz.normalize(ei)!==ei||tY.has(ei.toLowerCase()))throw Error(`Invalid ${ea}: ${JSON.stringify(ei)}`)}function assertSafePluginName(ei){if(\"string\"!=typeof ei||!tJ.test(ei))throw Error(`Invalid plugin name: ${JSON.stringify(ei)}`)}function resolveContainedPath(ei,...ea){return resolvePathUnderRoot(ei,ea,!1)}function resolveContainedPathAllowingRoot(ei,...ea){return resolvePathUnderRoot(ei,ea,!0)}function resolvePathUnderRoot(ei,ea,es){let el=tz.resolve(ei),ec=tz.resolve("
+        },
+        {
+          "anchor": "let i3=class{support(ei){return\"string\"==typeof ei||ei.source===tD.R7.Local}",
+          "offset": 6096753,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "let i3=class{support(ei){return\"string\"==typeof ei||ei.source===tD.R7.Local}async install(ei,ea,es){let el=ei.name,ec=ei.source;assertSafePluginName(el);let eu=this.normalizeSource(ec);if(es?.(`Resolving local plugin path for ${el}...`),!eu.path)throw this.errorCollector.addError({type:tD.mq.InstallFailed,pluginName:el,marketplaceName:\"\",message:`Local plugin source requires a path for '${el}'`,details:\"Missing path in plugin source configuration\"}),Error(`Local plugin source requires a path for ${el}`);let ed=await this.resolvePluginPath(el,eu.path,ea);if(!await tG.pathExists(ed))throw this.errorCollector.addError({type:tD.mq.InstallFailed,pluginName:el,marketplaceName:\"\",message:`Local plugin path does not exist for '${el}'`,details:`Path: ${ed}`}),Error(`Local plugin path does not exist: ${ed}`);return es?.(`Local plugin ${el} resolved at ${ed}`),ed}async update(ei,ea,es){let el=ei.name;return(assertSafePluginName(el),es?.(`Local plugin ${el} does not require updates`),await tG.pathExists(ea))?ea:(es?.(\"Local plugin path no longer exists, re-resolving...\"),this.install(ei,(0,tz.join)(ea,\"..\",\"..\"),es))}async isInstalled(ei,ea){assertSafePluginName(ei.name);let es=ei.source,el=\"\";if(\"string\"==typeof es?el=es:es.source===tD.R7.Local&&(el=es.path||\"\"),!el)return;let ec=resolveContainedPathAllowingRoot(ea,el);if(await tG.pathExists(ec))return ec}async resolvePluginPath(ei,ea,es){let el=resolveContainedPathAllowingRoot(es,ea);return await tG.pathExists(el)||(el=resolveContainedPathAllowingRoot(es,(0,tz.join)(ea,ei)),await tG.pathExists(el))?el:resolveContainedPathAllowingRoot(es,ea)}normalizeSource(ei){return\"string\"==typeof ei?{source:tD.R7.Local,path:ei}:ei}};local_plugin_installer_decorate([(0,tH.Autowired)(tD.nQ),local_plugin_installer_metadata(\"design:type\",\"function\"==typeof(tA=void 0!==tD.nQ&&tD.nQ)?tA:Object)],i3.prototype,\"errorCollector\",void 0),i3=local_plugin_installer_decorate([(0,tH.Component)(tD.I2)],i3);var git_plugin_installer_decorate=function(ei,ea,es,el){var ec,eu=arguments.length,ed=eu<3?ea:null===el?el=Object.getOwnPropertyDescriptor(ea,es):el;if(\"object\"==typeof Reflect&&\"function\"==typeof Reflect.decorate)ed=Reflect.decorate(ei,ea,es,el);else for(var ep=ei.length-1;ep>=0;ep--)(ec=ei[ep])&&(ed=(eu<3?ec(ed):eu>3?ec(ea,es,ed):ec(ea,es))||ed);return eu>3&&ed&&Object.defineProperty(ea,es,ed),ed},git_plugin_installer_m"
+        },
+        {
+          "anchor": "async installPlugins(ei,ea,es)",
+          "offset": 5990278,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async installPlugins(ei,ea,es){this.assertPluginManagementAllowed(\"installPlugins\");try{let el=es?.marketplace??await this.getMarketplace(ea);if(!el)throw new tD.gw(ea);ea=(el=await this.selectCurrentCommittedMarketplace(el)).storageName||el.name;let ec=[];for(let es of ei){let ei=this.getPluginId(es,ea),eu=await el.getPlugin(es),ed=eu?this.normalizePluginMarketplace(eu,el):void 0;if(!ed)throw Error(`Plugin ${es} is not found in marketplace ${ea}.`);ec.push({pluginId:ei,plugin:ed,marketplace:el})}let eu=await this.resolveRequestedPluginRefs(ec),ed=new Set(eu.map(ei=>ei.pluginId)),ep=await this.getEnabledPlugins(),eh=es?.scope||rb.I7.USER,ef=new Map(eu.map(ei=>[ei.pluginId,ei])),em=new Map,eg=[];eg.push(...await this.installDependencyClosure(ef,el,em,{...es,autoEnable:es?.autoEnable!==!1}));let ey=eu.map(ei=>ef.get(ei.pluginId)||ei),e_=await this.materializePluginRefs(ey,es);for(let ei of e_)ef.set(ei.pluginId,ei),eg.push(ei);eg.push(...await this.installDependencyClosure(ef,el,em,{...es,autoEnable:es?.autoEnable!==!1}));let ev=Array.from(em.keys()).filter(ei=>!ed.has(ei)),eb=[...ev,...Array.from(ed)],ew=new Map(e_.map(ei=>[ei.pluginId,es?.preserveExistingEnabledState&&void 0!==ep[ei.pluginId]?ep[ei.pluginId].enabled:es?.autoEnable!==void 0?es.autoEnable:ep[ei.pluginId]?.enabled??!1!==ei.plugin.defaultEnabled])),eS=new Set;for(let ei of e_)if(ew.get(ei.pluginId))for(let ea of this.collectKnownDependencyIds(e"
+        },
+        {
+          "anchor": "async updatePlugins(ei,ea,es)",
+          "offset": 5996695,
+          "offsetUnit": "UTF-16 code units",
+          "raw": "async updatePlugins(ei,ea,es){this.assertPluginManagementAllowed(\"updatePlugins\");try{let el=[],ec=[],eu=es?.marketplace??await this.getMarketplace(ea);if(!eu)throw Error(`Marketplace ${ea} is not found.`);ea=eu.storageName||eu.name;let ed=await this.getInstalledPlugins(),ep=new Map(ed.map(ei=>[this.getPluginId(ei.name,ei.marketplaceName),ei]));if(this.marketplaceNeedsRemoteSync(eu)&&!es?.skipMarketplaceSync){this.logger.info(`Syncing ${eu.type} marketplace ${ea} from remote before plugin update...`);try{eu=await this.updateMarketplace(ea,{marketplace:eu,skipDependencyResolution:!0,skipInstalledPluginRefresh:!0}),this.logger.info(`Marketplace ${ea} synced successfully`)}catch(el){let es=el instanceof Error?el.message:String(el);throw Error(`Failed to sync marketplace ${ea} before updating plugins ${ei.join(\",\")}: ${es}`)}}for(let ed of(eu=await this.selectCurrentCommittedMarketplace(eu),ei)){let ei=`${ed}@${ea}`;el.push(ei);let eh=await this.getPlugin(ed,ea)??ep.get(ei);if(!eh)throw Error(`Plugin ${ei} is not installed.`);let ef=await eu.getPlugin(ed);if(!ef)throw Error(`Plugin ${ed} is not found in marketplace ${ea}.`);let em=es?.scope||eh.installScope||rb.I7.USER,eg=(await this.getEnabledPlugins())[ei],ey=eg?.enabled??eh.status===tD.u8.Enabled,e_={pluginId:ei,plugin:ef,marketplace:eu},[ev]=await this.resolveRequestedPluginRefs([e_]),eb=es?.force?void 0:await this.resolveUpToDatePluginCache(ev,em,es?.workspacePath);if(eb){ev.cleanupMarketplaceLocation&&await tG.remove(ev.cleanupMarketplaceLocation).catch(()=>void 0),this.logger.info(`Plugin ${ei} is already up to date at ${eb.installPath}`);continue}let ew=new Map([[ei,ev]]),eS={...es,autoEnable:ey,scope:em};await this.installDependencyClosure(ew,eu,new Map,eS),this.logger.info(`Updating plugin ${ei}...`);let[eE]=await this.materializePluginRefs([ew.get(ei)||ev],{...es,refreshMutableIdentity:!0,autoEnable:ey,autoInstalled:eh.autoInstalled,scope:em}),eT=eE.plugin.installedPath,ek={...eE.plugin,installScope:em};ew.set(ei,{...eE,plugin:ek}),await this.installDependencyClosure(ew,eu,new Map,eS),ec.push({plugin:ek,scope:em}),this.logger.info(`Plu"
+        }
+      ]
+    }
+  ],
+  "observed": {
+    "panelDisplayNameOccurrences": 0,
+    "cardAndDetailTitleUseName": true,
+    "installedAndMarketplacePanelCopyNameVerbatim": true,
+    "nativeIdUsesNameAtMarket": true,
+    "updateUsesSameNameAtMarket": true,
+    "displayNameHonoredOnInspectedPanelPath": false,
+    "localNamePattern": "^[A-Za-z0-9][-A-Za-z0-9._]*$",
+    "originalChineseProbe": {
+      "name": "Loop 空壳卡片",
+      "acceptedByLocalNamePattern": false
+    },
+    "localInstallerChecksNameOnInstallAndIsInstalled": true,
+    "mainWindowNativeProtectionConfigured": true,
+    "macOSDoesNotUseWindowsNoSandboxBranch": true
+  },
+  "unknown": [
+    "真实窗口、市场可见、中文卡片安装及同身份升级尚须本轮隔离桌面验证。",
+    "尚无已证实的显示名称与插件安装键分离接法；改名保持身份本轮待定。",
+    "目录源直接以中文 name 接入已检查的 LocalPluginInstaller 会遇到 ASCII 名称校验；未执行安装验证，不据此断言所有其它原生接法不可能。"
+  ]
+}

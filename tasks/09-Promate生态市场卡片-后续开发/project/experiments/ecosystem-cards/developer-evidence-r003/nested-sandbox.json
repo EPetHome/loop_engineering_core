@@ -1,0 +1,83 @@
+{
+  "boundary": {
+    "pid": 40431,
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "{\"node\":\"v22.21.1\",\"electron\":\"37.10.3\",\"uid\":502,\"checks\":{\"outsideRead\":true,\"symlinkRead\":true,\"outsideWrite\":true,\"insideReadWrite\":true,\"inheritedChildBoundary\":true,\"ownedLoopback\":true,\"otherLoopbackDenied\":true,\"ownedUnixSocket\":true,\"otherUnixSocketDenied\":true}}\n",
+    "stderr": "[1001/140201.252896:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+    "canaryUnchanged": true,
+    "pass": true,
+    "canaryRoot": "/private/tmp/loop-card-canary-bcolpA",
+    "sandboxPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57918\")) (require-not (remote ip \"localhost:57920\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57918\")) (require-not (local ip \"localhost:57920\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57918\")) (require-not (local ip \"localhost:57920\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n"
+  },
+  "kind": "distinct-policy nesting diagnostic; NOT desktop evidence",
+  "canary": "/private/tmp/loop-card-host-0QWzbK/nested-canary-395c15e9-de2b-4227-a872-f2b77798aad5",
+  "innerPath": "/private/tmp/loop-card-host-0QWzbK/nested-inner-395c15e9-de2b-4227-a872-f2b77798aad5.sb",
+  "startedAt": "2026-10-01T18:02:01.425Z",
+  "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57918\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+  "innerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57918\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n\n(deny file-read-data (literal \"/private/tmp/loop-card-host-0QWzbK/nested-canary-395c15e9-de2b-4227-a872-f2b77798aad5\"))\n",
+  "runs": [
+    {
+      "label": "full-boundary",
+      "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57918\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+      "pid": 40437,
+      "code": 1,
+      "signal": null,
+      "timedOut": false,
+      "stdout": "{\"status\":71,\"signal\":null,\"stdout\":\"\",\"stderr\":\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"}\n",
+      "stderr": "[1001/140201.529611:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+      "nested": {
+        "status": 71,
+        "signal": null,
+        "stdout": "",
+        "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+      }
+    },
+    {
+      "label": "without-process-info-control",
+      "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-0QWzbK\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57918\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57918\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-0QWzbK\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n\n",
+      "pid": 40439,
+      "code": 1,
+      "signal": null,
+      "timedOut": false,
+      "stdout": "{\"status\":71,\"signal\":null,\"stdout\":\"\",\"stderr\":\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"}\n",
+      "stderr": "[1001/140201.602361:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+      "nested": {
+        "status": 71,
+        "signal": null,
+        "stdout": "",
+        "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+      }
+    },
+    {
+      "label": "default-only-control",
+      "outerPolicy": "(version 1)\n(allow default)\n",
+      "pid": 40441,
+      "code": 1,
+      "signal": null,
+      "timedOut": false,
+      "stdout": "{\"status\":71,\"signal\":null,\"stdout\":\"\",\"stderr\":\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"}\n",
+      "stderr": "",
+      "nested": {
+        "status": 71,
+        "signal": null,
+        "stdout": "",
+        "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+      }
+    }
+  ],
+  "innerControl": {
+    "pid": 40436,
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "{\"innerDenial\":\"EPERM\"}\n",
+    "stderr": "[1001/140201.462848:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n"
+  },
+  "innerControlConfirmed": true,
+  "distinctPolicyNestingConfirmed": false,
+  "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED",
+  "finishedAt": "2026-10-01T18:02:01.713Z",
+  "note": "Control policies apply only to fixed fictional-canary probes. WorkBuddy desktop always retains the full outer boundary and all original Chromium protection; this diagnostic does not authorize a relaxed host launch."
+}

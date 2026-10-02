@@ -1,0 +1,24 @@
+[2026-10-01T18:03:11.848Z] [+4ms] === Process started === pid=40770 argv=["/Applications/WorkBuddy.app/Contents/MacOS/Electron","--user-data-dir=/private/tmp/loop-card-host-HPiR04/user-data"]
+[2026-10-01T18:03:11.848Z] [+4ms] platform=darwin arch=arm64 node=v22.21.1 execPath=/Applications/WorkBuddy.app/Contents/MacOS/Electron
+[2026-10-01T18:03:11.848Z] [+4ms] cwd=/private/tmp/loop-card-host-HPiR04/workspace resourcesPath=/Applications/WorkBuddy.app/Contents/Resources
+[2026-10-01T18:03:11.848Z] [+4ms] env.APPDATA=N/A env.USERPROFILE=N/A
+[2026-10-01T18:03:11.848Z] [+4ms] Phase: all imports completed OK
+[2026-10-01T18:03:11.850Z] [+6ms] Phase: [CodeCache] enabled {"processName":"main","status":"enabled","statusRaw":1,"dir":"/private/tmp/loop-card-host-HPiR04/user-data/CodeCache/5.6.2_13.8.258.32-electron.0/main","appVersion":"5.6.2","v8Version":"13.8.258.32-electron.0","nodeVersion":"22.21.1","versionKey":"5.6.2_13.8.258.32-electron.0","elapsedMs":0,"resolvedDirectory":"/private/tmp/loop-card-host-HPiR04/user-data/CodeCache/5.6.2_13.8.258.32-electron.0/main"}
+[2026-10-01T18:03:11.851Z] [+7ms] Phase: electron-log initialized, logFilePath=/private/tmp/loop-card-host-HPiR04/profile/logs/main.log
+[2026-10-01T18:03:11.864Z] [+20ms] Phase: credential protection ready
+[2026-10-01T18:03:11.877Z] [+33ms] Phase: WORKBUDDY_DISABLE_SYSTEM_CA=1 auto-set (darwin=25 arm64, #62883 keychain crash workaround)
+[2026-10-01T18:03:11.921Z] [+77ms] Phase: configureElectronApp done
+[2026-10-01T18:03:11.921Z] [+77ms] host platform detected: hostArch=arm64 via=non-windows cost=0ms
+[2026-10-01T18:03:11.923Z] [+79ms] Phase: early preflight outcome=platform-skip
+[2026-10-01T18:03:11.924Z] [+80ms] Phase: single instance lock, gotTheLock=true
+[2026-10-01T18:03:12.067Z] [+223ms] Phase: app.whenReady fired
+[2026-10-01T18:03:12.067Z] [+223ms] Phase: PAC prewarm — session.defaultSession.resolveProxy fired
+[2026-10-01T18:03:12.090Z] [+246ms] Phase: [CodeCache] disk state {"processName":"main","processDir":"/private/tmp/loop-card-host-HPiR04/user-data/CodeCache/5.6.2_13.8.258.32-electron.0/main","cacheFileCount":0,"cacheSizeBytes":0,"cacheSizeMB":0}
+[2026-10-01T18:03:12.211Z] [+367ms] Phase: PAC prewarm done (144ms rule="")
+[2026-10-01T18:03:12.212Z] [+368ms] Splash crash guard: crashCount=0, skipSplash=false
+[2026-10-01T18:03:12.216Z] [+372ms] Phase: vendor extract check, assetsCount=7
+[2026-10-01T18:03:12.216Z] [+372ms] Phase: vendor isExtractNeeded=true (checkMs=0)
+[2026-10-01T18:03:12.216Z] [+372ms] showSplashIfNeeded: creating SplashWindow
+[2026-10-01T18:03:12.216Z] [+372ms] showSplashIfNeeded: calling splashWindow.show()
+[2026-10-01T18:03:12.685Z] [+841ms] Phase: showSplashIfNeeded returned OK
+[2026-10-01T18:03:12.686Z] [+842ms] Phase: vendor ensureAll starting

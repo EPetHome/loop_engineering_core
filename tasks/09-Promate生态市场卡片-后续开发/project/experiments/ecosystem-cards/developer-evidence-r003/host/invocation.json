@@ -1,0 +1,14 @@
+{
+  "attempt_id": "developer-r003-d9bd63d9c00c",
+  "kind": "developer foreground host self-check; NOT a frozen engine gate",
+  "cwd": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r003-d9bd63d9c00c",
+  "node": "/Users/Admin/.hermes/node/bin/node",
+  "argv": [
+    "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r003-d9bd63d9c00c/experiments/ecosystem-cards/integration/index.mjs",
+    "--workspace",
+    "/private/tmp/loop-card-r003-desktop-UQMctc",
+    "--report",
+    "/private/tmp/loop-card-r003-desktop-UQMctc/host-result.json"
+  ],
+  "startedAt": "2026-10-01T18:03:10.929Z"
+}

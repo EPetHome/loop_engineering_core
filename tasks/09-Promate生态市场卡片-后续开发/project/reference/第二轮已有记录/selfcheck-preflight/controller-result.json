@@ -1,0 +1,22 @@
+{
+  "attempt_id": "developer-r001-b84279cb5d8a",
+  "run_id": "promate-ecology-cards-02-20261002T020406-04362206",
+  "candidateCodeRoot": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-02-20261002T020406-04362206/host-ready/developer-r001-b84279cb5d8a",
+  "executable": "/Users/Admin/.hermes/node/bin/node",
+  "argv": [
+    "experiments/ecosystem-cards/integration/index.mjs",
+    "--workspace",
+    "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight",
+    "--report",
+    "/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/preflight-result.json",
+    "--preflight-only"
+  ],
+  "detached": false,
+  "startedAt": "2026-10-02T02:19:04.313Z",
+  "scope": "developer foreground self-check, NOT engine H0",
+  "finishedAt": "2026-10-02T02:19:06.744Z",
+  "exitCode": 1,
+  "signal": null,
+  "stdout": "{\"status\":\"UNKNOWN\",\"reportPath\":\"/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/preflight-result.json\",\"evidenceRoot\":\"/Users/Admin/Desktop/loop/loop-data/runs/promate-ecology-cards-02-20261002T020406-04362206/units/host-ready/attempts/developer-r001-b84279cb5d8a/selfcheck-preflight/desktop-2de3c41e-d9e1-4e92-909f-33050f52cf5e\",\"profile\":\"/private/tmp/loop-card-host-4rzNEV/profile\",\"reason\":\"DISTINCT_NATIVE_SANDBOX_LAYER_DENIED\",\"managedProcessesStopped\":true}\n",
+  "stderr": "HOST_UNVERIFIED=DISTINCT_NATIVE_SANDBOX_LAYER_DENIED\n"
+}

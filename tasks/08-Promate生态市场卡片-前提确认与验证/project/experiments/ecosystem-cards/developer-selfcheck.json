@@ -1,0 +1,49 @@
+{
+  "attempt_id": "developer-r001-4897ee5d3a18",
+  "kind": "developer self-check; not frozen-candidate gate evidence or independent review",
+  "core": {
+    "status": "PASS",
+    "command": "/Users/Admin/.hermes/node/bin/node experiments/ecosystem-cards/self-test.mjs",
+    "checks": 47,
+    "note": "最后一次前台执行结束并通过；包括一次注入stage->market重命名失败后的旧输出回滚。新增测试首次运行的空目录清理选项错误已修复并复测，不是宿主成功证据。"
+  },
+  "acceptance_samples": {
+    "status": "PASS",
+    "command": "TMPDIR=/private/tmp/loop-card-dev-XkkaV1 /Users/Admin/.hermes/node/bin/node acceptance/check.mjs c <当前副本> /private/tmp/loop-card-dev-XkkaV1/core-check",
+    "stdout": [
+      "PASS A：空壳内容、稳定身份、重复生成、升级与归属保护",
+      "PASS B：未安装、启用、停用、卸载、异常记录与只读性"
+    ],
+    "note": "只读运行现有检查，不代表引擎门禁或桌面通过。"
+  },
+  "syntax": {
+    "status": "PASS",
+    "command": "node --check <本目录所有mjs；集成修改后复查三个受影响模块>",
+    "note": "实际Node语法检查均返回0；未安装依赖。"
+  },
+  "protected_inputs": {
+    "status": "PASS",
+    "files": 52,
+    "changed": [],
+    "baseline": "/private/tmp/loop-card-dev-XkkaV1/protected-before.json",
+    "note": "逐字节SHA-256对比；本目录之外的所有副本文件不变，无提交、推送、发布、合并。"
+  },
+  "desktop": {
+    "status": "UNKNOWN",
+    "completed_actions": [],
+    "prior_report": "/private/tmp/loop-card-dev-XkkaV1/host-current/host-result.json",
+    "latest_run_workspace": "/private/tmp/loop-card-dev-XkkaV1/host-final",
+    "note": "本机5.6.2沙箱边界七项通过，但未出现真实桌面；原始stderr为Failed to create socket directory，原生锁gotTheLock=false。保留真实输出，无截图，不冒报安装。最终集成检查在写完本文件后以前台命令运行；最终结果以该目录host-result.json为准。"
+  },
+  "diagnostic_material": {
+    "pre_integration_probe": "/private/tmp/loop-card-dev-XkkaV1/desktop-probe.json",
+    "boundary_probe": "/private/tmp/loop-card-dev-XkkaV1/boundary-selftest.json",
+    "note": "最初诊断中原生启动器报告spawned启动修复preflight；已改用厂商E2E开关禁止该脱离进程组启动器。旧诊断仅保留，不作为当前候选桌面成功或完整清理证明。真实用户资料从未作为测试输入；Foundation系统路径查询只查询目录字符串，不读取目录内容。"
+  },
+  "unverified": [
+    "市场可见、安装、停用、启用、卸载、重装与同身份升级的真实桌面结果",
+    "WorkBuddy面板显示和刷新中文displayName",
+    "七步操作后的其他市场、插件和用户资料完整保护",
+    "冻结候选门禁和独立评审"
+  ]
+}

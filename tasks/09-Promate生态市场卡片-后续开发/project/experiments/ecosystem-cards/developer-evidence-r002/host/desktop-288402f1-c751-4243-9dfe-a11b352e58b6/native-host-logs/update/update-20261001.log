@@ -1,0 +1,7 @@
+
+================================================================================
+  Session started at 2026-10-01T17:21:19.760Z
+================================================================================
+[2026-10-01T17:21:19.760Z] [INFO ] Logger initialized at /private/tmp/loop-card-host-5lCF8x/profile/logs/update/update-20261001.log
+[2026-10-01T17:21:19.761Z] [INFO ] [early-silent-startup-update] enabled=true source=product-base
+[2026-10-01T17:21:19.774Z] [INFO ] [early-silent-startup-update] no ready update restored before window (state=idle)

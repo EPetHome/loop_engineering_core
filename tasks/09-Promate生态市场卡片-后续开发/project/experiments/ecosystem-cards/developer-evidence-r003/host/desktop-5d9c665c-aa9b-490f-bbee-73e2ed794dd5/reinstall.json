@@ -1,0 +1,266 @@
+{
+  "action": "reinstall",
+  "status": "UNKNOWN",
+  "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED",
+  "attempted": false,
+  "candidateDigest": "50a054fc7ac9e220b74e4614a141197990b5345945f484d739ae2dbac8fbd0a9",
+  "originalOutputPaths": {
+    "stdout": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stdout.log",
+    "stderr": "/private/tmp/loop-card-r003-desktop-UQMctc/desktop-5d9c665c-aa9b-490f-bbee-73e2ed794dd5/desktop.stderr.log"
+  },
+  "boundary": {
+    "pid": 40763,
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "{\"node\":\"v22.21.1\",\"electron\":\"37.10.3\",\"uid\":502,\"checks\":{\"outsideRead\":true,\"symlinkRead\":true,\"outsideWrite\":true,\"insideReadWrite\":true,\"inheritedChildBoundary\":true,\"ownedLoopback\":true,\"otherLoopbackDenied\":true,\"ownedUnixSocket\":true,\"otherUnixSocketDenied\":true}}\n",
+    "stderr": "[1001/140311.154898:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+    "canaryUnchanged": true,
+    "pass": true,
+    "canaryRoot": "/private/tmp/loop-card-canary-gmrDOz",
+    "sandboxPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57991\")) (require-not (remote ip \"localhost:57993\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57991\")) (require-not (local ip \"localhost:57993\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57991\")) (require-not (local ip \"localhost:57993\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n"
+  },
+  "sandboxNesting": {
+    "kind": "distinct-policy nesting diagnostic; NOT desktop evidence",
+    "canary": "/private/tmp/loop-card-host-HPiR04/nested-canary-0fad4068-b7cc-474c-ae56-0ee61c38b1ec",
+    "innerPath": "/private/tmp/loop-card-host-HPiR04/nested-inner-0fad4068-b7cc-474c-ae56-0ee61c38b1ec.sb",
+    "startedAt": "2026-10-01T18:03:11.326Z",
+    "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57991\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57991\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57991\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+    "innerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57991\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57991\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57991\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n\n(deny file-read-data (literal \"/private/tmp/loop-card-host-HPiR04/nested-canary-0fad4068-b7cc-474c-ae56-0ee61c38b1ec\"))\n",
+    "runs": [
+      {
+        "label": "full-boundary",
+        "outerPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-HPiR04\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:57991\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:57991\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:57991\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-HPiR04\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+        "pid": 40767,
+        "code": 1,
+        "signal": null,
+        "timedOut": false,
+        "stdout": "{\"status\":71,\"signal\":null,\"stdout\":\"\",\"stderr\":\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"}\n",
+        "stderr": "[1001/140311.425485:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+        "nested": {
+          "status": 71,
+          "signal": null,
+          "stdout": "",
+          "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+        }
+      }
+    ],
+    "innerControl": {
+      "pid": 40766,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "stdout": "{\"innerDenial\":\"EPERM\"}\n",
+      "stderr": "[1001/140311.361140:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n"
+    },
+    "innerControlConfirmed": true,
+    "distinctPolicyNestingConfirmed": false,
+    "reason": "DISTINCT_NATIVE_SANDBOX_LAYER_DENIED",
+    "finishedAt": "2026-10-01T18:03:11.463Z",
+    "note": "Control policies apply only to fixed fictional-canary probes. WorkBuddy desktop always retains the full outer boundary and all original Chromium protection; this diagnostic does not authorize a relaxed host launch."
+  },
+  "resourceProtection": {
+    "status": "UNKNOWN",
+    "otherResourcesUnchanged": null,
+    "diagnosticBeforeAfterUnchanged": true,
+    "completedActions": [],
+    "operationCoverageConfirmed": false,
+    "reason": "DESKTOP_OPERATION_PROTECTION_UNPROVEN"
+  },
+  "cleanup": {
+    "stopped": true,
+    "remaining": [],
+    "exit": {
+      "code": null,
+      "signal": "SIGKILL"
+    },
+    "processes": [
+      {
+        "pid": 40770,
+        "ppid": 40762,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:11 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/MacOS/Electron --user-data-dir=/private/tmp/loop-card-host-HPiR04/user-data"
+      },
+      {
+        "pid": 40776,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:11 2026",
+        "command": "(bash)"
+      },
+      {
+        "pid": 40777,
+        "ppid": 40776,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:11 2026",
+        "command": "(bash)"
+      },
+      {
+        "pid": 40778,
+        "ppid": 40777,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:11 2026",
+        "command": "(path_helper)"
+      },
+      {
+        "pid": 40787,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:11 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 40788,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:11 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 40790,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 40791,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 40792,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "/bin/sh -c /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump | grep -E \"^(bundle id:|path:)\" | grep -A 1 \"bundle id:.*WorkBuddy\" | grep \"path:\" | sort -u"
+      },
+      {
+        "pid": 40793,
+        "ppid": 40792,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump"
+      },
+      {
+        "pid": 40794,
+        "ppid": 40792,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "grep -E ^(bundle id:|path:)"
+      },
+      {
+        "pid": 40795,
+        "ppid": 40792,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "grep -A 1 bundle id:.*WorkBuddy"
+      },
+      {
+        "pid": 40796,
+        "ppid": 40792,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "grep path:"
+      },
+      {
+        "pid": 40797,
+        "ppid": 40792,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "sort -u"
+      },
+      {
+        "pid": 40799,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 40800,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 40803,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper (Renderer).app/Contents/MacOS/WorkBuddy Helper (Renderer) --type=renderer --user-data-dir=/private/tmp/loop-card-host-HPiR04/user-data --standard-schemes=wb-cover,local-file,vscode-file,wb-extension --secure-schemes=wb-cover,local-file,vscode-file,wb-extension --cors-schemes=vscode-file,wb-extension --fetch-schemes=wb-cover,local-file,vscode-file,wb-extension --streaming-schemes=local-file --app-path=/Applications/WorkBuddy.app/Contents/Resources/app.asar --no-sandbox --no-zygote --remote-debugging-port=57991 --js-flags=--regexp-interpret-all --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=8 --time-ticks-at-unix-epoch=-1790828104370417 --launch-time-ticks=49687919771 --shared-files --field-trial-handle=1718379636,r,6325328027978681457,8574780182488763147,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version"
+      },
+      {
+        "pid": 40806,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper (GPU).app/Contents/MacOS/WorkBuddy Helper (GPU) --type=gpu-process --user-data-dir=/private/tmp/loop-card-host-HPiR04/user-data --gpu-preferences=UAAAAAAAAAAgAAAEAAAAAAAAAAAAAAAAAABgAAEAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA --shared-files --field-trial-handle=1718379636,r,6325328027978681457,8574780182488763147,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version --seatbelt-client=52"
+      },
+      {
+        "pid": 40807,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=network --user-data-dir=/private/tmp/loop-card-host-HPiR04/user-data --standard-schemes=wb-cover,local-file,vscode-file,wb-extension --secure-schemes=wb-cover,local-file,vscode-file,wb-extension --cors-schemes=vscode-file,wb-extension --fetch-schemes=wb-cover,local-file,vscode-file,wb-extension --streaming-schemes=local-file --shared-files --field-trial-handle=1718379636,r,6325328027978681457,8574780182488763147,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version --seatbelt-client=51"
+      },
+      {
+        "pid": 40831,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 40832,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 40834,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "tar -xzf /private/tmp/loop-card-host-HPiR04/tmp/wb-dat-extract-node-40770-705f106a-31bc-485c-af0e-c7a8d9069bd8.tar.gz -C /private/tmp/loop-card-host-HPiR04/profile/binaries/node/versions/.extracting.node.40770.8d51a60e-c5f1-4bfe-91cc-342f9f5d6563"
+      },
+      {
+        "pid": 40836,
+        "ppid": 40770,
+        "pgid": 40760,
+        "uid": 502,
+        "start": "Thu Oct  1 14:03:12 2026",
+        "command": "<defunct>"
+      }
+    ],
+    "parentProcessGroup": 40760,
+    "detachedDetected": false
+  }
+}

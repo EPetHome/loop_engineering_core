@@ -1,0 +1,20 @@
+[NetProxy] installUndiciProxyDispatcher: ENTER (already=false node=v22.21.1 HTTPS_PROXY=set HTTP_PROXY=set pacResolver=absent)
+[NetProxy] resolveTrustedCAs: bundled=146 system=158(cli-fallback) extra=0 merged=304 getCACertAvailable=true disableSystemCA=true
+[NetProxy] resolveTrustedCAs system subjects: ["C=US | O=DigiCert\\, Inc. | CN=DigiCert TLS ECC P384 Root G5","C=US | OU=www.xrampsecurity.com | O=XRamp Security Services Inc | CN=XRamp Global Certification Authority","C=CH | O=WISeKey | OU=OISTE Foundation Endorsed | CN=OISTE WISeKey Global Root GB CA","C=US | O=Amazon | CN=Amazon Root CA 2","C=IT | L=Milan | O=Actalis S.p.A./03358520967 | CN=Actalis Authentication Root CA","C=US | O=Internet Security Research Group | CN=ISRG Root X1","C=US | O=Apple Inc. | CN=Apple Platform Code Signing ECC Root CA - G1","CN=ACCVRAIZ1 | OU=PKIACCV | O=ACCV | C=ES","C=US | O=Certainly | CN=Certainly Root R1","C=PL | O=Asseco Data Systems S.A. | OU=Certum Certification Authority | CN=Certum Trusted Root CA","C=TR | L=Gebze - Kocaeli | O=Turkiye Bilimsel ve Teknolojik Arastirma Kurumu - TUBITAK | OU=Kamu Sertifikasyon Merkezi -","C=US | O=Google Trust Services LLC | CN=GTS Root R3","C=PL | O=Unizeto Technologies S.A. | OU=Certum Certification Authority | CN=Certum Trusted Network CA","C=US | O=Certainly | CN=Certainly Root E1","C=RO | O=certSIGN | OU=certSIGN ROOT CA","C=CH | O=SwissSign AG | CN=SwissSign Gold CA - G2","C=DE | O=T-Systems Enterprise Services GmbH | OU=T-Systems Trust Center | CN=T-TeleSec GlobalRoot Class 2","O=Entrust.net | OU=www.entrust.net/CPS_2048 incorp. by ref. (limits liab.) | OU=(c) 1999 Entrust.net Limited | CN=Entrus","C=DE | O=D-Trust GmbH | CN=D-TRUST Root Class 3 CA 2 2009","C=US | O=DigiCert Inc | OU=www.digicert.com | CN=DigiCert Assured ID Root G2"]
+[NetProxy] undici global dispatcher: EnvHttpProxyAgent (proxy=127.0.0.1:7892, noProxy=*zhihu.com,*zhimg.com,*jd.com,100ime-iat-api.xfyun.cn,*360buyimg.com,localhost,*.local,127.*,10.*,172.16.*,172.17.*,172.18.*,172.19.*,172.2*,172.30.*,172.31.*,192.168.*,127.0.0.1,::1, system+extra+bundled CA count=304)
+[NetProxy] installAxiosGlobalProxy: global axios interceptor installed (request + response)
+[WorkbuddyProductConfig] Spilled oversized ACC_PRODUCT_CONFIG_V3 (361542 bytes) to /private/tmp/loop-card-host-5lCF8x/profile/cache/acc-product-config-v3.json to avoid execve E2BIG.
+[window] [TencentDocsThemeBridge] registered {
+  channels: [
+    'workbuddy:tencentDocs:setTheme',
+    'workbuddy:tencentDocs:syncThemeCookieForUrl'
+  ],
+  cookieName: 'dark_mode_setting'
+}
+[window] [TencentDocsLanguageBridge] registered {
+  channel: 'workbuddy:tencentDocs:setLanguage',
+  cookieName: 'language'
+}
+[UpdateFileLogger] Log file: /private/tmp/loop-card-host-5lCF8x/profile/logs/update/update-20261001.log
+[AppConfigService] Config file not found, using empty config
+[VendorExtract] node: current file not found, needs extraction

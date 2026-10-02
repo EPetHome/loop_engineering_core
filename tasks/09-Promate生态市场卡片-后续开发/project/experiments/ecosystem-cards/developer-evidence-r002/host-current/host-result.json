@@ -1,0 +1,463 @@
+{
+  "candidateCodeRoot": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a",
+  "candidateDigest": "fea6f1abbcba4ea93715d286f2eacb9a46dffe2691d2517936d72702bcee5f3c",
+  "candidateFiles": {
+    "AGENTS.md": "05a62c2c291194af5d46a68a3920d36e9703915639114ac1f608af4333f279ed",
+    "CLAUDE.md": "42b4648e76f2ae513469efd549b242b294c5daa62350043239a4faec4084c437",
+    "TASK.md": "2f7a31929bf6d2c78c08384fc70ed16a04cf447df35e9bc6e3ef1d2ec55880d8",
+    "acceptance/check.mjs": "29a396bd5eb0eac4c540a3aa5eda30b39e2f1444d6662e8313714e50681be4cd",
+    "experiments/ecosystem-cards/README.md": "e040982e1d76cec27d4f9bcb7ce03477395d589b9612d8e0dc06ed443ad94c89",
+    "experiments/ecosystem-cards/card-generation/index.mjs": "6eb16976aefa6e622e726f43c5be315034290efdad3aa33a1dd9255af63c479e",
+    "experiments/ecosystem-cards/card-state/index.mjs": "b459b793322438a4bf7f1932bc6a0fde9616de5666963332139838b162274137",
+    "experiments/ecosystem-cards/developer-evidence-r002/affected-checks.json": "4ce7f21d30e09195f798099f92c7da80424e1e71852f069dbd30fa43a06ea50b",
+    "experiments/ecosystem-cards/developer-evidence-r002/core-final.json": "c64498bf08fe042427c2f1aa6699baa3f62e775aaa4b3dbd0e2b98084e773bfd",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/controller.stderr.log": "2d47e1ef9b238e5d251731736d3eaa3687ab36028c62262a72ba75a3b3785b2f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/controller.stdout.log": "b758a06a3d0787e3bd29aa3a1baab12e6d69fed981ef30619b3d3f6899bef606",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/boundary.json": "d854cc9a410920aef2e4770a19168ac6add76f63ae48ebd3ec3140a51b8a0753",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/desktop.stderr.log": "e51b86c85d932d59ba3f51337c8414ab67d7ca999a2e8abf90d1b683055a1ac4",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/desktop.stdout.log": "11f2b4e15f4c7eddee4911578748ed292a0901e105993e2f1c9564262ee10a3b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/disable.json": "d27e56210dca9656e013804bba472faa4624e786c61741c4c3c8a3900c26a8a0",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/enable.json": "387e285349676242982f21c4e818219e2c9995214e39a389c392265c3abb3c02",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/foreign-after.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/foreign-before.json": "3e08c1acaf015d06a4f0c4b2d5d72770d17e0b8fa50772157c7a57bec0c5ef0b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/install.json": "52ad5768bc84b0d92cd053ad191eedc0699d1a27bd98e6867c6cc9211769c4f8",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/market-visible.json": "e59c58d30af40bf20c6f883e2ea525e0a1a107b671ac532b120fbf05a133b6e3",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/AppStartup.log": "03406a8d07d880af929cb6a6da86238911ff307753b02cf9f3db50effe1c5705",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/main.log": "a36c7c2a9ef7e2fe95c68b9196f0de61fad25e7520f94ea40f32000e6a5d3a76",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/startup/.splash-crash-guard": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/startup/2026-10-01/16924-132119.jsonl": "38978a83633539122a75993f21f9613f1bb3679b1e65ffceb34fbf59feed629f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/startup/2026-10-01/16924-132119.log": "412e9df0f3e69b3b707a7d986f64abb85a4f13bc56678402116af536bdae466b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/update/update-20261001.log": "a68b93a4a32f087bb694b2c807c2808448b9a3031d0c23a95f6607a18abc9600",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/native-host-logs/vendor-extract.log": "e895dd7f9afcbbfe98d16f5fbddbece03a82b6bd5fbcf91e811185bb211f453a",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/recovery.json": "c4650b9482491a9d57cf83251b0905d3cf33c17a825db775889e7b68b85b8c54",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/reinstall.json": "4ca78561db7ae0954b64c20baabca8c7bd0ddf261f06d1387c4172164437c88b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/uninstall.json": "37f6e86ffbf744443d37d696d66ea8533bbfb91c0fe7f25d33ee8e7a4e622c3f",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/desktop-288402f1-c751-4243-9dfe-a11b352e58b6/upgrade.json": "33768bf35d6cd7892845d53a785d9b530bef12d5f6daf5b231f2ef819f0df57b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/host-result.json": "331a4383e3d52577149c309cebb9c631fc918a62ff97039eeab92416f3c8124b",
+    "experiments/ecosystem-cards/developer-evidence-r002/host/invocation.json": "f83770614269bad11547751d649716c162254a0c4ad8b4b9d69b7d29409d3e0c",
+    "experiments/ecosystem-cards/developer-evidence-r002/index.json": "d35c4b9b21e665a08c1104f63a23ee16348ac6f84bdc96450390c82af023449e",
+    "experiments/ecosystem-cards/developer-evidence-r002/window-helper-check-final.json": "c1d4beb5611fad518680465251b1788b3deac5e7cdceeff6fdbefc338ffb2767",
+    "experiments/ecosystem-cards/developer-selfcheck.json": "8a5c444925cb0ba08a8545015e2990da1febe81d0c42c4c3d0e03ae37be0fdfd",
+    "experiments/ecosystem-cards/fs-safety.mjs": "30fdc232ce6b3670ef9b2aa498b228cf425e1fa367425375a8c60f93e07e43bb",
+    "experiments/ecosystem-cards/host-contract-check.mjs": "ed5fd2cae9c345a9ff4a615e3d43f00ce888c715b2b96198442452bbe18851e6",
+    "experiments/ecosystem-cards/host-contract.json": "d67ac02095212e5af52fdac4abecea1e113d1732bc6463271c406f591de0be0d",
+    "experiments/ecosystem-cards/integration/candidate.mjs": "fc974e66b1d8cd48357de1aebb8a523c7e200e0b10e28306ee5346c287a35249",
+    "experiments/ecosystem-cards/integration/cdp-selection-test.mjs": "413eb57a47714900cce935fa8913821b30aacf26d1daf1cd55e04450cac84b94",
+    "experiments/ecosystem-cards/integration/cdp.mjs": "c75671df420455a10acb9d753c7267bed659abf8b32fe2c1f727729315dbdbac",
+    "experiments/ecosystem-cards/integration/evidence.mjs": "a9fbe13887b3d63df35450cc47418adbf7b495dcd6323b3c2d24b89378096dbf",
+    "experiments/ecosystem-cards/integration/index.mjs": "9905d0c4fa8819721bb48058420af855f7cb47268b9ad836627db499d75926c7",
+    "experiments/ecosystem-cards/integration/isolation.mjs": "64d5874477d0e92923304c1be909a04d81b7b2bba178daa23f0a5f8f2c6cd893",
+    "experiments/ecosystem-cards/integration/preflight-test.mjs": "491091b2beebf94d3cc3ecda08ee804eabd2ae14a202c1bcb84766b2c0e0ef62",
+    "experiments/ecosystem-cards/integration/window.jxa": "a9793e506880708156480cac2dcb51d21fd79e5218cad12ee17547ee2be45e90",
+    "experiments/ecosystem-cards/protected-after.json": "c102e4fab3dd250cb0e8ebd60c5c2c3b67824d26b28849608a5b17aec33d367a",
+    "experiments/ecosystem-cards/protected-audit.mjs": "3eb18eb79bd0748a6e96f0dce1c805ad555bf4b95aa73818c3ca85a58975246a",
+    "experiments/ecosystem-cards/protected-before.json": "98b9327dbe4db9585367e751f4e180f585a88de5df96052c00c71e1fee514dc9",
+    "experiments/ecosystem-cards/self-test.mjs": "a32e6fbc7a51e32415313a9bf96e81cebc50efcb620dcb69a4ef8c91b24a5b5a",
+    "first-connect/bootstrap-template.mjs": "aebeffa22fdcd827c86bca083d9b94899016ef709e5582cd9fe75af9c7fd6d01",
+    "first-connect/desktop-preflight.mjs": "fa12945ff8ce91b58cdb2b3a6a7d5810a625416cf6cb224195d32d00225ac009",
+    "first-connect/native-install.mjs": "a1b1d81aa949721bb9c08deb3e3f5a205a7e56c8986d0a48904de7cfb1680756",
+    "first-connect/pilot.mjs": "168fd5535f805833bb49b557a4dc2e544bd71350e0731ea5cf01b86af08ba28b",
+    "marketplace/.codebuddy-plugin/marketplace.json": "a32fac6d71c60bbb918f779014d222d925e2457197b8aea8a7be8640d268a5bb",
+    "marketplace/plugins/promate/.codebuddy-plugin/plugin.json": "4150017948df24cee95b536142ec8a66fc9466cc5b25d8c00d7a4c9c5f7637e6",
+    "marketplace/plugins/promate/README.md": "ca368fdfa3a292a406e789413467b1372159ad3c80538de51d768d5f18854d89",
+    "marketplace/plugins/promate/configure.mjs": "ba549b7f07234816b607c20fa01455b13532561528670f0adfebcc1f95ac71d7",
+    "marketplace/plugins/promate/hooks/confirm.mjs": "420f0a6da87013a9cc25d3173afb145f6195b42044fff1907028c0e139cb4131",
+    "marketplace/plugins/promate/hooks/first-connect.mjs": "9264c8c691f90f2f36a7a5677a2ca821603e0f3026bd25088e235a83489dbec0",
+    "marketplace/plugins/promate/hooks/guard.mjs": "8d76bf9ef65220c3f36b41d1a2137afa610c2b8265dfd374d5410bdc6b309d26",
+    "marketplace/plugins/promate/hooks/hooks.json": "c638d45b2c29169b943439648de32d870e66a0b276cccee1b8684ed5bc65ca8a",
+    "marketplace/plugins/promate/hooks/lib.mjs": "4b959173dd8780ba5d5453c100063474326a890d1510fe11420341a6cef8f3a4",
+    "marketplace/plugins/promate/hooks/load.mjs": "cd2ae6de4a733414c899c5e40fe68e92ea5fbe55cf482183638b0136df374a12",
+    "marketplace/plugins/promate/hooks/mark.mjs": "a1b6762f044727beb83d38b98529e64711867264c10b42359470c370e0759d2e",
+    "marketplace/plugins/promate/hooks/route.mjs": "e2f772e9fbca877918ca132e3e2e2d765c02ca36d046586a748caa207b20dbf0",
+    "marketplace/plugins/promate/hooks/version.mjs": "c12521ee3869f8278433719aa178b51659ac81916db4575bb03d95b44e83dcf8",
+    "marketplace/plugins/promate/mcp/approval.mjs": "007088744acfdc306178d5fce42e4db67f7f5f880ee45d61975039d056a16f3d",
+    "marketplace/plugins/promate/mcp/client.mjs": "95ac80ee5fa9888d7e9713cfda9204e87a6708e606894b440c2a20342f68eb48",
+    "marketplace/plugins/promate/mcp/first-connect.mjs": "566f28c3f3f088ef1e0d47023fada8755730074e3ef81721d35757d2924dde63",
+    "marketplace/plugins/promate/mcp/handoff-page.mjs": "adea2aee380376f777e132f0e628794c5fb5c61f4a280a385fa1bfe3dd64d5c8",
+    "marketplace/plugins/promate/mcp/local-config.mjs": "2b209d8f33d8e6c80eb8858c9e47d1504b1d67b54b51f7c5f16077ba579de583",
+    "marketplace/plugins/promate/mcp/packages.mjs": "57e179756ebf6a7d06c27929d619e248653a8f6c70e2fb18a98ae78b7c0cc001",
+    "marketplace/plugins/promate/mcp/proxy.mjs": "1d87879f50a9125a0f77433015bef953df8c02d6cd30888392105d1a4979a73e",
+    "marketplace/plugins/promate/mcp/recovery-page.mjs": "773acf85b5b072647fe9e824ad4a60ad793fa8136f7110fca11286ee72bbf49b",
+    "marketplace/plugins/promate/mcp/resources.mjs": "df03694dd5c021405a00b884c1cae98086636c85bb2d29f4e2fda9bf5a0cf724",
+    "marketplace/plugins/promate/mcp/snapshots.mjs": "7c24f646f44024afa09c51c3fac1bab30b809ebfcb4eb6928845494bedadc18f",
+    "marketplace/plugins/promate/mcp/tools.json": "053074f58dc4903750fb5a6d72c419cd40daf6870e8cceb7f42f3b60abb6097a",
+    "marketplace/plugins/promate/skills/promate/SKILL.md": "3dc2af102ee3ba2610fb93031802d3fd2034c21713756ff82f1934b4a11bece6",
+    "reference/host-isolation.py": "1faea51904475d9765ea5569e51f650a5ded14b5644bd9763618a309185fb5c8",
+    "reference/既有宿主研究.md": "1727d46f1c20730c60d6dfeb801f9aed0840f8c8e16f683f92ede279a9808bd3",
+    "reference/需求原文.md": "522cb41378dc88bf2f4d129f07636415a8bacb9f1a11004b48ec472ce55fcb18",
+    "tests/desktop-preflight.test.mjs": "f79a269b66eb4910b1439828724980b60038c72276b27c6beec0c81bc9b9e0a6",
+    "tests/first-connect.test.mjs": "a42a9b49840e0f0a93a030d03ae6898eb6dbaad0e0d29c991656cea335a4719e",
+    "tests/helpers.mjs": "d055f9f415a8d50f8574bb24e1a843a81b9d70495041fb172027612bfd7cb37f",
+    "tests/hooks-confirm.test.mjs": "5d8bd7fd761f47a71e6d5b9098a945b2881315c100e9d1e851af0438ec866f0e",
+    "tests/hooks-guard.test.mjs": "7669b6a504aed0fb592f0053dc2b7e210e61cfa4c667810bb9641048cbe1f528",
+    "tests/hooks-route.test.mjs": "a4b115db61f0f5f9b072e1e7ec31767457d4d47c045401ad763360dbcc4e42b4",
+    "tests/hooks-version.test.mjs": "9294fd399bd1d6220cf1fffc270171a80fe2ba4760487f1eaf14baa722299dd1",
+    "tests/index.mjs": "06f91d78bb2d12ab0785fabcb9bf5aef2a0c44e10d6f1b1bc90d4a812c6e5c52",
+    "tests/install-safety.test.mjs": "092052a00a8913fc861b01a4360c033b534ecc1551e95b2f6acddcf79ce41feb",
+    "tests/local-config.test.mjs": "88d02b507e8bf204a9e60c9fb7099e8974682f2ce4a82a5b350c1be3738c9603",
+    "tests/native-install.test.mjs": "aae8cba9c0b956d448e1a82e489f421241dddca26a51a54b517755bfcf715a5f",
+    "tests/package.json": "3e424eab9f1247d21a5435f8223d9a81a8602bf9fab200684c6f2ab6726a9276",
+    "tests/proxy.test.mjs": "8ce8bf6a73dcd8cb1d0b2a40ebec5048d186695d3cc0503eb646f873170b1508",
+    "tests/recovery-page.test.mjs": "6dc790321dc901176bfc59cd264776c1bafac5e9ea13d87657ed3d49a996598f",
+    "tests/resource-packages.test.mjs": "c61f12eee5738b1fccf3a3057d28f0816cc609d152142528b4f9a021ee8cb7a2",
+    "tests/resources.test.mjs": "6fc75d8744579e1836c33028187a85ee1b33410547ffbc424f92561232a95116"
+  },
+  "candidateInvocation": {
+    "entryPath": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/integration/index.mjs",
+    "moduleURL": "file:///Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/integration/index.mjs",
+    "cwd": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a"
+  },
+  "candidateBoundaryConfirmed": true,
+  "desktopStartAttempted": true,
+  "status": "UNKNOWN",
+  "hostVersion": "5.6.2",
+  "profile": "/private/tmp/loop-card-host-ThnfSM/profile",
+  "isolationRoot": "/private/tmp/loop-card-host-ThnfSM",
+  "otherResourcesUnchanged": true,
+  "managedProcessesStopped": true,
+  "evidenceRoot": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1",
+  "startedAt": "2026-10-01T17:26:28.856Z",
+  "steps": [
+    {
+      "action": "market-visible",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/market-visible.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    },
+    {
+      "action": "install",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/install.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    },
+    {
+      "action": "disable",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/disable.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    },
+    {
+      "action": "enable",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/enable.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    },
+    {
+      "action": "uninstall",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/uninstall.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    },
+    {
+      "action": "reinstall",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/reinstall.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    },
+    {
+      "action": "upgrade",
+      "status": "UNKNOWN",
+      "rawEvidencePath": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/upgrade.json",
+      "screenshotPath": null,
+      "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED"
+    }
+  ],
+  "candidateIdentity": {
+    "candidateCodeRoot": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a",
+    "moduleFile": {
+      "path": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/integration/index.mjs",
+      "dev": "16777233",
+      "ino": "44939900",
+      "uid": "502"
+    },
+    "entryFile": {
+      "path": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/integration/index.mjs",
+      "dev": "16777233",
+      "ino": "44939900",
+      "uid": "502"
+    },
+    "moduleRoot": {
+      "path": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a",
+      "dev": "16777233",
+      "ino": "44939882",
+      "uid": "502"
+    },
+    "entryRoot": {
+      "path": "/Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a",
+      "dev": "16777233",
+      "ino": "44939882",
+      "uid": "502"
+    },
+    "workingRoot": {
+      "path": "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a",
+      "dev": "16777233",
+      "ino": "44939882",
+      "uid": "502"
+    },
+    "agreement": "same dev/ino/uid; each path independently checked for symlinks"
+  },
+  "hostArtifacts": {
+    "infoPlist": "1b7aeac8793e8cd61e1975222714a0f576197a454f5085c05692f0ee6468b7e2",
+    "asarHeader": "72df4e8ec84f4058b33df8357abd5a6c0bf18c67cd1d750e8b7c35cd5d6ac21c",
+    "cliBundle": "b340564b2410d99846397776a25fd99e11d86647a7c219ad06fedc441e364ddd"
+  },
+  "ownerId": "loop-card-host-133ca866-b719-4ecc-98b0-e513ce4efcae",
+  "card": {
+    "resourceId": "loop-ecology-shell-probe",
+    "name": "Loop 空壳卡片",
+    "description": "本次独立桌面测试，不含技能、代码、钩子或服务",
+    "version": "1.0.0"
+  },
+  "market": {
+    "marketRoot": "/private/tmp/loop-card-host-ThnfSM/generated/loop-ecology-test",
+    "marketName": "loop-ecology-test",
+    "pluginName": "loop-card-5aa6d450ff09139874a82786423d634d",
+    "resourceId": "loop-ecology-shell-probe",
+    "version": "1.0.0"
+  },
+  "boundary": {
+    "pid": 22517,
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "{\"node\":\"v22.21.1\",\"electron\":\"37.10.3\",\"uid\":502,\"checks\":{\"outsideRead\":true,\"symlinkRead\":true,\"outsideWrite\":true,\"insideReadWrite\":true,\"inheritedChildBoundary\":true,\"ownedLoopback\":true,\"otherLoopbackDenied\":true,\"ownedUnixSocket\":true,\"otherUnixSocketDenied\":true}}\n",
+    "stderr": "[1001/132629.055538:ERROR:electron/shell/common/mac/codesign_util.cc:93] SecCodeCopyGuestWithAttributes: Error Domain=NSOSStatusErrorDomain Code=100001 \"EPERM: Operation not permitted\" (100001)\n",
+    "canaryUnchanged": true,
+    "pass": true,
+    "canaryRoot": "/private/tmp/loop-card-canary-rXOLMu",
+    "sandboxPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:55360\")) (require-not (remote ip \"localhost:55362\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:55360\")) (require-not (local ip \"localhost:55362\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:55360\")) (require-not (local ip \"localhost:55362\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n"
+  },
+  "desktopPolicy": "(version 1)\n(allow default)\n(deny file-read-data file-read-xattr (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\") (subpath \"/private/var/folders\") (subpath \"/private/var/tmp\") (subpath \"/Library/Keychains\") (require-all (subpath \"/private/tmp\") (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\"))))\n(deny file-write* (require-all (require-not (subpath \"/private/tmp/loop-card-host-ThnfSM\")) (require-not (literal \"/dev/null\")) (require-not (literal \"/dev/tty\"))))\n(deny network-outbound (require-all (require-not (remote ip \"localhost:55360\")) (require-not (remote unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-bind (require-all (require-not (local ip \"localhost:55360\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny network-inbound (require-all (require-not (local ip \"localhost:55360\")) (require-not (local unix-socket (subpath \"/private/tmp/loop-card-host-ThnfSM\")))))\n(deny user-preference-read user-preference-write)\n(deny ipc-posix-shm-read-data ipc-posix-shm-write-data (ipc-posix-name-regex #\"^apple\\\\.cfprefs\"))\n(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.security.agent\") (global-name \"com.apple.cfprefsd.agent\"))\n(deny appleevent-send)\n(deny process-info* (target others))\n",
+  "failure": {
+    "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED",
+    "stack": "Error: NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED\n    at requireSafe (file:///Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/fs-safety.mjs:5:58)\n    at poll (file:///Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/integration/index.mjs:38:19)\n    at async file:///Users/Admin/Desktop/Loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a/experiments/ecosystem-cards/integration/index.mjs:148:21",
+    "interrupted": false,
+    "nativeStartupFailure": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED",
+    "originalOutputPaths": {
+      "stdout": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/desktop.stdout.log",
+      "stderr": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/desktop.stderr.log"
+    }
+  },
+  "failureCapture": {
+    "status": "UNKNOWN",
+    "screenshotPath": null,
+    "windows": {
+      "pid": 22584,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    "reason": "OWNED_ONSCREEN_WINDOW_UNPROVEN"
+  },
+  "cleanup": {
+    "stopped": true,
+    "remaining": [],
+    "exit": {
+      "code": null,
+      "signal": "SIGKILL"
+    },
+    "processes": [
+      {
+        "pid": 22525,
+        "ppid": 22513,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/MacOS/Electron --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data"
+      },
+      {
+        "pid": 22539,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 22555,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22556,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22560,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "<defunct>"
+      },
+      {
+        "pid": 22561,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump"
+      },
+      {
+        "pid": 22562,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "grep -E ^(bundle id:|path:)"
+      },
+      {
+        "pid": 22563,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "grep -A 1 bundle id:.*WorkBuddy"
+      },
+      {
+        "pid": 22564,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "grep path:"
+      },
+      {
+        "pid": 22565,
+        "ppid": 22560,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "sort -u"
+      },
+      {
+        "pid": 22575,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper (Renderer).app/Contents/MacOS/WorkBuddy Helper (Renderer) --type=renderer --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data --standard-schemes=wb-cover,local-file,vscode-file,wb-extension --secure-schemes=wb-cover,local-file,vscode-file,wb-extension --cors-schemes=vscode-file,wb-extension --fetch-schemes=wb-cover,local-file,vscode-file,wb-extension --streaming-schemes=local-file --app-path=/Applications/WorkBuddy.app/Contents/Resources/app.asar --no-sandbox --no-zygote --remote-debugging-port=55360 --js-flags=--regexp-interpret-all --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=8 --time-ticks-at-unix-epoch=-1790828104370417 --launch-time-ticks=47485562384 --shared-files --field-trial-handle=1718379636,r,730320512863831107,2522690884632101985,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version"
+      },
+      {
+        "pid": 22576,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22577,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22582,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=network --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data --standard-schemes=wb-cover,local-file,vscode-file,wb-extension --secure-schemes=wb-cover,local-file,vscode-file,wb-extension --cors-schemes=vscode-file,wb-extension --fetch-schemes=wb-cover,local-file,vscode-file,wb-extension --streaming-schemes=local-file --shared-files --field-trial-handle=1718379636,r,730320512863831107,2522690884632101985,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version --seatbelt-client=49"
+      },
+      {
+        "pid": 22583,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:29 2026",
+        "command": "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper (GPU).app/Contents/MacOS/WorkBuddy Helper (GPU) --type=gpu-process --user-data-dir=/private/tmp/loop-card-host-ThnfSM/user-data --gpu-preferences=UAAAAAAAAAAgAAAEAAAAAAAAAAAAAAAAAABgAAEAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA --shared-files --field-trial-handle=1718379636,r,730320512863831107,2522690884632101985,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=MacWebContentsOcclusion,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts --variations-seed-version --seatbelt-client=49"
+      },
+      {
+        "pid": 22588,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:30 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22589,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:30 2026",
+        "command": "(WorkBuddy Helper)"
+      },
+      {
+        "pid": 22612,
+        "ppid": 22525,
+        "pgid": 22511,
+        "uid": 502,
+        "start": "Thu Oct  1 13:26:30 2026",
+        "command": "<defunct>"
+      }
+    ],
+    "parentProcessGroup": 22511,
+    "detachedDetected": false
+  },
+  "candidateUnchanged": true,
+  "originalHostLogs": [
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/AppStartup.log",
+      "sourceRelativePath": "AppStartup.log",
+      "sha256": "f4aac675a9b32934715c32e5bd645eb995d60a68ea9293c78627d15967627840"
+    },
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/main.log",
+      "sourceRelativePath": "main.log",
+      "sha256": "ae353b86c6ebb4453db9047044ac8987a5e0e85c07a2b95055b491f345e4ce7c"
+    },
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/startup/.splash-crash-guard",
+      "sourceRelativePath": "startup/.splash-crash-guard",
+      "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+    },
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/startup/2026-10-01/22525-132629.jsonl",
+      "sourceRelativePath": "startup/2026-10-01/22525-132629.jsonl",
+      "sha256": "badaaec2db77d9e0b5580129d9b3fd08429e76222a291fe069a8a1ec74bb6f81"
+    },
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/startup/2026-10-01/22525-132629.log",
+      "sourceRelativePath": "startup/2026-10-01/22525-132629.log",
+      "sha256": "d602e5fe38b70b6da6e60e4808b2c07052900814e3b7302632b398ff33423168"
+    },
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/update/update-20261001.log",
+      "sourceRelativePath": "update/update-20261001.log",
+      "sha256": "5d7736d1eec0f4a19a82e1a372de6eb8481c51aa885ebc1a86fa0bfd3065f853"
+    },
+    {
+      "path": "/private/tmp/loop-card-dev-6t1rax/host-current/desktop-90fe3099-dab3-4aa5-b778-7a3b0fc60fd1/native-host-logs/vendor-extract.log",
+      "sourceRelativePath": "vendor-extract.log",
+      "sha256": "5a740d770792005c915d4c6d5488a0f7d71b4e9844bfdb78b94c8130a467fa6e"
+    }
+  ],
+  "hostBuildUnchanged": true,
+  "finishedAt": "2026-10-01T17:26:34.759Z",
+  "recovery": {
+    "isolationRoot": "/private/tmp/loop-card-host-ThnfSM",
+    "ownerToken": "e0eb5e00-de50-41f1-aacf-79631db092b1",
+    "retained": true,
+    "desktopStartAttempted": true,
+    "instruction": "保留整个隔离根和本次证据；不得删除用户资料、未知进程或未知临时目录。只按cleanup中的精确PID和启动时间核对本次进程。"
+  }
+}

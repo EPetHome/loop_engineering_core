@@ -1,0 +1,63 @@
+{
+  "attempt_id": "developer-r002-fbb5f7c4499a",
+  "kind": "original host static source excerpts; NOT a desktop result",
+  "hostVersion": "5.6.2",
+  "infoPlistSha256": "1b7aeac8793e8cd61e1975222714a0f576197a454f5085c05692f0ee6468b7e2",
+  "asarHeaderSha256": "72df4e8ec84f4058b33df8357abd5a6c0bf18c67cd1d750e8b7c35cd5d6ac21c",
+  "sources": [
+    {
+      "path": "renderer/assets/lib-chat-ui-C7y1ZM_R.js",
+      "sha256": "ae57e8dc763ad67a82bc39979d096d58ebc0548cb3bf0f521de9c76727393c09",
+      "excerpts": [
+        {
+          "anchor": "className: \"cb-plugins-card-name\"",
+          "offset": 10700047,
+          "raw": "\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: \"cb-plugins-card-name\",\n\t\t\t\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t\t\t\t}), scopeLabels.map((scopeLabel) => /* @__PURE__ */ (0, import_jsx_runtime$15.jsx)(\"span\", {\n\t\t\t\t\t\t\t\t\tclassName: (0, import_classnames$3.de"
+        },
+        {
+          "anchor": "className: \"cb-plugin-detail-title\"",
+          "offset": 10680254,
+          "raw": "\",\n\t\t\t\t\tchildren: [/* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"h1\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-title\",\n\t\t\t\t\t\tchildren: plugin.name\n\t\t\t\t\t}), /* @__PURE__ */ (0, import_jsx_runtime$16.jsx)(\"div\", {\n\t\t\t\t\t\tclassName: \"cb-plugin-detail-actions\",\n\t\t\t\t\t\tchildren: isInstalled ? /* @__PURE"
+        }
+      ]
+    },
+    {
+      "path": "Resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs",
+      "sha256": "b340564b2410d99846397776a25fd99e11d86647a7c219ad06fedc441e364ddd",
+      "excerpts": [
+        {
+          "anchor": "name:es.name,description:es.description,version:es.version,marketplaceName:this.storageName||this.name",
+          "offset": 5781449,
+          "raw": "anifest.plugins)return ei;for(let es of this.manifest.plugins)try{let ea={...es,name:es.name,description:es.description,version:es.version,marketplaceName:this.storageName||this.name,source:es.source};ei.push(ea)}catch(ei){ea.error(`Failed to read plugin ${es.name}:`,ei)}}catch(ei){ea.error(`Failed to list plugins from marketplace ${this.name}:`,ei)}return ei}"
+        },
+        {
+          "anchor": "getPluginId(ei,ea){return`${ei}@${ea}`}",
+          "offset": 5931723,
+          "raw": "ketplacePluginsLoading.get(ea)===eh&&this.marketplacePluginsLoading.delete(ea)}}getPluginId(ei,ea){return`${ei}@${ea}`}getHomePluginsDir(){return tK.PathUtils.getHomePluginsDir()}getInstalledPluginsRegistryPath(){return tz.join(this.getHomePluginsDir(),tD.Tn)}getInstalledPluginsRegistryLockName(){l"
+        }
+      ]
+    },
+    {
+      "path": "main/index.js",
+      "sha256": "586ef7f83fbe34834ff5c4de899c7f0647100643c4dded89d49556c8690d55e7",
+      "excerpts": [
+        {
+          "anchor": "const gotTheLock = electron.app.requestSingleInstanceLock();",
+          "offset": 2166194,
+          "raw": "returns 是否拿到锁；false 时调用方需 return 中断 main() 后续装配\n\t*/\n\tacquireSingletonLock() {\n\t\tconst gotTheLock = electron.app.requestSingleInstanceLock();\n\t\tthis.startupLog(`Phase: single instance lock, gotTheLock=${gotTheLock}`);\n\t\tmarkStartup(\"A8\");\n\t\tif (!gotTheLock) {\n\t\t\tthis.startupLog(\"SingletonLock failed: another instance ru"
+        },
+        {
+          "anchor": "if (process.env.WB_E2E_DISABLE_STARTUP_REPAIR === \"true\")",
+          "offset": 2110310,
+          "raw": "ss.platform !== \"darwin\") return;\n}\nfunction runEarlyPreflightAndMaybeBail() {\n\tif (process.env.WB_E2E_DISABLE_STARTUP_REPAIR === \"true\") return \"platform-skip\";\n\tif (process.platform === \"win32\") return runEarlyPreflightAndMaybeBailWin32();\n\tif (process.platform !== \"darwin\") return \"platform-skip\";\n\ttry {\n\t\tconst "
+        }
+      ]
+    }
+  ],
+  "observed": {
+    "cardAndDetailTitleUseName": true,
+    "nativeIdUsesNameAtMarket": true,
+    "mutableDisplayNameSupport": null
+  },
+  "note": "当前生成器保留固定安装键和输入displayName；这些代码片段不证明displayName被宿主展示。不得修改宿主DOM或重写登记来冒充名称正确。"
+}

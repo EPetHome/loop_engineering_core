@@ -1,0 +1,55 @@
+{
+  "attempt_id": "developer-r002-fbb5f7c4499a",
+  "scope": "developer isolated logical self-check, not an engine gate",
+  "sourceHashes": {
+    "card-state/index.mjs": "b459b793322438a4bf7f1932bc6a0fde9616de5666963332139838b162274137",
+    "self-test.mjs": "a32e6fbc7a51e32415313a9bf96e81cebc50efcb620dcb69a4ef8c91b24a5b5a"
+  },
+  "results": [
+    {
+      "command": [
+        "/Users/Admin/.hermes/node/bin/node",
+        "experiments/ecosystem-cards/self-test.mjs"
+      ],
+      "status": 0,
+      "signal": null,
+      "stdout": "{\"status\":\"PASS\",\"checks\":58,\"root\":\"/private/tmp/loop-card-unit-BC3tNO\",\"scope\":\"isolated unit fixtures, not desktop evidence\"}\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/Admin/.hermes/node/bin/node",
+        "acceptance/check.mjs",
+        "c",
+        "/Users/Admin/Desktop/loop/loop-data/checkouts/promate-ecology-cards-01-20261001T160116-8cbe4361/cards/developer-r002-fbb5f7c4499a",
+        "/private/tmp/loop-card-dev-6t1rax/core-final"
+      ],
+      "status": 0,
+      "signal": null,
+      "stdout": "PASS A：空壳内容、稳定身份、重复生成、升级与归属保护\nPASS B：未安装、启用、停用、卸载、异常记录与只读性\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/Admin/.hermes/node/bin/node",
+        "--check",
+        "experiments/ecosystem-cards/card-state/index.mjs"
+      ],
+      "status": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/Admin/.hermes/node/bin/node",
+        "--check",
+        "experiments/ecosystem-cards/self-test.mjs"
+      ],
+      "status": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

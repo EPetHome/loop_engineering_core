@@ -1,0 +1,70 @@
+{
+  "attempt_id": "developer-r002-fbb5f7c4499a",
+  "kind": "developer foreground self-check; not an engine gate or independent review",
+  "repairs": [
+    {"criterion_id": "S3", "change": "检查整个登记的跨身份路径声明；目标缓存的相同、父、旧版路径冲突返回UNKNOWN；profile内符号链接、外部未知路径和损坏异主记录不当作无冲突。"},
+    {"criterion_id": "S4", "change": "候选入口、模块和cwd分别拒绝符号链接后比较dev/ino/uid，安全接受同目录的Loop/loop拼写。修复本次原生临时目录和根内Unix socket接法；标题明确核对输入名称，卡片点击限定唯一目标。"},
+    {"criterion_id": "S5", "change": "前置异常纳入结构化报告/七步未执行说明/清理收尾；宿主启动前记录资源摘要，原始失败日志及恢复材料完整保留。截图辅助程序也受系统沙箱保护。"},
+    {"criterion_id": "S6", "change": "保留本轮52个保护输入的逐文件原始前后SHA-256、模式和字节数。旧developer-selfcheck.json不改写。"}
+  ],
+  "core": {
+    "status": "PASS",
+    "checks": 58,
+    "raw_result": "experiments/ecosystem-cards/developer-evidence-r002/core-final.json",
+    "command": "/Users/Admin/.hermes/node/bin/node experiments/ecosystem-cards/self-test.mjs",
+    "note": "最后一次核心逻辑自测前台执行结束，退出0；只读验收脚本c样例也退出0。原始stdout、stderr和受影响源码摘要保留；这不是引擎冻结门禁。"
+  },
+  "integration_logic": {
+    "status": "PASS",
+    "preflight_checks": 6,
+    "card_selection_checks": 6,
+    "raw_result": "experiments/ecosystem-cards/developer-evidence-r002/affected-checks.json",
+    "note": "目录大小写等价、异目录及符号链接拒绝、候选冲突前置报告通过；卡片唯一性/非目标/禁用控件选择逻辑通过。选择fixture不模拟真实安装成功。"
+  },
+  "syntax": {
+    "status": "PASS",
+    "modules": 13,
+    "note": "13个mjs实际Node --check均退出0；最后状态读取修改后另外复查两个受影响模块。JXA桥接修复后在独立沙箱中运行退出0，原始stdout为空窗口列表；不证明实际窗口或截图成功。",
+    "jxa_result": "experiments/ecosystem-cards/developer-evidence-r002/window-helper-check-final.json"
+  },
+  "protected_inputs": {
+    "status": "PASS",
+    "files": 52,
+    "changed": [],
+    "before": "experiments/ecosystem-cards/protected-before.json",
+    "after": "experiments/ecosystem-cards/protected-after.json",
+    "note": "相对本轮提供副本的原始前后比较；未读取或写回原项目/基线，不修改原插件、测试、验收或规则；未提交、推送、发布或合并。"
+  },
+  "host_static_contract": {
+    "source_checks": 3,
+    "report": "experiments/ecosystem-cards/host-contract.json",
+    "mutable_display_name_support": null,
+    "note": "原装5.6.2面板标题与原生安装身份均引用name。displayName落盘和摘要安装键可见不能证明输入名称正确；S1仍UNKNOWN。"
+  },
+  "desktop": {
+    "status": "UNKNOWN",
+    "exit_code": 1,
+    "reason": "NATIVE_CHROMIUM_SANDBOX_INITIALIZATION_DENIED",
+    "workspace": "/private/tmp/loop-card-dev-6t1rax/host-current",
+    "original_report": "/private/tmp/loop-card-dev-6t1rax/host-current/host-result.json",
+    "profile": "/private/tmp/loop-card-host-ThnfSM/profile",
+    "copied_report": "experiments/ecosystem-cards/developer-evidence-r002/host-current/host-result.json",
+    "raw_index": "experiments/ecosystem-cards/developer-evidence-r002/index-current.json",
+    "completed_actions": [],
+    "boundary_checks": 9,
+    "boundary_pass": true,
+    "managed_processes_stopped": true,
+    "remaining_processes": [],
+    "detached_detected": false,
+    "candidate_unchanged_during_run": true,
+    "other_resources_unchanged_during_startup": true,
+    "operation_screenshots": [],
+    "note": "最后前台集成测试已结束。实际入口大写Loop与cwd小写loop的文件系统身份一致；原生锁已越过原来的socket失败。随后GPU/网络服务报sandbox initialization failed: Operation not permitted。未关闭原生沙箱或锁，不使用CLI/headless安装、自写登记、真实用户profile或现有服务。仅启动前后的空插件登记未变化，不等于七步资源保护通过；七步均未执行，无操作截图。原始证据及整个隔离根保留。该运行后仅追加证据副本、索引及本自检摘要，实验实现未再改变。引擎冻结候选尚未运行。"
+  },
+  "unverified": [
+    "输入名称的真实展示及同身份改名",
+    "市场可见、安装、停用、启用、卸载、再次安装、同身份升级的真实桌面操作和截图",
+    "七步操作过程中的其他市场、插件和用户资料保护",
+    "本轮冻结候选门禁与独立评审；开发自评不是最终结论或业务验收"
+  ]
+}

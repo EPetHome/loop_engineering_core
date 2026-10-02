@@ -1,0 +1,53 @@
+(node:40770) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `Electron --trace-warnings ...` to show where the warning was created)
+
+DevTools listening on ws://127.0.0.1:57991/devtools/browser/b455d180-97df-4d4f-bc68-b4533b0b4f2d
+[40770:1001/140311.971887:ERROR:content/browser/devtools/devtools_http_handler.cc:303] Error writing DevTools active port to file /private/tmp/loop-card-host-HPiR04/user-data/session/DevToolsActivePort: No such file or directory (2)
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.087442:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140312.089146:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.211879:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+[40770:1001/140312.212032:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.308654:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+[40770:1001/140312.308831:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.372552:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.377515:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.445333:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+[40770:1001/140312.445611:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.503302:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140312.504090:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.537045:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+[40770:1001/140312.537223:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.569385:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140312.569875:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.601423:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140312.602738:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.634607:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140312.635009:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140312.665033:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140312.665407:ERROR:content/browser/network_service_instance_impl.cc:597] Network service crashed, restarting service.
+sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.sandbox initialization failed: Operation not permitted
+Failed to initialize sandbox.[40770:1001/140313.011285:ERROR:content/browser/gpu/gpu_process_host.cc:957] GPU process exited unexpectedly: exit_code=6
+[40770:1001/140313.011297:FATAL:content/browser/gpu/gpu_data_manager_impl_private.cc:415] GPU process isn't usable. Goodbye.
