@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "loop_guard": {
+      "command": "python3",
+      "args": [
+        "./mcp/bridge.py"
+      ],
+      "cwd": "."
+    }
+  }
+}

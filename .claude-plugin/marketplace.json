@@ -1,0 +1,15 @@
+{
+  "name": "loop-guard-local",
+  "owner": {
+    "name": "Loop Engineering"
+  },
+  "description": "本机 Loop 0.4.0 发布目录里的受控准备插件",
+  "plugins": [
+    {
+      "name": "loop-guard",
+      "source": "./plugins/loop-guard",
+      "description": "Loop 受控准备：只开放九个准备工具；Hook 只在带 .loop-guard-prep.json 的准备目录内生效。不提供启动、批准或任意 Shell。",
+      "category": "development"
+    }
+  ]
+}

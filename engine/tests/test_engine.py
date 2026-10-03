@@ -98,8 +98,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.execute(),'BLOCKED');self.assertEqual(self.unit['stats']['member_invocations'],1)
         self.assertEqual(self.unit['result']['criteria'][0]['status'],'UNKNOWN')
     def test_silent_gate_not_member_idle_timeout(self):
-        self.raw['units'][0]['idle_output_seconds']=.5
-        self.raw['units'][0]['gates'][0]['argv']=['{python}','-c','import time;time.sleep(.7);print("done")']
+        self.raw['units'][0]['idle_output_seconds']=2
+        self.raw['units'][0]['gates'][0]['argv']=['{python}','-c','import time;time.sleep(3);print("done")']
         self.assertEqual(self.execute(),'PASSED')
     def test_chatty_cannot_extend_timeout(self):
         self.mode('dev','chatty');self.raw['units'][0]['stage_timeout_seconds']=.4
