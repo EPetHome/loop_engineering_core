@@ -68,16 +68,39 @@ export default function(pi: ExtensionAPI) {
       return {content: [{type: "text", text: JSON.stringify(result)}], details: result};
     }
   });
+  pi.registerTool({
+    name: "loop_delete", label: "Loop delete",
+    description: "删除本单元可修改范围内已存在的普通文件，可一次多个；路径相对 code_path。不删目录；受保护文件和构建产物会被拒绝。",
+    parameters: Type.Object({paths: Type.Array(Type.String(), {minItems: 1, maxItems: 500})}),
+    async execute(_id, params, signal) {
+      if (readonly || building) throw new Error("File operation not allowed in this state");
+      const result = await rpc("delete", {paths: params.paths}, signal);
+      return {content: [{type: "text", text: JSON.stringify(result)}], details: result};
+    }
+  });
+  pi.registerTool({
+    name: "loop_copy", label: "Loop copy",
+    description: "把 code_path 内一个文件逐字节复制到一个或多个目标（目标须在本单元可修改范围内，已存在则覆盖）。多处必须保持完全一致的文件，改好一份后用它同步其余各份。",
+    parameters: Type.Object({source: Type.String(), targets: Type.Array(Type.String(), {minItems: 1, maxItems: 500})}),
+    async execute(_id, params, signal) {
+      if (readonly || building) throw new Error("File operation not allowed in this state");
+      const result = await rpc("copy", {source: params.source, targets: params.targets}, signal);
+      return {content: [{type: "text", text: JSON.stringify(result)}], details: result};
+    }
+  });
+  const writeTools = ["edit", "write", "loop_build", "loop_delete", "loop_copy"];
   pi.on("session_start", async () => {
     await rpc("hello");
     pi.setActiveTools(readonly ? ["read", "grep", "find", "ls", "loop_submit_check"] :
-                      ["read", "grep", "find", "ls", "edit", "write", "loop_build", "loop_submit_check"]);
+                      ["read", "grep", "find", "ls", ...writeTools, "loop_submit_check"]);
   });
   pi.on("cache_warming_decision", async () => ({action: "stop"}));
   pi.on("tool_call", async (event) => {
     const name = event.toolName;
-    if (!["read", "grep", "find", "ls", "edit", "write", "loop_build", "loop_submit_check"].includes(name))
-      return {block: true, reason: "受管成员不提供任意命令。使用 loop_build 或记录缺能力。"};
+    if (!["read", "grep", "find", "ls", ...writeTools, "loop_submit_check"].includes(name))
+      return {block: true, reason: "受管成员不提供任意命令。使用 loop_build / loop_delete / loop_copy 或记录缺能力。"};
+    if ((name === "loop_delete" || name === "loop_copy") && (readonly || building))
+      return {block: true, reason: "当前只读或构建中，禁止修改"};
     if (name === "edit" || name === "write") {
       if (readonly || building) return {block: true, reason: "当前只读或构建中，禁止修改"};
       const input = event.input as {path?: string};

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Human terminal + preparation CLI. No approval/start API is exposed via MCP."""
 from __future__ import annotations
-import argparse
+import argparse,shlex
 import json
 import os
 from pathlib import Path
@@ -95,6 +95,16 @@ def parser():
     c=sub.add_parser('status'); c.add_argument('prep_id')
     c=sub.add_parser('budget'); c.add_argument('authorization_id')
     c=sub.add_parser('launch'); c.add_argument('prepared_id'); c.add_argument('--approve',action='store_true'); c.add_argument('--authorization'); c.add_argument('--brief',action='store_true')
+    c=sub.add_parser('continue',help='从已停止的多单元运行起草续接计划：去掉已达标单元、从续接单元最新候选接着做；不登记不启动')
+    c.add_argument('run_id'); c.add_argument('--root',type=Path,required=True); c.add_argument('--project-id',required=True)
+    c.add_argument('--out',type=Path,required=True,help='续接计划文件，必须不存在')
+    c.add_argument('--fresh-unit',action='store_true',help='续接单元从其冻结输入重做，不用上次候选')
+    d=sub.add_parser('derive',help='从已登记项目起草新计划：规则原样另存，只改 source；不登记不启动')
+    d.add_argument('project_id',help='上一轮已登记的项目ID')
+    d.add_argument('--project-id',dest='new_project_id',required=True,metavar='NEW_PROJECT_ID',help='新项目ID')
+    d.add_argument('--out',type=Path,required=True,help='新计划文件，必须不存在')
+    d.add_argument('--source',type=Path,help='换一个源码目录；计划里只改 source')
+    d.add_argument('--copy-source',type=Path,help='把源码复制到该新目录（必须不存在）并让计划指向可写副本')
     c=sub.add_parser('serve'); c.add_argument('--socket',type=Path,required=True)
     c=sub.add_parser('plugin-config',help='生成专用准备目录（Codex 与 Claude Code 共用一个插件）')
     c.add_argument('--socket',type=Path,required=True); c.add_argument('--out',type=Path,required=True,help='准备目录，必须不存在')
@@ -122,6 +132,15 @@ def main(argv=None):
         elif name=='seal': result=prep.seal(state,args.prep_id,args.revision)
         elif name=='status': result=Ledger(state).get('prep',args.prep_id)
         elif name=='budget': result=Ledger(state).authorization(args.authorization_id)
+        elif name=='continue':
+            result=prep.continue_plan(args.root,args.run_id,args.project_id,args.out,fresh_unit=args.fresh_unit)
+            q=lambda v:shlex.quote(str(v))
+            result['next_commands']=[f'{q(sys.executable)} {q(Path(__file__).resolve())} --state {q(state)} register {q(args.project_id)} {q(result["plan"])} --root {q(Path(args.root).expanduser().resolve())}',
+                                     f'{q(sys.executable)} {q(Path(__file__).resolve())} --state {q(state)} begin {q(args.project_id)}',
+                                     '再 seal <prep_id> --revision <N>，把返回的启动命令交给用户']
+        elif name=='derive':
+            result=prep.derive_plan(state,args.project_id,args.new_project_id,args.out,
+                                    source=args.source,copy_source=args.copy_source)
         elif name=='launch': return launch_prepared(state,args.prepared_id,approve=args.approve,authorization=args.authorization,brief=args.brief)
         elif name=='serve':
             from loop_engineering.guard_server import serve

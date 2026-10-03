@@ -13,13 +13,28 @@ def rpc(method,**kw):
     if not r['ok']:raise RuntimeError(r['error'])
     return r['result']
 
+def refused(method,**kw):
+    try:rpc(method,**kw)
+    except RuntimeError:return
+    raise AssertionError('member service accepted '+method+' '+json.dumps(kw))
+
 rpc('hello')
 if role=='developer' and not c['protocol_repair_only']:
     (code/'value.txt').write_text('fixed-round-'+str(c['round']))
+    if '--file-ops' in sys.argv:
+        refused('delete',paths=['keep.txt','locked.txt'])      # one bad path changes nothing
+        assert (code/'keep.txt').exists()
+        for bad in (['locked.txt'],['../outside'],['missing.txt'],['copies/']):refused('delete',paths=bad)
+        refused('copy',source='value.txt',targets=['locked.txt'])
+        refused('copy',source='value.txt',targets=['value.txt'])
+        rpc('delete',paths=['gone.txt',str(code/'gone2.txt')])
+        rpc('copy',source='value.txt',targets=['copies/a.txt','copies/b.txt'])
     for name in c['unit']['build_profiles']:
         result=rpc('build',recipe_id=name,request_id='selftest-'+str(c['round']))
         if result['status']!='PASS':raise RuntimeError(str(result))
     rpc('submit_check')
+elif '--file-ops' in sys.argv:
+    refused('delete',paths=['value.txt']);refused('copy',source='value.txt',targets=['copies/c.txt'])
 rows=[]
 for criterion in c['unit']['criteria']:
     status='PASS'

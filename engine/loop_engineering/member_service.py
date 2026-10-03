@@ -9,9 +9,12 @@ import socketserver
 import tempfile
 import threading
 import uuid
-from .common import LoopError, atomic_json, digest
+from .common import LoopError, atomic_json, atomic_write, digest, matches, relative_path, safe_child, writable_change
 from .execution import inspect_developer_delivery, execute_recipe
 from .capabilities import unit_selftest_cap
+
+MAX_REQUEST_BYTES = 262144
+MAX_FILE_OPERATION_PATHS = 500
 
 
 class MemberService:
@@ -30,9 +33,9 @@ class MemberService:
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 self.connection.settimeout(10)
-                raw = self.rfile.readline(16385)
+                raw = self.rfile.readline(MAX_REQUEST_BYTES + 1)
                 try:
-                    if len(raw) > 16384 or not raw.endswith(b'\n'):
+                    if len(raw) > MAX_REQUEST_BYTES or not raw.endswith(b'\n'):
                         raise LoopError('invalid member request frame')
                     request = json.loads(raw)
                     if not isinstance(request, dict) or not hmac.compare_digest(str(request.get('token', '')), instance.token):
@@ -53,14 +56,14 @@ class MemberService:
         return {'LOOP_MEMBER_SOCKET': str(self.socket_path), 'LOOP_MEMBER_TOKEN': self.token}
 
     def dispatch(self, request: dict):
-        if set(request) - {'token', 'method', 'recipe_id', 'request_id'}:
+        if set(request) - {'token', 'method', 'recipe_id', 'request_id', 'paths', 'source', 'targets'}:
             raise LoopError('unsupported member request fields')
         method = request.get('method')
         if method == 'hello':
             self.handshake = True
             return {'attempt_id': self.context['attempt_id'], 'profiles': self.context['unit'].get('build_profiles', []),
-                    'tools': ['loop_build', 'loop_submit_check'], 'arbitrary_shell': False}
-        if method not in ('build', 'submit_check'):
+                    'tools': ['loop_build', 'loop_submit_check', 'loop_delete', 'loop_copy'], 'arbitrary_shell': False}
+        if method not in ('build', 'submit_check', 'delete', 'copy'):
             raise LoopError('unsupported member operation')
         with self.lock:
             self.owner.check_time()
@@ -70,8 +73,12 @@ class MemberService:
             if self.context['role'] != 'developer' or self.context['protocol_repair_only']:
                 if manifest != self.base:
                     raise LoopError('readonly member modified code')
-                if method == 'build':
-                    raise LoopError('reviewer/format-only members cannot start development builds')
+                if method in ('build', 'delete', 'copy'):
+                    raise LoopError('reviewer/format-only members cannot build or change files')
+            if method == 'delete':
+                return self.delete(request.get('paths'))
+            if method == 'copy':
+                return self.copy(request.get('source'), request.get('targets'))
             if method == 'submit_check':
                 return {'candidate_hash': digest(manifest), 'status': 'BOUNDARY_OK',
                         'note': '仅交付边界检查；不代表门禁/独立评审通过'}
@@ -107,6 +114,76 @@ class MemberService:
             self.completed[key] = reply
             self.owner.store.event('selftest_finished', self.owner.uid, **reply)
             return reply
+
+    def _relative(self, value) -> str:
+        """Accept a code_path-relative path, or an absolute path inside this attempt's code_path."""
+        if not isinstance(value, str) or not value:
+            raise LoopError('文件路径必须是非空字符串')
+        if os.path.isabs(value):
+            for root in {os.path.normpath(str(self.code)), os.path.realpath(str(self.code))}:
+                rel = os.path.relpath(os.path.normpath(value), root)
+                if not rel.startswith('..'):
+                    value = rel
+                    break
+            else:
+                raise LoopError('路径不在本次 code_path 内：' + value)
+        return relative_path(value.replace(os.sep, '/'))
+
+    def _writable_file(self, value) -> tuple[str, Path]:
+        rel = self._relative(value)
+        unit = self.owner.unit
+        outputs = [p for name in unit.get('build_profiles', [])
+                   for p in self.owner.rules['execution_profiles'][name]['output_paths']]
+        if not writable_change(rel, unit['writable_paths'], unit['protected_paths']) or matches(rel, outputs):
+            raise LoopError('超出本单元可修改范围，或是构建临时产物：' + rel)
+        return rel, safe_child(self.code, rel)
+
+    def _paths(self, values, name: str) -> list:
+        if not isinstance(values, list) or not values or len(values) > MAX_FILE_OPERATION_PATHS:
+            raise LoopError(f'{name} 必须是 1—{MAX_FILE_OPERATION_PATHS} 个路径的数组')
+        return values
+
+    def delete(self, paths) -> dict:
+        # Validate every path before touching any file, so a bad entry changes nothing.
+        plan = []
+        for value in self._paths(paths, 'paths'):
+            rel, target = self._writable_file(value)
+            if target.is_symlink() or not target.is_file():
+                raise LoopError('只能删除已存在的普通文件（不删目录）：' + rel)
+            if rel not in [r for r, _ in plan]:
+                plan.append((rel, target))
+        for _, target in plan:
+            target.unlink()
+        deleted = [rel for rel, _ in plan]
+        self.owner.store.event('member_files_deleted', self.owner.uid, attempt_id=self.context['attempt_id'], paths=deleted)
+        return {'deleted': deleted, 'note': '已在本次 code_path 删除；交付时仍按本单元范围核对'}
+
+    def copy(self, source, targets) -> dict:
+        source_rel = self._relative(source)
+        origin = safe_child(self.code, source_rel)
+        if origin.is_symlink() or not origin.is_file():
+            raise LoopError('复制源必须是 code_path 内已存在的普通文件：' + source_rel)
+        if origin.stat().st_size > self.owner.limits['max_source_bytes']:
+            raise LoopError('复制源超过源码体积上限')
+        data = origin.read_bytes()
+        executable = bool(origin.stat().st_mode & 0o111)
+        plan = []
+        for value in self._paths(targets, 'targets'):
+            rel, target = self._writable_file(value)
+            if rel == source_rel:
+                raise LoopError('目标与复制源相同：' + rel)
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise LoopError('目标已存在且不是普通文件：' + rel)
+            if rel not in [r for r, _ in plan]:
+                plan.append((rel, target))
+        for _, target in plan:
+            atomic_write(target, data)
+            os.chmod(target, 0o700 if executable else 0o600)
+        copied = [rel for rel, _ in plan]
+        self.owner.store.event('member_files_copied', self.owner.uid, attempt_id=self.context['attempt_id'],
+                               source=source_rel, paths=copied)
+        return {'source': source_rel, 'copied': copied, 'bytes': len(data),
+                'note': '逐字节复制，已存在的目标被覆盖；交付时仍按本单元范围核对'}
 
     def __exit__(self, *_):
         self.server.shutdown()

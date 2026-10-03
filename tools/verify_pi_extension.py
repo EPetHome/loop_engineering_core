@@ -20,7 +20,7 @@ def main():
                 'files':[str(p/'host-stubs.d.ts'),str(p/'loop-member-tools.ts')]}
         (p/'tsconfig.json').write_text(json.dumps(config))
         stub=p/'node_modules/@sinclair/typebox';stub.mkdir(parents=True)
-        (stub/'index.js').write_text("exports.Type={Object:(x)=>x,String:()=>({type:'string'})};\n")
+        (stub/'index.js').write_text("exports.Type={Object:(x)=>x,String:()=>({type:'string'}),Array:(x,o)=>({type:'array',items:x,...(o||{})})};\n")
         c=subprocess.run([tsc,'--project',str(p/'tsconfig.json')],cwd=p,timeout=30)
         if c.returncode:return c.returncode
         c=subprocess.run([node,str(p/'test-extension.cjs')],cwd=p,timeout=30)

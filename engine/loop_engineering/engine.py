@@ -262,6 +262,7 @@ class UnitEngine:
                   if previous and previous.get('review_path') else None)
         comp = make_comparison(self.input_path, self.input_manifest, code, manifest,
                                candidate, previous_manifest, review, adir / 'comparison.diff')
+        comp['previous_review_path'] = previous.get('review_path') if previous else None
         self.store.seal(adir / 'comparison.diff')
         return comp
 
@@ -305,6 +306,7 @@ class UnitEngine:
                        'input_hash': digest(base_manifest), 'unit_input_hash': digest(self.input_manifest),
                        'candidate_hash': self.candidate['hash'] if role == 'reviewer' else '',
                        'code_path': str(code), 'workspace_path': str(adir), 'response_path': str(response),
+                       'context_path': str(context_path),
                        'scratch_path': str(scratch) if scratch is not None else None,
                        'output_mode': output, 'adapter_kind': agent['kind'], 'unit': role_unit, 'limits': self.limits,
                        'feedback': self.feedback if role == 'developer' else None,

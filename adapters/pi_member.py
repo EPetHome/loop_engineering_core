@@ -37,7 +37,7 @@ DEFAULT_LOG_BYTES = 8 * 1024 * 1024
 def managed_tools(context: dict) -> str:
     """Same tool set the Loop extension activates; no bash in managed sessions."""
     if context['role'] == 'developer' and not context['protocol_repair_only']:
-        return 'read,edit,write,grep,find,ls,loop_build,loop_submit_check'
+        return 'read,edit,write,grep,find,ls,loop_build,loop_submit_check,loop_delete,loop_copy'
     return 'read,grep,find,ls,loop_submit_check'
 
 
@@ -191,7 +191,8 @@ def main() -> int:
     args = ap.parse_args()
     try:
         context_path = os.environ.get('LOOP_CONTEXT')
-        context = load_json(Path(context_path), 1024 * 1024) if context_path else {}
+        # Engine-written and sealed; it keeps full audit history, so allow it to outgrow the prompt.
+        context = load_json(Path(context_path), 16 * 1024 * 1024) if context_path else {}
         limits, unit = context.get('limits', {}), context.get('unit', {})
         workspace = args.workspace or (Path(context['workspace_path']) if context.get('workspace_path') else None)
         max_bytes = limits.get('max_log_bytes', DEFAULT_LOG_BYTES)

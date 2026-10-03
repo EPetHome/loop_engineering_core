@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import sys
 import time
 import uuid
@@ -190,6 +191,20 @@ def criteria_warnings(rules: dict) -> list[str]:
     return found
 
 
+INLINE_SCRIPT_BYTES = 4096
+
+
+def argv_warnings(rules: dict) -> list[str]:
+    """Non-blocking: a script hidden in argv cannot be reviewed in the preview (2026-10-03 lesson)."""
+    found = []
+    for name, profile in rules.get('execution_profiles', {}).items():
+        size = sum(len(str(a).encode('utf-8')) for a in profile.get('argv', []))
+        if size > INLINE_SCRIPT_BYTES:
+            found.append(f'配方 {name} 的命令参数共 {size} 字节，像是把脚本内联进了配置；'
+                         '建议把验收脚本放进源码的指定位置，配方只引用它的路径')
+    return found
+
+
 def _get_prep(ledger: Ledger, prep_id: str, revision: int | None = None) -> dict:
     from .rules import ident
     ident(prep_id, 'prep_id')
@@ -248,8 +263,12 @@ def _probe_key(rules: dict, name: str) -> str:
     # Include referenced source scripts, not just conventional build descriptors.
     for arg in argv:
         path = Path(arg) if Path(arg).is_absolute() else source / profile['cwd'] / arg
-        if path.is_file() and not path.is_symlink():
-            relevant[str(path)] = file_hash(path)
+        try:
+            if path.is_file() and not path.is_symlink():
+                relevant[str(path)] = file_hash(path)
+        except OSError:
+            # An argument that cannot be a path (e.g. inline code over NAME_MAX) is not a source file.
+            continue
     exe = shutil.which(argv[0])
     if exe:
         relevant['executable'] = file_hash(Path(exe))
@@ -319,7 +338,7 @@ def check(state: Path, prep_id: str, revision: int, *, refresh: bool = False) ->
                                    'detail': '已授权的一次执行条件探测尚未完成；不要求新业务已通过'})
         result = {'status': 'READY' if not issues else ('NEEDS_CAPABILITY' if any(x['kind'] == 'CAPABILITY' for x in issues) else 'INVALID'),
                   'revision': revision, 'issues': issues, 'cached': False,
-                  'warnings': criteria_warnings(rules) if rules else [],
+                  'warnings': criteria_warnings(rules) + argv_warnings(rules) if rules else [],
                   'coverage': ['规则结构', '全部已声明配方关联', '程序和路径存在性'],
                   'not_verified': ['业务正确性', '真实模型/账号/额度', '未来自定义构建副作用', '宿主 Hook 实际生效'],
                   'checked_at': now()}
@@ -435,6 +454,21 @@ def render_preview(rules: dict, approved: dict, rules_path: Path, verification: 
         lines.append('- %s：`%s`（目录 %s；输出 %s；网络 %s）' % (
             name, shlex.join(profile['argv']), profile['cwd'], ', '.join(profile['output_paths']) or '无',
             '允许' if profile['network'] else '关闭'))
+    # 2026-10-03: a unit required deleting 30 files that no member could delete; show the tool set up front.
+    agents = rules.get('agents', {})
+    pi_agents = sorted(n for n, a in agents.items() if any('pi_member.py' in str(x) for x in a.get('argv') or []))
+    others = sorted(set(agents) - set(pi_agents))
+    lines += ['', '## 成员能做什么（验收要求的操作必须在这里面，否则先补配方或调整验收）']
+    if pi_agents:
+        lines += ['- Pi 成员：' + ', '.join(pi_agents) + '。',
+                  '- 担任开发时：读、改、写、搜索文件；loop_build 只跑本单元配方自测；'
+                  'loop_submit_check 交付前查边界；loop_delete 删除、loop_copy 逐字节复制，二者只限本单元可改范围。'
+                  '不能执行任意命令、不能安装依赖或联网下载。',
+                  '- 担任评审时：只读（读、搜索文件和 loop_submit_check）；' +
+                  ('schema v2 不提供评审执行命令，机械检查必须写成门禁。' if rules.get('schema_version') == 2
+                   else '单元开启 reviewer_exec 时可在取证目录执行只读取证命令。')]
+    if others:
+        lines.append('- 其他成员（' + ', '.join(others) + '）：能力由各自适配器决定，Loop 未核实。')
     if warnings:
         lines += ['', '## ⚠ 验收标准提醒（不阻断）'] + ['- ' + w for w in warnings]
     for u in rules['units']:
@@ -446,3 +480,158 @@ def render_preview(rules: dict, approved: dict, rules_path: Path, verification: 
         lines += ['- ' + c['id'] + '：' + c['text'] + '；门禁：' + ', '.join(c['gate_ids']) for c in u['criteria']]
     lines += ['', '准备工具不会替用户批准新运行。完整规则中的模型、命令、授权仍以人工确认结果为准。']
     return '\n'.join(lines) + '\n'
+
+
+def _make_tree_writable(root: Path) -> None:
+    """Owner-write for every copied path: the chosen source may be read-only everywhere."""
+    for base, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = Path(base) / name
+            if not path.is_symlink():
+                os.chmod(path, path.stat().st_mode | stat.S_IWUSR)
+    os.chmod(root, root.stat().st_mode | stat.S_IWUSR)
+
+
+def derive_plan(state: Path, project_id: str, new_project_id: str, out: Path, *,
+                source: Path | None = None, copy_source: Path | None = None) -> dict:
+    """Draft a new plan from a registered project without registering or starting anything.
+
+    The registered rules are copied verbatim so the user only edits what really changes.
+    --source replaces just the source path. --copy-source first clones the source (the
+    --source one when given, otherwise the previously registered source) into a new
+    directory kept writable for the current user, then points the draft at the copy.
+    The draft still goes through register -> begin -> seal before the user can start it.
+    """
+    from .rules import ident
+    ident(new_project_id, 'project_id')
+    ledger = Ledger(state)
+    project = ledger.get('project', project_id)
+    out = Path(out).expanduser().absolute()
+    if out.exists():
+        raise LoopError('输出文件已存在，不覆盖：' + str(out))
+    chosen = None
+    if source is not None or copy_source is not None:
+        chosen = (Path(source).expanduser() if source is not None
+                  else Path(project['rules']['source'])).resolve()
+        if not chosen.is_dir():
+            raise LoopError('源码目录不存在：' + str(chosen))
+    destination = Path(copy_source).expanduser().resolve() if copy_source is not None else None
+    if destination is not None:
+        if destination.exists():
+            raise LoopError('目标目录已存在，不覆盖：' + str(destination))
+        if destination == chosen or chosen.is_relative_to(destination) or destination.is_relative_to(chosen):
+            raise LoopError('复制目标与源码目录不能互相嵌套：' + str(destination))
+    rules = copy.deepcopy(project['rules'])
+    if destination is not None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(chosen, destination, symlinks=False)
+        _make_tree_writable(destination)
+        rules['source'] = str(destination)
+    elif chosen is not None:
+        rules['source'] = str(chosen)
+    guard = Path(__file__).resolve().parents[2] / 'loop_guard.py'
+    root = project['root']
+    q = lambda v: shlex.quote(str(v))
+    next_commands = [f'{q(sys.executable)} {q(guard)} --state {q(state)} register '
+                     f'{q(new_project_id)} {q(out)} --root {q(root)}',
+                     f'{q(sys.executable)} {q(guard)} --state {q(state)} begin {q(new_project_id)}']
+    atomic_write(out, json.dumps(rules, ensure_ascii=False, indent=2) + '\n')
+    return {'plan': str(out), 'project_id': new_project_id, 'based_on': project_id,
+            'source': rules['source'], 'root': root, 'next_commands': next_commands}
+
+
+def continue_plan(root: Path, run_id: str, project_id: str, out: Path, *, fresh_unit: bool = False) -> dict:
+    """Draft a plan that resumes a stopped multi-unit run (managed runs refuse retry/seed).
+
+    PASSED units are dropped: their results are already inside the chosen source. The single
+    unit that can resume continues from its latest candidate (or its frozen input with
+    fresh_unit), and its still-open issues are appended to its goal. The draft then goes
+    through the normal register -> begin -> seal -> user launch; nothing is started here.
+    """
+    from .rules import ident, ancestors
+    from .engine import verify_candidate, snapshot_manifest
+    from .common import IntegrityError
+    ident(project_id, 'project_id')
+    runs = Path(root).expanduser().resolve() / 'runs'
+    run = runs / run_id
+    if run.parent != runs or not (run / 'manifest.json').is_file():
+        raise LoopError('找不到该运行：' + run_id)
+    out = Path(out).expanduser().absolute()
+    if out.exists():
+        raise LoopError('输出文件已存在，不覆盖：' + str(out))
+    manifest, rules = load_json(run / 'manifest.json'), load_json(run / 'rules.json')
+    if manifest['state'] != 'TERMINAL':
+        raise LoopError('运行尚未停止；先 stop 并等它结束，再续接')
+    if digest(rules) != manifest['rule_hash']:
+        raise IntegrityError('运行规则已被修改，不能据此续接')
+    if rules.get('schema_version') != 2:
+        raise LoopError('只支持 schema v2 受管运行')
+    units, states = rules['units'], manifest['units']
+    passed = {uid for uid, s in states.items() if (s.get('result') or {}).get('stop') == 'PASSED'}
+    remaining = [u for u in units if u['id'] not in passed]
+    if not remaining:
+        raise LoopError('全部单元都已达标，无需续接')
+    frontier = [u for u in remaining if all(d in passed for d in u['depends_on'])]
+    if len(frontier) != 1:
+        raise LoopError('可续接的单元不止一个（并行分支）：' + ', '.join(u['id'] for u in frontier) + '；本命令只处理单一续接点，请手工编排')
+    resume = frontier[0]
+    if passed - ancestors(units, resume['id']):
+        raise LoopError('有已达标单元不在续接单元的上游，成果需要合并；本命令不自动合并，请手工编排')
+    state = states[resume['id']]
+    candidate = None if fresh_unit else (state.get('result') or {}).get('candidate')
+    if candidate:
+        verify_candidate(candidate, rules['limits'])
+        source, origin = candidate['path'], f'{resume["id"]} 第 {candidate.get("round")} 轮候选'
+    elif state.get('input_path'):
+        source, origin = state['input_path'], f'{resume["id"]} 的冻结输入（上游成果已合入）'
+        if digest(snapshot_manifest(Path(source), rules['limits'])) != state.get('input_hash'):
+            raise IntegrityError('续接单元的冻结输入指纹不匹配')
+    else:
+        leaves = [p for p in passed if not any(p in ancestors(units, q) for q in passed)]
+        if not passed:
+            source, origin = manifest['input']['path'], '上次运行的冻结原始输入'
+        elif len(leaves) == 1:
+            leaf = states[leaves[0]]['result']['candidate']
+            verify_candidate(leaf, rules['limits'])
+            source, origin = leaf['path'], f'{leaves[0]} 的达标候选'
+        else:
+            raise LoopError('多个已达标上游需要合并成果；本命令不自动合并，请手工编排')
+    raw = copy.deepcopy(rules)
+    raw['source'] = str(source)
+    if (raw.get('completion') or {}).get('unit') in passed:
+        raise LoopError('收尾单元已达标但仍有未达标单元，请手工确认收尾方式')
+    kept = []
+    for u in units:
+        if u['id'] in passed:
+            continue
+        u = copy.deepcopy(u)
+        if u.get('input_from') in passed:
+            raise LoopError(f'单元 {u["id"]} 的 input_from 指向已达标单元，请手工编排')
+        u['depends_on'] = [d for d in u['depends_on'] if d not in passed]
+        kept.append(u)
+    raw['units'] = kept
+    header = (f'【续接信息，与下文冲突时以本段为准】续接自运行 {run_id}。'
+              + (f'已达标单元 {"、".join(sorted(passed))} 的成果已包含在本次源码中，不重做。' if passed else '')
+              + f'源码来自：{origin}（{source}）。')
+    raw['notes'] = header + '\n' + rules.get('notes', '')
+    open_items = [i for i in state.get('issue_history') or []
+                  if i.get('status') != 'RESOLVED' and not i.get('deferred')] if candidate else []
+    if open_items:
+        lines = [f'【续接，与上文冲突时以本段为准】上次运行留下 {len(open_items)} 个未解决问题，请先逐条修复：']
+        for item in open_items:
+            files = []
+            for occurrence in item.get('occurrences') or []:
+                reported = occurrence.get('reported') if isinstance(occurrence, dict) else None
+                for name in (reported.get('files') or [] if isinstance(reported, dict) else []):
+                    if name not in files:
+                        files.append(name)
+            lines.append(f'- [{",".join(item.get("criterion_ids") or [])}] {item.get("description")}'
+                         + (f'（{"；".join(files)}）' if files else ''))
+        next(u for u in kept if u['id'] == resume['id'])['goal'] += '\n' + '\n'.join(lines)
+    normalize(copy.deepcopy(raw), out.parent)
+    atomic_write(out, json.dumps(raw, ensure_ascii=False, indent=2) + '\n')
+    deferred = sum(1 for i in state.get('issue_history') or [] if i.get('deferred'))
+    return {'plan': str(out), 'project_id': project_id, 'resume_unit': resume['id'], 'source': str(source),
+            'origin': origin, 'dropped_passed_units': sorted(passed), 'units': [u['id'] for u in kept],
+            'carried_open_issues': len(open_items), 'deferred_findings_not_carried': deferred,
+            'next': '用新的项目编号登记这份计划（会实跑配方），再 begin → seal，启动命令交给用户'}

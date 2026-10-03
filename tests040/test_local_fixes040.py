@@ -56,6 +56,80 @@ class PiMemberTools(unittest.TestCase):
         self.assertTrue(w['write_regexes'][0].endswith(r'/[^/]+\.lock(/.*)?$'))
 
 
+class MemberFileOperations(unittest.TestCase):
+    # 2026-10-03: b3-config had to delete 30 connection.dat files and keep 29 identical copies;
+    # developers had no delete/copy tool, so the unit could never pass.
+    def test_developer_deletes_and_copies_inside_scope_only(self):
+        with tempfile.TemporaryDirectory() as t:
+            base=Path(t);raw=project(base,True);src=Path(raw['source'])
+            for name in ('gone.txt','gone2.txt','keep.txt','locked.txt'):(src/name).write_text(name)
+            unit=raw['units'][0]
+            unit.update(writable_paths=['value.txt','gone.txt','gone2.txt','keep.txt','copies/'],protected_paths=['locked.txt'])
+            for agent in raw['agents'].values():agent['argv']=agent['argv']+['--file-ops']
+            m,state,root,s,aid=execute_prepared(base,raw)
+            result=m['units']['check']['result'];self.assertEqual(result['stop'],'PASSED',result['reason'])
+            code=Path(result['candidate']['path'])
+            self.assertFalse((code/'gone.txt').exists());self.assertFalse((code/'gone2.txt').exists())
+            self.assertTrue((code/'keep.txt').exists());self.assertEqual((code/'locked.txt').read_text(),'locked.txt')
+            for name in ('a.txt','b.txt'):self.assertEqual((code/'copies'/name).read_bytes(),(code/'value.txt').read_bytes())
+            self.assertFalse((code/'copies/c.txt').exists())
+            run=next((root/'runs').iterdir())
+            events=[e.get('event') for e in map(json.loads,(run/'events.jsonl').read_text().splitlines())]
+            self.assertIn('member_files_deleted',events);self.assertIn('member_files_copied',events)
+
+    def test_developer_tool_allowlist_includes_file_operations(self):
+        self.assertEqual(pi_member.managed_tools({'role':'developer','protocol_repair_only':False}).split(','),
+                         ['read','edit','write','grep','find','ls','loop_build','loop_submit_check','loop_delete','loop_copy'])
+
+
+class ContinueStoppedRun(unittest.TestCase):
+    # 2026-10-03: managed runs refuse retry/seed, so a stopped multi-unit run was resumed twice
+    # with hand-written plans (source path, dropped units, carried issues all edited manually).
+    def test_continue_drops_passed_units_and_resumes_from_latest_candidate(self):
+        with tempfile.TemporaryDirectory() as t:
+            base=Path(t);raw=project(base,True)
+            raw['agents']['review_fail']=dict(raw['agents']['review'],identity='offline-review-fail',
+                                              argv=raw['agents']['review']['argv']+['--repair'])
+            second=json.loads(json.dumps(raw['units'][0]))
+            second.update(id='second',kind='integration',depends_on=['check'],reviewer='review_fail',max_repairs=0)
+            raw['units'].append(second);raw['completion']={'mode':'integration','unit':'second'}
+            m,state,root,s,aid=execute_prepared(base,raw)
+            self.assertEqual(m['units']['check']['result']['stop'],'PASSED')
+            self.assertEqual(m['units']['second']['result']['stop'],'NOT_MET')
+            run=next((root/'runs').iterdir()).name;out=base/'cont.json'
+            r=prep.continue_plan(root,run,'p2',out)
+            plan=json.loads(out.read_text())
+            self.assertEqual(([u['id'] for u in plan['units']],plan['units'][0]['depends_on']),(['second'],[]))
+            self.assertEqual(plan['source'],m['units']['second']['result']['candidate']['path'])
+            self.assertEqual((r['resume_unit'],r['dropped_passed_units']),('second',['check']))
+            self.assertGreaterEqual(r['carried_open_issues'],1)
+            self.assertIn('fixture requires second development round',plan['units'][0]['goal'])
+            self.assertIn('以本段为准',plan['notes'])
+            with self.assertRaises(LoopError):prep.continue_plan(root,run,'p3',out)     # never overwrites
+            # The draft goes through the normal managed path and finishes.
+            plan['agents']['review_fail']['argv']=raw['agents']['review']['argv']
+            prep.register_project(state,'p2',plan,base,root)
+            d=prep.begin(state,'p2');rid,s2,aid2=create_prepared_run(state,root,d);Controller(root,rid).execute()
+            m2=json.loads((root/'runs'/rid/'manifest.json').read_text())
+            self.assertEqual(m2['units']['second']['result']['stop'],'PASSED')
+            self.assertIn('成员能做什么',Path(s2['preview_path']).read_text())
+            rules=json.loads(json.dumps(s2['rules']));rules['agents']['dev']['argv']=['{python}','{engine}/../adapters/pi_member.py']
+            text=prep.render_preview(rules,rules,base/'rules.json')
+            for tool in ('loop_build','loop_delete','loop_copy','不能执行任意命令','担任评审时：只读','schema v2 不提供评审执行命令'):self.assertIn(tool,text)
+
+    def test_continue_refuses_parallel_frontier_instead_of_guessing(self):
+        from loop_engineering.common import digest
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)/'data';run=root/'runs'/'r1';run.mkdir(parents=True)
+            unit=lambda uid:{'id':uid,'depends_on':[]}
+            rules={'schema_version':2,'units':[unit('a'),unit('b')],'limits':{}}
+            (run/'rules.json').write_text(json.dumps(rules))
+            (run/'manifest.json').write_text(json.dumps({'state':'TERMINAL','rule_hash':digest(rules),
+                'units':{'a':{'result':{'stop':'NOT_MET'}},'b':{'result':{'stop':'NOT_RUN'}}}}))
+            with self.assertRaises(LoopError) as e:prep.continue_plan(root,'r1','p',Path(t)/'out.json')
+            self.assertIn('并行分支',str(e.exception));self.assertFalse((Path(t)/'out.json').exists())
+
+
 @unittest.skipUnless(MAC,'needs macOS sandbox-exec')
 class StrictSandboxOnMac(unittest.TestCase):
     def setUp(self):
@@ -219,6 +293,17 @@ class OutputDeclarations(unittest.TestCase):
         p=prep.register_project(self.base/'state','p',raw,self.base,self.base/'data',verify=True)
         entry=p['verification']['profiles']['test']
         self.assertEqual(entry['status'],'VERIFIED_NONZERO');self.assertIn('feature missing',entry['stdout_tail'])
+
+    def test_long_inline_argument_registers_and_is_flagged(self):
+        # 2026-10-03: a 15850-byte inline script in argv crashed registration with ENAMETOOLONG.
+        raw=project(self.base)
+        raw['execution_profiles']['test']['argv']=['{python}','-c',"import runpy;runpy.run_path('build.py')#"+'x'*6000]
+        state=self.base/'state'
+        p=prep.register_project(state,'p',raw,self.base,self.base/'data',verify=True)
+        self.assertEqual(p['verification']['profiles']['test']['status'],'VERIFIED')
+        d=prep.begin(state,'p')
+        warnings=prep.check(state,d['id'],d['revision'])['warnings']
+        self.assertTrue(any('配方 test' in w and '内联' in w for w in warnings),warnings)
 
     def test_budgeted_scenario_profile_not_run_at_registration(self):
         raw=project(self.base,failed_verify=True)

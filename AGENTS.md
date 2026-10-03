@@ -43,12 +43,24 @@ $PY loop_guard.py --state "$STATE" seal <prep_id> --revision <N>                
 - `register`、`launch` 要在**宿主环境**执行，不要放在 AI 工具自带的沙箱里。
 - 项目 ID 不能覆盖；构建命令、输出、模型或可修改范围有变化时，换一个新 ID 重新登记。源码内容变了不用重新登记。
 - 启动命令由 `seal` 返回，交给用户执行。用户看预览、输入 `yes` 后开始运行。
+- **中途停下的多单元运行**：`$PY loop_guard.py --state "$STATE" continue <运行编号> --root "$DATA" --project-id <新ID> --out <新计划.json>` 自动起草续接计划（去掉已达标单元、从续接单元最新候选接着做、带上未解决问题），再按上面登记、准备。不要手写续接计划。
+
+## 准备速查
+
+准备阶段（`begin → patch → check → seal`）只看这一节，不用去读引擎源码。以下都是当前代码里真实存在的规则：
+
+- **占位符（v2）**：配方 `execution_profiles` 的 `argv` 支持 `{python}`、`{engine}`、`{code}`、`{workspace}`、`{cache}`（该配方声明 `cache_dir` 之后才能用 `{cache}`）；成员 `argv` 支持 `{python}`、`{engine}`、`{code}`、`{workspace}`、`{context}`、`{response}`、`{schema}`、`{role}`、`{unit}`，不含 `{cache}`；v2 门禁必须写 `profile` 引用配方（登记时把配方 `argv` 复制给门禁），替换集合与配方一致——`{unit}` 只在成员 `argv` 里被替换，不要在配方或门禁里使用 `{unit}`。不要发明其他占位符。
+- **`output_paths` 与 `evidence_paths`**：都写项目内相对路径。本版本不支持通配符：`*`、`?`、`[]` 会被拒绝。`output_paths` 写本次构建新产生的确切文件，或以 `/` 结尾的目录；`evidence_paths` 只写确切文件名（不能以 `/` 结尾），并且必须落在声明的新输出范围内。
+- **多单元必须写 `completion`**：顶层声明 `completion`，`mode` 写 `independent`（各单元独立交付）或 `integration`（集成交付，`unit` 指向最终单元）；单单元可省略。集成模式的最终单元必须直接或间接依赖所有其他单元。
+- **schema v2 不支持 `reviewer_exec`**：`reviewer_exec: true` 会被直接拒绝；评审不能执行命令，机械检查必须写成门禁。
+- **续轮用 `derive`**：`derive <上一轮项目ID> --project-id <新项目ID> --out <新计划.json>` 把上一轮已登记规则原样另存为新计划，不登记、不启动；`--source <目录>` 只换源码路径；`--copy-source <新目录>` 把源码复制成可写副本并把计划指向副本（有 `--source` 就复制它，否则复制上一轮登记的源码）——上一轮候选目录只读，要拿候选当新源码就用这个选项。derive 之后仍要 `register → begin → seal`。
+- **续跑用 `continue`**：多单元运行中途停下后，`continue <运行编号> --root <DATA> --project-id <新项目ID> --out <新计划.json>` 自动起草续接计划：去掉已达标单元、从续接单元的最新候选接着做、带上未解决问题；并行分支或需要合并上游成果时明确拒绝。同样要重新登记、由用户启动。
 
 ## 写 plan.json 的要点
 
 从 `examples040/project-template.v2.json` 起草，所有 TODO 都要替换。
 
-- **成员**：argv 用 `{python}`、`{engine}/../adapters/pi_member.py`。
+- **成员**：argv 用 `{python}`、`{engine}/../adapters/pi_member.py`。开发方只有读/改/写/搜索、`loop_build`（本单元配方自测）、`loop_submit_check`、`loop_delete`、`loop_copy`（限本单元可改范围），**不能执行任意命令**；验收要求的操作必须在这个范围内，否则先补配方或调整验收。
 - **配方**（构建/检查命令）：
   - 纯构建配方单独登记，不要带"缺测试类就提前退出"这类业务前置，否则登记时验证不到输出；
   - 命令写绝对路径；Maven 用 `/usr/bin/env JAVA_HOME=<JDK21> /opt/homebrew/bin/mvn -o -B -s deploy/maven-settings.xml -Dmaven.repo.local={cache} …`；

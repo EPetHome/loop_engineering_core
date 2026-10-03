@@ -262,6 +262,33 @@ class ComparisonTests(unittest.TestCase):
             self.assertIn('仅评审可用当前候选有效证据显式解决已知 ID', prompt)
 
 
+    def test_prompt_hands_over_open_issues_not_bookkeeping(self):
+        # 2026-10-03: b3-recovery round 3 was BLOCKED; 14 issues carried 152KB of resolution
+        # records into the prompt (83KB -> 142KB -> 197KB -> over 256KB).
+        bookkeeping = {'report_path': '/run/attempts/reviewer-r001/accepted.json', 'note': 'z' * 3000}
+        def issue(n, status):
+            return {'id': f'issue-{n}', 'kind': 'issue', 'status': status, 'criterion_ids': ['C1'],
+                    'description': f'problem {n}', 'suggested_fix': f'fix {n}', 'source': bookkeeping,
+                    'occurrences': [{'source': bookkeeping, 'reported': {'files': [f'src/m{n}.py']}}],
+                    'resolution_attempts': [bookkeeping] * 3, 'resolution': bookkeeping}
+        def prompt(history):
+            return member_prompt({'role': 'developer', 'round': 3, 'context_path': '/run/context.json',
+                                  'unit': {'criteria': [{'id': 'C1', 'text': 'criterion text'}],
+                                           'gates': [{'id': 'G', 'profile': 'p', 'argv': ['x'] * 50}]},
+                                  'execution_profiles': {'p': {'cwd': '.', 'argv': ['{python}', '-c', 'y' * 20000]}},
+                                  'issue_history': history})
+        open_only = prompt([issue(1, 'OPEN')])
+        with_history = prompt([issue(1, 'OPEN')] + [issue(n, 'RESOLVED') for n in range(2, 40)])
+        self.assertIn('problem 1', with_history)
+        self.assertIn('src/m1.py', with_history)
+        self.assertIn('criterion text', with_history)
+        self.assertIn('/run/context.json', with_history)
+        self.assertNotIn('problem 2', with_history)
+        self.assertNotIn('z' * 100, with_history)
+        self.assertNotIn('y' * 100, with_history)
+        self.assertLess(len(with_history.encode()) - len(open_only.encode()), 38 * 200)
+
+
 class IssueHistoryTests(unittest.TestCase):
     def test_silence_and_all_criteria_pass_do_not_close_issues_or_gaps(self):
         with tempfile.TemporaryDirectory() as directory:
