@@ -8,14 +8,14 @@
     "dev": {
       "kind": "command",
       "identity": "approved-pi-developer",
-      "argv": ["{python}", "{engine}/../adapters/pi_member.py", "--model", "TODO_DEVELOPER_MODEL", "--thinking", "TODO_DEVELOPER_THINKING", "--tools", "read,edit,write,grep,find,ls"],
+      "argv": ["{python}", "{engine}/../adapters/pi_member.py", "--model", "TODO_DEVELOPER_MODEL", "--thinking", "TODO_DEVELOPER_THINKING", "--tools", "read,edit,write,grep,find,ls,loop_build,loop_submit_check,loop_delete,loop_copy"],
       "output": "stdout",
       "inherit_env": ["LOOP_PI_BIN"]
     },
     "review": {
       "kind": "command",
       "identity": "approved-pi-reviewer",
-      "argv": ["{python}", "{engine}/../adapters/pi_member.py", "--model", "TODO_REVIEWER_MODEL", "--thinking", "TODO_REVIEWER_THINKING", "--tools", "read,grep,find,ls"],
+      "argv": ["{python}", "{engine}/../adapters/pi_member.py", "--model", "TODO_REVIEWER_MODEL", "--thinking", "TODO_REVIEWER_THINKING", "--tools", "read,grep,find,ls,loop_submit_check"],
       "output": "stdout",
       "inherit_env": ["LOOP_PI_BIN"]
     }

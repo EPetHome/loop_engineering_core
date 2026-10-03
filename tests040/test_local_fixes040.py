@@ -24,18 +24,20 @@ def jdk():
 
 
 class PiMemberTools(unittest.TestCase):
-    def run_adapter(self,role,repair_only=False):
+    def run_adapter(self,role,repair_only=False,requested_tools='read,bash',managed=True):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);code=t/'code';code.mkdir();ws=t/'ws';ws.mkdir();capture=t/'argv.json'
             fake=t/'fake_pi';fake.write_text('#!'+sys.executable+'\nimport json,os,sys\n'
-                'open(os.environ["CAPTURE"],"w").write(json.dumps(sys.argv[1:]))\n');fake.chmod(0o700)
-            context={'role':role,'protocol_repair_only':repair_only,'managed_tools':True,'security':'audit-only',
+                'open(os.environ["CAPTURE"],"w").write(json.dumps(sys.argv[1:]))\nprint("{}")\n');fake.chmod(0o700)
+            context={'role':role,'protocol_repair_only':repair_only,'managed_tools':managed,'security':'audit-only',
                      'code_path':str(code),'workspace_path':str(ws),'execution_profiles':{},
                      'unit':{'stage_timeout_seconds':30,'protected_paths':[]},'limits':{}}
             (t/'context.json').write_text(json.dumps(context))
-            subprocess.run([sys.executable,str(ADAPTER),'--model','m/x','--thinking','max','--tools','read,bash'],
+            self.adapter_result=subprocess.run([sys.executable,str(ADAPTER),'--model','m/x','--thinking','max',
+                           '--tools',requested_tools]+([] if managed else ['--permission-extension',str(fake)]),
                            input='task',text=True,capture_output=True,cwd=code,timeout=30,
                            env=dict(os.environ,LOOP_PI_BIN=str(fake),CAPTURE=str(capture),LOOP_CONTEXT=str(t/'context.json')))
+            self.assertEqual(self.adapter_result.returncode,0,self.adapter_result.stderr)
             return json.loads(capture.read_text())
 
     def test_extension_tools_survive_pi_allowlist(self):
@@ -50,10 +52,93 @@ class PiMemberTools(unittest.TestCase):
             tools=(lambda a:a[a.index('--tools')+1].split(','))(self.run_adapter(role,repair))
             self.assertEqual(tools,['read','grep','find','ls','loop_submit_check'])
 
+
+    def test_managed_override_reports_configured_and_effective_tools(self):
+        for role,repair in (('developer',False),('reviewer',False),('developer',True)):
+            with self.subTest(role=role,repair=repair):
+                argv=self.run_adapter(role,repair)
+                effective=argv[argv.index('--tools')+1]
+                self.assertIn('配置 --tools=read,bash',self.adapter_result.stderr)
+                self.assertIn('实际 --tools='+effective,self.adapter_result.stderr)
+                self.assertIn('格式修复' if repair else role,self.adapter_result.stderr)
+                self.assertNotIn('配置 --tools',self.adapter_result.stdout)
+
+    def test_matching_and_unmanaged_tools_are_not_reported_as_overrides(self):
+        requested=pi_member.managed_tools({'role':'developer','protocol_repair_only':False})
+        argv=self.run_adapter('developer',requested_tools=requested)
+        self.assertEqual(argv[argv.index('--tools')+1],requested)
+        self.assertNotIn('配置 --tools',self.adapter_result.stderr)
+        argv=self.run_adapter('developer',managed=False)
+        self.assertEqual(argv[argv.index('--tools')+1],'read,bash')
+        self.assertNotIn('配置 --tools',self.adapter_result.stderr)
+
     def test_pi_state_paths_follow_agent_dir(self):
         w=pi_member.pi_state_writes({'PI_CODING_AGENT_DIR':'/tmp/agent-x','HOME':'/nonexistent'})
         self.assertEqual(w['write_files'],[Path('/tmp/agent-x').resolve()/'auth.json'])
         self.assertTrue(w['write_regexes'][0].endswith(r'/[^/]+\.lock(/.*)?$'))
+
+
+
+class MemberPreview(unittest.TestCase):
+    def rules(self,base):
+        raw=project(base,True)
+        for name,model,thinking,tools in (
+            ('dev','openai-codex/gpt-6.1-sol','max','read,bash'),
+            ('review','openai-codex/gpt-6-astra','xhigh','read,grep,find,ls')):
+            raw['agents'][name]['argv']=['{python}','{engine}/../adapters/pi_member.py',
+                '--model='+model,'--thinking',thinking,'--tools='+tools]
+        return normalize(raw,base)
+
+    def test_sealed_preview_shows_models_thinking_and_actual_role_tools(self):
+        with tempfile.TemporaryDirectory() as t:
+            base=Path(t);rules=self.rules(base)
+            state,root,d=prepared(base,rules)
+            sealed=prep.seal(state,d['id'],1)
+            preview=Path(sealed['preview_path']).read_text()
+            for text in ('成员配置','check / developer / dev','check / reviewer / review',
+                         '模型：openai-codex/gpt-6.1-sol','思考档位：max',
+                         '模型：openai-codex/gpt-6-astra','思考档位：xhigh',
+                         '配置 --tools：read,bash','按角色替换',
+                         '实际 --tools：read,edit,write,grep,find,ls,loop_build,loop_submit_check,loop_delete,loop_copy',
+                         '实际 --tools：read,grep,find,ls,loop_submit_check',
+                         '格式修复实际 --tools：read,grep,find,ls,loop_submit_check'):
+                self.assertIn(text,preview)
+            self.assertEqual(sealed['rules']['agents'],rules['agents'])
+
+    def test_preview_uses_last_flag_value_and_exact_adapter_identity(self):
+        with tempfile.TemporaryDirectory() as t:
+            base=Path(t);rules=self.rules(base)
+            rules['agents']['dev']['argv'] += ['--model','chosen-model','--thinking=xhigh']
+            text=prep.render_preview(rules,rules,base/'rules.json')
+            self.assertIn('模型：chosen-model；思考档位：xhigh',text)
+            rules['agents']['dev']['argv'][1]='/custom/pi_member.py'
+            text=prep.render_preview(rules,rules,base/'rules.json')
+            block=text.split('check / developer / dev',1)[1].split('check / reviewer / review',1)[0]
+            self.assertIn('实际工具：未核实',block)
+            self.assertNotIn('按角色替换',block)
+
+    def test_preview_lists_shared_agent_by_role_and_verify_has_no_developer(self):
+        with tempfile.TemporaryDirectory() as t:
+            base=Path(t);rules=self.rules(base)
+            other=json.loads(json.dumps(rules['units'][0]))
+            other.update(id='second',developer='review',reviewer='dev')
+            rules['units'].append(other)
+            text=prep.render_preview(rules,rules,base/'rules.json')
+            for role in ('check / developer / dev','check / reviewer / review',
+                         'second / developer / review','second / reviewer / dev'):
+                self.assertIn(role,text)
+            rules['units']=[dict(rules['units'][0],kind='verify',developer=None,reviewer=None,review_mode='gates')]
+            text=prep.render_preview(rules,rules,base/'rules.json')
+            self.assertIn('本次没有成员调用',text)
+            self.assertNotIn('check / developer / dev',text)
+
+    def test_legacy_preview_does_not_claim_managed_tools(self):
+        with tempfile.TemporaryDirectory() as t:
+            base=Path(t);rules=self.rules(base);rules['schema_version']=1
+            text=prep.render_preview(rules,rules,base/'rules.json')
+            self.assertIn('配置 --tools：read,bash',text)
+            self.assertIn('实际工具：未核实',text)
+            self.assertNotIn('按角色替换',text)
 
 
 class MemberFileOperations(unittest.TestCase):

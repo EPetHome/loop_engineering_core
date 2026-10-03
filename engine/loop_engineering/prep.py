@@ -16,6 +16,8 @@ from .ledger import Ledger
 from .rules import normalize, render_rules
 from .admission import inspect_input, installation_identity
 from .capabilities import capability_summary, compile_unit
+from .adapters import managed_tools
+from .sessions import supports_reuse
 
 MAX_ACTIONS = 40
 
@@ -427,6 +429,58 @@ def seal(state: Path, prep_id: str, revision: int) -> dict:
         return record
 
 
+
+def _member_option(argv: list[str], flag: str) -> str | None:
+    """Read explicit CLI values, including --name=value; like argparse, last wins."""
+    value = None
+    for index, item in enumerate(argv):
+        if item == '--':
+            break
+        if item.startswith(flag + '='):
+            value = item[len(flag) + 1:]
+        elif item == flag and index + 1 < len(argv):
+            value = argv[index + 1]
+    return value
+
+
+def _member_preview(rules: dict) -> list[str]:
+    lines = ['', '## 成员配置（按单元与实际调用角色）']
+    count = 0
+    for unit in rules['units']:
+        for role in ('developer', 'reviewer'):
+            if role == 'developer' and unit['kind'] == 'verify':
+                continue
+            if role == 'reviewer' and unit.get('review_mode') == 'gates':
+                continue
+            name = unit.get(role)
+            if not name:
+                continue
+            agent = rules['agents'][name]
+            args = agent.get('argv', []) if agent['kind'] == 'command' else agent.get('extra_args', [])
+            model = _member_option(args, '--model') or agent.get('model') or '未指定（由宿主选择，未核实）'
+            provider = _member_option(args, '--provider') or agent.get('provider')
+            if provider:
+                model = provider + '/' + model
+            thinking = _member_option(args, '--thinking') or '未指定（由宿主选择，未核实）'
+            configured = _member_option(args, '--tools')
+            lines += [f'- {unit["id"]} / {role} / {name}（身份：{agent["identity"]}）',
+                      f'  模型：{model}；思考档位：{thinking}',
+                      '  配置 --tools：' + (configured if configured is not None else '未指定')]
+            if rules.get('schema_version') == 2 and supports_reuse(agent):
+                actual = managed_tools({'role': role, 'protocol_repair_only': False})
+                lines.append('  实际 --tools：' + actual +
+                             ('；与配置一致' if actual == configured else '；受管模式按角色替换配置 --tools'))
+                if unit.get('max_protocol_retries', 0):
+                    readonly = managed_tools({'role': role, 'protocol_repair_only': True})
+                    lines.append('  格式修复实际 --tools：' + readonly + '（只读）')
+            else:
+                lines.append('  实际工具：未核实（由该适配器及其扩展决定；以上为配置值）')
+            count += 1
+    if not count:
+        lines.append('- 本次没有成员调用。')
+    return lines
+
+
 def render_preview(rules: dict, approved: dict, rules_path: Path, verification: dict | None = None,
                    warnings: list[str] = ()) -> str:
     """Human decision preview; full normalized JSON is a separate authoritative file."""
@@ -456,8 +510,9 @@ def render_preview(rules: dict, approved: dict, rules_path: Path, verification: 
             '允许' if profile['network'] else '关闭'))
     # 2026-10-03: a unit required deleting 30 files that no member could delete; show the tool set up front.
     agents = rules.get('agents', {})
-    pi_agents = sorted(n for n, a in agents.items() if any('pi_member.py' in str(x) for x in a.get('argv') or []))
+    pi_agents = sorted(n for n, a in agents.items() if supports_reuse(a))
     others = sorted(set(agents) - set(pi_agents))
+    lines += _member_preview(rules)
     lines += ['', '## 成员能做什么（验收要求的操作必须在这里面，否则先补配方或调整验收）']
     if pi_agents:
         lines += ['- Pi 成员：' + ', '.join(pi_agents) + '。',

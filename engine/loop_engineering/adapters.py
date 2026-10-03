@@ -9,6 +9,13 @@ from .common import LoopError
 ENGINE_DIR = Path(__file__).resolve().parent.parent
 
 
+def managed_tools(context: dict) -> str:
+    """Same tool set the Loop extension activates; no bash in managed sessions."""
+    if context['role'] == 'developer' and not context['protocol_repair_only']:
+        return 'read,edit,write,grep,find,ls,loop_build,loop_submit_check,loop_delete,loop_copy'
+    return 'read,grep,find,ls,loop_submit_check'
+
+
 def expand(arguments: list[str], values: dict[str, str]) -> list[str]:
     output = []
     for argument in arguments:

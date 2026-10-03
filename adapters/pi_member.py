@@ -25,6 +25,7 @@ from loop_engineering.pi_events import EventError, PiEvents, extract_json
 from loop_engineering.sessions import pi_session
 from loop_engineering.session_sandbox import protect
 from loop_engineering import outcomes
+from loop_engineering.adapters import managed_tools
 from loop_engineering.diagnostics import PrefixLog
 
 PI_DEFAULT = "pi"
@@ -32,13 +33,6 @@ NODE_BIN = ""
 PERMISSION_EXT = None  # Optional explicit --permission-extension, never an embedded user path.
 TAIL_MESSAGE = "按上面的说明完成任务。最终回复只输出一个 JSON 对象，不加 Markdown 围栏，不加任何前后说明。"
 DEFAULT_LOG_BYTES = 8 * 1024 * 1024
-
-
-def managed_tools(context: dict) -> str:
-    """Same tool set the Loop extension activates; no bash in managed sessions."""
-    if context['role'] == 'developer' and not context['protocol_repair_only']:
-        return 'read,edit,write,grep,find,ls,loop_build,loop_submit_check,loop_delete,loop_copy'
-    return 'read,grep,find,ls,loop_submit_check'
 
 
 def pi_state_writes(env: dict) -> dict:
@@ -236,7 +230,12 @@ def main() -> int:
             # --tools is an allowlist that also filters extension tools, so the Loop tools
             # must be named here or they are never registered.
             tool_index = argv.index('--tools') + 1
-            argv[tool_index] = managed_tools(context)
+            effective_tools = managed_tools(context)
+            if args.tools != effective_tools:
+                phase = '格式修复' if context.get('protocol_repair_only') else context['role']
+                print(f'pi_member: 受管工具按角色替换（{phase}）；配置 --tools={args.tools}；'
+                      f'实际 --tools={effective_tools}。受管模式不以配置值扩大或缩小工具集。', file=sys.stderr)
+            argv[tool_index] = effective_tools
         cwd = Path.cwd().resolve()
         if context.get('code_path') and Path(context['code_path']).resolve() != cwd:
             raise LoopError('current process cwd differs from authoritative code_path')
