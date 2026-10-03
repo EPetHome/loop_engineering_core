@@ -22,12 +22,14 @@ from .common import (LoopError, IntegrityError, FileLock, atomic_json, atomic_wr
                      check_boundary, copy_manifest, digest, environment, file_hash,
                      load_json, matches, now, safe_child, tree_manifest)
 from .protocol import evaluate, validate_report, response_schema, scratch_file
-from .handoff import make_comparison, record_findings, apply_resolutions, rule_gaps
+from .handoff import make_comparison, record_findings, apply_resolutions, rule_gaps, freeze_review
 from .rules import ancestors, topological
 from .runner import kill_group, process_identity
 from .storage import Store, render_views
 from .observability import read_observation
-from .sessions import DeveloperSessions
+from .sessions import DeveloperSessions, supports_reuse
+from .execution import inspect_developer_delivery, execute_recipe, new_output_roots
+from .member_service import MemberService
 
 
 class Stop(Exception):
@@ -104,10 +106,18 @@ class UnitEngine:
             read_observation(workspace), receipt)
 
     def seal_observation(self, workspace: Path):
-        for name in ('pi-events.jsonl', 'pi-stderr.log', 'activity.json', 'usage.json', 'session-protection.json'):
+        for name in ('pi-events.jsonl', 'pi-stderr.log', 'activity.json', 'usage.json', 'session-protection.json',
+                     'pi-events.jsonl.retention.json', 'pi-stderr.log.retention.json'):
             path = workspace / name
             if path.is_file() and not path.is_symlink():
                 self.store.seal(path)
+
+    def quota_specs(self):
+        if self.rules['schema_version'] != 2:
+            return []
+        return [{'path': str(self.store.root / area / self.store.rid), 'group': 'run',
+                 'max_bytes': self.limits['max_run_bytes'], 'max_files': self.limits['max_run_files']}
+                for area in ('runs', 'checkouts', 'snapshots', 'artifacts')]
 
     def run_job(self, argv: list[str], code: Path, job: Path, stdin: str,
                 timeout: float, idle: float, env: dict, phase: str) -> dict:
@@ -119,6 +129,14 @@ class UnitEngine:
                 'owner_start': process_identity(os.getpid()), 'timeout_seconds': timeout,
                 'idle_output_seconds': idle, 'deadline_epoch': self.deadline,
                 'cancel_file': str(self.store.run / 'cancel'), 'max_log_bytes': self.limits['max_log_bytes']}
+        if env.get('LOOP_ADAPTER_PROTOCOL') == 'loop-outcome-v1':
+            spec.update(adapter_protocol='loop-outcome-v1', soft_diagnostics=True, stdout_kind='response',
+                        max_response_bytes=self.limits['max_response_bytes'],
+                        max_event_bytes=self.limits.get('max_event_bytes', 8*1024*1024))
+        if self.rules['schema_version'] == 2:
+            spec['quotas'] = [{'path': str(self.store.root / area / self.store.rid),
+                               'group': 'run', 'max_bytes': self.limits['max_run_bytes'], 'max_files': self.limits['max_run_files']}
+                              for area in ('runs', 'checkouts', 'snapshots', 'artifacts')]
         atomic_json(job / 'job.json', spec, readonly=True)
         self.store.event('command_started', self.uid, phase=phase, job=str(job), argv=argv)
         env = dict(env)
@@ -161,6 +179,19 @@ class UnitEngine:
         return receipt
 
     def make_input(self) -> tuple[Path, dict]:
+        if self.unit.get('kind') == 'verify' and self.unit.get('input_from'):
+            result = self.store.data['units'][self.unit['input_from']]['result']
+            if not result or result['stop'] != 'PASSED':
+                raise IntegrityError('verify 依赖尚未达标')
+            candidate = result['candidate']
+            actual = verify_candidate(candidate, self.limits)
+            frozen = self.store.root / 'snapshots' / self.store.rid / ('unit-' + self.uid)
+            copy_manifest(Path(candidate['path']), frozen, actual, readonly=True)
+            atomic_json(self.workspace / 'input.json', {'hash': digest(actual), 'manifest': actual,
+                'path': str(frozen), 'input_from': self.unit['input_from']}, readonly=True)
+            self.store.seal(self.workspace / 'input.json')
+            self.store.unit(self.uid, input_hash=digest(actual), input_path=str(frozen), last_step_at=now())
+            return frozen, actual
         source_info = self.store.data['input']
         source, initial = Path(source_info['path']), source_info['manifest']
         work = self.store.root / 'checkouts' / self.store.rid / self.uid / 'assemble-input'
@@ -285,6 +316,10 @@ class UnitEngine:
                        'protocol_repair_only': protocol_repair,
                        'protocol_error': last_error, 'invalid_response_excerpt': invalid_excerpt,
                        'response_schema': response_schema()}
+            context['managed_tools'] = self.rules['schema_version'] == 2
+            if context['managed_tools']:
+                context['execution_profiles'] = self.rules['execution_profiles']
+                context['security'] = self.rules['security']
             context['session'] = sessions.select(context, agent)
             atomic_json(adir / 'session-choice.json', context['session'], readonly=True)
             self.store.seal(adir / 'session-choice.json')
@@ -303,7 +338,7 @@ class UnitEngine:
                 raise Stop('BLOCKED', '上下文包超过上限，未静默截断有效规则。请缩小规则或拆分任务。')
             atomic_json(context_path, context, readonly=True)
             self.store.seal(context_path)
-            if not self.store.reserve_call(self.uid, self.limits['max_member_invocations']):
+            if not self.store.reserve_call(self.uid, self.limits['max_member_invocations'], attempt):
                 raise Stop('NOT_MET', '成员调用总预算已耗尽。')
             member_env = environment(agent['inherit_env'])
             member_env.update(LOOP_CONTEXT=str(context_path), LOOP_RESPONSE=str(response),
@@ -311,11 +346,20 @@ class UnitEngine:
             member_env.pop('LOOP_SCRATCH', None)
             if scratch is not None:
                 member_env['LOOP_SCRATCH'] = str(scratch)
+            if supports_reuse(agent) or agent.get('outcome_protocol') == 'loop-outcome-v1':
+                member_env['LOOP_ADAPTER_PROTOCOL'] = 'loop-outcome-v1'
             phase = 'developing' if role == 'developer' else 'reviewing'
             self.observe_member(phase, adir / 'job')
-            receipt = self.run_job(args, code, adir / 'job', prompt,
-                                   self.unit['stage_timeout_seconds'], self.unit['idle_output_seconds'],
-                                   member_env, phase)
+            service_context = MemberService(self, context, code, base_manifest) if context['managed_tools'] else contextlib.nullcontext(None)
+            with service_context as service:
+                if service is not None:
+                    member_env.update(service.env())
+                receipt = self.run_job(args, code, adir / 'job', prompt,
+                                       self.unit['stage_timeout_seconds'], self.unit['idle_output_seconds'],
+                                       member_env, phase)
+                if service is not None and supports_reuse(agent) and not service.handshake and receipt['reason'] == 'ok':
+                    receipt = {**receipt, 'reason': 'config_error', 'detail': 'Loop Pi extension did not complete handshake'}
+
             self.observe_member(phase, adir / 'job', receipt)
             self.store.assert_integrity()
             actual = snapshot_manifest(code, self.limits)
@@ -323,10 +367,12 @@ class UnitEngine:
                 if actual != base_manifest:
                     raise IntegrityError('只读评审/格式修复阶段修改了代码')
             else:
-                check_boundary(self.input_manifest, actual, self.unit['writable_paths'], self.unit['protected_paths'])
+                actual = inspect_developer_delivery(code, self.input_manifest, self.unit, self.limits,
+                                                    self.rules.get('execution_profiles'))
             if receipt['reason'] != 'ok':
                 sessions.complete(context, False, 'execution_failed: ' + receipt['reason'])
-                if receipt['reason'] in ('timeout', 'idle_timeout', 'cancelled', 'controller_lost', 'log_limit'):
+                from .outcomes import RETRYABLE
+                if receipt['reason'] in ('timeout', 'idle_timeout', 'cancelled', 'controller_lost', 'log_limit') or (self.rules['schema_version'] == 2 and receipt['reason'] not in RETRYABLE):
                     raise Stop('BLOCKED', '成员执行停止：' + receipt['reason'])
                 stats = self.store.data['units'][self.uid]['stats']
                 if stats['infra_retries'] < self.unit['max_infra_retries']:
@@ -405,6 +451,8 @@ class UnitEngine:
                 'round': self.round, 'input_hash': digest(self.input_manifest)}
 
     def run_gates(self, manifest: dict):
+        if self.rules['schema_version'] == 2:
+            return self.run_profile_gates(manifest)
         self.gates = {}
         # Reasons are shared across gates, but never across candidates/repair rounds.
         failed_reasons = set()
@@ -437,10 +485,14 @@ class UnitEngine:
                 self.store.assert_integrity()
                 after = snapshot_manifest(code, self.limits)
                 # Tests may create explicitly declared new scratch files, never modify existing assets.
-                for p in changes(manifest, after):
-                    if p in manifest or not (matches(p, gate['output_paths']) or
-                            (p.endswith('/') and any(x.startswith(p) for x in gate['output_paths']))):
-                        raise IntegrityError(f'门禁 {gid} 修改了受测源码/验收资产或未声明输出：{p}')
+                bad = [p for p in changes(manifest, after)
+                       if p in manifest or not (matches(p, gate['output_paths']) or
+                           (p.endswith('/') and any(x.startswith(p) for x in gate['output_paths'])))]
+                if bad:
+                    modified = sorted(p for p in bad if p in manifest)
+                    roots = new_output_roots(manifest, [p for p in bad if p not in manifest])
+                    raise IntegrityError(f'门禁 {gid} 修改了受测源码/验收资产或未声明输出：'
+                                         f'既有资产 {modified[:20]}；未声明新输出（一次列全）{roots}')
                 status = 'PASS' if receipt['reason'] == 'ok' else ('FAIL' if receipt['reason'] == 'nonzero_exit' else 'UNKNOWN')
                 stdout, stderr = execution / 'job' / 'stdout.log', execution / 'job' / 'stderr.log'
                 reason = gate_failure_reason(stdout) if status == 'FAIL' else None
@@ -458,6 +510,69 @@ class UnitEngine:
                       'attempts': attempts, 'reruns': len(attempts) - 1,
                       'passed_after_rerun': status == 'PASS' and len(attempts) > 1,
                       'repeated_reason': repeated_reason}
+            path = location / 'evidence.json'
+            atomic_json(path, record, readonly=True)
+            self.store.seal(path)
+            self.gates[gid] = record
+            self.store.unit(self.uid, history=copy.deepcopy(self.history), last_step_at=now())
+        verify_candidate(self.candidate, self.limits)
+
+    def run_profile_gates(self, manifest: dict):
+        self.gates = {}
+        if self.history:
+            self.history[-1]['gates'] = self.gates
+        failed_reasons = set()
+        for gate in self.unit['gates']:
+            gid = gate['id']
+            location = self.workspace / 'gates' / f'r{self.round:03d}-{gid}'
+            attempts, repeated_reason = [], None
+            for number in range(1, gate['max_reruns'] + 2):
+                self.check_time()
+                self.store.assert_integrity()
+                verify_candidate(self.candidate, self.limits)
+                if not self.store.reserve_operation('gate_executions', f'gate:{self.round}:{gid}:{number}',
+                                                     self.limits['max_gate_executions'], self.uid, gate.get('budget_key')):
+                    raise Stop('NOT_MET', '门禁或场景累计预算已耗尽，不创建新额度')
+                execution = location / f'execution-{number:03d}'
+                self.store.unit(self.uid, phase='testing', last_step_at=now())
+                build = execute_recipe(Path(self.candidate['path']), manifest,
+                    self.rules['execution_profiles'][gate['profile']], execution, self.limits,
+                    purpose='GATE', security=self.rules['security'], deadline=self.deadline,
+                    cancel_file=self.store.run / 'cancel',
+                    binding={'run_id': self.store.rid, 'unit_id': self.uid, 'round': self.round, 'gate_id': gid}, run_quotas=self.quota_specs())
+                if number > 1:
+                    self.store.counter(self.uid, 'gate_reruns')
+                # Seal only authority/diagnostics, not volatile scratch trees.
+                for path in execution.rglob('*'):
+                    if path.is_file() and not path.is_symlink() and path.relative_to(execution).parts[0] in ('evidence', 'job'):
+                        self.store.seal(path)
+                self.store.seal(execution / 'build-receipt.json')
+                status = build['status']
+                receipt = build.get('receipt', {'reason': build['reason'], 'exit_code': None})
+                # Preserve executor failures even if the command itself exited zero.
+                if build['status'] == 'UNKNOWN':
+                    receipt = {**receipt, 'reason': build['reason'], 'error': build.get('error')}
+                stdout, stderr = execution / 'job/stdout.log', execution / 'job/stderr.log'
+                for path in (stdout, stderr):
+                    if not path.exists():
+                        atomic_write(path, '')
+                        self.store.seal(path)
+                reason = gate_failure_reason(stdout) if status == 'FAIL' else build['reason']
+                attempts.append({'attempt': number, 'status': status, 'exit_code': receipt['exit_code'],
+                                 'reason': reason, 'stdout': str(stdout), 'stderr': str(stderr)})
+                if status != 'FAIL':
+                    break
+                if reason in failed_reasons:
+                    repeated_reason = reason
+                    break
+                failed_reasons.add(reason)
+            record = {'id': gid, 'status': status, 'candidate_hash': self.candidate['hash'],
+                      'rule_hash': self.store.data['rule_hash'], 'input_hash': digest(self.input_manifest),
+                      'argv': build.get('argv', []), 'receipt': receipt, 'stdout': str(stdout), 'stderr': str(stderr),
+                      'attempts': attempts, 'reruns': len(attempts)-1,
+                      'passed_after_rerun': status == 'PASS' and len(attempts)>1,
+                      'repeated_reason': repeated_reason, 'build_receipt': str(execution / 'build-receipt.json'),
+                      'reports': build['reports'], 'purpose': 'GATE'}
             path = location / 'evidence.json'
             atomic_json(path, record, readonly=True)
             self.store.seal(path)
@@ -503,8 +618,9 @@ class UnitEngine:
                   'criteria': rows, 'rule_gaps': rule_gaps(self.issue_history),
                   'historical_rule_gaps': rule_gaps(self.issue_history, historical=True),
                   'issue_history': copy.deepcopy(self.issue_history),
+                  'deferred_findings': [copy.deepcopy(i) for i in self.issue_history if i.get('deferred')],
                   'evidence': self.evidence_index(rows), 'history': self.history,
-                  'workspace': str(self.workspace)}
+                  'workspace': str(self.workspace), 'verification_mode': self.unit.get('review_mode', 'independent')}
         self.store.finish_unit(self.uid, result)
 
     def execute(self):
@@ -522,7 +638,14 @@ class UnitEngine:
             while True:
                 self.check_time()
                 self.store.unit(self.uid, round=self.round)
-                dev, code, manifest, delivery = self.member('developer', base_path, base_manifest)
+                if self.unit.get('kind') == 'verify':
+                    code, manifest = base_path, base_manifest
+                    delivery = str(self.workspace / 'verification-input.json')
+                    atomic_json(Path(delivery), {'origin': 'program', 'kind': 'verify', 'input_hash': digest(manifest)}, readonly=True)
+                    self.store.seal(Path(delivery))
+                    dev = None
+                else:
+                    dev, code, manifest, delivery = self.member('developer', base_path, base_manifest)
                 self.candidate = self.freeze_candidate(code, manifest, delivery)
                 self.rows, self.gates, self.scratch_evidence = None, {}, {}
                 self.history.append({'round': self.round, 'candidate': self.candidate, 'developer': dev,
@@ -530,18 +653,41 @@ class UnitEngine:
                                      'issue_history': copy.deepcopy(self.issue_history)})
                 # Persist candidate pointer before validation so crash recovery can preserve it.
                 self.store.unit(self.uid, checkpoint=self.candidate, history=copy.deepcopy(self.history), last_step_at=now())
-                if dev['blocked']:
+                if dev and dev['blocked']:
                     raise Stop('NOT_MET', '开发方记录了阻断目标的规则缺口：' + dev['summary'])
                 self.run_gates(manifest)
-                if any(g['status'] == 'UNKNOWN' for g in self.gates.values()):
-                    raise Stop('BLOCKED', '至少一个必需门禁没有获得有效执行结果，未把环境问题当作业务通过。')
+                unknown = [gid + '：' + str(g['receipt'].get('error') or g['receipt'].get('reason'))[:1500]
+                           for gid, g in self.gates.items() if g['status'] == 'UNKNOWN']
+                if unknown:
+                    raise Stop('BLOCKED', '至少一个必需门禁没有获得有效执行结果，未把环境问题当作业务通过。'
+                               + '；'.join(unknown))
+                if self.unit.get('kind') == 'verify' and self.unit['review_mode'] == 'gates':
+                    self.rows = [{'id': c['id'], 'status': 'PASS' if all(self.gates[g]['status']=='PASS' for g in c['gate_ids']) else 'FAIL',
+                                  'note': '按显式 gates-only 规则，仅程序证据；未执行独立模型评审',
+                                  'evidence': ['gate:' + g for g in c['gate_ids']]} for c in self.unit['criteria']]
+                    if all(x['status'] == 'PASS' for x in self.rows):
+                        self.finish('PASSED', '本候选的程序验收通过；规则未要求模型评审，仍待用户验收。')
+                    else:
+                        self.finish('NOT_MET', '验证阶段未达标，停止该依赖链，不自动回到开发。')
+                    return
+                known_before = {item['id'] for item in self.issue_history}
                 review, _, _, review_path = self.member('reviewer', Path(self.candidate['path']), manifest)
                 self.store.assert_integrity()
                 verify_candidate(self.candidate, self.limits)
                 self.last_reviewed = dict(self.candidate)
                 self.rows = evaluate(review, self.unit, self.gates)
+                deferred, regression_only = [], False
+                if (self.rules['schema_version'] == 2 and self.round >= 2
+                        and self.unit.get('review_scope', 'frozen') == 'frozen'):
+                    previous = verify_candidate(self.history[-2]['candidate'], self.limits)
+                    changed = {p for p in changes(previous, manifest) if not p.endswith('/')}
+                    self.rows, self.issue_history, deferred, regression_only = freeze_review(
+                        self.rows, review, self.issue_history, known_before, changed, self.unit, self.gates,
+                        self.store.rid, self.uid, self.round)
+                    self.store.unit(self.uid, issue_history=copy.deepcopy(self.issue_history), last_step_at=now())
                 self.history[-1].update(review_path=review_path, review=review, evaluated=self.rows,
-                                        issue_history=copy.deepcopy(self.issue_history))
+                                        issue_history=copy.deepcopy(self.issue_history),
+                                        deferred=deferred, regression_only=regression_only)
                 self.store.unit(self.uid, history=copy.deepcopy(self.history), last_step_at=now())
                 if all(r['status'] == 'PASS' for r in self.rows) and not review['blocked']:
                     self.check_time()
@@ -549,11 +695,19 @@ class UnitEngine:
                     return
                 if review['blocked']:
                     raise Stop('NOT_MET', '评审记录了阻断达标的规则缺口：' + review['summary'])
+                if self.unit.get('kind') == 'verify':
+                    raise Stop('NOT_MET', '独立验证未达标，不自动回到开发')
+                if regression_only and len(self.history) >= 2 and self.history[-2].get('regression_only'):
+                    raise Stop('NOT_MET', '不收敛：连续两轮的修复都在改动处引入了新问题，已有问题却都已解决；'
+                                          '请收紧验收标准或拆小任务后再跑，不再继续消耗返修。')
                 if self.round - 1 >= self.unit['max_repairs']:
                     raise Stop('NOT_MET', '业务返修上限已到；保留未通过标准和当前候选。')
                 self.check_time()
                 self.feedback = {'summary': review['summary'], 'criteria': self.rows,
                                  'issues': review['issues'], 'rule_gaps': review['rule_gaps']}
+                if self.rules['schema_version'] == 2 and not self.store.reserve_operation('repairs', f'repair:{self.round}',
+                    self.limits['max_total_repairs'], self.uid):
+                    raise Stop('NOT_MET', '累计业务返修额度耗尽')
                 self.store.counter(self.uid, 'repairs')
                 self.store.event('repair_scheduled', self.uid, previous_round=self.round)
                 base_path, base_manifest = Path(self.candidate['path']), manifest
@@ -593,9 +747,13 @@ class Controller:
             self.store.assert_integrity()
             self.store.patch(state='RUNNING', worker_pid=os.getpid(), worker_started_at=now())
             try:
+                from .admission import verify_run
+                verify_run(self.store.root, self.store.data, self.rules)
                 limits = self.rules['limits']
                 source = Path(self.store.data['input_override'] or self.rules['source'])
                 manifest = snapshot_manifest(source, limits, self.rules['exclude_paths'])
+                if self.store.data.get('admission') and digest(manifest) != self.store.data['admission']['input_hash']:
+                    raise IntegrityError('启动复制前输入与准备回执不同')
                 frozen = self.store.root / 'snapshots' / self.store.rid / 'source'
                 copy_manifest(source, frozen, manifest, readonly=True)
                 if snapshot_manifest(source, limits, self.rules['exclude_paths']) != manifest:
@@ -627,7 +785,8 @@ class Controller:
                                 self.skip(u, '运行停止请求或总时限已到，未启动此单元。')
                                 pending.remove(uid)
                                 continue
-                            if self.store.data['budget']['member_invocations'] >= limits['max_member_invocations']:
+                            if (not (u.get('kind') == 'verify' and u.get('review_mode') == 'gates') and
+                                    self.store.data['budget']['member_invocations'] >= limits['max_member_invocations']):
                                 self.skip(u, '成员调用预算已耗尽，未启动此单元。')
                                 pending.remove(uid)
                                 continue

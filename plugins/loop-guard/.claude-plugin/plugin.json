@@ -1,0 +1,18 @@
+{
+  "name": "loop-guard",
+  "displayName": "Loop Guard",
+  "version": "0.4.0",
+  "description": "Loop 受控准备：只开放九个准备工具；Hook 只在带 .loop-guard-prep.json 的准备目录内生效。不提供启动、批准或任意 Shell。",
+  "author": {
+    "name": "Loop Engineering"
+  },
+  "hooks": "./hooks/loop-guard-hooks.json",
+  "mcpServers": {
+    "loop_guard": {
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/mcp/bridge.py"
+      ]
+    }
+  }
+}

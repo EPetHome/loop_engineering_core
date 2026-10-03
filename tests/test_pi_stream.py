@@ -389,6 +389,8 @@ class ForegroundCollector(unittest.TestCase):
         fake = self.work / 'program'
         fake.write_text('#!' + sys.executable + '\nimport sys,os,time,json\nsys.stdin.read()\n' + source)
         fake.chmod(0o700)
+        extension = self.work / 'offline-permission.ts'
+        extension.write_text('// deterministic wire fixture only')
         c = self.work / 'context.json'
         c.write_text(json.dumps(self.context))
         env = dict(os.environ, LOOP_CONTEXT=str(c), LOOP_PI_BIN=str(fake))
@@ -396,7 +398,7 @@ class ForegroundCollector(unittest.TestCase):
         self.addCleanup(out.close)
         self.addCleanup(err.close)
         p = subprocess.Popen([sys.executable, str(PROJECT / 'adapters/pi_member.py'), '--model', 'offline/protocol',
-            '--thinking', 'max', '--tools', 'read'], stdin=subprocess.PIPE, stdout=out, stderr=err, env=env)
+            '--thinking', 'max', '--tools', 'read', '--permission-extension', str(extension)], stdin=subprocess.PIPE, stdout=out, stderr=err, env=env)
         p.stdin.write(b'offline prompt')
         p.stdin.close()
         self.addCleanup(lambda: (p.kill(), p.wait()) if p.poll() is None else None)
@@ -468,16 +470,22 @@ class ForegroundCollector(unittest.TestCase):
                     activity = json.loads((self.workspace / 'activity.json').read_text())
                     self.assertEqual(activity['finish_reason'], 'invalid_response')
 
-    def test_combined_stdout_stderr_limit_stops_without_delivery(self):
+    def test_diagnostic_soft_limits_preserve_complete_delivery(self):
+        # 0.4 deliberate contract change: diagnostics retained per stream; parsing is complete.
         self.context['limits']['max_log_bytes'] = 4096
         code, out = self.wait(self.start('os.write(2,b"x"*60000)\n' + self.emitted()))
-        self.assertNotEqual(code, 0)
-        self.assertEqual(out, b'')
-        self.assertLessEqual(sum((self.workspace / n).stat().st_size for n in ('pi-events.jsonl', 'pi-stderr.log')), 4096)
-        self.assertEqual(json.loads((self.workspace / 'activity.json').read_text())['finish_reason'], 'log_limit')
+        self.assertEqual(code, 0, (self.work / 'err').read_text())
+        self.assertEqual(json.loads(out), {'answer': 2})
+        for name in ('pi-events.jsonl', 'pi-stderr.log'):
+            self.assertLessEqual((self.workspace / name).stat().st_size, 4096)
+        retention = json.loads((self.workspace / 'pi-stderr.log.retention.json').read_text())
+        self.assertFalse(retention['complete'])
+        self.assertEqual(retention['observed_bytes'], 60000)
+        self.assertEqual(json.loads((self.workspace / 'activity.json').read_text())['finish_reason'], 'ok')
 
     def test_no_newline_oversize_is_bounded_and_stops(self):
         self.context['limits']['max_log_bytes'] = 1024
+        self.context['limits']['max_event_bytes'] = 1024
         code, out = self.wait(self.start('os.write(1,b"x"*100000)\ntime.sleep(5)\n'))
         self.assertNotEqual(code, 0)
         self.assertEqual(out, b'')

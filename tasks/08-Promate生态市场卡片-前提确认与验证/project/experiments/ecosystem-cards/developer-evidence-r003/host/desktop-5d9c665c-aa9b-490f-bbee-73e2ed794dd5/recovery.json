@@ -1,7 +1,0 @@
-{
-  "isolationRoot": "/private/tmp/loop-card-host-HPiR04",
-  "ownerToken": "745c7901-7a30-4ea0-96f7-4c55f7d74a3e",
-  "retained": true,
-  "desktopStartAttempted": true,
-  "instruction": "保留整个隔离根和本次证据；不得删除用户资料、未知进程或未知临时目录。只按cleanup中的精确PID和启动时间核对本次进程。"
-}

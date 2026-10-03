@@ -141,12 +141,15 @@ class StreamEngine(unittest.TestCase):
         fake = self.work / 'stream-program'
         fake.write_text('#!' + sys.executable + '\n' + STREAM_PROGRAM)
         fake.chmod(0o700)
+        permission = self.work / 'permission-fixture.ts'
+        permission.write_text('// offline fixture; no actual permission verification\n')
         raw = load_json(ENGINE / 'examples/demo.json')
         raw['source'] = str(self.source)
         raw['limits']['max_wall_seconds'] = 120
         for a in raw['agents'].values():
             a.update(kind='command', argv=[sys.executable, str(PROJECT / 'adapters/pi_member.py'),
-                '--model', 'offline/protocol', '--thinking', 'max', '--tools', 'read'], output='stdout',
+                '--model', 'offline/protocol', '--thinking', 'max', '--tools', 'read',
+                '--permission-extension', str(permission)], output='stdout',
                 inherit_env=['LOOP_PI_BIN', 'PAUSE_SECONDS', 'REPAIR_CYCLE', 'DRIFT_SOURCE'])
         for u in raw['units']:
             u.update(gates=[], max_repairs=1)

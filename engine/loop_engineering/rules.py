@@ -1,4 +1,4 @@
-"""Strict v1 rule normalization and a deterministic human-readable view."""
+"""Strict v1/v2 rule normalization and a deterministic human-readable view."""
 from __future__ import annotations
 import copy
 from pathlib import Path
@@ -96,6 +96,10 @@ def topological(units: list[dict]) -> list[str]:
 
 def normalize(raw: dict, base: Path) -> dict:
     r = copy.deepcopy(raw)
+    if not isinstance(r, dict):
+        raise LoopError('规则必须是对象')
+    v2 = type(r.get('schema_version')) is int and r.get('schema_version') == 2
+    from .capabilities import V2_LIMITS, normalize_profiles, compile_unit
     def reject_placeholders(value):
         if isinstance(value, str) and (value.startswith('TODO:') or value.startswith('TODO_')):
             raise LoopError('规则仍包含 TODO 占位符；请在启动前完成确认与填写')
@@ -107,10 +111,21 @@ def normalize(raw: dict, base: Path) -> dict:
                 reject_placeholders(item)
     reject_placeholders(r)
     fields(r, ['schema_version', 'task_id', 'title', 'source', 'agents', 'units', 'limits',
-               'exclude_paths', 'completion', 'notes'],
+               'exclude_paths', 'completion', 'notes'] + (['execution_profiles', 'security', 'operation_budgets'] if v2 else []),
            ['schema_version', 'task_id', 'title', 'source', 'agents', 'units'], '规则')
-    if type(r['schema_version']) is not int or r['schema_version'] != 1:
-        raise LoopError('只支持 schema_version=1')
+    if type(r['schema_version']) is not int or r['schema_version'] not in (1, 2):
+        raise LoopError('只支持 schema_version=1/2')
+    if v2:
+        r['execution_profiles'] = normalize_profiles(r.get('execution_profiles', {}))
+        r.setdefault('security', 'strict')
+        if r['security'] not in ('strict', 'audit-only'):
+            raise LoopError('security 必须是 strict / audit-only')
+        r.setdefault('operation_budgets', {})
+        if not isinstance(r['operation_budgets'], dict):
+            raise LoopError('operation_budgets must be object')
+        for key, value in r['operation_budgets'].items():
+            ident(key, 'budget key')
+            number(value, 'operation budget', 1, True)
     ident(r['task_id'], 'task_id')
     text(r['title'], 'title')
     text(r['source'], 'source')
@@ -119,20 +134,24 @@ def normalize(raw: dict, base: Path) -> dict:
     text(r['notes'], 'notes', True)
     r.setdefault('exclude_paths', [])
     strings(r['exclude_paths'], 'exclude_paths', True)
-    r['exclude_paths'] = sorted(set(DEFAULT_EXCLUDES + r['exclude_paths']))
+    r['exclude_paths'] = sorted(set(DEFAULT_EXCLUDES + r['exclude_paths'] +
+        ([path for p in r['execution_profiles'].values() for path in p['output_paths']] if v2 else [])))
     r.setdefault('limits', {})
-    fields(r['limits'], LIMITS, [], 'limits')
-    for name, default in LIMITS.items():
+    effective_limits = {**LIMITS, **(V2_LIMITS if v2 else {})}
+    fields(r['limits'], effective_limits, [], 'limits')
+    for name, default in effective_limits.items():
         r['limits'].setdefault(name, default)
         number(r['limits'][name], f'limits.{name}', 1, integer=True)
     if r['limits']['max_parallel'] > 16:
         raise LoopError('本版本 max_parallel 上限为 16')
-    if not isinstance(r['agents'], dict) or not r['agents']:
+    if not isinstance(r['agents'], dict) or (not r['agents'] and not v2):
         raise LoopError('至少配置一个开发方和一个评审方')
     for name, a in r['agents'].items():
         ident(name, 'agent id')
-        fields(a, ['kind', 'identity', 'model', 'provider', 'argv', 'output', 'inherit_env', 'extra_args'],
+        fields(a, ['kind', 'identity', 'model', 'provider', 'argv', 'output', 'inherit_env', 'extra_args'] + (['outcome_protocol'] if v2 else []),
                ['kind', 'identity'], f'agents.{name}')
+        if 'outcome_protocol' in a and a['outcome_protocol'] != 'loop-outcome-v1':
+            raise LoopError('unsupported outcome_protocol')
         text(a['identity'], f'agents.{name}.identity')
         if a['kind'] not in ('command', 'codex', 'pi'):
             raise LoopError(f'不支持的适配器：{a["kind"]}')
@@ -167,11 +186,35 @@ def normalize(raw: dict, base: Path) -> dict:
                          '--extension', '-e', '--skill', '--system-prompt', '--approve', '--mode']
             if any(x.split('=')[0] in forbidden or x in forbidden for x in a['extra_args']):
                 raise LoopError('extra_args 不可覆盖安全、目录、会话或输出配置；复杂接入使用显式 command 适配器')
+    if v2 and r['security'] == 'strict':
+        from .sessions import supports_reuse
+        for name, agent in r['agents'].items():
+            if not supports_reuse(agent):
+                raise LoopError('strict v2 成员必须使用随包 pi_member.py command/stdout；其他接法仅可显式 audit-only')
     if not isinstance(r['units'], list) or not r['units']:
         raise LoopError('units 不能为空')
     unit_ids = set()
     for u in r['units']:
-        fields(u, ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'] + list(UNIT_DEFAULTS),
+        if v2:
+            compile_unit(u, r['execution_profiles'])
+            u.setdefault('review_mode', 'independent')
+            if u['review_mode'] not in ('independent', 'gates'):
+                raise LoopError('review_mode must be independent/gates')
+            # frozen: from round 2 a review may only block on known issues, failed gates or
+            # problems in files changed this round; other new findings are recorded as deferred.
+            u.setdefault('review_scope', 'frozen')
+            if u['review_scope'] not in ('frozen', 'open'):
+                raise LoopError('review_scope must be frozen/open')
+            if 'max_selftests' in u and (type(u['max_selftests']) is not int or u['max_selftests'] < 1):
+                raise LoopError('unit.max_selftests 必须是正整数')
+        verifying = v2 and u.get('kind') == 'verify'
+        if verifying:
+            u.setdefault('developer', None)
+            u.setdefault('reviewer', None)
+            u.setdefault('writable_paths', [])
+            if u['writable_paths'] or u.get('build_profiles'):
+                raise LoopError('verify 不得写代码或发起开发自测')
+        fields(u, ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'] + list(UNIT_DEFAULTS) + (['build_profiles', 'input_from', 'review_mode', 'review_scope', 'max_selftests'] if v2 else []),
                ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'], 'unit')
         ident(u['id'], 'unit.id')
         if u['id'] in unit_ids:
@@ -179,10 +222,12 @@ def normalize(raw: dict, base: Path) -> dict:
         unit_ids.add(u['id'])
         text(u['goal'], 'goal')
         for k, default in UNIT_DEFAULTS.items():
-            u.setdefault(k, copy.deepcopy(default))
+            u.setdefault(k, 0 if v2 and k == 'max_infra_retries' else copy.deepcopy(default))
         if type(u['reviewer_exec']) is not bool:
             raise LoopError('unit.reviewer_exec 只接受 true 或 false')
-        if u['kind'] not in ('work', 'integration'):
+        if v2 and u['reviewer_exec']:
+            raise LoopError('schema v2 尚未提供评审任意执行工具；请把机械检查声明为 gate，或等待独立评审执行配方能力')
+        if u['kind'] not in (('work', 'integration', 'verify') if v2 else ('work', 'integration')):
             raise LoopError('unit.kind 只支持 work / integration')
         if not isinstance(u['developer_session'], str) or u['developer_session'] not in ('fresh', 'reuse_repairs'):
             raise LoopError('unit.developer_session 只接受 fresh / reuse_repairs')
@@ -196,10 +241,20 @@ def normalize(raw: dict, base: Path) -> dict:
             number(u[k], k, 0.1)
         number(u['idle_output_seconds'], 'idle_output_seconds', 0)
         for role in ('developer', 'reviewer'):
+            if verifying and (role == 'developer' or u.get('review_mode') == 'gates'):
+                if u[role] is not None:
+                    raise LoopError('verify unused member must be null')
+                continue
             if u[role] not in r['agents']:
                 raise LoopError(f'未知 {role}：{u[role]}')
-        if u['developer'] == u['reviewer'] or r['agents'][u['developer']]['identity'] == r['agents'][u['reviewer']]['identity']:
+        if not verifying and (u['developer'] == u['reviewer'] or r['agents'][u['developer']]['identity'] == r['agents'][u['reviewer']]['identity']):
             raise LoopError('开发方和评审方必须是两个明确、不同的成员身份')
+        if v2 and not verifying and u['review_mode'] != 'independent':
+            raise LoopError('work/integration 必须独立评审')
+        if verifying and u['developer_session'] != 'fresh':
+            raise LoopError('verify 没有开发会话')
+        if v2 and u['idle_output_seconds'] != 0:
+            raise LoopError('0.4.0 managed mode requires idle_output_seconds=0; use phase deadlines')
         if u['developer_session'] == 'reuse_repairs':
             from .sessions import supports_reuse
             if not supports_reuse(r['agents'][u['developer']]):
@@ -210,11 +265,14 @@ def normalize(raw: dict, base: Path) -> dict:
             raise LoopError('gates 必须是数组；纯语义任务可为空')
         gate_ids, criterion_ids = set(), set()
         for g in u['gates']:
-            fields(g, ['id', 'argv', 'timeout_seconds', 'output_paths', 'max_reruns'], ['id', 'argv', 'timeout_seconds'], 'gate')
+            fields(g, ['id', 'argv', 'timeout_seconds', 'output_paths', 'max_reruns'] + (['profile', 'budget_key'] if v2 else []), ['id', 'argv', 'timeout_seconds'], 'gate')
             ident(g['id'], 'gate.id')
             if g['id'] in gate_ids:
                 raise LoopError('gate.id 重复')
             gate_ids.add(g['id'])
+            if v2 and 'budget_key' in g:
+                if g['budget_key'] not in r['operation_budgets']:
+                    raise LoopError('unknown operation budget: ' + str(g['budget_key']))
             argv(g['argv'], 'gate.argv')
             number(g['timeout_seconds'], 'gate.timeout_seconds', 0.1)
             g.setdefault('max_reruns', 0)
@@ -235,10 +293,18 @@ def normalize(raw: dict, base: Path) -> dict:
             strings(c['gate_ids'], 'criterion.gate_ids')
             if set(c['gate_ids']) - gate_ids:
                 raise LoopError(f'标准引用了未知门禁：{c["id"]}')
+        if verifying and u['review_mode'] == 'gates' and any(not c['gate_ids'] for c in u['criteria']):
+            raise LoopError('gates-only verify requires gate evidence for EVERY criterion')
         referenced = {g for c in u['criteria'] for g in c['gate_ids']}
         if referenced != gate_ids:
             raise LoopError('每个门禁必须关联至少一条标准，避免测试没有参与判定')
     order = topological(r['units'])
+    if v2:
+        for u in r['units']:
+            if 'input_from' in u and (u['kind'] != 'verify' or u['input_from'] not in ancestors(r['units'], u['id'])):
+                raise LoopError('input_from 仅允许 verify 引用已声明依赖中的候选')
+            if u['kind'] == 'verify' and u['depends_on'] and 'input_from' not in u:
+                raise LoopError('有依赖的 verify 必须显式 input_from，避免验证错候选')
     for i, a in enumerate(r['units']):
         for b in r['units'][i + 1:]:
             if a['id'] in ancestors(r['units'], b['id']) or b['id'] in ancestors(r['units'], a['id']):
@@ -251,6 +317,13 @@ def normalize(raw: dict, base: Path) -> dict:
                 for y in a['protected_paths'] + a['read_paths']:
                     if overlaps(x, y):
                         raise LoopError(f'无依赖单元读写/冻结冲突：{a["id"]} / {b["id"]}')
+    if v2:
+        for p in r['execution_profiles'].values():
+            if p.get('cache_dir'):
+                cache, source = Path(p['cache_dir']), Path(r['source'])
+                bundle = Path(__file__).resolve().parents[2]
+                if any(cache == x or cache.is_relative_to(x) or x.is_relative_to(cache) for x in (source, bundle)):
+                    raise LoopError('缓存必须是独立目录，不能覆盖源码或引擎')
     if 'completion' not in r:
         if len(r['units']) > 1:
             raise LoopError('多单元任务必须显式声明 completion：独立交付或集成交付')
@@ -260,10 +333,19 @@ def normalize(raw: dict, base: Path) -> dict:
     if mode == 'integration':
         final = r['completion'].get('unit')
         by_id = {u['id']: u for u in r['units']}
-        if final not in by_id or by_id[final]['kind'] != 'integration':
+        if final not in by_id or by_id[final]['kind'] not in (('integration', 'verify') if v2 else ('integration',)):
             raise LoopError('completion.unit 必须指向 kind=integration 的单元')
         if ancestors(r['units'], final) != unit_ids - {final}:
             raise LoopError('最终集成单元必须依赖所有其他单元（直接或间接）')
+        if v2 and by_id[final]['kind'] == 'verify':
+            selected = by_id[final].get('input_from')
+            if not selected:
+                raise LoopError('最终验证必须显式选择已集成候选 input_from')
+            represented = ancestors(r['units'], selected) | {selected}
+            producers = {u['id'] for u in r['units'] if u['kind'] != 'verify'}
+            if not producers.issubset(represented):
+                raise LoopError('所选最终候选没有包含全部代码生产分支，不能伪装集成交付')
+
     elif mode != 'independent' or 'unit' in r['completion']:
         raise LoopError('completion 无效')
     return r

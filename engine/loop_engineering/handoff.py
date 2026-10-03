@@ -107,9 +107,69 @@ def record_findings(history: list[dict], report: dict, run_id: str, unit_id: str
         item = by_id[fid]
         if occurrence not in item['occurrences']:
             item['occurrences'].append(occurrence)
+        if item.get('deferred'):
+            item.update(status='DEFERRED', state_candidate_hash=candidate_hash, state_round=round_number)
+            continue
         item.update(status='OPEN', state_note='已提出；尚无对本候选有效的评审显式解决。',
                     state_candidate_hash=candidate_hash, state_round=round_number)
     return result
+
+
+def freeze_review(rows: list[dict], report: dict, history: list[dict], known_before: set[str],
+                  changed: set[str], unit: dict, gates: dict, run_id: str, unit_id: str,
+                  round_number: int) -> tuple[list[dict], list[dict], list[dict], bool]:
+    """Issue-list freeze for repair rounds.
+
+    A criterion FAIL keeps blocking only for a failed gate, a known issue that is still not
+    resolved, or a new issue touching a file changed this round (a regression). New findings
+    about unchanged code are marked DEFERRED: kept for the decision maker, no further repair.
+    Returns (rows, history, deferred_items, regression_only). regression_only means every
+    blocking FAIL came from new problems in changed files, with nothing known left open.
+    """
+    rows, history = copy.deepcopy(rows), copy.deepcopy(history)
+    by_item = {item['id']: item for item in history}
+    criteria = {c['id']: c for c in unit['criteria']}
+    deferred, regression_only = [], False
+    reasons_seen = []
+    for row in rows:
+        if row['status'] != 'FAIL':
+            continue
+        cid = row['id']
+        if any(gates.get(g, {}).get('status') == 'FAIL' for g in criteria[cid]['gate_ids']):
+            reasons_seen.append('gate')
+            continue
+        known_open = any(item['kind'] == 'issue' and cid in item['criterion_ids'] and item['id'] in known_before
+                         and item['status'] != 'RESOLVED' and not item.get('deferred') for item in history)
+        new_in_scope, new_out = False, []
+        for issue in report['issues']:
+            if issue['criterion_id'] != cid:
+                continue
+            fid = finding_id(run_id, unit_id, 'issue', issue['description'], [cid])
+            if fid in known_before:
+                continue  # re-reported known issue: covered by known_open
+            if set(issue.get('files', [])) & changed:
+                new_in_scope = True
+            else:
+                new_out.append(fid)
+        if known_open:
+            reasons_seen.append('known')
+            continue
+        if new_in_scope:
+            reasons_seen.append('regression')
+            continue
+        # Only late discoveries about unchanged code: record, do not block.
+        for fid in new_out:
+            item = by_item[fid]
+            item['deferred'] = {'round': round_number, 'files': next(
+                (i.get('files', []) for i in report['issues']
+                 if finding_id(run_id, unit_id, 'issue', i['description'], [cid]) == fid), [])}
+            item.update(status='DEFERRED', state_note=f'第 {round_number} 轮新发现，位于本轮未改动的代码；'
+                        '按问题清单冻结规则记为遗留，不触发返修，交拍板人决定。')
+            deferred.append(copy.deepcopy(item))
+        row['status'] = 'PASS'
+        row['note'] += '；问题清单冻结：本轮新发现位于未改动代码，记为遗留，不阻断'
+    regression_only = bool(reasons_seen) and set(reasons_seen) == {'regression'}
+    return rows, history, deferred, regression_only
 
 
 def resolution_gates(item: dict, evidence: list[str], unit: dict) -> list[str]:

@@ -24,7 +24,15 @@ def response_schema() -> dict:
     })
     # Optional for backward compatibility; old reports remain valid unchanged.
     schema['properties']['issue_resolutions'] = arr(obj({'id': s, 'note': s, 'evidence': arr(s)}))
+    # Optional: project-relative files an issue is about. Required for reviewers from round 2
+    # of a frozen-scope v2 unit, so the engine can tell regressions from late discoveries.
+    schema['properties']['issues']['items']['properties']['files'] = arr(s)
     return schema
+
+
+def frozen_scope(context: dict) -> bool:
+    return (bool(context.get('managed_tools')) and context['role'] == 'reviewer' and context.get('round', 1) >= 2
+            and context['unit'].get('review_scope', 'frozen') == 'frozen')
 
 
 def scratch_file(root: Path, relative: str) -> Path:
@@ -64,7 +72,7 @@ def report_scratch(context: dict) -> Path | None:
                 info = (Path(base) / name).lstat()
                 if stat.S_ISREG(info.st_mode):
                     size += info.st_size
-                    if size > context['limits']['max_log_bytes']:
+                    if size > context['limits'].get('max_evidence_bytes', context['limits']['max_log_bytes']):
                         raise LoopError('取证目录普通文件总大小超过 limits.max_log_bytes')
     except OSError as exc:
         raise LoopError(f'取证目录无法核对：{exc}') from exc
@@ -125,13 +133,34 @@ def validate_report(report: dict, context: dict, code: Path, gates: dict) -> dic
         raise LoopError(f'缺少标准：{sorted(expected - received)}')
     if not isinstance(report['issues'], list):
         raise LoopError('issues 必须是数组')
+    frozen = frozen_scope(context)
     for issue in report['issues']:
-        fields(issue, ['criterion_id', 'description', 'suggested_fix'],
+        fields(issue, ['criterion_id', 'description', 'suggested_fix', 'files'],
                ['criterion_id', 'description', 'suggested_fix'], '修复项')
         if issue['criterion_id'] not in expected:
             raise LoopError('修复项不得引入冻结规则之外的完成标准')
         text(issue['description'], 'issue.description')
         text(issue['suggested_fix'], 'issue.suggested_fix')
+        files = issue.get('files', [])
+        if not isinstance(files, list) or any(not isinstance(f, str) for f in files):
+            raise LoopError('issue.files 必须是项目内相对路径数组')
+        for f in files:
+            relative_path(f)
+        if frozen and not files:
+            raise LoopError('第 2 轮起评审提出的每个问题都必须在 issue.files 写明相关文件（项目内相对路径）')
+    if frozen:
+        # A blocking FAIL must point at something: a failed gate, an open known issue, or an
+        # issue in this report. Otherwise nothing tells the developer what to repair.
+        open_known = {cid for item in context.get('issue_history', [])
+                      if item.get('kind') == 'issue' and item.get('status') != 'RESOLVED' and not item.get('deferred')
+                      for cid in item.get('criterion_ids', [])}
+        reported = {issue['criterion_id'] for issue in report['issues']}
+        by_id = {c['id']: c for c in context['unit']['criteria']}
+        for row in report['criteria']:
+            gate_failed = any(gates.get(g, {}).get('status') == 'FAIL' for g in by_id[row['id']]['gate_ids'])
+            if row['status'] == 'FAIL' and not gate_failed and row['id'] not in open_known | reported:
+                raise LoopError(f'标准 {row["id"]} 判 FAIL 但没有对应的问题：请在 issues 写明问题与 files，'
+                                '或说明哪个已知问题仍未解决')
     if not isinstance(report['rule_gaps'], list) or any(not isinstance(g, str) or not g.strip() for g in report['rule_gaps']):
         raise LoopError('rule_gaps 必须是文字数组')
     if report['blocked'] and not report['rule_gaps']:

@@ -68,6 +68,18 @@ def member_prompt(context: dict) -> str:
             '不得修改候选副本、门禁证据、规则、交接记录和原始项目。',
             '引用取证目录里的普通文件写 scratch:<相对路径>；只有开启取证的评审方可以这样引用，开发方不得使用。',
         ]
+    if context.get('managed_tools') and role == 'developer':
+        instruction += (' 本轮禁止直接运行构建命令；使用 loop_build(recipe_id) 在程序副本自测，初次与返修完全相同。'
+                        ' 交付前可用 loop_submit_check 检查边界；该工具不是门禁/评审。没有配方就记录缺能力，不自行写启动器。'
+                        ' 返修时先处理 issue_history 里全部 OPEN 项；修一个问题时，把同类分支一起查一遍并补回归测试，'
+                        '不要只修被点名的那一处。自测次数按单元限额，用完就直接交付。')
+    elif context.get('managed_tools'):
+        instruction += ' 第 1 轮必须一次列全所有未达标问题，每条写进 issues 并在 files 写出相关文件。'
+        if context.get('round', 1) >= 2 and context.get('unit', {}).get('review_scope', 'frozen') == 'frozen':
+            instruction += (' 本单元启用问题清单冻结：先逐条核对 issue_history 的待解决项，修好的用 issue_resolutions 关闭。'
+                            ' 新问题只有位于本轮改动的文件（comparison.changed_from_previous）时才阻断，必须在 issue.files 写出文件；'
+                            '未改动代码里的新发现照常写进 issues（写明 files），引擎会记为遗留交拍板人，不触发返修。'
+                            ' 判 FAIL 的标准必须有对应的问题或仍未解决的已知问题。')
     return '\n'.join([
         '你是 Loop Engineering 循环内部的 ' + role + '。'
         + ('这是显式续接的同单元开发业务返修会话。' if (context.get('session') or {}).get('mode') == 'reuse_repairs'

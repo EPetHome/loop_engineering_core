@@ -187,9 +187,36 @@ def audit(root: Path, rid: str) -> dict:
         except (LoopError, OSError, KeyError, TypeError, ValueError, StopIteration, UnboundLocalError) as exc:
             errors.append(uid + ': 问题历史无法核对：' + str(exc))
         if result['stop'] == 'PASSED':
-            if (not c or not result.get('reviewed') or not result.get('criteria')
+            program_only = (rules.get('schema_version') == 2 and unit.get('kind') == 'verify'
+                            and unit.get('review_mode') == 'gates' and unit.get('reviewer') is None)
+            if (not c or (not result.get('reviewed') and not program_only) or not result.get('criteria')
                     or any(r['status'] != 'PASS' for r in result['criteria'])):
                 errors.append(uid + ': 达标记录不完整')
+            if program_only:
+                expected = {x['id']: x for x in unit['criteria']}
+                rows = result.get('criteria', [])
+                if len(rows) != len(expected) or {x['id'] for x in rows} != set(expected):
+                    errors.append(uid + ': 程序验证标准集合不完整')
+                current = next((h for h in result.get('history', []) if c and h['candidate']['hash'] == c['hash']
+                                and h['round'] == c['round']), None)
+                gates = (current or {}).get('gates', {})
+                for cid, criterion in expected.items():
+                    if not criterion['gate_ids']:
+                        errors.append(uid + ': 程序验证不得代替纯语义标准')
+                    for gid in criterion['gate_ids']:
+                        g = gates.get(gid, {})
+                        receipt_path = run / 'units' / uid / 'gates' / f'r{c["round"]:03d}-{gid}' / 'evidence.json'
+                        try:
+                            saved = load_json(receipt_path)
+                            if (saved != g or g.get('status') != 'PASS' or g.get('purpose') != 'GATE'
+                                    or g.get('candidate_hash') != c['hash'] or g.get('rule_hash') != data['rule_hash']
+                                    or g.get('receipt', {}).get('reason') != 'ok'):
+                                raise IntegrityError('程序验证缺少当前候选的完整门禁回执')
+                            evidence = result.get('evidence', {}).get('gate:' + gid, {})
+                            if evidence.get('status') != 'PASS' or evidence.get('candidate_hash') != c['hash']:
+                                raise IntegrityError('程序验证门禁证据投影不匹配')
+                        except (LoopError, OSError, KeyError, TypeError, ValueError) as exc:
+                            errors.append(uid + ': ' + str(exc))
             for ref, e in result.get('evidence', {}).items():
                 try:
                     if not c or e.get('candidate_hash') != c['hash']:

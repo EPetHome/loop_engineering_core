@@ -581,7 +581,12 @@ class SessionContract(unittest.TestCase):
              patch('loop_engineering.session_sandbox.subprocess.run', side_effect=AssertionError('must not launch')):
             with self.assertRaisesRegex(LoopError, 'unavailable'):
                 protect(argv, c, Path(c['code_path']), Path(c['workspace_path']), 5)
-        with patch('loop_engineering.session_sandbox.subprocess.run') as run:
+        # Test the failed-probe branch independently of the host OS. No real sandbox run.
+        with patch('loop_engineering.session_sandbox.sys.platform', 'darwin'), \
+             patch('loop_engineering.session_sandbox.SANDBOX') as sandbox, \
+             patch('loop_engineering.session_sandbox.os.access', return_value=True), \
+             patch('loop_engineering.session_sandbox.subprocess.run') as run:
+            sandbox.is_file.return_value = True
             run.return_value.returncode = 1
             run.return_value.stderr = b'sandbox denied by host'
             with self.assertRaisesRegex(LoopError, 'probe failed'):

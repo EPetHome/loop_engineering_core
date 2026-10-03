@@ -1,41 +1,92 @@
-# LLM 使用入口：先读本页即可
+# Loop 0.4.0：AI 使用入口（先读本页）
 
-Loop 是本地 Python 开发循环：用户定目标并启动，程序安排开发、检查、独立评审和有限返修，停止后交结果。当前为 0.3.0 加本地修复；本机 Python 用 `/opt/homebrew/bin/python3.12`，引擎无需第三方 Python 依赖。程序达标不等于用户验收，不自动合并原项目。
+Loop 是本地开发循环：用户定目标，AI 做准备，Loop 程序管住执行。执行包括开发、自测、门禁、独立评审和有限返修，停止后交出结果。达标不等于用户已验收，Loop 也不会自动合并原项目。
 
-## 先分清任务
+## 分工
 
-- 收到程序提供的 `LOOP_CONTEXT`：你是循环内部成员，只按本次冻结规则、角色和 `code_path` 工作；不要执行下面的任务准备流程，不调用调度、重试或导出。
-- 用户要用现有 Loop 做任务：按下面的短流程准备，不先研究 Loop 的历史或实现。
-- 用户明确要求直接修改 Loop：按授权修改相关代码/文档；涉及 `engine/` 时读其 [局部规则](engine/AGENTS.md)。这不是普通启动准备，不必另开 Loop 来做。
+| 谁 | 做什么 |
+|---|---|
+| 用户 | 头脑风暴时定目标和验收口径；启动时看预览、输入 `yes`；最终验收 |
+| AI（你） | 其余全部：起草业务验收脚本和登记配置、执行登记、准备任务、把启动命令交给用户 |
+| Loop | 校验配置、封存规则、管预算、调度成员、跑门禁、留证据、出结果 |
 
-## 普通任务的最短路径
+你**不能**替用户启动：不执行 `launch`，不用 `--approve`。
 
-1. 读本次需求、目标项目的规则和直接相关代码/材料，明确目标、授权范围、逐条可判断的完成标准和预算。标准区分程序门禁与独立评审，说明所需证据；保留时间、调用和返修上限。复用用户已确认的决定，只询问影响实施的关键缺口，不让用户重复确认常规选择。
-2. 主动按成果依赖、文件读写冲突和共享资源安排单元：小任务可一个单元；独立工作可并行，依赖工作串行，紧密耦合的工作合并，需要组合交付时安排集成单元。将依赖、读写范围和资源互斥写入单元的 `depends_on`、`read_paths` / `writable_paths`、`resources`，并发上限写入 `limits.max_parallel`；资源互斥不能代替成果依赖。引擎只执行已声明的安排，不替你发现遗漏关系。简短说明理由，不另写分析报告或跑演练。
-3. 优先复用本任务或目标项目适用的 `task.json`，只改本次需要的字段；不要遍历全部历史任务找模板。没有适用规则时用 [现有模板](engine/templates/task.template.json)；本机 Pi 的 agents 配置直接取 [规则参考中的本机 Pi 片段](engine/docs/03-规则配置参考.md)，其他字段不清才查对应节。复用原测试作为门禁；通用成员提示由程序生成，不重复手写交付协议。
-4. 核对本任务的源码路径、可写/禁止范围、已确认模型工具配置和实际疑点。规则定稿后用 `engine/loop.py validate` 校验一次；规则未变且已校验不重复。程序/配置有变化或疑点才查 `doctor`、版本或对应接法文档；不要默认调用真实模型验证账号。运行数据目录必须在源项目之外，成员在工作副本实施，不直接改原项目或冻结规则。
-5. 目标、标准、范围、执行关系、配置与预算明确，规则结构检查通过且无已知阻断后，给出一条可复制启动命令和结果位置，结束准备。检查无法执行就如实列明原因与影响，不用整套演练代替判断。由用户启动真实成员；只有本次另有明确启动授权时才代执行。
+## 硬规则
 
-本机命令形式（替换成真实任务路径，不把占位路径交给用户）：
+1. **只写业务断言。** Loop 已经保证的不要再写：文件边界、指纹、候选绑定、证据留存、准备检查。验收脚本不许 `import loop_engineering`，也不许依赖 Loop 内部目录名（如 `registrations/`、`execution-NNN`）。
+2. **不乱建文件。** 只在用户指定的位置新建或修改文件；不额外写报告、测试、说明。
+3. **安全模式用 `audit-only`**（用户 2026-10-03 决定）。不要改回 strict。
+4. **模型**：开发 `openai-codex/gpt-6.1-sol` + `max`；评审 `openai-codex/gpt-6-astra` + `xhigh`。不擅自更换或降级。
+5. **说明文字不能和 plan 字段矛盾。** `notes`、项目里的 AGENTS.md 等会原样交给成员。2026-10-03 的教训：`notes` 写着 strict，实际是 audit-only，开发方发现矛盾后停止。
+6. **有任务在运行时，不要改** `engine/`、`adapters/`、`extensions/`、`plugins/` 和根目录脚本；运行中的完整性检查会把这种改动当成篡改并停止运行。要改引擎，先读 `engine/AGENTS.md`。
+7. 遇到规则冲突或缺少能力，如实说明，不在现场改引擎。
+
+## 流程与命令
+
+```
+① 头脑风暴 → ② 写业务验收脚本 + plan.json → ③ 登记 register → ④ 准备 begin→patch→check→seal → ⑤ 启动命令交给用户
+```
 
 ```bash
 cd /Users/Admin/Desktop/loop
-/opt/homebrew/bin/python3.12 engine/loop.py validate "tasks/<任务>/task.json"
-/opt/homebrew/bin/python3.12 run_loop.py "tasks/<任务>/task.json" --root /Users/Admin/Desktop/loop/loop-data
+PY=/opt/homebrew/bin/python3.12
+STATE="$HOME/.loop040/state"     # 账本：登记、准备、授权
+DATA="$HOME/.loop040/data"       # 运行记录；必须在源码目录之外
+
+$PY loop_guard.py --state "$STATE" register <项目ID> /绝对路径/plan.json --root "$DATA"
+$PY loop_guard.py --state "$STATE" begin <项目ID>
+$PY loop_guard.py --state "$STATE" patch <prep_id> changes.json --revision <N>   # 只在需要修改任务内容时
+$PY loop_guard.py --state "$STATE" seal <prep_id> --revision <N>                  # seal 会重新检查；不要依赖缓存的 check 结果
 ```
 
-上面分别是准备时的结构检查和交给用户的启动命令，不要求用户再执行整套准备。默认只交程序汇总；仅用户需要 AI 简报时，在这一次启动命令后加 `--brief`，不要事后为摘要重跑业务。默认保持 `fresh`、`idle_output_seconds=0`；其他策略按任务明确配置。
+- `register`、`launch` 要在**宿主环境**执行，不要放在 AI 工具自带的沙箱里。
+- 项目 ID 不能覆盖；构建命令、输出、模型或可修改范围有变化时，换一个新 ID 重新登记。源码内容变了不用重新登记。
+- 启动命令由 `seal` 返回，交给用户执行。用户看预览、输入 `yes` 后开始运行。
 
-## 什么时候才展开
+## 写 plan.json 的要点
 
-- 仅使用现有 Loop：不读 `docs/archive/`、不通读完整手册、引擎源码、旧验收报告或全部日志；不预先实现成功解、不固定跑 demo、全引擎回归、假成员演练或真实模型试调用。准备结束后不追加一轮“为了放心”的检查。
-- 首次配置不同接法/环境，或确有接口、安全、可行性疑点：只查对应资料和验证该疑点。首次使用 Loop 的 LLM 不等于首次安装引擎。安装、升级、修改引擎时再按影响验证。
-- 本机 Pi 使用 `adapters/pi_member.py` 的 command 接法与权限扩展，不照搬旧任务目标、权限、预算或完整门禁；接法有疑点才查 [成员接入](engine/docs/04-成员工具接入.md) 对应部分。
-- 用户要求解释流程时才查 [完整使用参考](engine/docs/02-完整使用手册.md) 的相关节；历史仅在明确追溯时读 [归档索引](docs/archive/README.md)，其中旧流程、路径、状态不是当前指令。
-- 查看结果先读指定运行的 `manifest.json` / `result.md`，再按问题定位证据。独立评审默认只读源码、配置、差异、测试代码和已有记录；没有明确执行授权，不跑测试、接口、模型、服务或 `audit` 等检查。
+从 `examples040/project-template.v2.json` 起草，所有 TODO 都要替换。
 
-## 文件与现有工作
+- **成员**：argv 用 `{python}`、`{engine}/../adapters/pi_member.py`。
+- **配方**（构建/检查命令）：
+  - 纯构建配方单独登记，不要带"缺测试类就提前退出"这类业务前置，否则登记时验证不到输出；
+  - 命令写绝对路径；Maven 用 `/usr/bin/env JAVA_HOME=<JDK21> /opt/homebrew/bin/mvn -o -B -s deploy/maven-settings.xml -Dmaven.repo.local={cache} …`；
+  - `cache_dir` 指向依赖种子的克隆（`cp -cR`），不要直接用种子本身；
+  - `evidence_paths` 写确切的文件名，不支持通配符。
+- **单元**：`writable_paths` 给最小范围；开发和集成单元用 `review_mode: independent`；分阶段的计划可以让前面的单元保护某个文件、后面的单元修改它。
+- **验收标准要有终点**：不要写"覆盖全部边界""完整处理所有情况"。列成明确清单，能用程序检查的写成门禁。准备阶段会对这类写法给出提醒，预览里也会标出来。
+- **返修收敛**：v2 单元默认 `review_scope: "frozen"`，即问题清单冻结。第 1 轮评审要一次列全问题；从第 2 轮起，只有三种情况会触发返修：没修好的已知问题、失败的门禁、本轮改动的文件里出现的新问题。没改动的代码里新挖出的问题记为"遗留发现"，在结果页交给用户决定。如果连续两轮都是"旧问题修好了、改动处又冒出新问题"，就提前判"不收敛"并停下。确实需要旧行为时，单元写 `review_scope: "open"`。
+- **自测额度按单元分**：默认把 `limits.max_selftests` 平均分给有构建配方的单元；个别单元可以用 `max_selftests` 单独指定。
 
-- `engine/` 是引擎，`adapters/` 是接法，`tasks/` 是任务，`loop-data/` 是运行记录与候选。修改引擎前确认没有使用该副本的活动任务；最近一次终态不代表全部空闲，不启停别处的独立 toolchain。
-- `temp/` 是用户自己的资料区，只读用户指定材料，不在其中生成文档、测试日志、压缩包或缓存。任务沿用一份说明；临时中间文件用系统临时目录，交付物放用户指定位置，不自行删除既有文件。
-- 保留已有未提交改动、运行记录和其他任务。打包使用现有 `scripts/package_loop.py`，包含本文件与归档目录；输出到用户指定位置，不把打包变成日常启动前置步骤。
+**登记结果怎么看**：
+
+| 结果 | 含义 |
+|---|---|
+| `VERIFIED` | 命令能跑，输出都在声明范围内 |
+| `VERIFIED_NONZERO` | 命令真的跑了，只是业务断言没过（通常因为功能还没做） |
+| 被拒绝 | 漏声明输出（一次列全）、报告缺失、一个输出都没产生、改了源码、超时、环境错误。先看 stderr，一次改全 |
+
+## 受约束的准备目录（插件）
+
+loop-guard 插件已在 Codex 和 Claude Code 上装好。只要在 `~/.loop040/prep` 里开会话，AI 就只有 9 个准备工具，不能跑命令、不能写文件。使用前，先在一个终端启动准备服务，`--state` 必须和项目登记时用的一致：
+
+```bash
+/opt/homebrew/bin/python3.12 /Users/Admin/Desktop/loop/loop_guard.py --state "<STATE>" serve --socket ~/.loop040/g.sock
+```
+
+## 本机事实
+
+| 用途 | 值 |
+|---|---|
+| Python | `/opt/homebrew/bin/python3.12` |
+| Pi | `/Users/Admin/.local/bin/pi`（0.87.1） |
+| JDK 21 | `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`（`mvn` 不设 `JAVA_HOME` 时会用 JDK 26） |
+| Codex 命令行 | `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`（PATH 里那个 npm 版已损坏） |
+| 结果 | `<DATA>/runs/<运行编号>/result.md`；运行中用 `$PY engine/loop.py status <运行编号> --root "$DATA"` 查看 |
+
+专家团第三批（2026-10-03）使用的是它自己的状态目录和数据根：`/Users/Admin/Desktop/产品智能体交付资料/迭代思路/14-可信交付与验收改进/loop/` 下的 `guard040-state` 和 `run-data040`。
+
+## 详细文档
+
+`docs040/01`（架构）、`02`（安装与日常使用）、`03`（配置接口）、`04`（安全边界）。`temp/` 是用户自己的资料区，只读，不在里面生成文件。

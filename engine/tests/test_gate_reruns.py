@@ -328,9 +328,9 @@ class GateRerunTests(unittest.TestCase):
         self.assertEqual(self.unit['stats']['member_invocations'], 1)
 
     def test_timeout_after_failure_is_unknown_and_stops_rerunning(self):
-        self.configure({'G1': [fail('initial'), {'exit_code': 1, 'sleep': 2,
+        self.configure({'G1': [fail('initial'), {'exit_code': 1, 'sleep': 5,
                                                'stdout': ['LOOP_FAIL_REASON=initial']}, passed()]}, maximum=3)
-        self.raw['units'][0]['gates'][0]['timeout_seconds'] = 0.5
+        self.raw['units'][0]['gates'][0]['timeout_seconds'] = 2.0  # avoid charging Python startup against a 0.5s fixture window
         self.assertEqual(self.execute(), 'BLOCKED')
         record = self.record()
         self.assertEqual([a['status'] for a in record['attempts']], ['FAIL', 'UNKNOWN'])

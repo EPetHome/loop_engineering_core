@@ -1,0 +1,20 @@
+{
+  "name": "loop-guard-local",
+  "interface": {
+    "displayName": "Loop Guard（本机）"
+  },
+  "plugins": [
+    {
+      "name": "loop-guard",
+      "source": {
+        "source": "local",
+        "path": "./plugins/loop-guard"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

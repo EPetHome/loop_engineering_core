@@ -21,13 +21,15 @@ class PiMemberCheck(unittest.TestCase):
                 'Path(os.environ["CAPTURE"]).write_text(json.dumps({"argv":sys.argv[1:], "prompt":sys.stdin.read()}))\n'
                 'print("```json\\n{\\\"ok\\\":true}\\n```")\n')
             fake.chmod(0o700)
+            extension = work / 'offline-permission.ts'
+            extension.write_text('// offline argument fixture; not a real security extension')
             for model, thinking, selected in [
                 ('openai-codex/gpt-6.1-sol', 'max', 'read,bash,edit,write,grep,find,ls'),
                 ('openai-codex/gpt-6-astra', 'xhigh', 'read,grep,find,ls'),
             ]:
                 capture = work / 'capture.json'
                 done = subprocess.run([sys.executable, str(ADAPTER), '--model', model,
-                    '--thinking', thinking, '--tools', selected], input='frozen task context',
+                    '--thinking', thinking, '--tools', selected, '--permission-extension', str(extension)], input='frozen task context',
                     text=True, capture_output=True, timeout=15,
                     env=dict(os.environ, LOOP_PI_BIN=str(fake), CAPTURE=str(capture)))
                 self.assertEqual(done.returncode, 0, done.stderr)
@@ -41,7 +43,7 @@ class PiMemberCheck(unittest.TestCase):
                 self.assertIn('--offline', args)
                 self.assertIn('--no-extensions', args)
                 self.assertEqual(args[args.index('-e') + 1],
-                    '/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts')
+                    str(extension.resolve()))
                 self.assertIn('-p', args)
 
 

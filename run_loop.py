@@ -19,17 +19,21 @@ from loop_engineering.storage import STOP_LABELS, create_run
 from loop_engineering.observability import engine_summary, read_observation, summarize
 from loop_engineering.supervisor import supervise
 
-PI = '/Users/Admin/.local/bin/pi'
-EXTENSION = '/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts'
+PI = 'pi'  # Override explicitly with LOOP_PI_BIN; never a bundled personal path.
 PROMPT = ROOT / 'prompts' / 'brief.md'
 BRIEF_SECONDS = 300
 
 
 def brief_command():
-    return [PI, '--offline', '--mode', 'json', '--no-session', '--model', 'opencode-go/deepseek-v4.1-flash',
-            '--thinking', 'xhigh', '--no-extensions', '--no-skills',
+    model = os.environ.get('LOOP_BRIEF_MODEL')
+    thinking = os.environ.get('LOOP_BRIEF_THINKING')
+    extension = os.environ.get('LOOP_PERMISSION_EXTENSION')
+    if not model or not thinking or not extension or not Path(extension).is_file():
+        raise LoopError('AI简报需显式配置 LOOP_BRIEF_MODEL、LOOP_BRIEF_THINKING 和有效 LOOP_PERMISSION_EXTENSION；不选择默认模型')
+    return [os.environ.get('LOOP_PI_BIN', PI), '--offline', '--mode', 'json', '--no-session', '--model', model,
+            '--thinking', thinking, '--no-extensions', '--no-skills',
             '--no-prompt-templates', '--no-themes', '--tools', 'read,grep,find,ls',
-            '-e', EXTENSION, '-p', '只压缩指定运行的已有记录，最终输出简报正文。']
+            '-e', str(Path(extension).resolve()), '-p', '只压缩指定运行的已有记录，最终输出简报正文。']
 
 
 def make_brief(run):
@@ -45,9 +49,10 @@ def make_brief(run):
         'deadline_epoch': time.time() + BRIEF_SECONDS,
         'cancel_file': str(job / 'cancel'), 'max_log_bytes': 512 * 1024,
         'pi_json': True, 'pi_delivery': 'text',
+        'soft_diagnostics': True, 'max_event_bytes': 8 * 1024 * 1024,
+        'max_response_bytes': 1024 * 1024,
     }, readonly=True)
     env = environment()
-    env['PATH'] = '/Users/Admin/.hermes/node/bin:' + env.get('PATH', '')
     previous = {}
     for sig in (signal.SIGINT, signal.SIGTERM):
         previous[sig] = signal.signal(sig, lambda *_: atomic_write(job / 'cancel', 'user cancelled brief\n'))
@@ -149,7 +154,7 @@ def deliver(run, brief=False):
         elif brief:
             status = '原始结果已完成，正在按请求生成 AI 简报（最多 5 分钟）。'
             write_entry()
-            print('已请求 AI 简报，调用 ds4.1 生成简报。', flush=True)
+            print('已请求 AI 简报，仅使用显式配置的简报模型。', flush=True)
             make_brief(run)
             status = '[查看日志简报](brief.md)。简报不改变原始结论。'
     except Exception as exc:

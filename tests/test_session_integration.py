@@ -116,9 +116,11 @@ class ComposedSessionIntegration(unittest.TestCase):
         self.raw = load_json(PROJECT / 'engine/examples/demo.json')
         self.raw['source'] = str(self.source)
         self.raw['limits'].update(max_parallel=1, max_wall_seconds=120, max_member_invocations=16)
+        extension = self.work / 'offline-permission.ts'
+        extension.write_text('// deterministic session fixture only')
         for agent in self.raw['agents'].values():
             agent.update(kind='command', argv=[sys.executable, str(PROJECT / 'adapters/pi_member.py'),
-                         '--model', 'explicit-offline-wire', '--thinking', 'max', '--tools', 'read,bash,edit,write'],
+                         '--model', 'explicit-offline-wire', '--thinking', 'max', '--tools', 'read,bash,edit,write', '--permission-extension', str(extension)],
                          output='stdout', inherit_env=['LOOP_PI_BIN', 'SESSION_CAPTURE', 'SESSION_SCENARIO'])
         u = self.raw['units'][0]
         u.update(developer_session='reuse_repairs', max_repairs=2, max_protocol_retries=1, max_infra_retries=1)
@@ -184,6 +186,8 @@ class ComposedSessionIntegration(unittest.TestCase):
             self.assertEqual(load_json(attempt / 'activity.json')['finish_reason'], 'invalid_response')
             self.assertFalse((attempt / 'accepted.json').exists())
 
+    @unittest.skipUnless(sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
+                         "Requires real macOS old-directory write-denial; not simulated on Linux")
     def test_pi087_session_payloads_and_compaction_preserve_business_reuse(self):
         self.protocol_program(PI_SAMPLE['compaction'], PI_SAMPLE['session_entries'])
         data = self.execute('one_repair')
@@ -202,6 +206,8 @@ class ComposedSessionIntegration(unittest.TestCase):
         self.assertTrue(mapping['ready'])
         self.assertEqual((self.source / 'invites.py').read_bytes(), self.before)
 
+    @unittest.skipUnless(sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
+                         "Requires real macOS old-directory write-denial; not simulated on Linux")
     def test_two_business_repairs_resolution_observation_protection_finalization_export(self):
         d = self.execute()
         u = d['units']['invite']
@@ -258,6 +264,8 @@ class ComposedSessionIntegration(unittest.TestCase):
         self.assertEqual((self.source / 'invites.py').read_bytes(), self.before)
         self.assertEqual((Path(u['result']['history'][0]['candidate']['path']) / 'invites.py').read_text(), 'value = 1\n')
 
+    @unittest.skipUnless(sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
+                         "Requires real macOS old-directory write-denial; not simulated on Linux")
     def test_old_receipt_causes_new_format_session_not_business_resume(self):
         d = self.execute('protocol')
         dev = [x for x in self.calls if x['context']['role'] == 'developer']
@@ -274,6 +282,8 @@ class ComposedSessionIntegration(unittest.TestCase):
         self.assertEqual(d['units']['invite']['stats']['protocol_retries_by_role'], {'developer': 1, 'reviewer': 0})
         self.assertEqual(d['units']['invite']['stats']['repairs'], 1)
 
+    @unittest.skipUnless(sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
+                         "Requires real macOS old-directory write-denial; not simulated on Linux")
     def test_failed_local_process_retries_fresh_and_preserves_failed_conversation(self):
         self.execute('infra')
         dev = [x for x in self.calls if x['context']['role'] == 'developer']

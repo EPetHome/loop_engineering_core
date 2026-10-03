@@ -1,0 +1,448 @@
+"""No-model task preparation. RPC exposes preparation, never approval or launch."""
+from __future__ import annotations
+import copy
+import json
+import os
+import re
+from pathlib import Path
+import shlex
+import shutil
+import sys
+import time
+import uuid
+from .common import LoopError, FileLock, atomic_json, atomic_write, digest, load_json, matches, now
+from .ledger import Ledger
+from .rules import normalize, render_rules
+from .admission import inspect_input, installation_identity
+from .capabilities import capability_summary, compile_unit
+
+MAX_ACTIONS = 40
+
+
+def _tail(path: Path, lines: int = 25) -> str:
+    try:
+        data = path.read_bytes()[-16384:].decode('utf-8', 'replace')
+    except OSError:
+        return ''
+    return '\n'.join(data.splitlines()[-lines:])
+
+
+def verification_targets(rules: dict, skip: list[str] = ()) -> tuple[list[str], dict]:
+    """Profiles a unit really uses. Budgeted scenario-only profiles need a human decision."""
+    used, plain = set(), set()
+    for u in rules['units']:
+        used.update(u.get('build_profiles', []))
+        plain.update(u.get('build_profiles', []))
+        for g in u.get('gates', []):
+            if g.get('profile'):
+                used.add(g['profile'])
+                if not g.get('budget_key'):
+                    plain.add(g['profile'])
+    unknown = sorted(set(skip) - set(rules['execution_profiles']))
+    if unknown:
+        raise LoopError('--skip-verify 引用了不存在的配方：' + ', '.join(unknown))
+    skipped = {n: '人工 --skip-verify' for n in skip if n in used}
+    skipped.update({n: '仅被带 budget_key 的场景门禁使用，登记时不自动执行' for n in used - plain - set(skip)})
+    return sorted(plain - set(skip)), skipped
+
+
+def verify_profiles(state: Path, project_id: str, rules: dict, skip: list[str] = (), log=None) -> dict:
+    """Run every used profile once on the current source, through the same executor as gates.
+
+    A profile counts as verified only if it really ran: required reports exist and, when it
+    declares outputs, at least one appeared. A non-zero exit with that evidence is reported as
+    VERIFIED_NONZERO (feature may not exist yet). Anything else -- missing reports, no output at
+    all, undeclared outputs, timeouts, sandbox/config errors -- rejects the registration before
+    any model time is spent. A profile that cannot run on the current source must be skipped
+    explicitly with --skip-verify; it is then shown as unverified in the preview.
+    """
+    from .execution import execute_recipe
+    from .common import copy_manifest
+    targets, skipped = verification_targets(rules, skip)
+    base = Path(state) / 'registrations' / (project_id + '-' + uuid.uuid4().hex[:8])
+    manifest = inspect_input(rules)
+    frozen = base / 'input'
+    copy_manifest(Path(rules['source']), frozen, manifest)
+    if inspect_input(rules) != manifest:
+        raise LoopError('登记验证复制期间原始输入改变')
+    results, failed = {}, []
+    for name in targets:
+        profile = rules['execution_profiles'][name]
+        if log:
+            log(f'登记验证：运行配方 {name}（上限 {profile["timeout_seconds"]} 秒，不调用模型）')
+        execution = base / name
+        record = execute_recipe(frozen, manifest, profile, execution, rules['limits'], purpose='REGISTER',
+                                security=rules['security'], deadline=time.time() + profile['timeout_seconds'],
+                                cancel_file=base / 'cancel', binding={'project_id': project_id})
+        ok = record['reason'] in ('ok', 'nonzero_exit')
+        entry = {'status': ('VERIFIED' if record['reason'] == 'ok' else 'VERIFIED_NONZERO') if ok else 'FAILED',
+                 'reason': record['reason'], 'error': record.get('error'),
+                 'outputs': record.get('outputs', []), 'receipt': str(execution / 'build-receipt.json'),
+                 'profile_key': _probe_key(rules, name)}
+        if ok and profile['output_paths'] and not entry['outputs']:
+            ok = False
+            entry.update(status='FAILED', reason='no_output',
+                         error='声明了 output_paths，但当前源码上一个输出都没产生，无法验证声明')
+        if record['reason'] != 'ok':
+            entry['stdout_tail'] = _tail(execution / 'job/stdout.log')
+            entry['stderr_tail'] = _tail(execution / 'job/stderr.log')
+        if not ok:
+            failed.append(name)
+        results[name] = entry
+    report = {'verified_at': now(), 'directory': str(base), 'profiles': results, 'skipped': skipped,
+              'note': '登记验证只核对执行条件与输出声明，不代表业务门禁已通过'}
+    if failed:
+        raise LoopError('登记验证未通过，未登记。先按 stderr/stdout 排除环境问题；确认某个配方只是因功能未实现而无法在当前源码上运行时，'
+                        '用 --skip-verify ' + ' --skip-verify '.join(failed) + ' 显式跳过（预览会标为未验证）。详情：'
+                        + json.dumps({n: {k: results[n].get(k) for k in ('reason', 'error', 'stderr_tail', 'stdout_tail')}
+                                      for n in failed}, ensure_ascii=False))
+    return report
+
+
+def register_project(state: Path, project_id: str, raw: dict, base: Path, root: Path,
+                     require_probes: list[str] = (), *, verify: bool = False,
+                     skip_verify: list[str] = (), log=None) -> dict:
+    from .rules import ident
+    ident(project_id, 'project_id')
+    rules = normalize(raw, base)
+    if rules['schema_version'] != 2:
+        raise LoopError('先明确转换成 schema_version=2，旧规则不自动升级')
+    root = root.expanduser().resolve()
+    source = Path(rules['source'])
+    if root == source or root.is_relative_to(source):
+        raise LoopError('运行根不能位于源码内')
+    for profile in rules['execution_profiles'].values():
+        if profile.get('cache_dir'):
+            cache = Path(profile['cache_dir'])
+            for restricted in (root, state.expanduser().resolve()):
+                if cache == restricted or cache.is_relative_to(restricted) or restricted.is_relative_to(cache):
+                    raise LoopError('缓存不能覆盖数据根或Guard授权目录')
+    for name in require_probes:
+        if name not in rules['execution_profiles'] or not rules['execution_profiles'][name]['probe_allowed']:
+            raise LoopError('require-probe 必须引用显式 probe_allowed 配方')
+    allowed = sorted(set(p for u in rules['units'] for p in u['writable_paths']))
+    protected = sorted(set(p for u in rules['units'] for p in u['protected_paths']))
+    ledger = Ledger(state)
+    project = {'id': project_id, 'revision': 1, 'root': str(root), 'rules': rules,
+               'writable_paths': allowed, 'protected_paths': protected,
+               'require_probes': list(require_probes), 'created_at': now()}
+    root.mkdir(parents=True, exist_ok=True)
+    marker = root / '.loop-managed.json'
+    if marker.exists():
+        old = load_json(marker)
+        if old.get('state') != str(ledger.state):
+            raise LoopError('数据根属于另一控制目录，请选新根')
+    if verify:
+        try:
+            ledger.get('project', project_id)
+        except LoopError:
+            pass
+        else:
+            raise LoopError('项目ID已登记，不覆盖；能力变更请用新的登记ID')
+        project['verification'] = verify_profiles(ledger.state, project_id, rules, skip_verify, log)
+    ledger.put('project', project_id, project, create_only=True)
+    for name, entry in (project.get('verification') or {}).get('profiles', {}).items():
+        # A registration run is the same executor as a probe; reuse it for require_probes.
+        ledger.put('probe', project_id + ':' + entry['profile_key'],
+                   {'environment_valid': True, 'record': entry, 'profile_key': entry['profile_key']})
+    atomic_json(marker, {'state': str(ledger.state), 'managed_schema': 2})
+    return project
+
+
+def _constraints(project: dict, raw: dict):
+    approved = project['rules']
+    for key in ('source', 'agents', 'execution_profiles', 'security', 'exclude_paths'):
+        if raw.get(key) != approved.get(key):
+            raise LoopError('普通编排不得修改已登记配置：' + key)
+    for name, amount in raw.get('limits', {}).items():
+        if name not in approved['limits'] or type(amount) is not int or amount > approved['limits'][name]:
+            raise LoopError('普通编排不得扩大限额：' + name)
+    for key, amount in raw.get('operation_budgets', {}).items():
+        if key not in approved['operation_budgets'] or type(amount) is not int or amount > approved['operation_budgets'][key]:
+            raise LoopError('普通编排不得增加操作额度')
+    # Compare each unit with the registered unit of the same id: staged plans may protect a
+    # file early and remove it in a later unit. Units added during preparation get the
+    # strictest bound (all registered writable/protected paths).
+    registered = {u['id']: u for u in approved.get('units', [])}
+    for unit in raw.get('units', []):
+        base = registered.get(unit.get('id'))
+        writable = base['writable_paths'] if base else project['writable_paths']
+        protected = base['protected_paths'] if base else project['protected_paths']
+        for path in unit.get('writable_paths', []):
+            if not matches(path, writable):
+                raise LoopError('普通编排不得扩大源码修改范围：' + str(unit.get('id')) + ' ' + path)
+        if not set(protected).issubset(unit.get('protected_paths', [])):
+            raise LoopError('不得移除登记时的保护路径：' + str(unit.get('id')))
+
+
+UNBOUNDED = re.compile(r'全部|所有|完整|任何|全量|穷尽|充分|一切')
+
+
+def criteria_warnings(rules: dict) -> list[str]:
+    """Non-blocking: open-ended criteria give a reviewer no finish line (2026-10-03 lesson)."""
+    found = []
+    for u in rules['units']:
+        for c in u['criteria']:
+            words = sorted(set(UNBOUNDED.findall(c['text'])))
+            if words:
+                found.append(f'{u["id"]}/{c["id"]} 含"{"、".join(words)}"，可能没有终点；'
+                             '建议改成明确清单，能用程序检查的写成门禁')
+    return found
+
+
+def _get_prep(ledger: Ledger, prep_id: str, revision: int | None = None) -> dict:
+    from .rules import ident
+    ident(prep_id, 'prep_id')
+    prep = ledger.get('prep', prep_id)
+    if revision is not None and prep['revision'] != revision:
+        raise LoopError('revision 不一致，请读取最新准备状态')
+    return prep
+
+
+def begin(state: Path, project_id: str) -> dict:
+    ledger = Ledger(state)
+    project = ledger.get('project', project_id)
+    pid = 'prep-' + uuid.uuid4().hex
+    prep = {'id': pid, 'project_id': project_id, 'revision': 1, 'status': 'DRAFT',
+            'rules': copy.deepcopy(project['rules']), 'actions': 1, 'created_at': now(),
+            'capabilities': capability_summary(), 'checks': None, 'probes': {}}
+    ledger.put('prep', pid, prep, create_only=True)
+    return prep
+
+
+def patch(state: Path, prep_id: str, expected_revision: int, changes: dict) -> dict:
+    from .rules import ident
+    ident(prep_id, 'prep_id')
+    ledger = Ledger(state)
+    with FileLock(ledger.state / 'locks' / (prep_id + '.lock')):
+        prep = _get_prep(ledger, prep_id, expected_revision)
+        if prep.get('prepared_id'):
+            raise LoopError('已封存；新任务/修订必须创建新准备，不能改旧回执')
+        if not isinstance(changes, dict) or set(changes) - {'title', 'task_id', 'notes', 'units', 'completion', 'limits', 'operation_budgets'}:
+            raise LoopError('patch 仅接受业务规则和收紧预算，不接受任意路径/命令/程序')
+        if prep['actions'] >= MAX_ACTIONS:
+            raise LoopError('准备动作预算耗尽，草稿保留；不继续探测')
+        raw = copy.deepcopy(prep['rules'])
+        raw.update(changes)
+        _constraints(ledger.get('project', prep['project_id']), raw)
+        if raw == prep['rules']:
+            return prep
+        prep.update(rules=raw, revision=expected_revision + 1, status='DRAFT', checks=None,
+                    actions=prep['actions'] + 1)
+        ledger.put('prep', prep_id, prep, expected_revision=expected_revision)
+        return prep
+
+
+def _probe_key(rules: dict, name: str) -> str:
+    from .common import file_hash
+    source = Path(rules['source'])
+    relevant = {}
+    patterns = ['**/pom.xml', '**/build.gradle', '**/build.gradle.kts', '**/package.json', '**/package-lock.json', '**/.mvn/**']
+    for pattern in patterns:
+        for path in source.glob(pattern):
+            if path.is_file() and not path.is_symlink() and not any(p in ('node_modules', '.git', 'target') for p in path.parts):
+                relevant[path.relative_to(source).as_posix()] = file_hash(path)
+    profile = rules['execution_profiles'][name]
+    from .adapters import expand, ENGINE_DIR
+    argv = expand(profile['argv'], {'python': sys.executable, 'engine': str(ENGINE_DIR), 'code': str(source), 'cache': profile.get('cache_dir') or ''})
+    # Include referenced source scripts, not just conventional build descriptors.
+    for arg in argv:
+        path = Path(arg) if Path(arg).is_absolute() else source / profile['cwd'] / arg
+        if path.is_file() and not path.is_symlink():
+            relevant[str(path)] = file_hash(path)
+    exe = shutil.which(argv[0])
+    if exe:
+        relevant['executable'] = file_hash(Path(exe))
+    return digest({'profile': profile, 'files': relevant, 'python': sys.version})
+
+
+def check(state: Path, prep_id: str, revision: int, *, refresh: bool = False) -> dict:
+    from .rules import ident
+    ident(prep_id, 'prep_id')
+    ledger = Ledger(state)
+    with FileLock(ledger.state / 'locks' / (prep_id + '.lock')):
+        prep = _get_prep(ledger, prep_id, revision)
+        if prep['checks'] is not None and not refresh:
+            return {**prep['checks'], 'cached': True,
+                    'note': '同 revision 结构检查缓存；输入和动态条件在 seal/launch 重新核对'}
+        project = ledger.get('project', prep['project_id'])
+        issues = []
+        raw = copy.deepcopy(prep['rules'])
+        try:
+            _constraints(project, raw)
+        except LoopError as exc:
+            issues.append({'kind': 'CONFIG', 'detail': str(exc)})
+        # Collect ALL profile linkage conflicts, not just the first unit.
+        for u in raw.get('units', []):
+            try:
+                compile_unit(u, project['rules']['execution_profiles'])
+            except (LoopError, KeyError, TypeError) as exc:
+                issues.append({'kind': 'CONFIG', 'unit': u.get('id'), 'detail': str(exc)})
+        rules = None
+        try:
+            rules = normalize(raw, Path(project['rules']['source']))
+        except (LoopError, KeyError, TypeError, ValueError) as exc:
+            issues.append({'kind': 'CONFIG', 'detail': str(exc)})
+        if rules:
+            from .adapters import expand, ENGINE_DIR, command
+            source = Path(rules['source'])
+            if not source.is_dir() or source.is_symlink():
+                issues.append({'kind': 'ENVIRONMENT', 'detail': 'source 不存在或为链接'})
+            if rules['security'] == 'strict' and (sys.platform != 'darwin' or not Path('/usr/bin/sandbox-exec').is_file()):
+                issues.append({'kind': 'CAPABILITY', 'detail': 'strict 需要本机 macOS sandbox-exec；不自动降级'})
+            for name, profile in rules['execution_profiles'].items():
+                cwd = source / profile['cwd']
+                argv = expand(profile['argv'], {'python': sys.executable, 'engine': str(ENGINE_DIR),
+                                               'code': str(source), 'workspace': str(ledger.state), 'cache': profile.get('cache_dir') or ''})
+                if not cwd.is_dir():
+                    issues.append({'kind': 'ENVIRONMENT', 'profile': name, 'detail': 'cwd 不存在'})
+                if not shutil.which(argv[0]):
+                    issues.append({'kind': 'ENVIRONMENT', 'profile': name, 'detail': '程序不存在：' + argv[0]})
+            for u in rules['units']:
+                for role in ('developer', 'reviewer'):
+                    member = u.get(role)
+                    if member is None:
+                        continue
+                    vals = {'python': sys.executable, 'engine': str(ENGINE_DIR), 'code': str(source), 'workspace': str(ledger.state),
+                            'context': 'context.json', 'response': 'response.json', 'schema': 'schema.json', 'unit': u['id'], 'role': role}
+                    args, _ = command(rules['agents'][member], role, vals)
+                    if not shutil.which(args[0]):
+                        issues.append({'kind': 'ENVIRONMENT', 'unit': u['id'], 'detail': '成员程序不存在：' + args[0]})
+            for name in project['require_probes']:
+                key = _probe_key(rules, name)
+                try:
+                    cache = ledger.get('probe', project['id'] + ':' + key)
+                except LoopError:
+                    cache = None
+                if not cache or not cache.get('environment_valid'):
+                    issues.append({'kind': 'PROBE', 'question_id': 'profile:' + name, 'profile': name,
+                                   'detail': '已授权的一次执行条件探测尚未完成；不要求新业务已通过'})
+        result = {'status': 'READY' if not issues else ('NEEDS_CAPABILITY' if any(x['kind'] == 'CAPABILITY' for x in issues) else 'INVALID'),
+                  'revision': revision, 'issues': issues, 'cached': False,
+                  'warnings': criteria_warnings(rules) if rules else [],
+                  'coverage': ['规则结构', '全部已声明配方关联', '程序和路径存在性'],
+                  'not_verified': ['业务正确性', '真实模型/账号/额度', '未来自定义构建副作用', '宿主 Hook 实际生效'],
+                  'checked_at': now()}
+        prep.update(checks=result, status=result['status'])
+        ledger.put('prep', prep_id, prep, expected_revision=revision)
+        return result
+
+
+def probe(state: Path, prep_id: str, revision: int, question_id: str) -> dict:
+    ledger = Ledger(state)
+    prep = _get_prep(ledger, prep_id, revision)
+    if prep.get('prepared_id') or prep['status'] == 'READY':
+        raise LoopError('已经就绪/封存，不再启动额外探测')
+    checks = check(state, prep_id, revision)
+    matches_q = [x for x in checks['issues'] if x.get('question_id') == question_id and x['kind'] == 'PROBE']
+    if len(matches_q) != 1:
+        raise LoopError('没有对应的已授权未决问题；不接受任意探测')
+    name = matches_q[0]['profile']
+    project = ledger.get('project', prep['project_id'])
+    rules = normalize(prep['rules'], Path(project['rules']['source']))
+    if not rules['execution_profiles'][name]['probe_allowed']:
+        raise LoopError('配方没有探测授权')
+    key = _probe_key(rules, name)
+    with FileLock(ledger.state / 'locks' / ('probe-' + key + '.lock')), FileLock(ledger.state / 'locks' / (prep_id + '.lock')):
+        prep = _get_prep(ledger, prep_id, revision)
+        if prep['actions'] >= MAX_ACTIONS or key in prep['probes']:
+            raise LoopError('同一问题/配置已探测或动作预算耗尽；先检查已有证据，不原样重复')
+        prep['actions'] += 1
+        prep['probes'][key] = {'state': 'STARTED'}
+        ledger.put('prep', prep_id, prep, expected_revision=revision)
+        from .execution import execute_recipe
+        path = ledger.state / 'probes' / prep_id / key
+        from .common import copy_manifest
+        frozen = path.parent / (key + '-input')
+        manifest = inspect_input(rules)
+        copy_manifest(Path(rules['source']), frozen, manifest)
+        if inspect_input(rules) != manifest:
+            raise LoopError('探测复制期间原始输入改变')
+        record = execute_recipe(frozen, manifest, rules['execution_profiles'][name],
+                                path, rules['limits'], purpose='PROBE', security=rules['security'],
+                                deadline=time.time() + min(120, rules['execution_profiles'][name]['timeout_seconds']),
+                                cancel_file=path.parent / 'cancel', binding={'prep_id': prep_id, 'revision': revision})
+        # An exit 1 may be expected before implementation. Output/command integrity must be known.
+        valid = record['reason'] in ('ok', 'nonzero_exit')
+        entry = {'environment_valid': valid, 'record': record, 'profile_key': key}
+        ledger.put('probe', project['id'] + ':' + key, entry)
+        prep = _get_prep(ledger, prep_id, revision)
+        prep['probes'][key] = entry
+        prep['checks'] = None
+        ledger.put('prep', prep_id, prep, expected_revision=revision)
+        return entry
+
+
+def seal(state: Path, prep_id: str, revision: int) -> dict:
+    ledger = Ledger(state)
+    prep = _get_prep(ledger, prep_id, revision)
+    if prep.get('prepared_id'):
+        return ledger.get('prepared', prep['prepared_id'])
+    report = check(state, prep_id, revision, refresh=True)
+    if report['status'] != 'READY':
+        raise LoopError('未就绪：' + str(report['issues']))
+    with FileLock(ledger.state / 'locks' / (prep_id + '.lock')):
+        prep = _get_prep(ledger, prep_id, revision)
+        if prep.get('prepared_id'):
+            return ledger.get('prepared', prep['prepared_id'])
+        project = ledger.get('project', prep['project_id'])
+        rules = normalize(prep['rules'], Path(project['rules']['source']))
+        manifest = inspect_input(rules)
+        prepared_id = 'prepared-' + uuid.uuid4().hex
+        record = {'id': prepared_id, 'prep_id': prep_id, 'revision': revision,
+                  'project_id': prep['project_id'], 'rules': rules, 'rules_hash': digest(rules),
+                  'input_hash': digest(manifest), 'root': project['root'],
+                  'installation_hash': installation_identity()['sha256'], 'checks': report,
+                  'launch_request_id': 'launch-' + uuid.uuid4().hex, 'created_at': now()}
+        directory = ledger.state / 'prepared' / prepared_id
+        atomic_json(directory / 'rules.json', rules, readonly=True)
+        atomic_write(directory / 'preview.md', render_preview(rules, project['rules'], directory / 'rules.json',
+                                                              project.get('verification'), report.get('warnings', [])),
+                     readonly=True)
+        command = [sys.executable, str(Path(__file__).resolve().parents[2] / 'loop_guard.py'),
+                   '--state', str(ledger.state), 'launch', prepared_id]
+        record.update(preview_path=str(directory / 'preview.md'), launch_command=shlex.join(command))
+        ledger.put('prepared', prepared_id, record, create_only=True)
+        prep.update(status='SEALED', prepared_id=prepared_id)
+        ledger.put('prep', prep_id, prep, expected_revision=revision)
+        return record
+
+
+def render_preview(rules: dict, approved: dict, rules_path: Path, verification: dict | None = None,
+                   warnings: list[str] = ()) -> str:
+    """Human decision preview; full normalized JSON is a separate authoritative file."""
+    changed = [key for key in ('title', 'task_id', 'notes', 'units', 'completion', 'limits', 'operation_budgets')
+               if rules.get(key) != approved.get(key)]
+    lines = ['# 启动预览：' + rules['title'], '', '仅表示可启动，不代表业务通过或模型账户可用。',
+             '源项目：' + rules['source'], '安全模式：' + rules['security'],
+             '相对登记配置变化：' + (', '.join(changed) if changed else '无'),
+             '完整有效规则（请核对语义与授权）：' + str(rules_path),
+             '全局时间上限：' + str(rules['limits']['max_wall_seconds']) + ' 秒；不是预计耗时。',
+             '成员/自测/门禁/返修上限：' + '/'.join(str(rules['limits'][x]) for x in
+                ('max_member_invocations','max_selftests','max_gate_executions','max_total_repairs')),
+             '额外操作额度：' + json.dumps(rules['operation_budgets'], ensure_ascii=False)]
+    if verification is None:
+        lines.append('配方登记验证：未执行（登记时 --no-verify 或旧登记）；输出声明未经实际运行核对')
+    else:
+        for name, entry in verification['profiles'].items():
+            lines.append('配方登记验证：%s=%s，实际输出 %s%s' % (name, entry['status'], json.dumps(entry['outputs'], ensure_ascii=False),
+                                                         '；' + entry['warning'] if entry.get('warning') else ''))
+        for name, why in verification['skipped'].items():
+            lines.append('配方登记验证：%s=未验证（%s）' % (name, why))
+    # The yes also approves what the machine will run: list every registered command.
+    lines += ['', '## 将执行的构建/检查命令（按 yes 即同时批准）']
+    for name, profile in rules.get('execution_profiles', {}).items():
+        lines.append('- %s：`%s`（目录 %s；输出 %s；网络 %s）' % (
+            name, shlex.join(profile['argv']), profile['cwd'], ', '.join(profile['output_paths']) or '无',
+            '允许' if profile['network'] else '关闭'))
+    if warnings:
+        lines += ['', '## ⚠ 验收标准提醒（不阻断）'] + ['- ' + w for w in warnings]
+    for u in rules['units']:
+        lines += ['', '## ' + u['id'] + ' / ' + u['kind'], u['goal'],
+                  '依赖：' + ', '.join(u['depends_on']) + '；候选来源：' + str(u.get('input_from') or '本次输入/引擎合成'),
+                  '开发：' + str(u.get('developer')) + '；评审：' + str(u.get('reviewer')) + ' / ' + u['review_mode'],
+                  '可改：' + ', '.join(u['writable_paths']) + '；保护：' + ', '.join(u['protected_paths']),
+                  '返修：最多 %s 次；评审口径：%s' % (u.get('max_repairs'), '问题清单冻结' if u.get('review_scope', 'frozen') == 'frozen' else '开放')]
+        lines += ['- ' + c['id'] + '：' + c['text'] + '；门禁：' + ', '.join(c['gate_ids']) for c in u['criteria']]
+    lines += ['', '准备工具不会替用户批准新运行。完整规则中的模型、命令、授权仍以人工确认结果为准。']
+    return '\n'.join(lines) + '\n'

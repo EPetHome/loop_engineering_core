@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import math
+import time
 from pathlib import Path
 
 from .common import atomic_json
@@ -66,8 +67,12 @@ def extract_json(text: str):
 
 
 class PiEvents:
-    def __init__(self, workspace: Path | None, max_bytes: int):
+    def __init__(self, workspace: Path | None, max_bytes: int, *, diagnostic_bytes: int | None = None,
+                 legacy_bytes: int | None = None, persist_interval: float = 0):
         self.workspace, self.max_bytes = workspace, max_bytes
+        self.legacy_bytes = legacy_bytes if legacy_bytes is not None else max_bytes
+        self.persist_interval, self.persist_at = persist_interval, 0.0
+        self.soft_diagnostics = diagnostic_bytes is not None
         self.buffer, self.legacy = bytearray(), bytearray()
         self.raw = None
         self.event_mode, self.invalid_prefix, self.invalid = False, False, False
@@ -87,7 +92,11 @@ class PiEvents:
             path = workspace / 'pi-events.jsonl'
             if path.is_symlink():
                 raise EventError('collector_error', 'refusing symlink pi-events.jsonl')
-            self.raw = path.open('wb')
+            if diagnostic_bytes is None:
+                self.raw = path.open('wb')
+            else:
+                from .diagnostics import PrefixLog
+                self.raw = PrefixLog(path, diagnostic_bytes)
             activity_path = workspace / 'activity.json'
             if activity_path.is_symlink():
                 self.raw.close()
@@ -119,7 +128,11 @@ class PiEvents:
                     'final_response_settled': self.settled,
                 }}
 
-    def persist(self):
+    def persist(self, force=False):
+        stamp = time.monotonic()
+        if not force and self.activity['running'] and stamp - self.persist_at < self.persist_interval:
+            return
+        self.persist_at = stamp
         self.activity['tool_calls'] = [{'toolCallId': key, 'toolName': name}
                                        for key, name in self.active_tools.items()]
         if self.workspace is not None:
@@ -246,7 +259,7 @@ class PiEvents:
         elif kind not in ('session', 'turn_end', 'queue_update', 'entry_appended',
                           'session_info_changed', 'thinking_level_changed', 'summarization_retry_finished'):
             self.phase('unknown', kind)
-        self.persist()
+        self.persist(force=kind not in ('message_update', 'tool_execution_update'))
 
     def record(self, line: bytes):
         try:
@@ -279,15 +292,15 @@ class PiEvents:
             self.raw.write(data)
             self.raw.flush()
         if not self.event_mode:
-            if len(self.legacy) + len(data) > self.max_bytes:
-                raise EventError('log_limit', 'legacy stdout exceeds max_log_bytes')
+            if len(self.legacy) + len(data) > self.legacy_bytes:
+                raise EventError('response_limit' if self.soft_diagnostics else 'log_limit', 'legacy response exceeds its independent limit')
             self.legacy.extend(data)
         start = 0
         while start < len(data):
             end = data.find(b'\n', start)
             part = data[start:] if end < 0 else data[start:end]
             if len(self.buffer) + len(part) > self.max_bytes:
-                raise EventError('log_limit', 'single JSONL line exceeds max_log_bytes')
+                raise EventError('event_limit' if self.soft_diagnostics else 'log_limit', 'single JSONL event exceeds parser limit')
             self.buffer.extend(part)
             if end < 0:
                 break

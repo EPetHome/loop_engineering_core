@@ -37,7 +37,7 @@ def engine_identity() -> dict:
 
 
 def create_run(root: Path, rules: dict, parent: str | None = None,
-               input_override: str | None = None, seed: dict | None = None) -> str:
+               input_override: str | None = None, seed: dict | None = None, admission: dict | None = None) -> str:
     source = Path(rules['source']).resolve()
     root = root.expanduser().resolve()
     if root == source or root.is_relative_to(source):
@@ -45,6 +45,18 @@ def create_run(root: Path, rules: dict, parent: str | None = None,
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(root, 0o700)
     rid = rules['task_id'] + '-' + time.strftime('%Y%m%dT%H%M%S', time.gmtime()) + '-' + uuid.uuid4().hex[:8]
+    proof = None
+    if rules.get('schema_version') == 2:
+        from .admission import claim_creation
+        proof, rid, fresh_claim = claim_creation(root, rules, rid, admission, parent, input_override, seed)
+        if not fresh_claim:
+            existing = root / 'runs' / rid / 'manifest.json'
+            if not existing.is_file():
+                raise LoopError('该请求已认领但创建未完成；保留 pending，不重新派工。请人工核对。')
+            return rid
+    else:
+        from .admission import deny_legacy_in_managed
+        deny_legacy_in_managed(root, rules)
     run = root / 'runs' / rid
     run.mkdir(parents=True, mode=0o700)
     atomic_json(run / 'rules.json', rules, readonly=True)
@@ -55,7 +67,7 @@ def create_run(root: Path, rules: dict, parent: str | None = None,
                 'max_wall_seconds': rules['limits']['max_wall_seconds'],
                 'engine': engine_identity(), 'rule_hash': digest(rules),
                 'parent_run': parent, 'input_override': input_override, 'seed_candidate': seed,
-                'budget': {'member_invocations': 0}, 'input': None,
+                'budget': {'member_invocations': 0}, 'input': None, 'admission': proof,
                 'environment': {'python': sys.version, 'platform': platform.platform(), 'executable': sys.executable},
                 'integrity': {str(p.relative_to(run)): file_hash(p) for p in
                               [run / 'rules.json', run / 'rules.md', run / 'response.schema.json']},
@@ -67,6 +79,9 @@ def create_run(root: Path, rules: dict, parent: str | None = None,
                                   'issue_history': [], 'history': [], 'result': None} for u in rules['units']},
                 'result': None}
     atomic_json(run / 'manifest.json', manifest)
+    if proof:
+        from .ledger import Ledger
+        Ledger(Path(proof['state'])).mark_created(proof['request_id'])
     return rid
 
 
@@ -105,7 +120,8 @@ class Store:
 
     def counter(self, uid: str, key: str):
         with self.lock:
-            self.data['units'][uid]['stats'][key] += 1
+            stats = self.data['units'][uid]['stats']
+            stats[key] = stats.get(key, 0) + 1
             self.commit()
 
     def protocol_retry(self, uid: str, role: str):
@@ -115,12 +131,29 @@ class Store:
             stats['protocol_retries_by_role'][role] += 1
             self.commit()
 
-    def reserve_call(self, uid: str, maximum: int) -> bool:
+    def reserve_call(self, uid: str, maximum: int, operation: str | None = None) -> bool:
         with self.lock:
             if self.data['budget']['member_invocations'] >= maximum:
                 return False
+            from .admission import reserve
+            op = operation or uuid.uuid4().hex
+            if not reserve(self.data, ['member_invocations'], self.rid + ':' + uid + ':' + op):
+                return False
             self.data['budget']['member_invocations'] += 1
             self.data['units'][uid]['stats']['member_invocations'] += 1
+            self.commit()
+            return True
+
+    def reserve_operation(self, dimension: str, operation: str, maximum: int, uid: str, budget_key: str | None = None) -> bool:
+        with self.lock:
+            current = self.data['budget'].get(dimension, 0)
+            if current >= maximum:
+                return False
+            from .admission import reserve
+            dimensions = [dimension] + (['operation:' + budget_key] if budget_key else [])
+            if not reserve(self.data, dimensions, self.rid + ':' + uid + ':' + operation):
+                return False
+            self.data['budget'][dimension] = current + 1
             self.commit()
             return True
 
@@ -155,6 +188,9 @@ class Store:
             p = self.run / relative
             if p.is_symlink() or not p.is_file() or file_hash(p) != expected:
                 raise IntegrityError('冻结文件发生变化：' + relative)
+        if self.data.get('admission'):
+            from .admission import verify_run
+            verify_run(self.root, self.data, load_json(self.run / 'rules.json'))
         if engine_identity()['sha256'] != self.data['engine']['sha256']:
             raise IntegrityError('引擎运行期间自身代码发生变化')
 
@@ -290,6 +326,14 @@ def markdown_result(data: dict) -> str:
                   '', '计数：`' + json.dumps(v['stats'], ensure_ascii=False) + '`', '',
                   '成员用量：`' + json.dumps(v.get('member_usage'), ensure_ascii=False) + '`', '',
                   '成员进程计时：`' + json.dumps(v.get('member_processes'), ensure_ascii=False) + '`', '']
+        if v.get('deferred_findings'):
+            lines += ['#### 遗留发现（未阻断，待拍板人决定）', '',
+                      '评审在返修轮提出、位于该轮未改动代码中的新问题。按问题清单冻结规则没有触发返修。', '']
+            for item in v['deferred_findings']:
+                files = '、'.join(item['deferred'].get('files', [])) or '未注明'
+                lines.append(f'- 第 {item["deferred"]["round"]} 轮 · {"/".join(item["criterion_ids"])} · '
+                             f'{item["description"]}（文件：{files}）'.replace('\n', ' '))
+            lines.append('')
         if v.get('issue_history'):
             lines += ['#### 历史问题与缺口', '',
                       '历史提出、当前状态、处理依据分别列出；未再提及或标准 PASS 不等于解决。旧候选解决不沿用。', '',

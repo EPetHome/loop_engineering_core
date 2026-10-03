@@ -132,12 +132,17 @@ class DeliveryCheck(unittest.TestCase):
                         run.assert_called_once_with(Path('task.json'), root, brief=brief)
 
     def test_summary_model_and_read_only_tools(self):
-        argv=run_loop.brief_command()
-        self.assertEqual(argv[argv.index('--model')+1],'opencode-go/deepseek-v4.1-flash')
-        self.assertEqual(argv[argv.index('--thinking')+1],'xhigh')
-        self.assertEqual(argv[argv.index('--tools')+1],'read,grep,find,ls')
-        self.assertNotIn('--no-context-files',argv)
-        self.assertIn(run_loop.EXTENSION,argv)
+        with tempfile.TemporaryDirectory() as tmp:
+            extension=Path(tmp)/'permission-fixture.ts'
+            extension.write_text('// transport fixture only')
+            with patch.dict(os.environ,{'LOOP_BRIEF_MODEL':'explicit/test', 'LOOP_BRIEF_THINKING':'high',
+                            'LOOP_PERMISSION_EXTENSION':str(extension)}):
+                argv=run_loop.brief_command()
+            self.assertEqual(argv[argv.index('--model')+1],'explicit/test')
+            self.assertEqual(argv[argv.index('--thinking')+1],'high')
+            self.assertEqual(argv[argv.index('--tools')+1],'read,grep,find,ls')
+            self.assertNotIn('--no-context-files',argv)
+            self.assertIn(str(extension.resolve()),argv)
 
     def test_offline_loop_integration(self):
         with tempfile.TemporaryDirectory(prefix='loop-entry-integration-') as name:

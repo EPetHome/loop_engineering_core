@@ -49,11 +49,15 @@ class BriefObservability(unittest.TestCase):
     def test_packaged_prompt_and_original_command_contract(self):
         self.assertEqual(run_loop.PROMPT, PROJECT / 'prompts/brief.md')
         self.assertTrue(run_loop.PROMPT.is_file())
-        argv = run_loop.brief_command()
-        self.assertEqual(argv[0], run_loop.PI)
-        self.assertEqual(argv[argv.index('--model') + 1], 'opencode-go/deepseek-v4.1-flash')
+        extension = self.work / 'permission-fixture.ts'
+        extension.write_text('// transport fixture only')
+        with patch.dict('os.environ', {'LOOP_PI_BIN': 'pi-offline-fixture', 'LOOP_BRIEF_MODEL': 'explicit/test',
+                        'LOOP_BRIEF_THINKING': 'high', 'LOOP_PERMISSION_EXTENSION': str(extension)}):
+            argv = run_loop.brief_command()
+        self.assertEqual(argv[0], 'pi-offline-fixture')
+        self.assertEqual(argv[argv.index('--model') + 1], 'explicit/test')
         self.assertEqual(argv[argv.index('--mode') + 1], 'json')
-        self.assertIn(run_loop.EXTENSION, argv)
+        self.assertIn(str(extension.resolve()), argv)
         self.assertEqual(argv[argv.index('--tools') + 1], 'read,grep,find,ls')
         prompt = run_loop.PROMPT.read_text()
         for boundary in ('真实成员', '真实 CLI', 'NOT_PERFORMED', 'api_requests=null', 'provider cost=0', '未核实链接'):
