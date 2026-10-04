@@ -15,7 +15,7 @@ from .common import LoopError, FileLock, atomic_json, atomic_write, digest, load
 from .ledger import Ledger
 from .rules import normalize, render_rules
 from .admission import inspect_input, installation_identity
-from .capabilities import capability_summary, compile_unit
+from .capabilities import capability_summary, compile_unit, unit_selftest_cap, round_selftest_cap
 from .adapters import managed_tools
 from .sessions import supports_reuse
 
@@ -193,6 +193,21 @@ def criteria_warnings(rules: dict) -> list[str]:
     return found
 
 
+def time_warnings(rules: dict) -> list[str]:
+    """Stage limits alone may already exceed the unit's entire repair budget."""
+    found = []
+    for u in rules['units']:
+        if not u.get('developer'):
+            continue
+        seconds, stage, repairs = u['max_seconds'], u['stage_timeout_seconds'], u['max_repairs']
+        required = (repairs + 1) * stage
+        if seconds < required:
+            found.append(f'单元 {u["id"]} 的时限 {seconds:g} 秒，按阶段时限 {stage:g} 秒算最多只够约 '
+                         f'{int(seconds // stage)} 轮开发，返修上限 {repairs} 次可能用不满；'
+                         f'建议把单元时限至少调到 {required:g}，或者调低阶段时限')
+    return found
+
+
 INLINE_SCRIPT_BYTES = 4096
 
 
@@ -340,7 +355,7 @@ def check(state: Path, prep_id: str, revision: int, *, refresh: bool = False) ->
                                    'detail': '已授权的一次执行条件探测尚未完成；不要求新业务已通过'})
         result = {'status': 'READY' if not issues else ('NEEDS_CAPABILITY' if any(x['kind'] == 'CAPABILITY' for x in issues) else 'INVALID'),
                   'revision': revision, 'issues': issues, 'cached': False,
-                  'warnings': criteria_warnings(rules) + argv_warnings(rules) if rules else [],
+                  'warnings': criteria_warnings(rules) + argv_warnings(rules) + time_warnings(rules) if rules else [],
                   'coverage': ['规则结构', '全部已声明配方关联', '程序和路径存在性'],
                   'not_verified': ['业务正确性', '真实模型/账号/额度', '未来自定义构建副作用', '宿主 Hook 实际生效'],
                   'checked_at': now()}
@@ -531,7 +546,16 @@ def render_preview(rules: dict, approved: dict, rules_path: Path, verification: 
                   '依赖：' + ', '.join(u['depends_on']) + '；候选来源：' + str(u.get('input_from') or '本次输入/引擎合成'),
                   '开发：' + str(u.get('developer')) + '；评审：' + str(u.get('reviewer')) + ' / ' + u['review_mode'],
                   '可改：' + ', '.join(u['writable_paths']) + '；保护：' + ', '.join(u['protected_paths']),
-                  '返修：最多 %s 次；评审口径：%s' % (u.get('max_repairs'), '问题清单冻结' if u.get('review_scope', 'frozen') == 'frozen' else '开放')]
+                  '返修：最多 %s 次；评审口径：%s' % (u.get('max_repairs'), '问题清单冻结' if u.get('review_scope', 'frozen') == 'frozen' else '开放'),
+                  '过线口径：' + u.get('review_bar', '默认（违反标准原文 / 可复现的错误 / 破坏下游才算必须修）')]
+        if u.get('developer'):
+            lines.append(f'时限可容纳约 {int(u["max_seconds"] // u["stage_timeout_seconds"])} 轮（按阶段时限）')
+            if u.get('build_profiles'):
+                rounds = u['max_repairs'] + 1
+                shares = ' / '.join(str(round_selftest_cap(rules, u, r)) for r in range(1, rounds + 1))
+                lines.append(f'自测：单元 {unit_selftest_cap(rules, u)} 次，按 {rounds} 轮累计分配（{shares}）')
+        if u.get('first_round') == 'review':
+            lines.append('第 1 轮：只跑门禁和评审（不开发）')
         lines += ['- ' + c['id'] + '：' + c['text'] + '；门禁：' + ', '.join(c['gate_ids']) for c in u['criteria']]
     lines += ['', '准备工具不会替用户批准新运行。完整规则中的模型、命令、授权仍以人工确认结果为准。']
     return '\n'.join(lines) + '\n'
@@ -595,17 +619,24 @@ def derive_plan(state: Path, project_id: str, new_project_id: str, out: Path, *,
             'source': rules['source'], 'root': root, 'next_commands': next_commands}
 
 
-def continue_plan(root: Path, run_id: str, project_id: str, out: Path, *, fresh_unit: bool = False) -> dict:
+def continue_plan(root: Path, run_id: str, project_id: str, out: Path, *, fresh_unit: bool = False,
+                  from_round: int | None = None) -> dict:
     """Draft a plan that resumes a stopped multi-unit run (managed runs refuse retry/seed).
 
     PASSED units are dropped: their results are already inside the chosen source. The single
-    unit that can resume continues from its latest candidate (or its frozen input with
-    fresh_unit), and its still-open issues are appended to its goal. The draft then goes
+    unit that can resume uses its latest/selected candidate (or its frozen input with
+    fresh_unit); an unreviewed candidate is reviewed before development. Open issues
+    from that candidate's ledger are appended to its goal. The draft then goes
     through the normal register -> begin -> seal -> user launch; nothing is started here.
     """
     from .rules import ident, ancestors
     from .engine import verify_candidate, snapshot_manifest
     from .common import IntegrityError
+    if from_round is not None:
+        if fresh_unit:
+            raise LoopError('--from-round 与 --fresh-unit 互斥；请只选择一种续接来源')
+        if type(from_round) is not int or from_round < 1:
+            raise LoopError('--from-round 必须是正整数；请指定历史中的候选轮次')
     ident(project_id, 'project_id')
     runs = Path(root).expanduser().resolve() / 'runs'
     run = runs / run_id
@@ -633,10 +664,26 @@ def continue_plan(root: Path, run_id: str, project_id: str, out: Path, *, fresh_
     if passed - ancestors(units, resume['id']):
         raise LoopError('有已达标单元不在续接单元的上游，成果需要合并；本命令不自动合并，请手工编排')
     state = states[resume['id']]
-    candidate = None if fresh_unit else (state.get('result') or {}).get('candidate')
+    result = state.get('result') or {}
+    issue_history = result.get('issue_history', state.get('issue_history')) or []
+    reviewed = bool(result.get('reviewed'))
+    candidate = None if fresh_unit else result.get('candidate')
+    if from_round is not None:
+        history = result.get('history') or []
+        selected = next((h for h in history if h.get('round') == from_round), None)
+        if not selected or not selected.get('candidate'):
+            available = sorted(h['round'] for h in history if h.get('candidate'))
+            raise LoopError(f'单元 {resume["id"]} 第 {from_round} 轮没有可用候选；可选轮次：'
+                            + ('、'.join(map(str, available)) or '无') + '。请改用其中一轮或 --fresh-unit')
+        candidate = selected['candidate']
+        reviewed = bool(selected.get('review'))
+        issue_history = selected.get('issue_history') or []
+    candidate_round = from_round if from_round is not None else (candidate.get('round') if candidate else None)
+    # verify already skips development on every round and cannot declare first_round.
+    first_round = 'review' if candidate and not reviewed and resume['kind'] != 'verify' else 'develop'
     if candidate:
         verify_candidate(candidate, rules['limits'])
-        source, origin = candidate['path'], f'{resume["id"]} 第 {candidate.get("round")} 轮候选'
+        source, origin = candidate['path'], f'{resume["id"]} 单元第 {candidate_round} 轮候选'
     elif state.get('input_path'):
         source, origin = state['input_path'], f'{resume["id"]} 的冻结输入（上游成果已合入）'
         if digest(snapshot_manifest(Path(source), rules['limits'])) != state.get('input_hash'):
@@ -663,16 +710,24 @@ def continue_plan(root: Path, run_id: str, project_id: str, out: Path, *, fresh_
         if u.get('input_from') in passed:
             raise LoopError(f'单元 {u["id"]} 的 input_from 指向已达标单元，请手工编排')
         u['depends_on'] = [d for d in u['depends_on'] if d not in passed]
+        if u['id'] == resume['id'] and u['kind'] != 'verify':
+            u['first_round'] = first_round
         kept.append(u)
     raw['units'] = kept
     header = (f'【续接信息，与下文冲突时以本段为准】续接自运行 {run_id}。'
               + (f'已达标单元 {"、".join(sorted(passed))} 的成果已包含在本次源码中，不重做。' if passed else '')
-              + f'源码来自：{origin}（{source}）。')
+              + f'源码来自 {origin}（{source}）。'
+              + ('续接单元第 1 轮只跑门禁和评审（不开发），未达标再按本轮评审意见返修。' if first_round == 'review' else ''))
     raw['notes'] = header + '\n' + rules.get('notes', '')
-    open_items = [i for i in state.get('issue_history') or []
-                  if i.get('status') != 'RESOLVED' and not i.get('deferred')] if candidate else []
-    if open_items:
-        lines = [f'【续接，与上文冲突时以本段为准】上次运行留下 {len(open_items)} 个未解决问题，请先逐条修复：']
+    open_items = [i for i in issue_history if i.get('kind') == 'issue'
+                  and i.get('status') not in ('RESOLVED', 'ADVISORY') and not i.get('deferred')] if candidate else []
+    if open_items or first_round == 'review':
+        if first_round == 'review':
+            lines = [f'【续接，与上文冲突时以本段为准】上次运行留下 {len(open_items)} 个未解决问题；'
+                     f'当前代码是第 {candidate_round} 轮候选，开发方已声称处理，但还没有评审。'
+                     '评审逐条核对：已解决的不再列出，仍未解决的重新列为问题。开发方只处理评审本轮列出的问题。']
+        else:
+            lines = [f'【续接，与上文冲突时以本段为准】上次运行留下 {len(open_items)} 个未解决问题，请先逐条修复：']
         for item in open_items:
             files = []
             for occurrence in item.get('occurrences') or []:
@@ -685,8 +740,9 @@ def continue_plan(root: Path, run_id: str, project_id: str, out: Path, *, fresh_
         next(u for u in kept if u['id'] == resume['id'])['goal'] += '\n' + '\n'.join(lines)
     normalize(copy.deepcopy(raw), out.parent)
     atomic_write(out, json.dumps(raw, ensure_ascii=False, indent=2) + '\n')
-    deferred = sum(1 for i in state.get('issue_history') or [] if i.get('deferred'))
+    deferred = sum(1 for i in issue_history if i.get('deferred'))
     return {'plan': str(out), 'project_id': project_id, 'resume_unit': resume['id'], 'source': str(source),
+            'first_round': first_round, 'from_round': from_round,
             'origin': origin, 'dropped_passed_units': sorted(passed), 'units': [u['id'] for u in kept],
             'carried_open_issues': len(open_items), 'deferred_findings_not_carried': deferred,
             'next': '用新的项目编号登记这份计划（会实跑配方），再 begin → seal，启动命令交给用户'}

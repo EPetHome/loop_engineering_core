@@ -48,5 +48,9 @@ report={'attempt_id':c['attempt_id'],'role':role,'candidate_hash':'' if role=='d
         'summary':'Deterministic offline fixture','blocked':False,'criteria':rows,
         'issues':[{'criterion_id':x['id'],'description':'fixture requires second development round',
                    'suggested_fix':'produce second version'} for x in rows if x['status']=='FAIL'], 'rule_gaps':[]}
+if role=='reviewer' and c.get('managed_tools'):
+    for item in report['issues']:
+        item.update(severity='blocking',counterexample='first version still requires the second fixture development round',
+                    files=['value.txt'],locations=['value.txt:1'],spec_refs=[item['criterion_id']])
 Path(c['response_path']).write_text(json.dumps(report))
 print(json.dumps(report))

@@ -11,6 +11,17 @@ from .common import LoopError, load_json
 from .pi_events import TOKEN_FIELDS, number
 
 PROJECTION_BYTES = 256 * 1024
+READ_COUNTS = ('reads', 'distinct_files', 'repeat_reads', 'cross_reads')
+
+
+def tool_counts(value):
+    return isinstance(value, dict) and all(isinstance(k, str) and k and type(v) is int and v >= 0
+                                          for k, v in value.items())
+
+
+def read_paths(value):
+    return isinstance(value, list) and all(isinstance(p, dict) and isinstance(p.get('path'), str)
+                                         and p['path'] and type(p.get('outside')) is bool for p in value)
 
 
 def read_observation(workspace: Path) -> dict:
@@ -37,6 +48,14 @@ def read_observation(workspace: Path) -> dict:
                 if any(x is not None and not number(x) for x in
                        [value['assistant_messages'], value['tool_calls'], *value['tokens'].values()]):
                     raise ValueError('invalid usage numbers')
+                # Bad optional cost dimensions do not erase existing token coverage.
+                checks = {**{field: lambda x: type(x) is int and x >= 0 for field in READ_COUNTS},
+                          'tools_by_name': tool_counts, 'read_paths': read_paths}
+                for field, valid in checks.items():
+                    value.setdefault(field, None)
+                    if value[field] is not None and not valid(value[field]):
+                        result['errors'].append('usage.' + field + ': 无效的成本统计，保留为未知')
+                        value[field] = None
                 # No current adapter verifies bottom-level HTTP completeness or account prices.
                 value.update(api_requests=None, cost=None)
             result[name] = value
@@ -63,16 +82,26 @@ def summarize(records: list[dict], expected: int | None) -> dict:
                 {'known_processes': len(known), 'expected_processes': expected,
                  'observed_total': total if known else None})
     usage, coverage = {}, {}
-    for field in ('assistant_messages', 'tool_calls'):
+    for field in ('assistant_messages', 'tool_calls', *READ_COUNTS):
         values = [u.get(field) if u else None for u in usages]
         usage[field], coverage[field] = sum_field(values)
+    tools = [u.get('tools_by_name') if u else None for u in usages]
+    known_tools = [t for t in tools if isinstance(t, dict) and tool_counts(t)]
+    totals = {}
+    for counts in known_tools:
+        for name, count in counts.items():
+            totals[name] = totals.get(name, 0) + count
+    usage['tools_by_name'] = totals if complete and expected and len(known_tools) == expected else None
+    coverage['tools_by_name'] = {'known_processes': len(known_tools), 'expected_processes': expected,
+                                 'observed_total': totals if known_tools else None}
     usage['tokens'], coverage['tokens'] = {}, {}
     for key in TOKEN_FIELDS:
         values = [(u.get('tokens') or {}).get(key) if u else None for u in usages]
         usage['tokens'][key], coverage['tokens'][key] = sum_field(values)
     if expected == 0:
         # No invocation is known, but no model meter exists either.
-        usage.update(assistant_messages=None, tool_calls=None, tokens=dict.fromkeys(TOKEN_FIELDS))
+        usage.update(assistant_messages=None, tool_calls=None, tokens=dict.fromkeys(TOKEN_FIELDS),
+                     **dict.fromkeys(READ_COUNTS))
     usage.update(api_requests=None, cost=None)
     coverage.update(source='member usage projections, including failed/retried attempts',
                     api_requests='unknown: model rounds are not complete HTTP request counts',
@@ -89,6 +118,32 @@ def summarize(records: list[dict], expected: int | None) -> dict:
         process[field], process['coverage'][field] = sum_field([(r or {}).get(field) for r in receipts],
                                                              signed=field == 'wall_elapsed_seconds')
     return {'usage': usage, 'processes': process}
+
+
+def cost_sessions(records: list[dict]) -> list[dict]:
+    """Finalize one unit's observations; never reparse retained raw events."""
+    ordered = sorted(enumerate(records), key=lambda pair:
+                     pair[1]['call_order'] if type(pair[1].get('call_order')) is int else pair[0])
+    sessions, seen, prior_known = [], set(), True
+    for _, record in ordered:
+        usage = record.get('usage')
+        paths = usage.get('read_paths') if isinstance(usage, dict) else None
+        known = read_paths(paths)
+        keys = {(p['outside'], p['path']) for p in paths} if isinstance(paths, list) and known else set()
+        cross_reads = len(keys & seen) if known and prior_known else None
+        if isinstance(usage, dict):
+            usage['cross_reads'] = cross_reads
+        seen.update(keys)
+        prior_known = prior_known and known
+        u, receipt = usage or {}, record.get('receipt') or {}
+        session = {'attempt_id': record.get('attempt_id'), 'role': record.get('role'),
+                   'round': record.get('round'), 'elapsed_seconds': receipt.get('elapsed_seconds'),
+                   'code_map_provided': record.get('code_map_provided'),
+                   'off_map_reads': record.get('off_map_reads'), 'off_map_status': record.get('off_map_status', 'unknown')}
+        session.update({field: u.get(field) for field in ('assistant_messages', 'tool_calls', *READ_COUNTS)})
+        session.update({key: (u.get('tokens') or {}).get(key) for key in ('input', 'cache_read', 'output')})
+        sessions.append(session)
+    return sessions
 
 
 def engine_summary(data: dict) -> dict:

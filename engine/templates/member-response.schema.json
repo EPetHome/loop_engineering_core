@@ -68,6 +68,25 @@
           },
           "suggested_fix": {
             "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "advisory"]
+          },
+          "counterexample": {
+            "type": "string"
+          },
+          "locations": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "spec_refs": {
+            "type": "array",
+            "items": {"type": "string"}
           }
         },
         "required": [
@@ -83,7 +102,24 @@
       "items": {
         "type": "string"
       }
-    }
+    },
+    "issue_resolutions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "note": {"type": "string"},
+          "evidence": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["id", "note", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "code_map": {"type": "string", "minLength": 1, "maxLength": 8000, "pattern": "\\S"}
   },
   "required": [
     "attempt_id",

@@ -208,19 +208,34 @@ def normalize(raw: dict, base: Path) -> dict:
             if 'max_selftests' in u and (type(u['max_selftests']) is not int or u['max_selftests'] < 1):
                 raise LoopError('unit.max_selftests 必须是正整数')
         verifying = v2 and u.get('kind') == 'verify'
+        if v2:
+            if verifying and 'first_round' in u:
+                raise LoopError('verify 单元不允许 first_round；请删除该字段')
+            if not verifying:
+                u.setdefault('first_round', 'develop')
+                if u['first_round'] not in ('develop', 'review'):
+                    raise LoopError('unit.first_round 只接受 develop / review')
+                if u['first_round'] == 'review' and not u.get('reviewer'):
+                    raise LoopError('first_round=review 必须配置 reviewer；请指定独立评审方')
         if verifying:
             u.setdefault('developer', None)
             u.setdefault('reviewer', None)
             u.setdefault('writable_paths', [])
             if u['writable_paths'] or u.get('build_profiles'):
                 raise LoopError('verify 不得写代码或发起开发自测')
-        fields(u, ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'] + list(UNIT_DEFAULTS) + (['build_profiles', 'input_from', 'review_mode', 'review_scope', 'max_selftests'] if v2 else []),
+        fields(u, ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'] + list(UNIT_DEFAULTS) + (['build_profiles', 'input_from', 'review_mode', 'review_scope', 'max_selftests', 'review_bar', 'first_round'] if v2 else []),
                ['id', 'goal', 'writable_paths', 'criteria', 'gates', 'developer', 'reviewer'], 'unit')
         ident(u['id'], 'unit.id')
         if u['id'] in unit_ids:
             raise LoopError(f'重复单元：{u["id"]}')
         unit_ids.add(u['id'])
         text(u['goal'], 'goal')
+        if v2 and 'review_bar' in u:
+            text(u['review_bar'], 'unit.review_bar')
+            if len(u['review_bar'].strip()) > 600:
+                raise LoopError('unit.review_bar 去掉首尾空白后最多 600 字；请缩短单元过线口径')
+            if not u.get('reviewer'):
+                raise LoopError('unit.review_bar 只允许写在有 reviewer 的单元；请配置评审或移除过线口径')
         for k, default in UNIT_DEFAULTS.items():
             u.setdefault(k, 0 if v2 and k == 'max_infra_retries' else copy.deepcopy(default))
         if type(u['reviewer_exec']) is not bool:

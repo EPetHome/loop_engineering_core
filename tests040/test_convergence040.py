@@ -58,7 +58,7 @@ class ReviewProtocol(unittest.TestCase):
                 'criteria':[{'id':'C','status':status,'note':'n','evidence':['gate:G']}],'issues':issues,'rule_gaps':[]}
     def test_repair_round_issue_needs_files(self):
         with self.assertRaises(LoopError) as e:
-            validate_report(self.report([{'criterion_id':'C','description':'d','suggested_fix':'f'}]),self.context(),Path('.'),{'G':{'status':'PASS'}})
+            validate_report(self.report([{'criterion_id':'C','description':'d','suggested_fix':'f','severity':'advisory'}]),self.context(),Path('.'),{'G':{'status':'PASS'}})
         self.assertIn('files',str(e.exception))
     def test_fail_must_point_at_a_problem(self):
         with self.assertRaises(LoopError):
@@ -66,9 +66,14 @@ class ReviewProtocol(unittest.TestCase):
         known=[{'id':'issue-1','kind':'issue','criterion_ids':['C'],'status':'OPEN'}]
         validate_report(self.report([]),self.context(known),Path('.'),{'G':{'status':'PASS'}})   # still-open known issue
         validate_report(self.report([]),self.context(),Path('.'),{'G':{'status':'FAIL'}})        # failed gate
-    def test_first_round_unchanged(self):
+    def test_first_round_requires_severity_but_not_files(self):
         ctx=self.context();ctx['round']=1
-        validate_report(self.report([{'criterion_id':'C','description':'d','suggested_fix':'f'}]),ctx,Path('.'),{'G':{'status':'PASS'}})
+        item:dict={'criterion_id':'C','description':'d','suggested_fix':'f'}
+        with self.assertRaisesRegex(LoopError,'severity'):
+            validate_report(self.report([item]),ctx,Path('.'),{'G':{'status':'PASS'}})
+        item.update(severity='blocking',counterexample='fixture scenario gives the wrong result',
+                    locations=['tests040/fixtures/member_freeze.py:1'])
+        validate_report(self.report([item]),ctx,Path('.'),{'G':{'status':'PASS'}})
 
 
 class SelftestShare(unittest.TestCase):

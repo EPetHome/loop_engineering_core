@@ -3,7 +3,7 @@
   "task_id": "my-task",
   "title": "TODO: 填写已审任务名称",
   "source": "TODO_SOURCE_ABSOLUTE_PATH",
-  "security": "strict",
+  "security": "audit-only",
   "agents": {
     "dev": {
       "kind": "command",
@@ -39,6 +39,8 @@
   "units": [{
     "id": "work", "kind": "work", "goal": "TODO: 已审目标与不做什么",
     "developer": "dev", "reviewer": "review", "review_mode": "independent",
+    "review_bar": "TODO: 可选单元过线口径（最多 600 字；普通开发可删除用默认口径）。验收脚本示例：会让正确实现被判失败的算必须修；错误实现也能通过（检查不够严）的算建议，除非涉及标准里点名的核心行为。",
+    "first_round": "develop",
     "writable_paths": ["TODO_SOURCE_PATH/"], "protected_paths": ["TODO_TEST_PATH/"],
     "build_profiles": ["maven-test"], "developer_session": "fresh",
     "max_repairs": 2, "max_infra_retries": 0, "max_protocol_retries": 1,

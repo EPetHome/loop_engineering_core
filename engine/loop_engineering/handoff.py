@@ -9,6 +9,7 @@ import difflib
 import json
 import os
 from pathlib import Path
+import re
 
 from .common import LoopError, changes, digest, file_hash, safe_child
 
@@ -69,6 +70,38 @@ def make_comparison(unit_input: Path, input_manifest: dict, code: Path, manifest
     return comp
 
 
+def code_map_covers(text: str, relative: str) -> bool:
+    names = [relative] + [relative[:i + 1] for i, char in enumerate(relative) if char == '/']
+    return any(re.search(r'(?<![\w./-])' + re.escape(name) + r'(?![\w./-])', text) for name in names)
+
+
+def validate_code_map(text: str, before: dict, after: dict) -> None:
+    missing = [p for p in changes(before, after)
+               if (before.get(p, {}).get('kind') == 'file' or after.get(p, {}).get('kind') == 'file')
+               and not code_map_covers(text, p)]
+    if missing:
+        extra = f'；另有 {len(missing) - 20} 条' if len(missing) > 20 else ''
+        raise LoopError('code_map 漏写改动文件：' + '、'.join(missing[:20]) + extra
+                        + '；请补齐相对路径，也可以用以 / 结尾的目录前缀统一覆盖；只改报告，不要改代码')
+
+
+def read_guidance(context: dict, manifest: dict) -> dict:
+    code_map = context.get('code_map')
+    text = code_map.get('text') if isinstance(code_map, dict) else None
+    paths = {p for p, info in manifest.items() if info.get('kind') == 'file' and text is not None
+             and code_map_covers(text, p)}
+    comparison = context.get('comparison') or {}
+    paths.update(comparison.get('changed_from_input') or [])
+    paths.update(comparison.get('changed_from_previous') or [])
+    for item in context.get('issue_history') or []:
+        if item.get('kind') != 'issue' or item.get('status') != 'OPEN' or item.get('severity') == 'advisory':
+            continue
+        paths.update(item.get('files') or [])
+        paths.update(location.rsplit(':', 1)[0] for location in item.get('locations') or [])
+    # Keep the map predicate too: directory guidance may cover files created during this call.
+    return {'code_map': text, 'paths': sorted(paths)}
+
+
 def finding_id(run_id: str, unit_id: str, kind: str, description: str, criterion_ids: list[str]) -> str:
     return kind + '-' + digest({'run_id': run_id, 'unit_id': unit_id, 'kind': kind,
                                'description': description, 'criterion_ids': sorted(criterion_ids)})
@@ -78,8 +111,10 @@ def rebind_history(history: list[dict], candidate_hash: str, round_number: int) 
     result = copy.deepcopy(history)
     for item in result:
         resolution = item.get('resolution') or {}
-        if item['status'] == 'RESOLVED' and (resolution.get('candidate_hash') != candidate_hash or
-                                            resolution.get('round') != round_number):
+        if item.get('severity') == 'advisory':
+            item['status'] = 'ADVISORY'
+        elif item['status'] == 'RESOLVED' and (resolution.get('candidate_hash') != candidate_hash or
+                                              resolution.get('round') != round_number):
             item['status'] = 'UNKNOWN'
             item['state_note'] = '新候选/业务轮尚未显式复核；旧解决证据不继承。'
         item.update(state_candidate_hash=candidate_hash, state_round=round_number)
@@ -102,11 +137,27 @@ def record_findings(history: list[dict], report: dict, run_id: str, unit_id: str
             item = {'id': fid, 'kind': kind, 'description': description, 'criterion_ids': criterion_ids,
                     'suggested_fix': fix, 'source': copy.deepcopy(source), 'occurrences': [],
                     'resolution_attempts': [], 'resolution': None}
+            if kind == 'issue':
+                item.update(severity=original.get('severity', 'blocking'),
+                            counterexample=original.get('counterexample', ''),
+                            locations=copy.deepcopy(original.get('locations', [])),
+                            spec_refs=copy.deepcopy(original.get('spec_refs', [])))
             result.append(item)
             by_id[fid] = item
         item = by_id[fid]
         if occurrence not in item['occurrences']:
             item['occurrences'].append(occurrence)
+        if kind == 'issue':
+            for name in ('counterexample', 'locations', 'spec_refs'):
+                value = original.get(name)
+                valid = (isinstance(value, str) and bool(value.strip()) if name == 'counterexample' else
+                         isinstance(value, list) and bool(value) and all(isinstance(v, str) and v.strip() for v in value))
+                if valid:
+                    item[name] = copy.deepcopy(value)
+        if item.get('severity') == 'advisory' or item.get('status') == 'ADVISORY':
+            item.update(status='ADVISORY', state_note='建议项，不阻断，交拍板人决定',
+                        state_candidate_hash=candidate_hash, state_round=round_number)
+            continue
         if item.get('deferred'):
             item.update(status='DEFERRED', state_candidate_hash=candidate_hash, state_round=round_number)
             continue
@@ -139,12 +190,15 @@ def freeze_review(rows: list[dict], report: dict, history: list[dict], known_bef
             reasons_seen.append('gate')
             continue
         known_open = any(item['kind'] == 'issue' and cid in item['criterion_ids'] and item['id'] in known_before
-                         and item['status'] != 'RESOLVED' and not item.get('deferred') for item in history)
+                         and item['status'] not in ('RESOLVED', 'ADVISORY')
+                         and item.get('severity', 'blocking') != 'advisory' and not item.get('deferred') for item in history)
         new_in_scope, new_out = False, []
         for issue in report['issues']:
             if issue['criterion_id'] != cid:
                 continue
             fid = finding_id(run_id, unit_id, 'issue', issue['description'], [cid])
+            if by_item[fid].get('status') == 'ADVISORY' or by_item[fid].get('severity') == 'advisory':
+                continue
             if fid in known_before:
                 continue  # re-reported known issue: covered by known_open
             if set(issue.get('files', [])) & changed:
@@ -187,10 +241,12 @@ def apply_resolutions(history: list[dict], report: dict, unit: dict, gates: dict
     for proposed in report.get('issue_resolutions', []):
         if report['role'] != 'reviewer' or proposed['id'] not in by_id or not proposed['evidence']:
             raise LoopError('仅评审能用当前证据显式解决已知问题 ID')
+        item = by_id[proposed['id']]
+        if item.get('status') == 'ADVISORY' or item.get('severity') == 'advisory':
+            raise LoopError('建议项不需要关闭；请从 issue_resolutions 移除该 ADVISORY 项，交拍板人决定')
         bound = {ref: copy.deepcopy(evidence_index[ref]) for ref in proposed['evidence'] if ref in evidence_index}
         if len(bound) != len(set(proposed['evidence'])) or any(e.get('candidate_hash') != candidate_hash for e in bound.values()):
             raise LoopError('问题解决证据未绑定当前候选')
-        item = by_id[proposed['id']]
         checks = {gid: {'status': gates.get(gid, {}).get('status', 'UNKNOWN'),
                         'candidate_hash': gates.get(gid, {}).get('candidate_hash')}
                   for gid in resolution_gates(item, proposed['evidence'], unit)}

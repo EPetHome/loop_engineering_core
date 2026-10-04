@@ -8,10 +8,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import math
+import os
 import time
 from pathlib import Path
 
-from .common import atomic_json
+from .common import LoopError, atomic_json, load_json
 
 TOKEN_FIELDS = {'input': 'input', 'output': 'output',
                 'cache_read': 'cacheRead', 'cache_write': 'cacheWrite'}
@@ -68,14 +69,30 @@ def extract_json(text: str):
 
 class PiEvents:
     def __init__(self, workspace: Path | None, max_bytes: int, *, diagnostic_bytes: int | None = None,
-                 legacy_bytes: int | None = None, persist_interval: float = 0):
+                 legacy_bytes: int | None = None, persist_interval: float = 0,
+                 code_path: str | Path | None = None):
         self.workspace, self.max_bytes = workspace, max_bytes
+        if code_path is None:
+            context_path = os.environ.get('LOOP_CONTEXT')
+            if context_path:
+                try:
+                    context = load_json(Path(context_path), 16 * 1024 * 1024)
+                    code_path = context.get('code_path') if isinstance(context, dict) else None
+                except (LoopError, OSError, ValueError, RecursionError):
+                    pass  # Optional telemetry must not prevent an invocation.
+            code_path = code_path or os.environ.get('LOOP_CODE')
+        self.code_path = (Path(os.path.abspath(os.path.normpath(code_path)))
+                          if isinstance(code_path, (str, Path)) and code_path else None)
+        self.tools_by_name, self.read_files, self.read_seen = {}, [], set()
+        self.reads, self.repeat_reads = 0, 0
         self.legacy_bytes = legacy_bytes if legacy_bytes is not None else max_bytes
         self.persist_interval, self.persist_at = persist_interval, 0.0
         self.soft_diagnostics = diagnostic_bytes is not None
         self.buffer, self.legacy = bytearray(), bytearray()
         self.raw = None
         self.event_mode, self.invalid_prefix, self.invalid = False, False, False
+        # A parser/limit failure or an unconsumed tail can hide completed reads; keep it forever.
+        self.incomplete = False
         self.messages, self.tool_ids, self.active_tools = 0, set(), {}
         self.unmatched_tools = False
         self.token_totals = dict.fromkeys(TOKEN_FIELDS, 0)
@@ -106,15 +123,31 @@ class PiEvents:
         self.persist()
 
     def usage(self):
+        tools_known = (self.event_mode and not self.unmatched_tools and not self.invalid
+                       and not self.incomplete and not self.active_tools)
+        paths = [self.read_path_view(path) for path in self.read_files]
         tokens = {key: self.token_totals[key] if self.messages and self.token_known[key] == self.messages
                   else None for key in TOKEN_FIELDS}
         return {'assistant_messages': self.messages if self.event_mode else None,
                 'tool_calls': len(self.tool_ids) if self.event_mode and not self.unmatched_tools else None,
+                'tools_by_name': dict(self.tools_by_name) if tools_known else None,
+                'reads': self.reads if tools_known else None,
+                'distinct_files': len(self.read_files) if tools_known else None,
+                'repeat_reads': self.repeat_reads if tools_known else None,
+                'read_paths': paths if tools_known else None,
+                'cross_reads': None,
                 'tokens': tokens, 'api_requests': None, 'cost': None,
                 'coverage': {
                     'source': 'message_end' if self.event_mode else 'no_jsonl_events',
                     'assistant_messages': 'observed message_end records only',
                     'tool_calls': 'unique toolCallId at execution_start; unmatched lifecycle makes count unknown',
+                    'reads_complete': bool(tools_known),
+                    'unmatched_tools': self.unmatched_tools,
+                    'reads_observed': self.reads,
+                    'distinct_files_observed': len(self.read_files),
+                    'repeat_reads_observed': self.repeat_reads,
+                    'read_paths_observed': paths,
+                    'tools_by_name_observed': dict(self.tools_by_name),
                     'tokens': {key: {'known_messages': self.token_known[key],
                                      'observed_messages': self.messages,
                                      'observed_total': self.token_totals[key] if self.token_known[key] else None}
@@ -127,6 +160,33 @@ class PiEvents:
                     'finish_reason': self.activity.get('finish_reason'),
                     'final_response_settled': self.settled,
                 }}
+
+    def read_path_view(self, path: Path) -> dict:
+        if self.code_path is not None and path.is_relative_to(self.code_path):
+            return {'path': path.relative_to(self.code_path).as_posix(), 'outside': False}
+        return {'path': str(path), 'outside': True}
+
+    def count_tool(self, event: dict):
+        if not self.event_mode:
+            return
+        name = event.get('toolName')
+        if not isinstance(name, str) or not name:
+            return
+        self.tools_by_name[name] = self.tools_by_name.get(name, 0) + 1
+        if name != 'read':
+            return
+        self.reads += 1
+        args = event.get('args')
+        path = args.get('path') if isinstance(args, dict) else None
+        if not isinstance(path, str) or not path:
+            return
+        # Normalize before containment, without resolving or reading the target.
+        path = Path(os.path.abspath(os.path.normpath(os.path.join(self.code_path or os.getcwd(), path))))
+        if path in self.read_seen:
+            self.repeat_reads += 1
+        else:
+            self.read_seen.add(path)
+            self.read_files.append(path)
 
     def persist(self, force=False):
         stamp = time.monotonic()
@@ -153,7 +213,11 @@ class PiEvents:
     def event(self, event):
         kind = event['type']
         self.activity.update(last_event_at=datetime.now(timezone.utc).isoformat(), last_event_type=kind)
-        if kind in ('agent_start', 'turn_start'):
+        if kind == 'session':
+            cwd = event.get('cwd')
+            if isinstance(cwd, str) and cwd:
+                self.code_path = Path(os.path.abspath(os.path.normpath(cwd)))
+        elif kind in ('agent_start', 'turn_start'):
             self.new_work()
             self.phase('waiting', kind)
         elif kind == 'message_start' and (event.get('message') or {}).get('role') in ('assistant', 'user'):
@@ -201,6 +265,10 @@ class PiEvents:
                 self.unmatched_tools = True
                 self.phase('unknown', 'tool event lacks toolCallId')
             elif kind == 'tool_execution_start':
+                if not isinstance(event.get('toolName'), str) or not event['toolName']:
+                    self.unmatched_tools = True
+                if call_id not in self.tool_ids:
+                    self.count_tool(event)
                 self.tool_ids.add(call_id)
                 self.active_tools[call_id] = event.get('toolName')
                 self.phase('tools', kind)
@@ -293,6 +361,7 @@ class PiEvents:
             self.raw.flush()
         if not self.event_mode:
             if len(self.legacy) + len(data) > self.legacy_bytes:
+                self.incomplete = True
                 raise EventError('response_limit' if self.soft_diagnostics else 'log_limit', 'legacy response exceeds its independent limit')
             self.legacy.extend(data)
         start = 0
@@ -300,6 +369,7 @@ class PiEvents:
             end = data.find(b'\n', start)
             part = data[start:] if end < 0 else data[start:end]
             if len(self.buffer) + len(part) > self.max_bytes:
+                self.incomplete = True
                 raise EventError('event_limit' if self.soft_diagnostics else 'log_limit', 'single JSONL event exceeds parser limit')
             self.buffer.extend(part)
             if end < 0:
@@ -313,6 +383,9 @@ class PiEvents:
         error, body = None, b''
         try:
             if reason != 'ok':
+                # timeout/cancel/nonzero can cut the stream mid-record; the tail may hold reads.
+                if self.buffer:
+                    self.incomplete = True
                 return b''
             if self.buffer:
                 if self.event_mode:

@@ -276,7 +276,11 @@ def markdown_result(data: dict) -> str:
     checks = finalization.get('checks') or {}
     integrity_status = checks.get('integrity', 'PASS' if final_status == 'PASS' else 'UNKNOWN')
     source_status = checks.get('source', 'PASS' if final_status == 'PASS' else 'UNKNOWN')
+    known = lambda value: '未知' if value is None else str(value)
+    usage = r.get('member_usage') or {}
     lines = [f'# Loop 结果：{data["title"]}', '',
+             '运行合计：缓存读取 ' + known((usage.get('tokens') or {}).get('cache_read')) + ' token、读文件 '
+             + known(usage.get('reads')) + ' 次、跨会话重读 ' + known(usage.get('cross_reads')) + ' 次。', '',
              f'**停止类型：{STOP_LABELS[r["stop"]]}**', '', r['summary'], '',
              f'- 运行：`{data["run_id"]}`', f'- 父运行：`{data["parent_run"] or "无"}`',
              f'- 规则指纹：`{data["rule_hash"]}`', f'- 引擎：`{data["engine"]["version"]}`',
@@ -325,7 +329,25 @@ def markdown_result(data: dict) -> str:
         lines += ['', '当前未解决规则缺口：' + ('；'.join(v.get('rule_gaps', [])) or '无'),
                   '', '计数：`' + json.dumps(v['stats'], ensure_ascii=False) + '`', '',
                   '成员用量：`' + json.dumps(v.get('member_usage'), ensure_ascii=False) + '`', '',
-                  '成员进程计时：`' + json.dumps(v.get('member_processes'), ensure_ascii=False) + '`', '']
+                  '成员进程计时：`' + json.dumps(v.get('member_processes'), ensure_ascii=False) + '`', '',
+                  '#### 成本', '',
+                  '| 成员 | 轮次 | 耗时 | 模型轮次 | 工具调用 | 读文件 | 不同文件 | 会话内重读 | 跨会话重读 | 地图外读取 | 输入 | 缓存读 | 输出 token | 是否提供代码地图 |',
+                  '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+        for session in v.get('cost_sessions') or []:
+            elapsed = session.get('elapsed_seconds')
+            provided = session.get('code_map_provided')
+            role = {'developer': '开发方', 'reviewer': '评审方'}.get(session.get('role'), session.get('role'))
+            member = known(role) + ('（`' + session['attempt_id'] + '`）' if session.get('attempt_id') else '')
+            cells = [member, known(session.get('round')), known(elapsed) + (' 秒' if elapsed is not None else '')]
+            cells += [known(session.get(field)) for field in ('assistant_messages', 'tool_calls', 'reads',
+                      'distinct_files', 'repeat_reads', 'cross_reads')]
+            cells.append('无地图' if session.get('off_map_status') == 'no_map' else known(session.get('off_map_reads')))
+            cells += [known(session.get(field)) for field in ('input', 'cache_read', 'output')]
+            cells.append('未知' if provided is None else ('是' if provided else '否'))
+            lines.append('| ' + ' | '.join(cell.replace('|', '／').replace('\n', '<br>') for cell in cells) + ' |')
+        if not v.get('cost_sessions'):
+            lines.append('| ' + ' | '.join(['未知'] * 14) + ' |')
+        lines.append('')
         if v.get('deferred_findings'):
             lines += ['#### 遗留发现（未阻断，待拍板人决定）', '',
                       '评审在返修轮提出、位于该轮未改动代码中的新问题。按问题清单冻结规则没有触发返修。', '']
@@ -333,6 +355,13 @@ def markdown_result(data: dict) -> str:
                 files = '、'.join(item['deferred'].get('files', [])) or '未注明'
                 lines.append(f'- 第 {item["deferred"]["round"]} 轮 · {"/".join(item["criterion_ids"])} · '
                              f'{item["description"]}（文件：{files}）'.replace('\n', ' '))
+            lines.append('')
+        if v.get('advisory_findings'):
+            lines += ['#### 建议项（不阻断，待拍板人决定）', '']
+            for item in v['advisory_findings']:
+                locations = '、'.join(item.get('locations', [])) or '未注明'
+                lines.append(f'- 第 {item["source"]["round"]} 轮 · {"/".join(item["criterion_ids"])} · '
+                             f'{item["description"]}（位置：{locations}）'.replace('\n', ' '))
             lines.append('')
         if v.get('issue_history'):
             lines += ['#### 历史问题与缺口', '',

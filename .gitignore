@@ -6,3 +6,5 @@ temp/
 __pycache__/
 *.pyc
 .DS_Store
+# 本地改代码前的快照备份，只留在磁盘上，不进版本管理
+.bak/

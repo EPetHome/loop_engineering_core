@@ -63,8 +63,14 @@ def issue_history_errors(result: dict, unit: dict, run: Path, rid: str, uid: str
             if fid in seen or fid != finding_id(rid, uid, item['kind'], item['description'], item['criterion_ids']):
                 raise IntegrityError('问题 ID 重复或与原始提出不匹配')
             seen.add(fid)
-            if item['kind'] not in ('issue', 'rule_gap') or item['status'] not in ('OPEN', 'RESOLVED', 'UNKNOWN'):
+            if (item['kind'] not in ('issue', 'rule_gap') or
+                    item['status'] not in ('OPEN', 'RESOLVED', 'UNKNOWN', 'ADVISORY', 'DEFERRED')):
                 raise IntegrityError('历史问题种类或状态无效')
+            if item['status'] == 'ADVISORY' and (item['kind'] != 'issue' or item.get('severity') != 'advisory'):
+                raise IntegrityError('建议项种类或级别不一致')
+            if item['status'] == 'DEFERRED' and (item['kind'] != 'issue' or not item.get('deferred') or
+                    item.get('severity') == 'advisory'):
+                raise IntegrityError('遗留发现种类、标记或级别不一致')
             if not item['occurrences'] or item['source'] != item['occurrences'][0]['source']:
                 raise IntegrityError('历史问题丢失原始来源')
             if item['kind'] == 'issue' and item['suggested_fix'] != item['occurrences'][0]['reported']['suggested_fix']:
@@ -119,6 +125,8 @@ def issue_history_errors(result: dict, unit: dict, run: Path, rid: str, uid: str
             resolution = item.get('resolution')
             if resolution and (resolution not in item['resolution_attempts'] or not resolution['applied']):
                 raise IntegrityError('有效解决缺少已接受处理依据')
+            if item['status'] == 'ADVISORY' and resolution:
+                raise IntegrityError('建议项不能具有有效解决记录')
             if item['status'] == 'RESOLVED' and (not current or not resolution or
                     resolution['candidate_hash'] != current['hash'] or resolution['round'] != current['round'] or
                     not item['resolution_attempts'][-1]['applied']):

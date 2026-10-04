@@ -102,6 +102,14 @@ def unit_selftest_cap(rules: dict, unit: dict) -> int:
     return max(1, -(-total // len(builders)))
 
 
+def round_selftest_cap(rules: dict, unit: dict, round_number: int) -> int:
+    """Cumulative share; unused self-tests carry into the next business round."""
+    cap = unit_selftest_cap(rules, unit)
+    rounds = unit.get('max_repairs', 0) + 1
+    current = min(max(1, round_number), rounds)
+    return -(-cap * current // rounds)
+
+
 def capability_summary() -> dict:
     return {'version': '0.4.0', 'schemas': [1, 2],
             'managed_schema': 2, 'unit_kinds': ['work', 'integration', 'verify'],

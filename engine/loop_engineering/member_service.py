@@ -8,10 +8,11 @@ import secrets
 import socketserver
 import tempfile
 import threading
+import time
 import uuid
 from .common import LoopError, atomic_json, atomic_write, digest, matches, relative_path, safe_child, writable_change
 from .execution import inspect_developer_delivery, execute_recipe
-from .capabilities import unit_selftest_cap
+from .capabilities import unit_selftest_cap, round_selftest_cap
 
 MAX_REQUEST_BYTES = 262144
 MAX_FILE_OPERATION_PATHS = 500
@@ -55,6 +56,11 @@ class MemberService:
     def env(self):
         return {'LOOP_MEMBER_SOCKET': str(self.socket_path), 'LOOP_MEMBER_TOKEN': self.token}
 
+    def timed_reply(self, reply: dict) -> dict:
+        if self.context['role'] == 'developer':
+            return {**reply, 'seconds_left': max(0, int(self.owner.developer_deadline - time.time()))}
+        return reply
+
     def dispatch(self, request: dict):
         if set(request) - {'token', 'method', 'recipe_id', 'request_id', 'paths', 'source', 'targets'}:
             raise LoopError('unsupported member request fields')
@@ -76,12 +82,12 @@ class MemberService:
                 if method in ('build', 'delete', 'copy'):
                     raise LoopError('reviewer/format-only members cannot build or change files')
             if method == 'delete':
-                return self.delete(request.get('paths'))
+                return self.timed_reply(self.delete(request.get('paths')))
             if method == 'copy':
-                return self.copy(request.get('source'), request.get('targets'))
+                return self.timed_reply(self.copy(request.get('source'), request.get('targets')))
             if method == 'submit_check':
-                return {'candidate_hash': digest(manifest), 'status': 'BOUNDARY_OK',
-                        'note': '仅交付边界检查；不代表门禁/独立评审通过'}
+                return self.timed_reply({'candidate_hash': digest(manifest), 'status': 'BOUNDARY_OK',
+                                        'note': '仅交付边界检查；不代表门禁/独立评审通过'})
             recipe = request.get('recipe_id')
             if recipe not in self.owner.unit.get('build_profiles', []):
                 raise LoopError('self-test profile not authorized for this unit')
@@ -90,18 +96,22 @@ class MemberService:
                 raise LoopError('build requires bounded request_id')
             key = (recipe, request_id)
             if key in self.completed:
-                return self.completed[key]
+                return self.timed_reply(self.completed[key])
             cap = unit_selftest_cap(self.owner.rules, self.owner.unit)
+            round_number = min(self.owner.round, self.owner.unit['max_repairs'] + 1)
+            cumulative = round_selftest_cap(self.owner.rules, self.owner.unit, self.owner.round)
             used = self.owner.store.data['units'][self.owner.uid]['stats'].get('selftests', 0)
-            if used >= cap:
-                raise LoopError(f'本单元自测额度已用完（{used}/{cap} 次）；请直接交付，由正式门禁检查')
+            if used >= cumulative:
+                raise LoopError(f'本轮自测额度已用完（本单元已用 {used} 次，到第 {round_number} 轮累计可用 {cumulative} 次，'
+                                f'总额度 {cap} 次），剩余额度留给后续返修；请直接交付，由正式门禁检查')
             if not self.owner.store.reserve_operation('selftests', self.context['attempt_id'] + ':' + recipe + ':' + request_id, self.owner.limits['max_selftests'], self.owner.uid):
                 raise LoopError('self-test budget exhausted')
             self.owner.store.counter(self.owner.uid, 'selftests')
             execution = self.owner.workspace / 'selftests' / self.context['attempt_id'] / ('build-' + uuid.uuid4().hex)
             profile = self.owner.rules['execution_profiles'][recipe]
             record = execute_recipe(self.code, manifest, profile, execution, self.owner.limits,
-                purpose='SELF_TEST', security=self.owner.rules['security'], deadline=self.owner.deadline,
+                purpose='SELF_TEST', security=self.owner.rules['security'],
+                deadline=min(self.owner.deadline, self.owner.developer_deadline),
                 cancel_file=self.owner.store.run / 'cancel',
                 binding={k: self.context[k] for k in ('run_id', 'unit_id', 'attempt_id')}, run_quotas=self.owner.quota_specs())
             for path in execution.rglob('*'):
@@ -112,6 +122,7 @@ class MemberService:
                      'stdout': record.get('stdout'), 'stderr': record.get('stderr'),
                      'error': record.get('error'), 'note': '不是正式门禁证据，开发方不得引用 gate:'}
             self.completed[key] = reply
+            reply = self.timed_reply(reply)
             self.owner.store.event('selftest_finished', self.owner.uid, **reply)
             return reply
 

@@ -31,7 +31,7 @@ elif role=='reviewer':
         status='FAIL'; issues=[{'criterion_id':crit['id'],'description':'first problem','suggested_fix':'fix it','files':['value.txt']}]
     else:
         resolutions=[{'id':i['id'],'note':'fixed in this candidate','evidence':gates} for i in c['issue_history']
-                     if i['kind']=='issue' and i['status']!='RESOLVED' and not i.get('deferred')]
+                     if i['kind']=='issue' and i['status'] not in ('RESOLVED','ADVISORY') and not i.get('deferred')]
         late={'late-unchanged':'build.py'}.get(scenario)
         changed={'regression':'value.txt','nonconverge':'value.txt'}.get(scenario)
         if late: issues=[{'criterion_id':crit['id'],'description':'late finding in old code','suggested_fix':'later','files':[late]}]
@@ -42,5 +42,9 @@ rows=[{'id':x['id'],'status':status if x is crit else 'PASS','note':'OFFLINE stu
        'evidence':['code:value.txt'] if role=='developer' else ['gate:'+g for g in x['gate_ids']]} for x in c['unit']['criteria']]
 report={'attempt_id':c['attempt_id'],'role':role,'candidate_hash':'' if role=='developer' else c['candidate_hash'],
         'summary':'freeze fixture','blocked':False,'criteria':rows,'issues':issues,'rule_gaps':[]}
+if role=='reviewer' and c.get('managed_tools'):
+    for item in issues:
+        item.update(severity='blocking',counterexample='fixture scenario '+scenario+' has an incorrect result at round '+str(rnd),
+                    locations=[item['files'][0]+':1'],spec_refs=[item['criterion_id']])
 if resolutions: report['issue_resolutions']=resolutions
 print(json.dumps(report))

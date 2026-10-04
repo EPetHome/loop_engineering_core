@@ -8,6 +8,7 @@ import concurrent.futures
 import contextlib
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -17,16 +18,17 @@ import time
 import traceback
 import uuid
 
-from .adapters import ENGINE_DIR, command, expand, member_prompt
+from .adapters import ENGINE_DIR, command, expand, member_prompt, prompt_view
 from .common import (LoopError, IntegrityError, FileLock, atomic_json, atomic_write, changes,
                      check_boundary, copy_manifest, digest, environment, file_hash,
                      load_json, matches, now, safe_child, tree_manifest)
 from .protocol import evaluate, validate_report, response_schema, scratch_file
-from .handoff import make_comparison, record_findings, apply_resolutions, rule_gaps, freeze_review
+from .handoff import (make_comparison, record_findings, apply_resolutions, rule_gaps, freeze_review,
+                      validate_code_map, code_map_covers, read_guidance)
 from .rules import ancestors, topological
 from .runner import kill_group, process_identity
 from .storage import Store, render_views
-from .observability import read_observation
+from .observability import read_observation, cost_sessions
 from .sessions import DeveloperSessions, supports_reuse
 from .execution import inspect_developer_delivery, execute_recipe, new_output_roots
 from .member_service import MemberService
@@ -36,6 +38,17 @@ class Stop(Exception):
     def __init__(self, stop: str, reason: str):
         self.stop, self.reason = stop, reason
         super().__init__(reason)
+
+
+def repair_time_reserve(deadline: float, timing: dict, current: float | None = None) -> int:
+    current = time.time() if current is None else current
+    remaining = deadline - current
+    reserve = math.ceil((timing['gate_seconds'] + timing['review_seconds']) * 1.25)
+    available, need = remaining - reserve, 0.5 * timing['developer_seconds']
+    if available <= 0 or available < need:
+        raise Stop('NOT_MET', f'时间不够返修：剩余 {remaining / 60:.1f} 分钟，扣除门禁和复审预留 {reserve / 60:.1f} 分钟后，'
+                             f'不足上一轮开发用时的一半（{need / 60:.1f} 分钟）；未开始返修，保留当前候选和问题清单')
+    return reserve
 
 
 def unknown_rows(unit: dict, note: str) -> list[dict]:
@@ -78,8 +91,24 @@ class UnitEngine:
         self.candidate, self.last_reviewed, self.rows = None, None, None
         self.gates, self.feedback, self.history = {}, None, []
         self.issue_history = []
+        self.code_map = None
         self.scratch_evidence = {}
         self.round = 1
+        self.repair_reserve = 0
+        self.developer_deadline = self.deadline
+
+    @contextlib.contextmanager
+    def time_stage(self, key: str):
+        started = time.time()
+        try:
+            yield
+        finally:
+            self.history[-1]['timing'][key] = round(max(0, time.time() - started), 1)
+            self.store.unit(self.uid, history=copy.deepcopy(self.history), last_step_at=now())
+
+    def repair_timeout(self):
+        raise Stop('NOT_MET', f'返修开发用完了本轮可用时间（已为门禁和复审预留 {self.repair_reserve / 60:.1f} 分钟），'
+                             '没有交付；保留上一候选和问题清单')
 
     def check_time(self):
         if (self.store.run / 'cancel').exists():
@@ -97,13 +126,35 @@ class UnitEngine:
         self.store.unit(self.uid, **values)
         self.observe_member(phase, job)
 
-    def observe_member(self, phase: str, job: Path, receipt: dict | None = None):
+    def observe_member(self, phase: str, job: Path, receipt: dict | None = None, *, report: dict | None = None,
+                       guidance: dict | None = None):
         if phase not in ('developing', 'reviewing'):
             return
         workspace = job.parent
+        records = self.store.data['units'][self.uid].get('member_observations', {})
+        old = records.get(workspace.name, {})
+        observation = read_observation(workspace)
+        observation.update(round=self.round, call_order=old.get('call_order', len(records)))
+        guidance = guidance if guidance is not None else old.get('read_guidance')
+        if guidance is not None:
+            observation['read_guidance'] = guidance
+        usage = observation.get('usage') or {}
+        complete = all(usage.get(field) is not None for field in
+                       ('reads', 'distinct_files', 'repeat_reads', 'read_paths', 'tools_by_name'))
+        off_map, status = None, 'unknown'
+        if complete and guidance is not None:
+            if guidance['code_map'] is None:
+                status = 'no_map'
+            else:
+                guided = set(guidance['paths'])
+                off_map = len({p['path'] for p in usage['read_paths'] if not p['outside']
+                               and p['path'] not in guided and not code_map_covers(guidance['code_map'], p['path'])})
+                status = 'known'
+        observation.update(off_map_reads=off_map, off_map_status=status)
+        if report is not None:
+            observation['code_map_provided'] = 'code_map' in report
         self.store.member_observation(self.uid, workspace.name,
-            'developer' if phase == 'developing' else 'reviewer', workspace,
-            read_observation(workspace), receipt)
+            'developer' if phase == 'developing' else 'reviewer', workspace, observation, receipt)
 
     def seal_observation(self, workspace: Path):
         for name in ('pi-events.jsonl', 'pi-stderr.log', 'activity.json', 'usage.json', 'session-protection.json',
@@ -171,7 +222,11 @@ class UnitEngine:
         self.observe_member(phase, job, receipt)
         if phase in ('developing', 'reviewing'):
             self.seal_observation(job.parent)
-        self.check_time()
+        # Guardian cleanup may cross the unit deadline; retain the more specific reserved-time stop.
+        reserved_timeout = (phase == 'developing' and receipt['reason'] == 'timeout' and self.repair_reserve > 0
+                            and self.developer_deadline == self.deadline - self.repair_reserve)
+        if (self.store.run / 'cancel').exists() or not reserved_timeout:
+            self.check_time()
         for name in ('job.json', 'stdin.txt', 'receipt.json', 'stdout.log', 'stderr.log'):
             p = job / name
             if p.is_file():
@@ -278,6 +333,8 @@ class UnitEngine:
         scratch = None
         while True:
             self.check_time()
+            if role == 'developer' and self.repair_reserve > 0 and time.time() >= self.deadline - self.repair_reserve:
+                self.repair_timeout()
             self.store.assert_integrity()
             attempt = f'{role}-r{self.round:03d}-' + uuid.uuid4().hex[:12]
             adir = self.workspace / 'attempts' / attempt
@@ -315,9 +372,13 @@ class UnitEngine:
                        'history_index': str(self.workspace),
                        'comparison': self.comparison(code, base_manifest, adir),
                        'issue_history': copy.deepcopy(self.issue_history),
+                       'code_map': copy.deepcopy(self.code_map),
                        'protocol_repair_only': protocol_repair,
                        'protocol_error': last_error, 'invalid_response_excerpt': invalid_excerpt,
                        'response_schema': response_schema()}
+            if role == 'developer':
+                context['developer_timeout_seconds'] = max(0, min(self.unit['stage_timeout_seconds'],
+                                                                  self.deadline - self.repair_reserve - time.time()))
             context['managed_tools'] = self.rules['schema_version'] == 2
             if context['managed_tools']:
                 context['execution_profiles'] = self.rules['execution_profiles']
@@ -351,14 +412,22 @@ class UnitEngine:
             if supports_reuse(agent) or agent.get('outcome_protocol') == 'loop-outcome-v1':
                 member_env['LOOP_ADAPTER_PROTOCOL'] = 'loop-outcome-v1'
             phase = 'developing' if role == 'developer' else 'reviewing'
-            self.observe_member(phase, adir / 'job')
+            self.observe_member(phase, adir / 'job', guidance=read_guidance(prompt_view(context), base_manifest))
             service_context = MemberService(self, context, code, base_manifest) if context['managed_tools'] else contextlib.nullcontext(None)
             with service_context as service:
                 if service is not None:
                     member_env.update(service.env())
-                receipt = self.run_job(args, code, adir / 'job', prompt,
-                                       self.unit['stage_timeout_seconds'], self.unit['idle_output_seconds'],
-                                       member_env, phase)
+                timeout, reserve_limited = self.unit['stage_timeout_seconds'], False
+                if role == 'developer':
+                    current = time.time()
+                    available = self.deadline - self.repair_reserve - current
+                    reserve_limited = self.repair_reserve > 0 and available <= timeout
+                    self.developer_deadline = min(current + timeout, self.deadline - self.repair_reserve)
+                    timeout = min(timeout, available)
+                    if reserve_limited and timeout <= 0:
+                        self.repair_timeout()
+                receipt = self.run_job(args, code, adir / 'job', prompt, timeout,
+                                       self.unit['idle_output_seconds'], member_env, phase)
                 if service is not None and supports_reuse(agent) and not service.handshake and receipt['reason'] == 'ok':
                     receipt = {**receipt, 'reason': 'config_error', 'detail': 'Loop Pi extension did not complete handshake'}
 
@@ -373,6 +442,8 @@ class UnitEngine:
                                                     self.rules.get('execution_profiles'))
             if receipt['reason'] != 'ok':
                 sessions.complete(context, False, 'execution_failed: ' + receipt['reason'])
+                if receipt['reason'] == 'timeout' and reserve_limited:
+                    self.repair_timeout()
                 from .outcomes import RETRYABLE
                 if receipt['reason'] in ('timeout', 'idle_timeout', 'cancelled', 'controller_lost', 'log_limit') or (self.rules['schema_version'] == 2 and receipt['reason'] not in RETRYABLE):
                     raise Stop('BLOCKED', '成员执行停止：' + receipt['reason'])
@@ -389,6 +460,10 @@ class UnitEngine:
             try:
                 report = load_json(response, self.limits['max_response_bytes'])
                 validate_report(report, context, code, self.gates)
+                if context['managed_tools'] and role == 'developer' and 'code_map' in report:
+                    if self.input_manifest is None:
+                        raise IntegrityError('缺少单元输入清单，无法核对 code_map')
+                    validate_code_map(report['code_map'], self.input_manifest, actual)
             except (LoopError, TypeError, KeyError) as exc:
                 sessions.complete(context, False, 'protocol_rejected: ' + str(exc)[:400])
                 last_error = str(exc)
@@ -434,7 +509,11 @@ class UnitEngine:
                                                        self.evidence_index(report.get('issue_resolutions', [])))
             # Persist accepted findings before the next member/step, including on
             # failure paths. Recovery uses this ledger without inferring closure.
-            self.store.unit(self.uid, issue_history=copy.deepcopy(self.issue_history), last_step_at=now())
+            if role == 'developer':
+                self.code_map = {'round': self.round, 'text': report['code_map'].strip()} if 'code_map' in report else None
+            self.observe_member(phase, adir / 'job', receipt, report=report)
+            self.store.unit(self.uid, issue_history=copy.deepcopy(self.issue_history),
+                            code_map=copy.deepcopy(self.code_map), last_step_at=now())
             self.store.event('handoff_accepted', self.uid, role=role, attempt=attempt, candidate_hash=digest(actual))
             return report, code, actual, str(accepted)
 
@@ -613,14 +692,17 @@ class UnitEngine:
                         row['status'] = 'FAIL'
                     elif self.gates[gid]['status'] == 'UNKNOWN':
                         row['status'] = 'UNKNOWN'
-        self.store.unit(self.uid, phase='finalizing', active_job=None)
-        result = {'stop': stop, 'reason': reason, 'candidate': self.candidate,
+        records = copy.deepcopy(self.store.data['units'][self.uid].get('member_observations', {}))
+        sessions = cost_sessions(list(records.values()))
+        self.store.unit(self.uid, phase='finalizing', active_job=None, member_observations=records)
+        result = {'stop': stop, 'reason': reason, 'candidate': self.candidate, 'cost_sessions': sessions,
                   'last_reviewed_candidate': self.last_reviewed,
                   'reviewed': bool(self.last_reviewed and self.candidate and self.last_reviewed['hash'] == self.candidate['hash']),
                   'criteria': rows, 'rule_gaps': rule_gaps(self.issue_history),
                   'historical_rule_gaps': rule_gaps(self.issue_history, historical=True),
                   'issue_history': copy.deepcopy(self.issue_history),
                   'deferred_findings': [copy.deepcopy(i) for i in self.issue_history if i.get('deferred')],
+                  'advisory_findings': [copy.deepcopy(i) for i in self.issue_history if i.get('status') == 'ADVISORY'],
                   'evidence': self.evidence_index(rows), 'history': self.history,
                   'workspace': str(self.workspace), 'verification_mode': self.unit.get('review_mode', 'independent')}
         self.store.finish_unit(self.uid, result)
@@ -639,25 +721,32 @@ class UnitEngine:
                 self.store.event('checkpoint_reused_as_code_only', self.uid, candidate=seed['hash'])
             while True:
                 self.check_time()
-                self.store.unit(self.uid, round=self.round)
-                if self.unit.get('kind') == 'verify':
-                    code, manifest = base_path, base_manifest
-                    delivery = str(self.workspace / 'verification-input.json')
-                    atomic_json(Path(delivery), {'origin': 'program', 'kind': 'verify', 'input_hash': digest(manifest)}, readonly=True)
+                self.history.append({'round': self.round, 'candidate': None, 'developer': None,
+                                     'delivery_path': None, 'review_path': None,
+                                     'issue_history': copy.deepcopy(self.issue_history),
+                                     'timing': {'developer_seconds': 0.0, 'gate_seconds': 0.0, 'review_seconds': 0.0}})
+                self.store.unit(self.uid, round=self.round, history=copy.deepcopy(self.history))
+                review_first = self.round == 1 and self.unit.get('first_round') == 'review'
+                if self.unit.get('kind') == 'verify' or review_first:
+                    code, manifest = (self.input_path, self.input_manifest) if review_first else (base_path, base_manifest)
+                    delivery = str(self.workspace / ('review-first-input.json' if review_first else 'verification-input.json'))
+                    atomic_json(Path(delivery), {'origin': 'program', 'kind': 'review_first' if review_first else 'verify',
+                                                'input_hash': digest(manifest)}, readonly=True)
                     self.store.seal(Path(delivery))
                     dev = None
                 else:
-                    dev, code, manifest, delivery = self.member('developer', base_path, base_manifest)
+                    with self.time_stage('developer_seconds'):
+                        dev, code, manifest, delivery = self.member('developer', base_path, base_manifest)
                 self.candidate = self.freeze_candidate(code, manifest, delivery)
                 self.rows, self.gates, self.scratch_evidence = None, {}, {}
-                self.history.append({'round': self.round, 'candidate': self.candidate, 'developer': dev,
-                                     'delivery_path': delivery, 'review_path': None,
-                                     'issue_history': copy.deepcopy(self.issue_history)})
+                self.history[-1].update(candidate=self.candidate, developer=dev, delivery_path=delivery,
+                                        issue_history=copy.deepcopy(self.issue_history))
                 # Persist candidate pointer before validation so crash recovery can preserve it.
                 self.store.unit(self.uid, checkpoint=self.candidate, history=copy.deepcopy(self.history), last_step_at=now())
                 if dev and dev['blocked']:
                     raise Stop('NOT_MET', '开发方记录了阻断目标的规则缺口：' + dev['summary'])
-                self.run_gates(manifest)
+                with self.time_stage('gate_seconds'):
+                    self.run_gates(manifest)
                 unknown = [gid + '：' + str(g['receipt'].get('error') or g['receipt'].get('reason'))[:1500]
                            for gid, g in self.gates.items() if g['status'] == 'UNKNOWN']
                 if unknown:
@@ -673,7 +762,8 @@ class UnitEngine:
                         self.finish('NOT_MET', '验证阶段未达标，停止该依赖链，不自动回到开发。')
                     return
                 known_before = {item['id'] for item in self.issue_history}
-                review, _, _, review_path = self.member('reviewer', Path(self.candidate['path']), manifest)
+                with self.time_stage('review_seconds'):
+                    review, _, _, review_path = self.member('reviewer', Path(self.candidate['path']), manifest)
                 self.store.assert_integrity()
                 verify_candidate(self.candidate, self.limits)
                 self.last_reviewed = dict(self.candidate)
@@ -687,6 +777,9 @@ class UnitEngine:
                         self.rows, review, self.issue_history, known_before, changed, self.unit, self.gates,
                         self.store.rid, self.uid, self.round)
                     self.store.unit(self.uid, issue_history=copy.deepcopy(self.issue_history), last_step_at=now())
+                open_at_start = {i['id'] for i in self.history[-1]['issue_history']
+                                 if i.get('kind') == 'issue' and i.get('status') == 'OPEN'
+                                 and not i.get('deferred') and i.get('severity', 'blocking') != 'advisory'}
                 self.history[-1].update(review_path=review_path, review=review, evaluated=self.rows,
                                         issue_history=copy.deepcopy(self.issue_history),
                                         deferred=deferred, regression_only=regression_only)
@@ -702,11 +795,21 @@ class UnitEngine:
                 if regression_only and len(self.history) >= 2 and self.history[-2].get('regression_only'):
                     raise Stop('NOT_MET', '不收敛：连续两轮的修复都在改动处引入了新问题，已有问题却都已解决；'
                                           '请收紧验收标准或拆小任务后再跑，不再继续消耗返修。')
+                if (self.rules['schema_version'] == 2 and self.round >= 2 and open_at_start
+                        and not any(i['id'] in open_at_start and i.get('status') == 'RESOLVED' for i in self.issue_history)):
+                    raise Stop('NOT_MET', f'停滞：本轮返修没有关掉任何已知的必须修问题（仍有 {len(open_at_start)} 个），'
+                                          '继续返修大概率白跑；已停下交拍板人决定')
                 if self.round - 1 >= self.unit['max_repairs']:
                     raise Stop('NOT_MET', '业务返修上限已到；保留未通过标准和当前候选。')
+                self.repair_reserve = repair_time_reserve(self.deadline, self.history[-1]['timing'])
                 self.check_time()
+                issue_severities = {(i['description'], cid): i.get('severity', 'blocking')
+                                    for i in self.issue_history if i.get('kind') == 'issue'
+                                    for cid in i.get('criterion_ids', [])}
                 self.feedback = {'summary': review['summary'], 'criteria': self.rows,
-                                 'issues': review['issues'], 'rule_gaps': review['rule_gaps']}
+                                 'issues': [i for i in review['issues'] if issue_severities.get(
+                                     (i['description'], i['criterion_id']), i.get('severity', 'blocking')) == 'blocking'],
+                                 'rule_gaps': review['rule_gaps']}
                 if self.rules['schema_version'] == 2 and not self.store.reserve_operation('repairs', f'repair:{self.round}',
                     self.limits['max_total_repairs'], self.uid):
                     raise Stop('NOT_MET', '累计业务返修额度耗尽')
