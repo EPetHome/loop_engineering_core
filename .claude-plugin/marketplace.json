@@ -1,14 +1,14 @@
 {
-  "name": "loop-guard-local",
+  "name": "autoreview-local",
   "owner": {
     "name": "Loop Engineering"
   },
-  "description": "本机 Loop 0.4.0 发布目录里的受控准备插件",
+  "description": "本机自动评审插件（Claude Code / Codex 共用一份 Hook）",
   "plugins": [
     {
-      "name": "loop-guard",
-      "source": "./plugins/loop-guard",
-      "description": "Loop 受控准备：只开放九个准备工具；Hook 只在带 .loop-guard-prep.json 的准备目录内生效。不提供启动、批准或任意 Shell。",
+      "name": "autoreview",
+      "source": "./plugins/autoreview",
+      "description": "自动评审：开发方写【交付完成】后由 Astra 独立评审；有必修时用 Stop Hook 打回同一个会话返修，最多 3 次。只在带 .autoreview.json 的项目里生效。",
       "category": "development"
     }
   ]

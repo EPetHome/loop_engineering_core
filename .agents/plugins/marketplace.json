@@ -1,14 +1,14 @@
 {
-  "name": "loop-guard-local",
+  "name": "autoreview-local",
   "interface": {
-    "displayName": "Loop Guard（本机）"
+    "displayName": "Autoreview（本机）"
   },
   "plugins": [
     {
-      "name": "loop-guard",
+      "name": "autoreview",
       "source": {
         "source": "local",
-        "path": "./plugins/loop-guard"
+        "path": "./plugins/autoreview"
       },
       "policy": {
         "installation": "AVAILABLE",

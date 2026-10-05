@@ -1,8 +1,0 @@
-__pycache__/
-*.py[cod]
-.venv/
-loop-data/
-demo-output/
-task.json
-task.readable.md
-.DS_Store
