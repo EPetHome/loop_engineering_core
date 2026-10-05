@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CONVENTION,
   MAX_DIFF_BYTES,
   buildRepairMessage,
   buildReviewInput,
@@ -110,7 +111,11 @@ test("T6 下一步决策", () => {
 });
 
 test("T7 返修消息：含必修原文和第几次返修、结尾要求，不含小问题", () => {
-  const message = buildRepairMessage(2, "1. 位置：a.py:1\n   问题：坏的");
+  const parsed = parseReview("## 结论：需返修\n## 必修\n1. 位置：a.py:1\n   问题：坏的\n## 小问题\n- 小问题条目不该出现\n");
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.review.minor, ["小问题条目不该出现"]);
+  const message = buildRepairMessage(2, parsed.review.mustFixRaw);
   assert.ok(message.startsWith("【自动评审 · 第 2 次返修】"));
   assert.ok(message.includes("1. 位置：a.py:1"));
   assert.ok(message.includes("坏的"));
@@ -146,6 +151,13 @@ test("T8 评审输入：第 1 轮有需求原文；第 2 轮有上一轮必修�
   assert.ok(round2.includes("add 用了减法"));
   assert.ok(round2.includes("## 开发方最新回复"));
   assert.ok(round2.includes("第 1 条：已修"));
+  const retry = buildReviewInput({
+    round: 3, firstReview: true, requirement: "首轮未成功时重送需求",
+    deliveryNote: "重试", diff: "+未审改动", diffStat: "", untracked: [],
+  });
+  assert.ok(retry.includes("## 需求原文") && retry.includes("首轮未成功时重送需求"));
+  const manual = buildReviewInput({ round: 1, deliveryNote: "", diff: "", diffStat: "", untracked: [] });
+  assert.ok(manual.includes("本会话没有记录需求原文（手动 /review），请按改动本身和项目文档评审"));
 });
 
 test("T9 diff 超过 200KB：只给 stat 和文件列表并提示", () => {
@@ -228,4 +240,12 @@ test("T10 总结渲染：完成 / 暂停（达到上限）/ 暂停（评审失�
   assert.ok(failed.includes("- 状态：暂停（评审失败）"));
   assert.ok(!failed.includes("## 未解决的必修"));
   assert.ok(failed.includes("第 2 次评审退出码 1"));
+});
+
+test("T11 开发约定：标记可选、改动也会自动评审", () => {
+  assert.ok(CONVENTION.includes("【自动评审约定】"));
+  assert.ok(CONVENTION.includes("交付时最后一行写【交付完成】，评审会立即开始；不写的话，程序检测到改动也会自动评审。"));
+  assert.ok(CONVENTION.includes("需要用户决定时，最后一行写【需要你决定】。"));
+  assert.ok(CONVENTION.includes("第 N 条：已修"));
+  assert.ok(CONVENTION.includes("第 N 条：异议：理由"));
 });

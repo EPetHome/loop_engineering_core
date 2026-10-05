@@ -7,10 +7,11 @@
  * 用法：node test/e2e.mjs [R1 R2 ...]    不传则跑全部
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseReview } from "../core.ts";
 
 const REPO_ROOT = dirname(fileURLToPath(import.meta.url)).replace(/\/test$/, "");
 const PI = "/Users/Admin/.local/bin/pi";
@@ -47,14 +48,13 @@ function marker(text) {
   return "none";
 }
 
-function findSessionFiles(id) {
-  const root = join(homedir(), ".pi", "agent", "sessions");
+function findSessionFiles(id, root) {
   if (!existsSync(root)) return [];
   const res = spawnSync("find", [root, "-name", `*_${id}.jsonl`, "-type", "f"], { encoding: "utf8" });
   return (res.stdout || "").split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
-function sessionUserMessages(file) {
+function sessionEntries(file) {
   return readFileSync(file, "utf8")
     .split("\n")
     .filter(Boolean)
@@ -64,8 +64,17 @@ function sessionUserMessages(file) {
       } catch {
         return null;
       }
-    })
-    .filter((entry) => entry && entry.type === "message" && entry.message && entry.message.role === "user")
+    }).filter(Boolean);
+}
+
+export function hasParsedLatestRound(state) {
+  const round = state?.rounds?.at(-1);
+  return Boolean(round && !round.failed && ["通过", "需返修"].includes(round.conclusion));
+}
+
+function sessionUserMessages(file) {
+  return sessionEntries(file)
+    .filter((entry) => entry.type === "message" && entry.message && entry.message.role === "user")
     .map((entry) => {
       const content = entry.message.content;
       if (typeof content === "string") return content;
@@ -102,6 +111,7 @@ const SCENARIOS = {
     async run(ctx, check) {
       check.includes("状态为完成", ctx.summary, "- 状态：完成");
       check.includes("评审 2 次、返修 1 次", ctx.summary, "- 评审 2 次，返修 1 次");
+      if (ctx.nudges > 0) check.expect("驱动提醒前扩展已发未交付提醒", ctx.reminderBeforeNudge);
       check.expect("开发会话只有一个会话文件", ctx.devSessionFiles.length === 1, `实际 ${ctx.devSessionFiles.length} 个`);
       if (ctx.devSessionFiles[0]) {
         const users = sessionUserMessages(ctx.devSessionFiles[0]);
@@ -151,9 +161,9 @@ const SCENARIOS = {
     async run(ctx, check) {
       const counts = countsOf(ctx.summary);
       check.expect("总结里有评审轮次", counts.reviews >= 1, `评审 ${counts.reviews} 次`);
-      check.includes("评审输出被解析（有结论）", ctx.summary, "结论：");
+      check.expect("本轮结构化解析成功，结论为通过或需返修", hasParsedLatestRound(ctx.state), JSON.stringify(ctx.state?.rounds?.at(-1)));
       const reviewerId = `autoreview-rev-${ctx.devSessionId}`;
-      const files = findSessionFiles(reviewerId);
+      const files = findSessionFiles(reviewerId, ctx.sessionRoot);
       check.expect("评审会话文件存在且只有一个", files.length === 1, `实际 ${files.length} 个`);
       if (files[0]) {
         const users = sessionUserMessages(files[0]);
@@ -164,9 +174,9 @@ const SCENARIOS = {
         );
       }
       if (counts.reviews === 1) {
-        const home = join(homedir(), ".pi-autoreview", basename(ctx.repo));
+        const home = join(ctx.home, ".pi-autoreview", basename(ctx.repo));
         const inputs = existsSync(home) ? readdirSync(home).filter((name) => name.startsWith(`review-input-${ctx.devSessionId}-r`)) : [];
-        const inputPath = inputs.length > 0 ? join(home, inputs[0]) : join(ctx.repo, "review-input-fallback.md");
+        const inputPath = inputs.length > 0 ? join(home, inputs[0]) : join(ctx.runtimeDir, "review-input-fallback.md");
         if (!existsSync(inputPath)) writeFileSync(inputPath, "## 需求原文\n补测\n\n## 本轮改动\n（无）\n");
         const args = [
           "--offline", "-p", "--session-id", reviewerId, "--model", CHEAP_MODEL, "--thinking", "low",
@@ -175,10 +185,12 @@ const SCENARIOS = {
         ];
         const before = files[0] ? sessionUserMessages(files[0]).length : 0;
         for (let i = 0; i < 2; i += 1) {
-          const res = spawnSync(PI, args, { cwd: ctx.repo, encoding: "utf8", timeout: 300_000 });
+          const res = spawnSync(PI, args, { cwd: ctx.repo, env: ctx.env, encoding: "utf8", timeout: 300_000 });
           check.expect(`补跑评审第 ${i + 1} 次成功`, res.status === 0, `退出码 ${res.status}：${(res.stderr || "").slice(-200)}`);
+          const parsed = parseReview(res.stdout || "");
+          check.expect(`补跑评审第 ${i + 1} 次输出解析成功`, parsed.ok && ["通过", "需返修"].includes(parsed.review.conclusion), (res.stdout || "").slice(-500));
         }
-        const after = findSessionFiles(reviewerId);
+        const after = findSessionFiles(reviewerId, ctx.sessionRoot);
         check.expect("补跑后仍是同一个评审会话文件", after.length === 1 && after[0] === files[0], `文件：${after.join(", ")}`);
         if (after[0]) {
           const nowUsers = sessionUserMessages(after[0]).length;
@@ -193,7 +205,7 @@ const SCENARIOS = {
     flags: [],
     async run(ctx, check) {
       check.expect("总结里有评审轮次", countsOf(ctx.summary).reviews >= 1, "没有评审轮次");
-      check.includes("评审输出被解析（有结论）", ctx.summary, "结论：");
+      check.expect("本轮结构化解析成功，结论为通过或需返修", hasParsedLatestRound(ctx.state), JSON.stringify(ctx.state?.rounds?.at(-1)));
       ctx.notes.push(`Astra 轮次：${(ctx.summary.match(/^### 第 \d+ 轮（.*耗时 (\d+) 秒）/gm) || []).join("；")}`);
     },
   },
@@ -209,7 +221,23 @@ async function runScenario(id, def) {
   run("git", ["add", "calc.py"], repo);
   run("git", ["commit", "-q", "-m", "init"], repo);
 
-  const env = { ...process.env, FAKE_STATE_DIR: fakeDir, ...def.env };
+  // 测试进程的 HOME、凭据副本、会话和总结全部放临时目录；不改用户配置。
+  const runtimeDir = mkdtempSync(join(tmpdir(), "autoreview-e2e-runtime-"));
+  const agentDir = join(runtimeDir, ".pi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const sourceAgent = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  for (const name of ["auth.json", "models.json", "settings.json"]) {
+    const source = join(sourceAgent, name);
+    if (existsSync(source)) cpSync(source, join(agentDir, name));
+  }
+  const permissionConfig = join("extensions", "pi-permission-system", "config.json");
+  mkdirSync(dirname(join(agentDir, permissionConfig)), { recursive: true });
+  cpSync(join(sourceAgent, permissionConfig), join(agentDir, permissionConfig));
+  const sessionRoot = join(agentDir, "sessions");
+  const env = {
+    ...process.env, HOME: runtimeDir, PI_CODING_AGENT_DIR: agentDir,
+    PI_CODING_AGENT_SESSION_DIR: sessionRoot, FAKE_STATE_DIR: fakeDir, ...def.env,
+  };
   const args = [
     "--offline", "--mode", "rpc", "--model", CHEAP_MODEL, "--thinking", "low",
     "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--tools", "read,edit,write,bash",
@@ -217,8 +245,10 @@ async function runScenario(id, def) {
   ];
   const child = spawn(PI, args, { cwd: repo, env, stdio: ["pipe", "pipe", "pipe"] });
   const result = {
-    repo, id, def, summary: "", devSessionId: "", devSessionFiles: [], fakeCalls: [],
+    repo, id, def, home: runtimeDir, runtimeDir, sessionRoot, env,
+    summary: "", state: undefined, devSessionId: "", devSessionFiles: [], fakeCalls: [],
     statusText: "", notes: [], stderr: "", records: 0, checks: [], error: "",
+    reviewTriggered: false, undeliveredReminders: [],
   };
   let stdoutBuf = "";
   let stderrBuf = "";
@@ -242,8 +272,15 @@ async function runScenario(id, def) {
       result.devSessionId = record.data.sessionId ?? "";
       sessionFile = record.data.sessionFile ?? "";
     } else if (record.type === "extension_ui_request") {
-      if (record.method === "setStatus") result.statusText = record.statusText ?? "";
-      else if (record.method === "notify") result.notes.push(record.message ?? "");
+      if (record.method === "setStatus") {
+        result.statusText = record.statusText ?? "";
+        if (result.statusText.includes("自动评审中")) result.reviewTriggered = true;
+      } else if (record.method === "notify") {
+        result.notes.push(record.message ?? "");
+        if ((record.message ?? "").includes("有未评审的改动")) {
+          result.undeliveredReminders.push({ message: record.message, nudgesWhenSeen: nudges });
+        }
+      }
     } else if (record.type === "message_end") {
       if (record.message?.role === "assistant") lastAssistant = extractText(record.message);
     } else if (record.type === "agent_start") {
@@ -280,7 +317,7 @@ async function runScenario(id, def) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) break;
     if (result.devSessionId) {
-      result.summaryPath = join(homedir(), ".pi-autoreview", basename(repo), `${result.devSessionId}.md`);
+      result.summaryPath = join(runtimeDir, ".pi-autoreview", basename(repo), `${result.devSessionId}.md`);
       if (existsSync(result.summaryPath)) {
         result.summary = readFileSync(result.summaryPath, "utf8");
         const status = statusOf(result.summary);
@@ -323,7 +360,10 @@ async function runScenario(id, def) {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
 
-  if (result.devSessionId) result.devSessionFiles = findSessionFiles(result.devSessionId);
+  if (result.devSessionId) result.devSessionFiles = findSessionFiles(result.devSessionId, sessionRoot);
+  if (sessionFile && existsSync(sessionFile)) {
+    result.state = sessionEntries(sessionFile).filter((entry) => entry.type === "custom" && entry.customType === "autoreview-state").at(-1)?.data;
+  }
   if (existsSync(fakeDir)) {
     const log = join(fakeDir, "calls.log");
     if (existsSync(log)) {
@@ -331,6 +371,8 @@ async function runScenario(id, def) {
     }
   }
   result.nudges = nudges;
+  result.zeroIntervention = result.reviewTriggered && nudges === 0;
+  result.reminderBeforeNudge = result.undeliveredReminders.some((notice) => notice.nudgesWhenSeen === 0);
   result.timedOut = timedOut;
   return result;
 }
@@ -340,6 +382,7 @@ async function main() {
   const wanted = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
   const ids = wanted.length > 0 ? wanted : Object.keys(SCENARIOS);
   const failures = [];
+  const reports = [];
   for (const id of ids) {
     const def = SCENARIOS[id];
     if (!def) {
@@ -370,7 +413,14 @@ async function main() {
       console.log(`  ${item.ok ? "🟢" : "🔴"} ${item.name}${item.ok ? "" : ` —— ${item.detail}`}`);
       if (!item.ok) failures.push(`${id}: ${item.name} —— ${item.detail}`);
     }
-    console.log(`  （耗时 ${Math.round((Date.now() - started) / 1000)} 秒，nudge ${ctx.nudges} 次）`);
+    const durationSeconds = Math.round((Date.now() - started) / 1000);
+    console.log(`  （耗时 ${durationSeconds} 秒，零干预触发 ${ctx.zeroIntervention ? "是" : "否"}，测试驱动提醒 ${ctx.nudges} 次）`);
+    console.log(`  未交付提醒：${ctx.undeliveredReminders.length} 次；驱动首次提醒前${ctx.reminderBeforeNudge ? "已出现" : "未出现"}`);
+    reports.push({
+      id, durationSeconds, zeroIntervention: ctx.zeroIntervention, nudges: ctx.nudges,
+      undeliveredReminders: ctx.undeliveredReminders, reminderBeforeNudge: ctx.reminderBeforeNudge,
+      checks: check.results, error: ctx.error, summary: ctx.summary, state: ctx.state,
+    });
     if (ctx.error) {
       console.log(`  ctx.error=${ctx.error}\n  状态栏=${ctx.statusText}\n  最近通知=${ctx.notes.slice(-5).join(" | ")}`);
     } else {
@@ -386,8 +436,11 @@ async function main() {
     // 清理：玩具仓库、假状态、以及这次运行写入的总结与评审输入
     rmSync(ctx.repo, { recursive: true, force: true });
     rmSync(`${ctx.repo}.fake`, { recursive: true, force: true });
-    if (ctx.summaryPath) rmSync(dirname(ctx.summaryPath), { recursive: true, force: true });
+    rmSync(ctx.runtimeDir, { recursive: true, force: true });
   }
+  const reportPath = join(tmpdir(), `autoreview-e2e-results-${process.pid}.json`);
+  writeFileSync(reportPath, JSON.stringify(reports, null, 2));
+  console.log(`\n结构化验收记录：${reportPath}`);
   console.log("\n===== 汇总 =====");
   if (failures.length === 0) {
     console.log("全部通过");
@@ -398,7 +451,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

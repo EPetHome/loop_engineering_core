@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/Admin/.hermes/node/bin/node /Users/Admin/Desktop/loop/hosts/hook.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/Admin/.hermes/node/bin/node /Users/Admin/Desktop/loop/hosts/hook.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/Admin/.hermes/node/bin/node /Users/Admin/Desktop/loop/hosts/hook.ts",
+            "timeout": 3700
+          }
+        ]
+      }
+    ]
+  }
+}

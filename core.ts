@@ -8,6 +8,13 @@ import { createHash } from "node:crypto";
 
 export const MARKER_DELIVERED = "【交付完成】";
 export const MARKER_DECISION = "【需要你决定】";
+/** 开发方约定，pi 扩展与宿主 Hook 注入同一份原文。 */
+export const CONVENTION = [
+  "【自动评审约定】",
+  "- 交付时最后一行写【交付完成】，评审会立即开始；不写的话，程序检测到改动也会自动评审。",
+  "- 需要用户决定时，最后一行写【需要你决定】。",
+  "- 收到「自动评审」消息后，逐条写「第 N 条：已修」或「第 N 条：异议：理由」。",
+].join("\n");
 /** 超过这个字节数的 diff 不再原文附给评审。 */
 export const MAX_DIFF_BYTES = 200 * 1024;
 
@@ -54,6 +61,8 @@ export interface SummaryInput {
 
 export interface ReviewInputOptions {
   round: number;
+  /** 没有成功检查点时，即使调用轮次大于 1 也重送首轮材料。 */
+  firstReview?: boolean;
   requirement?: string;
   deliveryNote: string;
   previousMustFix?: string;
@@ -157,11 +166,11 @@ export function buildRepairMessage(repairRound: number, mustFixRaw: string): str
   ].join("\n");
 }
 
-/** 拼评审输入：第 1 轮带需求原文；第 2 轮起带上一轮必修和开发方最新回复。 */
+/** 拼评审输入：尚无成功评审时带需求原文，否则带成功检查点的必修。 */
 export function buildReviewInput(options: ReviewInputOptions): string {
   const parts: string[] = [];
-  if (options.round <= 1) {
-    parts.push("## 需求原文", options.requirement?.trim() || "（未记录）");
+  if (options.firstReview ?? options.round <= 1) {
+    parts.push("## 需求原文", options.requirement?.trim() || "本会话没有记录需求原文（手动 /review），请按改动本身和项目文档评审");
     parts.push("## 开发方交付说明", options.deliveryNote.trim() || "（无）");
   } else {
     parts.push("## 开发方最新回复", options.deliveryNote.trim() || "（无）");

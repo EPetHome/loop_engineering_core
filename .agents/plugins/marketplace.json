@@ -1,0 +1,20 @@
+{
+  "name": "autoreview-local",
+  "interface": {
+    "displayName": "Autoreview（本机）"
+  },
+  "plugins": [
+    {
+      "name": "autoreview",
+      "source": {
+        "source": "local",
+        "path": "./plugins/autoreview"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

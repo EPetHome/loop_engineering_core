@@ -3,6 +3,8 @@
  * fake-reviewer.mjs — 联调用假评审。
  * 用法：fake-reviewer.mjs <轮次> <评审输入文件> <评审会话id>
  * 环境：FAKE_MODE=pass|pass-after-1|always-fix|fail|modify
+ *       FAKE_FIX_COUNTS=1,3（指定第几次调用返回必修，优先级高于 FAKE_MODE）
+ *       FAKE_SLEEP_SECONDS=<秒>（调用后先睡，用于验证宿主 Hook 超时）
  *       FAKE_STATE_DIR=<目录>（记录调用次数与参数）
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -27,11 +29,23 @@ if (mode === "fail") {
   process.exit(1);
 }
 
+const sleepSeconds = Number.parseInt(process.env.FAKE_SLEEP_SECONDS ?? "", 10);
+if (Number.isFinite(sleepSeconds) && sleepSeconds > 0) {
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sab, 0, 0, sleepSeconds * 1000);
+}
+
 if (mode === "modify") {
   writeFileSync(join(process.cwd(), "reviewer-touched.txt"), "评审不该改文件\n");
 }
 
-const fix = mode === "always-fix" || (mode === "pass-after-1" && count === 1);
+const fixCounts = (process.env.FAKE_FIX_COUNTS ?? "")
+  .split(",")
+  .map((value) => Number.parseInt(value, 10))
+  .filter((value) => Number.isFinite(value));
+const fix = fixCounts.length > 0
+  ? fixCounts.includes(count)
+  : mode === "always-fix" || (mode === "pass-after-1" && count === 1);
 if (fix) {
   process.stdout.write(`## 结论：需返修
 ## 必修
