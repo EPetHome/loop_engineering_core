@@ -1,10 +1,5 @@
-# 运行数据和导出的成果不进版本管理：它们由引擎生成，体积会越来越大
-loop-data/
-exports/
 temp/
-.pi/
-__pycache__/
-*.pyc
-.DS_Store
-# 本地改代码前的快照备份，只留在磁盘上，不进版本管理
 .bak/
+.pi/
+.DS_Store
+__pycache__/
