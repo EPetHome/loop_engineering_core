@@ -1,6 +1,6 @@
 /**
  * pi 自动评审扩展：交付标记触发评审，必修回送原开发会话。
- * 失败调用不推进成功检查点；git 取证失败或指纹变化只暂停。
+ * 失败调用不推进成功检查点；git 取证失败或指纹变化只暂停；暂停后你再让开发方干活即恢复自动评审。
  * 加载：pi -e /Users/Admin/Desktop/loop/autoreview.ts
  */
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -325,7 +325,9 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       if (state.phase === "reviewing") await pause(ctx, INTERRUPTED, life);
       else updateStatus(ctx, life);
       checkLive(life);
-      if (state.phase === "paused") ctx.ui.notify(`自动评审：上次暂停（${state.pauseReason ?? "未知原因"}），输入 /review 继续`, "info");
+      if (state.phase === "paused") {
+        ctx.ui.notify(`自动评审：上次暂停（${state.pauseReason ?? "未知原因"}），给开发方发消息继续干活即恢复自动评审，或输入 /review 立即评审`, "info");
+      }
     } catch (error) { await pauseForError(ctx, error, life); }
   });
 
@@ -345,8 +347,23 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", async (event, ctx) => {
     const life = lifecycle;
-    if (!life.active || gitAvailability !== "available") return;
+    if (!life.active || gitAvailability === "unsupported") return;
     try {
+      // 上次 git 探测异常（不是明确的非 git）时重新探测；仍失败照旧暂停。
+      if (gitAvailability === "unknown" && (reviewRunning || !await probeRepository(ctx, life))) return;
+      checkLive(life);
+      // 暂停后你再让开发方干活就是接管：解除暂停，下次停下照常自动评审，返修计数重新算。
+      // 返修消息发出前 phase 已是 idle，不会走到这里。
+      if (state.phase === "paused") {
+        const reason = state.pauseReason ?? "未知原因";
+        state.phase = "idle";
+        state.pauseReason = undefined;
+        state.awaitingRepair = false;
+        state.repairs = 0;
+        saveState(life);
+        updateStatus(ctx, life);
+        ctx.ui.notify(`自动评审：已恢复（上次暂停：${reason}）`, "info");
+      }
       if (state.requirement === undefined && event.prompt.trim()) {
         state.requirement = event.prompt;
         saveState(life);
@@ -376,7 +393,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         await pause(ctx, "开发方需要你决定", life);
         return;
       }
-      // 暂停状态不自动评审，等用户输入 /review。
+      // 暂停状态不自动评审，等你发消息让开发方继续（before_agent_start 解除）或输入 /review。
       if (state.phase === "paused") return;
       if (marker === "none") {
         const baseline = state.lastFingerprint ?? state.baselineFingerprint;
