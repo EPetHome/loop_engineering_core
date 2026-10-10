@@ -24,6 +24,7 @@ export const MARKER_FILE = ".autoreview.json";
 export const DEFAULT_ACCEPTANCE_MODEL = "opencode-go/deepseek-v4.1-flash";
 export const DEFAULT_ACCEPTANCE_TIMEOUT_MIN = 20;
 export const DEFAULT_READY_TIMEOUT_SEC = 60;
+export const DEFAULT_RESET_TIMEOUT_SEC = 120;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
 
 export interface AcceptanceConfig {
@@ -36,6 +37,9 @@ export interface AcceptanceConfig {
   /** 就绪检查：系统输出里出现这句即就绪。 */
   readyLog?: string;
   readyTimeoutSec: number;
+  /** 重置数据的命令（sh -c，在开发目录执行，环境同被测系统）：每次调验收方前由程序执行，只重置数据、不重启服务。 */
+  reset?: string;
+  resetTimeoutSec: number;
   /** 额外收集的日志文件（绝对路径，按 .autoreview.json 所在目录解析）。 */
   logs: string[];
   errorPatterns: string[];
@@ -146,6 +150,8 @@ export function parseAcceptanceConfig(
     readyUrl,
     readyLog: optionalString(data, "readyLog"),
     readyTimeoutSec: positiveInt(data, "readyTimeoutSec", DEFAULT_READY_TIMEOUT_SEC),
+    reset: optionalString(data, "reset"),
+    resetTimeoutSec: positiveInt(data, "resetTimeoutSec", DEFAULT_RESET_TIMEOUT_SEC),
     logs: stringList(data, "logs", []).map((path) => resolve(root, path)),
     errorPatterns: stringList(data, "errorPatterns", DEFAULT_ERROR_PATTERNS),
     ignorePatterns: stringList(data, "ignorePatterns", []),

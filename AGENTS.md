@@ -20,7 +20,7 @@
 - `acceptance-tools/`：验收方的工具，`ev.mjs`（跑命令留证据）、`browser.mjs`（无头 Chromium 操作网页留证据）；每轮在运行目录生成 `./ev`、`./browser` 包装脚本。
 - `README-验收标准.md`：接入手册，【块 1】写法段（带版本与起止标记）、【块 2】启动配置、【块 3】浏览器工具；程序提示和接入命令都引用它，单测核对三块都在且能用。
 - `plugins/autoreview/`：插件清单与 `hooks/hooks.json`；根目录 `.claude-plugin/marketplace.json`、`.agents/plugins/marketplace.json` 是本地市场 `autoreview-local`。
-- `test/*.test.ts`：core 单测、验收单测（含真起被测系统）、接入单测（手册、提示、接入命令）、fake pi 入口回归、git 取证、宿主 Hook 回归、E2E 判定与驱动回归；`test/fake-reviewer.mjs`、`test/fake-tester.mjs`、`test/fake-drafter.mjs`：假评审、假验收方、假起草方；`test/e2e.mjs`：E2E 实操验收（RPC 驱动 pi，场景 A1–A7，含验收命令；尚未覆盖自动验收）。
+- `test/*.test.ts`：core 单测、验收单测（含真起被测系统）、接入单测（手册、提示、接入命令）、fake pi 入口回归、git 取证、宿主 Hook 回归、E2E 判定与驱动回归；`test/fake-reviewer.mjs`、`test/fake-tester.mjs`、`test/fake-drafter.mjs`：假评审、假验收方、假起草方；`test/e2e.mjs`：E2E 实操验收（RPC 驱动 pi，场景 A1–A9：A7 验收命令，A8、A9 自动验收的系统被关掉与数据重置）。
 - `docs/`：历史资料，不改；`temp/`：用户资料区，不碰。
 
 ## 怎么跑
@@ -37,7 +37,7 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node --test test/*.test.ts
 pi --offline --no-extensions -e ./autoreview.ts --help
 ```
 
-E2E 实操验收（开发方与真实评审都用 ds4.1-flash，几到几十分钟；不加参数跑 A1–A7 全部）：
+E2E 实操验收（开发方与真实评审都用 ds4.1-flash，几到几十分钟；不加参数跑 A1–A9 全部）：
 
 ```bash
 PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs A1
@@ -54,6 +54,7 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs A1
 - 无法验证分原因：验收方没做好 → 同会话重做 1 次、再换强模型（`strongModel`，默认评审模型）另开会话重验 1 次；没配启动（连不上也改判，不打回）、缺工具、全部没验证 → 暂停并给出「复制【块 N】到 <路径>」；只有个别条目 → 部分验证，照常评审，完成时列给人工。
 - 给用户看的提示走 `systemMessage`（只对 Claude Code）、pi `ctx.ui.notify`、系统通知、总结「需要你做的事」；`additionalContext` 只有模型看得到。写法段缺失或过期每个会话提醒一次（`conventionNoticed`）。
 - 宿主交给 Hook 的消息不展开 `@文件`，`expandFileRefs` 自己展开（最多 3 个、每个 200KB、跳过二进制），需求原文和验收标准按展开后的算。
+- 被测系统归程序管：验收方不许启停、重启、杀进程、清数据（提示词硬规则）；`acceptance.reset` 由程序在每次调验收方前执行，输出写 `reset.log`，失败暂停。验收途中系统退出立即停掉验收方、不再重验：被信号关掉（或正常退出且日志无错）记 G1 无法验证、这一轮无法验收暂停，关掉之后的证据不算数；崩溃才 G1 不通过打回。收尾时清掉端口上验收期间起的残留进程（`lsof` + `ps etime`），Hook 取消子进程时杀整个进程组。
 - 「返修后没有任何改动」比较的是 `lastCheckedFingerprint`（最近一次给出结论时的指纹，含验收不通过），评审 diff 的基线仍是上次成功评审。
 - 暂停或评审被中断（死锁 + `reviewing`）后，用户再提交消息即恢复自动评审、返修计数清零：Hook 在 UserPromptSubmit 做，pi 扩展在 `before_agent_start` 做；活进程持锁时不动。
 - Stop Hook 收到 SIGTERM/SIGINT/SIGHUP 时先杀掉自己登记的子进程组再退出；被 SIGKILL 时，下一次 SessionStart / UserPromptSubmit / Stop（死锁）先清理登记里的残留进程（核对启动时间，防止进程号复用误杀）。

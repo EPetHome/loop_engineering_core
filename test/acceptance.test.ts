@@ -1,5 +1,6 @@
 /** 自动验收：纯函数（取标准、解析、判定、消息）与一轮验收流程（真起被测系统）；产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,12 +8,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
-  ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, criteriaFromUser, extractCriteria,
-  findObjections, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
+  ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, buildCorrectionInput, classifySystemExit,
+  criteriaFromUser, extractCriteria, findObjections, judgeAcceptance, lastEvidenceAt, parseAcceptanceReport,
+  parseCriteriaDraft, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
-import { runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
-import { checkAcceptanceBudget, DEFAULT_ACCEPTANCE_MODEL, parseAcceptanceConfig } from "../config.ts";
+import { ACCEPTANCE_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
+import { checkAcceptanceBudget, DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
+import { blockerHint } from "../onboarding.ts";
 import { createChildExec } from "../hosts/hook.ts";
 import { readProcs } from "../procs.ts";
 
@@ -176,10 +179,15 @@ async function freePort(): Promise<number> {
 }
 
 const SERVER = `
+import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { join } from "node:path";
 const port = Number(process.argv[2]);
+// 假验收方的 kill 模式按这个文件找到被测系统。
+if (process.env.AUTOREVIEW_RUN_DIR) writeFileSync(join(process.env.AUTOREVIEW_RUN_DIR, "server.pid"), String(process.pid));
 createServer((req, res) => {
   if (req.url === "/boom") console.error("ERROR boom at " + req.url);
+  if (req.url === "/crash") { console.error("ERROR crash at " + req.url); process.exit(1); }
   res.end(req.url === "/health" ? "ok" : "买菜");
 }).listen(port, "127.0.0.1", () => console.log("Listening on " + port));
 `;
@@ -410,4 +418,222 @@ test("A17 换强模型重验能救回来：第一位乱写，强模型按要求�
     assert.equal(h.calls().length, 3);
     assert.match(readFileSync(join(stage.record.runDir, "strong.md"), "utf8"), /上一位验收方没按要求/);
   } finally { h.close(); }
+});
+
+// —— 验收方关掉被测系统、数据不干净（上一版 loop 出事的场景）——
+
+const stamped = (id: string, at: string, out: string) => `=== ${id} #1 ${at}\n$ curl\n退出码：0\n--- 标准输出\n${out}\n`;
+
+test("A18 退出方式归责：被信号关掉或无错误的正常退出算被关掉，其余算崩溃", () => {
+  assert.equal(classifySystemExit({ code: null, signal: "SIGTERM" }, []), "被关掉");
+  assert.equal(classifySystemExit({ code: null, signal: "SIGKILL" }, ["ERROR x"]), "被关掉", "被信号关掉时日志里的错误多半是关停时打的");
+  assert.equal(classifySystemExit({ code: 143, signal: null }, []), "被关掉", "sh 转述子进程被 SIGTERM 关掉");
+  assert.equal(classifySystemExit({ code: 130, signal: null }, []), "被关掉");
+  assert.equal(classifySystemExit({ code: 0, signal: null }, []), "被关掉");
+  assert.equal(classifySystemExit({ code: 0, signal: null }, ["ERROR boom"]), "崩溃");
+  assert.equal(classifySystemExit({ code: 1, signal: null }, []), "崩溃");
+  assert.equal(classifySystemExit({ code: 134, signal: null }, []), "崩溃", "SIGABRT 是崩溃");
+  assert.equal(classifySystemExit({ code: null, signal: "SIGSEGV" }, []), "崩溃");
+  assert.equal(lastEvidenceAt(`${stamped("A1", "2026-10-10T00:00:01Z", "a")}${stamped("A1", "2026-10-10T00:00:05Z", "b")}`, "A1"), Date.parse("2026-10-10T00:00:05Z"));
+  assert.equal(lastEvidenceAt(undefined, "A1"), undefined);
+  assert.equal(parseElapsed("05:07"), 307);
+  assert.equal(parseElapsed("01:02:03"), 3723);
+  assert.equal(parseElapsed("2-00:00:01"), 172801);
+  assert.equal(parseElapsed("abc"), undefined);
+});
+
+test("A19 被关掉时的判定：之前的证据照算，之后的证据不算，G1/G2 不打回，整轮无法验收", () => {
+  const stoppedAt = Date.parse("2026-10-10T00:00:03Z");
+  const parsed = parseAcceptanceReport([
+    "## 结论：不通过", "## 逐条结果",
+    "A1：通过", "- 证据摘录：已添加",
+    "A2：不通过", "- 实际：Connection refused", "- 证据摘录：Connection refused",
+  ].join("\n"));
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  const record = judgeAcceptance({
+    criteria: criteriaItems, report: parsed.report, logErrors: ["ERROR pool closed during shutdown"], runDir: "/run", hasService: true,
+    evidence: evidenceOf({ A1: stamped("A1", "2026-10-10T00:00:01Z", "已添加"), A2: stamped("A2", "2026-10-10T00:00:04Z", "Connection refused") }),
+    systemStopped: { at: stoppedAt, detail: "系统在验收途中被关掉了（退出码 143）" },
+  });
+  const byId = Object.fromEntries(record.items.map((item) => [item.id, item]));
+  assert.equal(byId.G1.verdict, "无法验证");
+  assert.equal(byId.G1.cause, "系统被关掉");
+  assert.equal(byId.A1.verdict, "通过", "关掉之前留的证据照算");
+  assert.equal(byId.A2.verdict, "无法验证", "关掉之后留的证据不算");
+  assert.match(byId.A2.detail, /被关掉之后留的/);
+  assert.equal(byId.G2.verdict, "无法验证", "关停时打的错误不据此打回");
+  assert.equal(record.verdict, "无法验收");
+  assert.equal(record.blocker, "系统被关掉");
+  assert.equal(record.note, undefined, "被关掉时不再对比验收方自报的结论");
+
+  const noReport = judgeAcceptance({
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, evidence: () => undefined,
+    reportError: "第 1 次验收超时或被终止", systemStopped: { at: stoppedAt, detail: "被关掉" },
+  });
+  assert.deepEqual(noReport.items.map((item) => [item.id, item.verdict, item.cause]),
+    [["G1", "无法验证", "系统被关掉"], ["A1", "无法验证", "系统被关掉"], ["A2", "无法验证", "系统被关掉"]]);
+  assert.equal(noReport.verdict, "无法验收");
+
+  const failedBeforeStop = parseAcceptanceReport(
+    ["## 结论：不通过", "## 逐条结果", "A1：不通过", "- 实际：没输出", "- 证据摘录：没输出", "A2：通过", "- 证据摘录：买菜"].join("\n"),
+  );
+  assert.ok(failedBeforeStop.ok);
+  if (!failedBeforeStop.ok) return;
+  const realFailure = judgeAcceptance({
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, report: failedBeforeStop.report,
+    evidence: evidenceOf({ A1: stamped("A1", "2026-10-10T00:00:01Z", "没输出"), A2: stamped("A2", "2026-10-10T00:00:02Z", "买菜") }),
+    systemStopped: { at: stoppedAt, detail: "被关掉" },
+  });
+  assert.equal(realFailure.verdict, "不通过", "关掉之前实测出的真问题照样打回");
+  assert.deepEqual(realFailure.items.filter((item) => item.verdict === "不通过").map((item) => item.id), ["A1"]);
+});
+
+test("A20 验收方关掉被测系统：立即停掉验收方、不换强模型重验，判无法验收而不是打回开发方", async () => {
+  const h = await harness(
+    { start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health" },
+    { FAKE_ACC_MODE: "kill" },
+  );
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    const { record } = stage;
+    assert.equal(record.verdict, "无法验收");
+    assert.equal(record.blocker, "系统被关掉");
+    assert.deepEqual(record.items.filter((item) => item.verdict === "不通过"), [], "没有任何一条算到开发方头上");
+    const g1 = record.items.find((item) => item.id === "G1")!;
+    assert.equal(g1.verdict, "无法验证");
+    assert.match(g1.detail, /被关掉了（退出码 (143|SIGTERM)），多半是验收方/);
+    assert.equal(h.calls().length, 1, "系统没了就不再重做、不换强模型");
+    assert.equal(await portOpen(h.port), false);
+    const hint = blockerHint(record as AcceptanceRecord, h.work, h.config);
+    assert.match(hint, /不是开发方的问题/);
+    assert.match(hint, /acceptance\.reset/);
+  } finally { h.close(); }
+});
+
+test("A21 验收方关掉后用 setsid 重启服务占着端口：收尾时清掉，并写进记录", async () => {
+  const h = await harness(
+    { start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health" },
+    { FAKE_ACC_MODE: "kill-restart", FAKE_ACC_URL: "http://127.0.0.1:{port}/health" },
+  );
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    assert.equal(stage.record.blocker, "系统被关掉");
+    assert.match((stage.record.cleanup ?? []).join("\n"), /验收期间起的进程 pid \d+（.*），不是程序启动的被测系统，已关掉/);
+    assert.equal(await portOpen(h.port), false, "逃出进程组的重启进程也被清掉");
+  } finally { h.close(); }
+});
+
+test("A22 系统自己崩溃（非 0 退出、日志有错误）：仍算 G1 不通过，打回开发方", async () => {
+  const h = await harness(
+    { start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health" },
+    { FAKE_ACC_URL: "http://127.0.0.1:{port}/crash" },
+  );
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "不通过");
+    const g1 = stage.record.items.find((item) => item.id === "G1")!;
+    assert.equal(g1.verdict, "不通过");
+    assert.match(g1.detail, /系统在验收过程中退出了（退出码 1）/);
+    assert.equal(stage.record.items.find((item) => item.id === "G2")?.verdict, "不通过");
+  } finally { h.close(); }
+});
+
+test("A23 配了 reset：每次调验收方前由程序重置，输出不进系统日志；重做时要求从头全部重测", async () => {
+  const h = await harness(
+    {
+      start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health",
+      reset: "echo 重置 >> \"$AUTOREVIEW_RUN_DIR/reset-count\"; echo \"ERROR 重置时打的不算系统错误 $RESET_FLAG\"",
+      env: { RESET_FLAG: "ENV_OK" },
+    },
+    { FAKE_ACC_MODE: "lazy" },
+  );
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    const { runDir } = stage.record;
+    assert.equal(stage.record.verdict, "通过", "重置时打的 ERROR 不算 G2");
+    assert.equal(readFileSync(join(runDir, "reset-count"), "utf8").trim().split("\n").length, 2, "第 1 次和重做前各重置一次");
+    const resetLog = readFileSync(join(runDir, "reset.log"), "utf8");
+    assert.match(resetLog, /重做前/);
+    assert.match(resetLog, /ENV_OK/, "重置命令拿得到被测系统的环境变量");
+    assert.doesNotMatch(readFileSync(join(runDir, "system.log"), "utf8"), /重置时打的/);
+    assert.match(readFileSync(join(runDir, "correction.md"), "utf8"), /已把数据重置到初始状态[\s\S]*从 A1 起全部重新实测/);
+    assert.match(readFileSync(join(runDir, "input.md"), "utf8"), /每次验收前都已把数据重置到初始状态/);
+  } finally { h.close(); }
+});
+
+test("A24 reset 失败：暂停（环境问题），不调验收方，被测系统照样关停", async () => {
+  const h = await harness({
+    start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health", reset: "echo 测试库连不上 >&2; exit 2",
+  });
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "paused");
+    if (stage.kind !== "paused") return;
+    assert.match(stage.reason, /验收前重置数据失败（环境问题/);
+    assert.match(stage.notes ?? "", /退出码 2：测试库连不上/);
+    assert.match(stage.hint, /acceptance\.reset[\s\S]*reset\.log/);
+    assert.deepEqual(h.calls(), []);
+    assert.equal(await portOpen(h.port), false);
+  } finally { h.close(); }
+});
+
+test("A25 没配 reset、验收方报「数据不是初始状态」：无法验收并提示配 reset；配了仍不干净就提示检查重置命令", async () => {
+  const h = await harness({}, { FAKE_ACC_MODE: "dirty" });
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "无法验收");
+    assert.equal(stage.record.blocker, "数据不干净");
+    assert.match(readFileSync(join(stage.record.runDir, "input.md"), "utf8"), /程序没有配置数据重置[\s\S]*数据不是初始状态/);
+    assert.match(blockerHint(stage.record, h.work, h.config), /没有配置 acceptance\.reset[\s\S]*【块 2】/);
+    const withReset = parseAcceptanceConfig({ reset: "true" }, h.work, process.env)!;
+    assert.match(blockerHint(stage.record, h.work, withReset), /没能把数据恢复到初始状态/);
+  } finally { h.close(); }
+});
+
+test("A26 reset 配置、提示词硬规则、重做输入", () => {
+  const config = parseAcceptanceConfig({ reset: "sh deploy/reset.sh" }, "/p")!;
+  assert.equal(config.reset, "sh deploy/reset.sh");
+  assert.equal(config.resetTimeoutSec, DEFAULT_RESET_TIMEOUT_SEC);
+  assert.equal(parseAcceptanceConfig({}, "/p")!.reset, undefined);
+  assert.throws(() => parseAcceptanceConfig({ reset: "" }, "/p"), /reset/);
+  assert.throws(() => parseAcceptanceConfig({ resetTimeoutSec: 0 }, "/p"), /resetTimeoutSec/);
+  const prompt = readFileSync(ACCEPTANCE_PROMPT_PATH, "utf8");
+  assert.match(prompt, /## 不要动被测系统/);
+  assert.match(prompt, /不要启动、停止、重启它，不要 kill、pkill 任何进程/);
+  assert.match(prompt, /原因写「数据不是初始状态」/);
+  const preview = { verdict: "无法验收" as const, items: [{ id: "A1", text: "t", verdict: "无法验证" as const, detail: "没证据", evidenceProblem: true }], logErrors: [], extra: [], runDir: "/run" };
+  assert.match(buildCorrectionInput(preview, false), /重做这几条[\s\S]*数据不是初始状态[\s\S]*不要启动、停止、重启被测系统/);
+  assert.match(buildCorrectionInput(preview, true), /从头重做[\s\S]*从 A1 起全部重新实测/);
+});
+
+test("A27 Hook 的子进程被取消时连同后代一起杀掉（验收方起的子进程不留下）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "autoreview-abort-"));
+  const pidFile = join(root, "child.pid");
+  const controller = new AbortController();
+  try {
+    const exec = createChildExec()("/bin/sh", ["-c", `sleep 30 & echo $! > ${pidFile}; wait`], { cwd: root, timeout: 60_000, signal: controller.signal });
+    for (let i = 0; i < 50 && !existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
+    const grandchild = Number(readFileSync(pidFile, "utf8"));
+    controller.abort();
+    const result = await exec;
+    assert.equal(result.killed, true);
+    // 被杀掉的孙进程可能还是僵尸（等 init 回收），只看它是不是还在运行。
+    const running = (): boolean => {
+      const res = spawnSync("ps", ["-o", "stat=", "-p", String(grandchild)], { encoding: "utf8" });
+      return res.status === 0 && !res.stdout.trim().startsWith("Z");
+    };
+    for (let i = 0; i < 20 && running(); i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(running(), false, "后台的 sleep 也被杀掉");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

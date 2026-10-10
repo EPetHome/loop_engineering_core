@@ -81,11 +81,14 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reapTimer: ReturnType<typeof setTimeout> | undefined;
   let registered: number | undefined;
+  let onAbort: (() => void) | undefined;
   const finish = (code: number, killedFlag: boolean): void => {
     if (done) return;
     done = true;
     if (timer) clearTimeout(timer);
     if (reapTimer) clearTimeout(reapTimer);
+    // 同一个 signal 会给很多次调用用：结束后摘掉监听，免得堆积，也免得事后误杀复用的进程组号。
+    if (onAbort) options.signal?.removeEventListener("abort", onAbort);
     if (registered !== undefined && procsFile) {
       try { unregisterProc(procsFile, registered); } catch { /* 登记清理失败不影响结果 */ }
     }
@@ -97,9 +100,10 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
   };
   let child;
   try {
-    // detached 让子进程成为进程组组长，超时时可以连同后代一起杀掉。
+    // detached 让子进程成为进程组组长，超时或取消时可以连同后代一起杀掉。
+    // 取消不交给 spawn 的 signal：它只杀组长，还会抢先结束，让下面的整组清理来不及跑。
     child = spawn(command, args, {
-      cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"], signal: options.signal, detached: true,
+      cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true,
     });
   } catch (error) {
     process.stderr.write(`autoreview hook: 无法启动 ${command}：${errorText(error)}\n`);
@@ -121,20 +125,25 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
     finish(1, killed || aborted);
   });
   child.on("close", (code, signal) => finish(code ?? 1, killed || Boolean(signal)));
-  if (options.timeout > 0) {
-    timer = setTimeout(() => {
-      killed = true;
-      const pid = child.pid;
-      try {
-        if (pid) process.kill(-pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        try { child.kill("SIGKILL"); } catch { /* 已经退出 */ }
-      }
-      // 后代可能仍持有 stdout/stderr，close 不一定到达：有界清理，绝不无限等。
-      reapTimer = setTimeout(() => finish(137, true), 250);
-    }, options.timeout);
+  const killTree = (): void => {
+    killed = true;
+    const pid = child.pid;
+    try {
+      if (pid) process.kill(-pid, "SIGKILL");
+      else child.kill("SIGKILL");
+    } catch {
+      try { child.kill("SIGKILL"); } catch { /* 已经退出 */ }
+    }
+    // 后代可能仍持有 stdout/stderr，close 不一定到达：有界清理，绝不无限等。
+    if (!done) reapTimer ??= setTimeout(() => finish(137, true), 250);
+  };
+  // 取消（被测系统退出、会话关闭等）时和超时一样连同后代一起杀掉，不留验收方起的子进程。
+  if (options.signal?.aborted) killTree();
+  else if (options.signal) {
+    onAbort = killTree;
+    options.signal.addEventListener("abort", onAbort, { once: true });
   }
+  if (options.timeout > 0) timer = setTimeout(killTree, options.timeout);
 });
 
 export const childExec: Exec = createChildExec();

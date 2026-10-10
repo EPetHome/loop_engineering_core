@@ -45,9 +45,10 @@ export interface ParsedAcceptance {
 
 /**
  * 无法验证的原因，决定后续怎么走：验收方没做好 → 换强模型重验；没配启动、缺工具 → 暂停并告诉你复制哪一块；
+ * 系统被关掉、数据不干净 → 暂停交给你（不算开发方的错）；
  * 其他（标准含糊、环境不通）→ 个别条目留给人工，全部都这样才暂停。
  */
-export type UnknownCause = "验收方" | "没配启动" | "缺工具" | "其他";
+export type UnknownCause = "系统被关掉" | "数据不干净" | "验收方" | "没配启动" | "缺工具" | "其他";
 
 export interface AcceptanceItemResult {
   id: string;
@@ -77,6 +78,8 @@ export interface AcceptanceRecord {
   /** 验收方没做好，换强模型重验过。 */
   escalated?: boolean;
   note?: string;
+  /** 收尾时清理端口上残留进程的记录。 */
+  cleanup?: string[];
 }
 
 const ITEM_START = /^(?:[-*]\s*)?(?:A\s*)?(\d+)\s*[.、．:：)）]\s*(.*)$/i;
@@ -229,8 +232,10 @@ export interface JudgeInput {
   reportError?: string;
   /** 读 evidence/<id>.txt；不存在返回 undefined。 */
   evidence: (id: string) => string | undefined;
-  /** 系统没能启动或中途退出的说明（G1）。 */
+  /** 系统没能启动或中途崩溃的说明（G1 不通过，算开发方的）。 */
   systemFailure?: string;
+  /** 系统在验收途中被关掉（信号或无错误的正常退出）：G1 无法验证，之后留的证据不算数，不打回开发方。 */
+  systemStopped?: { detail: string; at: number };
   logErrors: string[];
   runDir: string;
   /** 配置了怎么启动被测系统（acceptance.start）。 */
@@ -242,17 +247,55 @@ const NEEDS_URL = /https?:\/\/|localhost|127\.0\.0\.1/i;
 /** browser.mjs 找不到 Playwright 时写进证据的固定文字。 */
 export const NO_PLAYWRIGHT = "缺少 Playwright";
 const BLOCKER_TEXT: Record<UnknownCause, string> = {
+  系统被关掉: "被测系统在验收途中被关掉了（多半是验收方或重置命令关的，不是开发方的问题）",
+  数据不干净: "被测系统的数据不是初始状态，依赖初始状态的标准没法验",
   验收方: "验收方没按要求留证据或输出格式不对",
   没配启动: "没有配置怎么启动被测系统",
   缺工具: "缺少浏览器工具 Playwright",
   其他: "全部标准都没能验证",
 };
 
-/** 验收方报「无法验证」时归类：缺工具 → 没配启动（标准或原因里要连系统，却没配 start）→ 其他。 */
-function classifyUnknown(criterion: CriterionItem, reason: string, evidence: string | undefined, hasService: boolean): UnknownCause {
+/** 验收方按提示词报数据问题时用的说法。 */
+export const DIRTY_DATA = /数据不是初始状态|数据不干净/;
+
+/**
+ * 验收方报「无法验证」时归类：系统被关掉后连不上 → 缺工具 → 数据不干净 → 没配启动（标准或原因里要连系统，却没配 start）→ 其他。
+ */
+function classifyUnknown(
+  criterion: CriterionItem, reason: string, evidence: string | undefined, hasService: boolean, systemStopped: boolean,
+): UnknownCause {
+  if (systemStopped && UNREACHABLE.test(reason)) return "系统被关掉";
   if (evidence?.includes(NO_PLAYWRIGHT) || /playwright|浏览器工具/i.test(reason)) return "缺工具";
+  if (DIRTY_DATA.test(reason)) return "数据不干净";
   if (!hasService && (UNREACHABLE.test(reason) || NEEDS_URL.test(reason) || NEEDS_URL.test(criterion.text))) return "没配启动";
   return "其他";
+}
+
+/** 被关掉的信号，以及 sh 转述子进程被这些信号关掉时的退出码（128 + 信号号）。 */
+const STOP_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP", "SIGKILL"];
+const STOP_CODES = [129, 130, 137, 143];
+
+/**
+ * 验收途中系统退出，是被关掉还是自己崩了：
+ * 被 TERM/INT/HUP/KILL 关掉（或 sh 转述的 129/130/137/143）→ 被关掉；退出码 0 且日志没有错误 → 被关掉；
+ * 其余（非 0 退出码、SIGSEGV/SIGABRT 之类，或正常退出但日志有错误）→ 崩溃，算开发方的。
+ */
+export function classifySystemExit(exit: { code: number | null; signal: string | null }, logErrors: string[]): "被关掉" | "崩溃" {
+  if (exit.signal && STOP_SIGNALS.includes(exit.signal)) return "被关掉";
+  if (exit.code !== null && STOP_CODES.includes(exit.code)) return "被关掉";
+  if (exit.code === 0 && logErrors.length === 0) return "被关掉";
+  return "崩溃";
+}
+
+/** 证据文件里这一条最后一次留证据的时间（./ev、./browser 的块头「=== A1 #n <ISO 时间>」）。 */
+export function lastEvidenceAt(content: string | undefined, id: string): number | undefined {
+  if (!content) return undefined;
+  let last: number | undefined;
+  for (const match of content.matchAll(new RegExp(`^=== ${id} #\\d+ (\\S+)`, "gm"))) {
+    const at = Date.parse(match[1]);
+    if (!Number.isNaN(at)) last = at;
+  }
+  return last;
 }
 
 const G1_TEXT = "系统能按配置启动、就绪，并在验收过程中一直运行";
@@ -273,8 +316,11 @@ function failDetail(item: ReportItem, evidencePath: string): string {
  */
 export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "durationMs"> {
   const items: AcceptanceItemResult[] = [];
+  const stopped = input.systemStopped;
   if (input.systemFailure) {
     items.push({ id: "G1", text: G1_TEXT, verdict: "不通过", detail: input.systemFailure });
+  } else if (stopped) {
+    items.push({ id: "G1", text: G1_TEXT, verdict: "无法验证", detail: stopped.detail, cause: "系统被关掉" });
   }
   if (input.report) {
     for (const criterion of input.criteria) {
@@ -287,7 +333,10 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
       }
       if (reported.verdict === "无法验证") {
         const reason = reported.fields["原因"] || "验收方没写原因";
-        items.push({ ...criterion, verdict: "无法验证", detail: `原因：${reason}`, cause: classifyUnknown(criterion, reason, content, input.hasService) });
+        items.push({
+          ...criterion, verdict: "无法验证", detail: `原因：${reason}`,
+          cause: classifyUnknown(criterion, reason, content, input.hasService, Boolean(stopped)),
+        });
         continue;
       }
       const excerpt = normalize(reported.fields["证据摘录"] ?? "");
@@ -297,6 +346,15 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
       else if (!normalize(content).includes(excerpt)) problem = `证据摘录在 ${evidencePath} 里找不到`;
       if (problem) {
         items.push({ ...criterion, verdict: "无法验证", detail: `原因：报告「${reported.verdict}」，但${problem}`, evidenceProblem: true, cause: "验收方" });
+        continue;
+      }
+      // 系统被关掉之后，连到的可能是别人重启的进程或者根本连不上：这时留的证据不算数。
+      const lastAt = lastEvidenceAt(content, criterion.id);
+      if (stopped && (lastAt === undefined || lastAt >= stopped.at)) {
+        items.push({
+          ...criterion, verdict: "无法验证", cause: "系统被关掉",
+          detail: `原因：报告「${reported.verdict}」，但证据是在被测系统被关掉之后留的，不算数`,
+        });
         continue;
       }
       const observed = [reported.fields["实际"], reported.fields["证据摘录"], reported.fields["相关日志"]].join("\n");
@@ -312,18 +370,25 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
         detail: reported.verdict === "通过" ? `证据摘录：${reported.fields["证据摘录"]}` : failDetail(reported, evidencePath),
       });
     }
+  } else if (stopped) {
+    for (const criterion of input.criteria) {
+      items.push({ ...criterion, verdict: "无法验证", detail: "原因：被测系统被关掉，没有完成实测", cause: "系统被关掉" });
+    }
   } else if (!input.systemFailure) {
     for (const criterion of input.criteria) {
       items.push({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}`, cause: "验收方" });
     }
   }
   if (input.logErrors.length > 0) {
-    items.push({ id: "G2", text: G2_TEXT, verdict: "不通过", detail: input.logErrors.join("\n") });
+    // 被关掉时，日志里的错误可能是关停时打的：这一轮不据此打回，留给你看。
+    items.push(stopped
+      ? { id: "G2", text: G2_TEXT, verdict: "无法验证", cause: "系统被关掉", detail: `系统被关掉前后日志里有错误（可能是关停时打的），这一轮不据此打回：\n${input.logErrors.join("\n")}` }
+      : { id: "G2", text: G2_TEXT, verdict: "不通过", detail: input.logErrors.join("\n") });
   }
   const failed = items.some((item) => item.verdict === "不通过");
   const unknown = items.filter((item) => item.verdict === "无法验证");
   const ids = unknown.map((item) => item.id).join("、");
-  const blocker = (["没配启动", "缺工具", "验收方"] as const).find((cause) => unknown.some((item) => item.cause === cause))
+  const blocker = (["系统被关掉", "数据不干净", "没配启动", "缺工具", "验收方"] as const).find((cause) => unknown.some((item) => item.cause === cause))
     ?? (unknown.length > 0 && unknown.length === input.criteria.length ? "其他" : undefined);
   const verdict = failed ? "不通过" : unknown.length === 0 ? "通过" : blocker ? "无法验收" : "部分验证";
   const record: Omit<AcceptanceRecord, "durationMs"> = {
@@ -335,19 +400,33 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   }
   if (verdict === "部分验证") record.reason = `${ids} 没能自动验证，需要人工验收`;
   if (input.systemFailure && input.report === undefined) record.note = "系统没能正常运行，其余标准没有实测";
+  // 被关掉时验收方的自报结论没有意义，不再提示对比。
   const claimed = input.report?.conclusion ?? "";
-  if (claimed && !claimed.startsWith(verdict)) record.note = `验收方自报「${claimed}」，程序按逐条结果判为「${verdict}」`;
+  if (claimed && !stopped && !claimed.startsWith(verdict)) record.note = `验收方自报「${claimed}」，程序按逐条结果判为「${verdict}」`;
   return record;
 }
 
-/** 证据有问题的条目，发回同一个验收会话重做一次。 */
-export function buildCorrectionInput(record: Omit<AcceptanceRecord, "durationMs">): string {
+/** 数据状态说明：配了重置时程序每次验收前都重置；没配时提醒验收方不要自己清数据。 */
+export function dataStateNote(resetConfigured: boolean): string {
+  return resetConfigured
+    ? "程序在每次验收前都已把数据重置到初始状态。"
+    : "程序没有配置数据重置：数据可能还留着之前操作的结果。依赖初始状态、现在做不了的条目报「无法验证」，原因写「数据不是初始状态」；不要自己清数据、重启或关闭系统。";
+}
+
+/**
+ * 证据有问题的条目，发回同一个验收会话重做一次。
+ * 重做前程序重置过数据时，之前操作留下的数据已经不在了，要从 A1 起全部重测。
+ */
+export function buildCorrectionInput(record: Omit<AcceptanceRecord, "durationMs">, resetDone = false): string {
   const problems = record.items.filter((item) => item.evidenceProblem).map((item) => `- ${item.id}：${item.detail}`);
   return [
-    "## 证据有问题，请重做这几条",
+    resetDone ? "## 证据有问题，请从头重做" : "## 证据有问题，请重做这几条",
     ...problems,
     "",
-    "用 ./ev 或 ./browser 重新实测这些条目；证据摘录必须从 evidence/<条目>.txt 里原样复制。",
+    resetDone
+      ? "程序已把数据重置到初始状态，之前操作留下的数据已经不在了：请按标准顺序从 A1 起全部重新实测。"
+      : `用 ./ev 或 ./browser 重新实测这些条目。${dataStateNote(false)}`,
+    "证据摘录必须从 evidence/<条目>.txt 里原样复制。不要启动、停止、重启被测系统。",
     "然后按系统提示里的格式，重新输出全部条目的结果。",
   ].join("\n") + "\n";
 }
@@ -364,6 +443,8 @@ export interface AcceptanceInputOptions {
   guide?: string;
   deliveryNote: string;
   previousFailed: string[];
+  /** 配置了 acceptance.reset（程序每次验收前重置数据）。 */
+  resetConfigured?: boolean;
 }
 
 /** 拼验收方输入：环境、工具、需求、标准、操作说明、开发方的使用说明。 */
@@ -374,6 +455,8 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
     options.baseUrl ? `- 系统地址：${options.baseUrl}（程序已经启动好）`
       : "- 系统没有常驻服务：直接调用命令来验收；标准要访问网址却连不上时，报「无法验证」，原因写「连不上被测系统」",
     options.systemLog ? `- 系统输出日志（实时写入）：${options.systemLog}` : "",
+    options.baseUrl ? "- 被测系统由程序启动和关停：不要启动、停止、重启它，不要 kill 任何进程" : "",
+    `- 数据：${dataStateNote(Boolean(options.resetConfigured))}`,
     ...options.logFiles.map((file) => `- 系统日志：${file}`),
     "- 留证据跑命令：./ev A1 -- <命令>；在项目目录里跑：./ev A1 --cwd <项目目录> -- <命令>",
     "- 操作网页：./browser A1 <步骤文件.json>",
@@ -441,6 +524,7 @@ export function renderAcceptanceForReview(record: AcceptanceRecord): string {
 export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   const lines = [`验收：${record.verdict}（耗时 ${Math.round(record.durationMs / 1000)} 秒；材料：${record.runDir}）`];
   if (record.escalated) lines.push("验收方：第一位没按要求做，已换强模型重验");
+  for (const item of record.cleanup ?? []) lines.push(`验收收尾：${item}`);
   if (record.reason) lines.push(`验收说明：${record.reason}`);
   if (record.note) lines.push(`验收提示：${record.note}`);
   for (const item of record.items) {

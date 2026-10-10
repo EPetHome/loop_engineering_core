@@ -97,6 +97,13 @@ const RESUME = "再给开发方发一条消息继续";
 /** 无法验收时给你的下一步：按卡住的原因指到具体的块和文件。 */
 export function blockerHint(record: AcceptanceRecord, workDir: string, acceptance: AcceptanceConfig): string {
   switch (record.blocker) {
+    case "系统被关掉":
+      return `被测系统在验收途中被关掉了，多半是验收方自己关的（或重置命令重启了服务），不是开发方的问题，这一轮作废、没有打回开发方。`
+        + `需要干净数据的项目请在 ${configFile(acceptance)} 配置 acceptance.reset（只重置数据、不重启服务，写法见 ${GUIDE_DOC} 的【块 2】）；${RESUME}，会重新验收`;
+    case "数据不干净":
+      return acceptance.reset
+        ? `配置的 acceptance.reset 没能把数据恢复到初始状态（见总结里验收方给的原因）：检查 ${configFile(acceptance)} 里的重置命令，${RESUME}`
+        : `验收需要干净的初始数据，但 ${configFile(acceptance)} 没有配置 acceptance.reset：按 ${GUIDE_DOC} 的【块 2】加上重置命令（只重置数据、不重启服务），${RESUME}`;
     case "没配启动":
       return copyNotice(2, configFile(acceptance), `改好启动命令和端口，${RESUME}`, acceptance.root);
     case "缺工具":

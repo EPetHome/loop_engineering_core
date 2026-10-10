@@ -11,6 +11,7 @@
  * 输出最后两行是结论和报告路径；作为 --autoreview-accept-cmd 运行时会进自动评审总结。
  */
 import { spawn, spawnSync } from "node:child_process";
+import { connect, createServer } from "node:net";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -23,10 +24,25 @@ const PI = process.env.AUTOREVIEW_E2E_PI || "/Users/Admin/.local/bin/pi";
 const PERMISSION_EXT = "/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts";
 const AUTOREVIEW = join(REPO_ROOT, "autoreview.ts");
 const FAKE_REVIEWER = "test/fake-reviewer.mjs";
+const FAKE_TESTER = join(REPO_ROOT, "test", "fake-tester.mjs");
 /** 开发方与真实评审统一用 ds4.1-flash。 */
 const MODEL = "opencode-go/deepseek-v4.1-flash";
 const THINKING = "low";
 const PROMPT = "修复 calc.py 中 add 的错误，新建 test_calc.py 并用 python3 运行通过。";
+/** 自动验收场景用：需求里带「## 验收标准」，不用起草。 */
+const PROMPT_WITH_CRITERIA = `${PROMPT}
+
+## 验收标准
+1. 操作：执行 python3 -c "from calc import add; print(add(2, 3))"
+   预期：输出 5`;
+/** 自动验收场景的玩具被测系统：把 pid 写进运行目录，假验收方的 kill 模式按它关掉系统。 */
+const TOY_SERVER = `import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { join } from "node:path";
+const port = Number(process.argv[2]);
+if (process.env.AUTOREVIEW_RUN_DIR) writeFileSync(join(process.env.AUTOREVIEW_RUN_DIR, "server.pid"), String(process.pid));
+createServer((req, res) => res.end(req.url === "/health" ? "ok" : "calc")).listen(port, "127.0.0.1", () => console.log("Listening on " + port));
+`;
 const SCENARIO_TIMEOUT_MS = 30 * 60 * 1000;
 /** 开发方停下这么久，既没开始评审也没继续干活，就判场景卡住。 */
 const STUCK_AFTER_MS = Number(process.env.AUTOREVIEW_E2E_STUCK_MS) || 60 * 1000;
@@ -178,7 +194,7 @@ function sessionMessages(file) {
     .map((entry) => ({ role: entry.message.role, text: textOf(entry.message.content) }));
 }
 
-const isRepairMessage = (message) => message.role === "user" && /^【自动评审 · 第 \d+ 次返修】/.test(message.text);
+const isRepairMessage = (message) => message.role === "user" && /^【自动(评审|验收) · 第 \d+ 次返修】/.test(message.text);
 const gitDirty = (repo) => spawnSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).stdout.trim() !== "";
 const readInput = (ctx, round) => {
   const path = join(ctx.dataDir, `review-input-${ctx.devSessionId}-r${round}.md`);
@@ -195,7 +211,8 @@ class Checks {
 /** 每个场景都要满足的通用标准 G1–G5。 */
 function commonChecks(ctx, def, check) {
   const status = statusOf(ctx.summary);
-  check.expect(`G1 结束状态为「${def.expect}」`, status === def.expect, `实际「${status}」`);
+  const expected = typeof def.expect === "string" ? status === def.expect : def.expect.test(status);
+  check.expect(`G1 结束状态为「${def.expectLabel ?? def.expect}」`, expected, `实际「${status}」`);
   check.expect("G2 零人工干预：驱动只发了 1 条需求", ctx.promptsSent === 1, `实际 ${ctx.promptsSent} 条`);
   const file = ctx.devSessionFiles[0];
   const repairs = sessionMessages(file).filter(isRepairMessage).length;
@@ -320,6 +337,42 @@ export const SCENARIOS = {
         `日志「${log}」`);
     },
   },
+  A8: {
+    name: "自动验收：验收方关掉被测系统，不打回开发方",
+    env: { FAKE_MODE: "pass", AUTOREVIEW_ACCEPTANCE_CMD: FAKE_TESTER, FAKE_ACC_MODE: "kill" },
+    flags: () => FAKE,
+    prompt: PROMPT_WITH_CRITERIA,
+    acceptance: ({ port }) => ({ start: `node server.mjs ${port}`, readyUrl: `http://127.0.0.1:${port}/health` }),
+    expect: /^暂停（无法验收：被测系统在验收途中被关掉了/,
+    expectLabel: "暂停（无法验收：被测系统在验收途中被关掉了…）",
+    async checks(ctx, check) {
+      check.expect("A8-1 没有打回开发方（返修 0 次）", ctx.state?.repairs === 0, `返修 ${ctx.state?.repairs ?? "（无状态）"} 次`);
+      check.expect("A8-2 总结里 G1 记为无法验证，写明不是开发方的问题",
+        /- G1：无法验证 —— 系统在验收途中被关掉了.*不是开发方的问题/.test(ctx.summary), "总结里没有对应的 G1 记录");
+      const calls = existsSync(join(ctx.fakeDir, "acc-calls.log")) ? readFileSync(join(ctx.fakeDir, "acc-calls.log"), "utf8").trim().split("\n").length : 0;
+      check.expect("A8-3 系统没了就不再重做、不换强模型（验收方只被调用 1 次）", calls === 1, `实际 ${calls} 次`);
+      check.expect("A8-4 被测系统的端口已经释放", !await portOpen(ctx.port), `端口 ${ctx.port} 还有程序在监听`);
+      check.expect("A8-5 没有进入评审", ctx.fakeCalls.length === 0, `评审被调用 ${ctx.fakeCalls.length} 次`);
+    },
+  },
+  A9: {
+    name: "自动验收：重做前程序重置数据",
+    env: { FAKE_MODE: "pass", AUTOREVIEW_ACCEPTANCE_CMD: FAKE_TESTER, FAKE_ACC_MODE: "lazy" },
+    flags: () => FAKE,
+    prompt: PROMPT_WITH_CRITERIA,
+    acceptance: ({ port, scene }) => ({
+      start: `node server.mjs ${port}`, readyUrl: `http://127.0.0.1:${port}/health`,
+      reset: `echo 重置 >> '${join(scene, "reset-count")}'`,
+    }),
+    expect: "完成",
+    checks(ctx, check) {
+      const resets = existsSync(join(ctx.scene, "reset-count")) ? readFileSync(join(ctx.scene, "reset-count"), "utf8").trim().split("\n").length : 0;
+      check.expect("A9-1 第 1 次验收和重做前各重置一次数据", resets === 2, `重置 ${resets} 次`);
+      check.expect("A9-2 重做后验收通过、进入评审", /^验收：通过/m.test(ctx.summary) && ctx.fakeCalls.length === 1,
+        `评审被调用 ${ctx.fakeCalls.length} 次`);
+      check.expect("A9-3 没有打回开发方", ctx.state?.repairs === 0, `返修 ${ctx.state?.repairs ?? "（无状态）"} 次`);
+    },
+  },
 };
 
 /** A1：评审会话唯一且复用；只评审了 1 次时直接补跑两次同一评审会话来确认复用。 */
@@ -376,7 +429,25 @@ async function closeChild(child) {
   killGroup(child, "SIGKILL");
 }
 
-function prepareScene(id, runDir) {
+async function freePort() {
+  return new Promise((resolvePort) => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => resolvePort(port));
+    });
+  });
+}
+
+const portOpen = (port) => new Promise((resolveOpen) => {
+  const socket = connect({ host: "127.0.0.1", port });
+  const done = (open) => { socket.destroy(); resolveOpen(open); };
+  socket.setTimeout(1000, () => done(false));
+  socket.once("connect", () => done(true));
+  socket.once("error", () => done(false));
+});
+
+async function prepareScene(id, def, runDir) {
   const scene = join(runDir, id);
   const repo = join(scene, `calc-${id.toLowerCase()}`);
   mkdirSync(repo, { recursive: true });
@@ -384,7 +455,15 @@ function prepareScene(id, runDir) {
   run("git", ["config", "user.email", "e2e@example.com"], repo);
   run("git", ["config", "user.name", "e2e"], repo);
   writeFileSync(join(repo, "calc.py"), "def add(a, b):\n    return a - b\n");
-  run("git", ["add", "calc.py"], repo);
+  const files = ["calc.py"];
+  // 自动验收场景：玩具被测系统和 .autoreview.json 一起提交，开发方的改动里不会混进它们。
+  const port = def.acceptance ? await freePort() : 0;
+  if (def.acceptance) {
+    writeFileSync(join(repo, "server.mjs"), TOY_SERVER);
+    writeFileSync(join(repo, ".autoreview.json"), `${JSON.stringify({ acceptance: def.acceptance({ scene, port }) }, null, 2)}\n`);
+    files.push("server.mjs", ".autoreview.json");
+  }
+  run("git", ["add", ...files], repo);
   run("git", ["commit", "-q", "-m", "init"], repo);
   // 测试进程的 HOME、凭据副本、会话和总结都放在场景目录；不改用户配置。
   const home = join(scene, "home");
@@ -399,14 +478,14 @@ function prepareScene(id, runDir) {
   mkdirSync(dirname(join(agentDir, permissionConfig)), { recursive: true });
   cpSync(join(sourceAgent, permissionConfig), join(agentDir, permissionConfig));
   return {
-    scene, repo, home, sessionRoot: join(agentDir, "sessions"), agentDir,
+    scene, repo, home, sessionRoot: join(agentDir, "sessions"), agentDir, port,
     fakeDir: join(scene, "fake"), acceptLog: join(scene, "accept-calls.log"),
     dataDir: join(home, ".pi-autoreview", basename(repo)),
   };
 }
 
 async function runScenario(id, def, runDir) {
-  const paths = prepareScene(id, runDir);
+  const paths = await prepareScene(id, def, runDir);
   const env = {
     ...process.env, HOME: paths.home, PI_CODING_AGENT_DIR: paths.agentDir,
     PI_CODING_AGENT_SESSION_DIR: paths.sessionRoot, FAKE_STATE_DIR: paths.fakeDir, ...def.env,
@@ -458,7 +537,7 @@ async function runScenario(id, def, runDir) {
   child.stderr.on("data", (chunk) => { ctx.stderr = `${ctx.stderr}${chunk}`.slice(-4000); });
 
   send({ type: "get_state", id: "gs" });
-  send({ type: "prompt", id: "p1", message: PROMPT });
+  send({ type: "prompt", id: "p1", message: def.prompt ?? PROMPT });
 
   const summaryPath = () => join(paths.dataDir, `${ctx.devSessionId}.md`);
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS;
@@ -485,13 +564,13 @@ async function runScenario(id, def, runDir) {
   return { ctx, end };
 }
 
-function evaluate(def, ctx, end) {
+async function evaluate(def, ctx, end) {
   const check = new Checks();
   let precondition;
   if (end.kind === "summary") {
     try {
       commonChecks(ctx, def, check);
-      def.checks(ctx, check);
+      await def.checks(ctx, check);
       precondition = def.precondition?.(ctx);
     } catch (error) {
       check.expect("场景检查执行完成", false, error.message);
@@ -532,7 +611,7 @@ async function main() {
       ctx = { notes: [], summary: "", modelErrors: [], stderr: "" };
       end = { kind: "error", message: tail(error.message, 300) };
     }
-    const verdict = evaluate(def, ctx, end);
+    const verdict = await evaluate(def, ctx, end);
     const scene = join(runDir, id);
     const keep = verdict.verdict !== "pass";
     if (!keep) rmSync(scene, { recursive: true, force: true });

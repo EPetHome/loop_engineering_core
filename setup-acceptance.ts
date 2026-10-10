@@ -64,6 +64,9 @@ function extras(root: string): { logs: string[]; guide?: string } {
   return { logs, guide };
 }
 
+/** 有常驻服务的项目都提醒一次：验收会写数据时要配 reset，否则从第 2 轮起数据不干净。 */
+export const RESET_NOTE = "验收会写数据库或文件的话，按【块 2】补上 reset（只重置数据、不重启服务）；不配的话从第 2 次验收起数据不干净，依赖初始状态的标准会验不了";
+
 /** 按项目文件推断类型、启动命令和端口；推不出来的写进 notes 让你补。 */
 export function detectProject(root: string, port: number): Detection {
   const notes: string[] = [];
@@ -90,6 +93,7 @@ export function detectProject(root: string, port: number): Detection {
       const script = frontend && scripts.dev ? "dev" : scripts.start ? "start" : scripts.dev ? "dev" : undefined;
       if (!script) {
         notes.push(`看起来是网页或接口项目（${frontend ?? backend}），但 package.json 里没有 start 或 dev 脚本：请按【块 2】补上 start`);
+        notes.push(RESET_NOTE);
         return { kind: "网页或接口", acceptance: { ...optional }, notes, needsBrowser: Boolean(frontend), hasPlaywright };
       }
       // vite 不认 PORT 环境变量，端口只能写进命令；其他常见框架都认 PORT。
@@ -98,6 +102,7 @@ export function detectProject(root: string, port: number): Detection {
       if (frontend === "react-scripts") env.BROWSER = "none";
       notes.push(`启动命令：${start}（package.json 的 ${script} 脚本，${frontend ?? backend}）`);
       notes.push(`端口：${port}（${frontend === "vite" ? "写进启动命令" : "通过 PORT 环境变量传给服务；服务不认 PORT 的话把端口写进 start"}）`);
+      notes.push(RESET_NOTE);
       return {
         kind: "网页或接口", acceptance: { start, readyUrl: url, env, ...optional }, notes, needsBrowser: Boolean(frontend), hasPlaywright,
       };
@@ -111,11 +116,13 @@ export function detectProject(root: string, port: number): Detection {
   if (existsSync(join(root, "manage.py"))) {
     const start = `python3 manage.py runserver 127.0.0.1:${port}`;
     notes.push(`启动命令：${start}（Django，manage.py）`);
+    notes.push(RESET_NOTE);
     return { kind: "网页或接口", acceptance: { start, readyUrl: `http://127.0.0.1:${port}/`, ...optional }, notes, needsBrowser: true, hasPlaywright: false };
   }
   const python = `${readText(join(root, "pyproject.toml"))}\n${readText(join(root, "requirements.txt"))}`;
   if (/fastapi|uvicorn|flask/i.test(python)) {
     notes.push(`看起来是 Python 接口项目，启动命令推断不出来：请按【块 2】补上 start（例如 uvicorn main:app --port ${port}）和 readyUrl（${url}）`);
+    notes.push(RESET_NOTE);
     return { kind: "网页或接口", acceptance: { ...optional }, notes, needsBrowser: false, hasPlaywright: false };
   }
   if (/\[project\.scripts\]|console_scripts/.test(python)) {

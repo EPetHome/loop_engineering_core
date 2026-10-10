@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
@@ -886,6 +887,59 @@ test("H12 接入提示：写法段缺失每会话提醒一次；无法验收、�
       assert.match(input, /其余全部通过，A2 没能自动验证/);
       assert.match(h.summary(), /人工验收 A2（操作：todo list）：程序没能自动验证，原因：标准写得含糊/);
       assert.match(h.notifications(), /A2 没能自动验证/);
+    } finally { h.close(); }
+  });
+});
+
+test("H13 自动验收被关掉或数据不干净：不打回开发方，暂停并说明下一步", async (t) => {
+  const requirement = "做一个待办接口\n## 验收标准\n1. 操作：GET /\n   预期：返回 ok\n2. 操作：GET /list\n   预期：返回 ok";
+  const freePort = (): Promise<number> => new Promise((resolvePort) => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as { port: number };
+      server.close(() => resolvePort(port));
+    });
+  });
+  const server = `import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { join } from "node:path";
+if (process.env.AUTOREVIEW_RUN_DIR) writeFileSync(join(process.env.AUTOREVIEW_RUN_DIR, "server.pid"), String(process.pid));
+createServer((q, r) => r.end("ok")).listen(Number(process.argv[2]), "127.0.0.1");
+`;
+
+  await t.test("验收方关掉被测系统：G1 无法验证、不打回、不评审，提示不是开发方的问题", async () => {
+    const port = await freePort();
+    const marker = JSON.stringify({ acceptance: { start: `node server.mjs ${port}`, readyUrl: `http://127.0.0.1:${port}/` } });
+    const h = fixture({ marker, files: { "server.mjs": server } });
+    const env = { ...ACC_ENV, FAKE_ACC_MODE: "kill" };
+    try {
+      h.run(h.event("SessionStart"), { env });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
+      h.write("file.txt", "base\nTODO\n");
+      const out = JSON.parse(h.run(h.delivered(), { env }).stdout);
+      assert.equal(out.decision, undefined, "不是开发方的错，不打回");
+      assert.match(out.systemMessage, /^自动评审暂停（无法验收：被测系统在验收途中被关掉了/);
+      assert.match(out.systemMessage, /不是开发方的问题[\s\S]*acceptance\.reset/);
+      const state = h.readState();
+      assert.equal(state.phase, "paused");
+      assert.equal(state.repairs, 0);
+      assert.ok(!existsSync(join(h.root, "fake", "calls.log")), "没有进入评审");
+      assert.match(h.summary(), /- G1：无法验证 —— 系统在验收途中被关掉了/);
+    } finally { h.close(); }
+  });
+
+  await t.test("没配 reset、验收方报数据不是初始状态：暂停并提示按【块 2】配 reset", () => {
+    const h = fixture({ marker: JSON.stringify({ acceptance: {} }) });
+    const env = { ...ACC_ENV, FAKE_ACC_MODE: "dirty" };
+    try {
+      h.run(h.event("SessionStart"), { env });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
+      h.write("file.txt", "base\nTODO\n");
+      const out = JSON.parse(h.run(h.delivered(), { env }).stdout);
+      assert.equal(out.decision, undefined);
+      assert.match(out.systemMessage, /无法验收：被测系统的数据不是初始状态/);
+      assert.match(out.systemMessage, /没有配置 acceptance\.reset[\s\S]*【块 2】/);
+      assert.equal(h.readState().repairs, 0);
     } finally { h.close(); }
   });
 });

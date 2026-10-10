@@ -12,7 +12,7 @@ import {
   acceptanceTodos, blockerHint, blockVersion, conventionNotice, conventionStatus, conventionTarget, extractBlock,
   GUIDE_DOC, manualHint, readBlock, SETUP_SCRIPT,
 } from "../onboarding.ts";
-import { detectProject, planSetup, upsertBlock } from "../setup-acceptance.ts";
+import { detectProject, planSetup, RESET_NOTE, upsertBlock } from "../setup-acceptance.ts";
 
 const SETUP = fileURLToPath(new URL("../setup-acceptance.ts", import.meta.url));
 const tempDir = (): string => mkdtempSync(join(tmpdir(), "autoreview-onboard-"));
@@ -31,6 +31,10 @@ test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   const block2 = JSON.parse(extractBlock(doc, 2)!);
   const config = parseAcceptanceConfig(block2.acceptance, "/p", {})!;
   assert.ok(config.start && config.readyUrl, "块 2 是一份能直接用的启动配置");
+  const resetExample = /\*\*验收会写数据\*\*[\s\S]*?```json\n([\s\S]*?)\n```/.exec(doc)?.[1];
+  assert.ok(resetExample, "块 2 讲了 reset，并给了能用的示例");
+  assert.equal(parseAcceptanceConfig(JSON.parse(resetExample!).acceptance, "/p", {})!.reset, "sh deploy/acceptance/reset-data.sh");
+  assert.match(doc, /只重置数据，\*\*不要重启或关闭服务\*\*/);
   assert.match(extractBlock(doc, 3)!, /playwright install chromium/);
   assert.equal(readBlock(1), block1);
   assert.equal(blockVersion("## 起草需求时写验收标准（自动验收）\n"), 0, "没有标记的旧版算第 0 版");
@@ -131,6 +135,8 @@ test("O6 接入命令的探测：常见项目推断启动命令和端口，推�
       if (item.note) assert.ok(detected.notes.some((note) => item.note!.test(note)), detected.notes.join("\n"));
       if (item.browser !== undefined) assert.equal(detected.needsBrowser, item.browser);
       if (item.files["logs/app.log"] !== undefined) assert.deepEqual(detected.acceptance.logs, ["logs/app.log"]);
+      // 有常驻服务的项目都提醒配 reset；命令行项目不提。
+      assert.equal(detected.notes.includes(RESET_NOTE), item.kind === "网页或接口", JSON.stringify(item.files));
       parseAcceptanceConfig(detected.acceptance, root, {});
     } finally { rmSync(root, { recursive: true, force: true }); }
   }

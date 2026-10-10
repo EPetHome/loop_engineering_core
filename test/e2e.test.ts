@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseAcceptanceConfig } from "../config.ts";
 import {
   acceptRunOf, deliveryNoteOf, hasParsedLatestRound, judge, overallOf, renderReport, statusOf, summaryFinished,
 } from "./e2e.mjs";
@@ -116,15 +117,18 @@ test("E5 驱动：假 pi 跑通通过 / 卡住有改动 / 没干活三种结局�
   const agent = join(root, "agent");
   mkdirSync(join(agent, "extensions", "pi-permission-system"), { recursive: true });
   writeFileSync(join(agent, "extensions", "pi-permission-system", "config.json"), "{}");
-  const cases = [
+  const cases: { mode: string; exit: number; verdict: RegExp; kept: boolean; reason?: RegExp; scenario?: string }[] = [
     { mode: "finish", exit: 0, verdict: /🟢 验收通过（1 通过/, kept: false },
     { mode: "dirty", exit: 1, verdict: /🔴 不通过（0 通过 \/ 1 不通过/, kept: true, reason: /有未评审的改动却没有开始评审/ },
     { mode: "idle", exit: 2, verdict: /⚪ 验收未完成（0 通过 \/ 0 不通过 \/ 1 无法判定/, kept: true, reason: /没有任何改动/ },
+    // 自动验收场景：玩具被测系统和 .autoreview.json 要提交进玩具仓库，配置能被解析。
+    { mode: "idle", exit: 2, verdict: /⚪ 验收未完成/, kept: true, scenario: "A8" },
   ];
   try {
     for (const item of cases) {
-      await t.test(item.mode, () => {
-        const res = spawnSync(process.execPath, [E2E, "A5"], {
+      await t.test(`${item.scenario ?? "A5"} ${item.mode}`, () => {
+        const scenario = item.scenario ?? "A5";
+        const res = spawnSync(process.execPath, [E2E, scenario], {
           encoding: "utf8", timeout: 60_000,
           env: { ...process.env, AUTOREVIEW_E2E_PI: pi, AUTOREVIEW_E2E_STUCK_MS: "1500", FAKE_PI_MODE: item.mode, PI_CODING_AGENT_DIR: agent },
         });
@@ -136,7 +140,16 @@ test("E5 驱动：假 pi 跑通通过 / 卡住有改动 / 没干活三种结局�
           assert.match(report, item.verdict);
           if (item.reason) assert.match(report, item.reason);
           if (item.mode === "finish") assert.match(report, /^- 🟢 A5-1 总结列出被改的文件$/m);
-          const scene = join(dirname(reportPath), "A5");
+          const scene = join(dirname(reportPath), scenario);
+          if (scenario === "A8") {
+            const repo = join(scene, "calc-a8");
+            const tracked = spawnSync("git", ["ls-files"], { cwd: repo, encoding: "utf8" }).stdout.split("\n");
+            assert.ok(tracked.includes("server.mjs") && tracked.includes(".autoreview.json"), tracked.join(","));
+            const marker = JSON.parse(readFileSync(join(repo, ".autoreview.json"), "utf8"));
+            const config = parseAcceptanceConfig(marker.acceptance, repo, {})!;
+            assert.match(config.start ?? "", /^node server\.mjs \d+$/);
+            assert.match(config.readyUrl ?? "", /^http:\/\/127\.0\.0\.1:\d+\/health$/);
+          }
           assert.equal(existsSync(scene), item.kept, item.kept ? "未通过要保留现场" : "通过要清理现场");
           if (item.kept) assert.match(report, new RegExp(`^- 现场：${scene.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
         } finally {
