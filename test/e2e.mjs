@@ -48,7 +48,7 @@ const stamp = () => new Date().toLocaleString("zh-CN", { hour12: false });
 // ───────────────────────── 纯函数：解析、终态、判定、报告（e2e.test.ts 覆盖） ─────────────────────────
 
 export const statusOf = (summary) => (/^- 状态：(.+)$/m.exec(summary ?? "")?.[1] ?? "").trim();
-export const acceptanceOf = (summary) => (/^- 验收：(.+)$/m.exec(summary ?? "")?.[1] ?? "").trim();
+export const acceptRunOf = (summary) => (/^- 验收命令：(.+)$/m.exec(summary ?? "")?.[1] ?? "").trim();
 export const countsOf = (summary) => {
   const match = /^- 评审 (\d+) 次，返修 (\d+) 次$/m.exec(summary ?? "");
   return { reviews: Number(match?.[1] ?? 0), repairs: Number(match?.[2] ?? 0) };
@@ -59,14 +59,14 @@ export function hasParsedLatestRound(state) {
   return Boolean(round && !round.failed && ["通过", "需返修"].includes(round.conclusion));
 }
 
-/** 总结到达终态：暂停，或完成且（需要时）验收已出结果。 */
-export function summaryFinished(summary, waitAcceptance = false) {
+/** 总结到达终态：暂停，或完成且（需要时）验收命令已出结果。 */
+export function summaryFinished(summary, waitAcceptRun = false) {
   const status = statusOf(summary);
   if (status.startsWith("暂停")) return true;
   if (!status.startsWith("完成")) return false;
-  if (!waitAcceptance) return true;
-  const acceptance = acceptanceOf(summary);
-  return acceptance !== "" && acceptance !== "进行中";
+  if (!waitAcceptRun) return true;
+  const acceptRun = acceptRunOf(summary);
+  return acceptRun !== "" && acceptRun !== "进行中";
 }
 
 /** 第 1 轮评审输入里的「开发方交付说明」，也就是触发评审时开发方的最后一条回复。 */
@@ -308,15 +308,15 @@ export const SCENARIOS = {
     env: { FAKE_MODE: "pass" },
     flags: (paths) => [...FAKE, "--autoreview-accept-cmd", `echo accepted >> '${paths.acceptLog}' && echo FAKE_ACCEPT_OUTPUT`],
     expect: "完成",
-    waitAcceptance: true,
+    waitAcceptRun: true,
     checks(ctx, check) {
-      const acceptance = acceptanceOf(ctx.summary);
-      check.expect("A7-1 总结里验收结果为「通过」", acceptance === "通过", `实际「${acceptance}」`);
+      const acceptRun = acceptRunOf(ctx.summary);
+      check.expect("A7-1 总结里验收命令结果为「通过」", acceptRun === "通过", `实际「${acceptRun}」`);
       const runs = existsSync(ctx.acceptLog) ? readFileSync(ctx.acceptLog, "utf8").split("\n").filter(Boolean).length : 0;
       check.expect("A7-2 验收命令恰好执行 1 次", runs === 1, `实际 ${runs} 次`);
       check.expect("A7-3 由评审完成自动触发", /第 \d+ 轮评审完成后自动执行/.test(ctx.summary), "总结里没有自动触发记录");
       const log = /^- 完整输出：(.+)$/m.exec(ctx.summary)?.[1] ?? "";
-      check.expect("A7-4 总结带验收输出，完整输出写进日志", ctx.summary.includes("FAKE_ACCEPT_OUTPUT") && existsSync(log),
+      check.expect("A7-4 总结带验收命令输出，完整输出写进日志", ctx.summary.includes("FAKE_ACCEPT_OUTPUT") && existsSync(log),
         `日志「${log}」`);
     },
   },
@@ -468,9 +468,9 @@ async function runScenario(id, def, runDir) {
     if (ctx.devSessionId && existsSync(summaryPath())) ctx.summary = readFileSync(summaryPath(), "utf8");
     if (interrupted) end = { kind: "interrupted" };
     else if (child.exitCode !== null || child.signalCode) end = { kind: "exited", code: child.exitCode ?? child.signalCode };
-    else if (ctx.summary && summaryFinished(ctx.summary, def.waitAcceptance)) end = { kind: "summary" };
+    else if (ctx.summary && summaryFinished(ctx.summary, def.waitAcceptRun)) end = { kind: "summary" };
     else if (Date.now() > deadline) end = { kind: "timeout" };
-    else if (!busy && settledAt > 0 && Date.now() - settledAt > STUCK_AFTER_MS && !/评审中|验收中/.test(ctx.statusText)) {
+    else if (!busy && settledAt > 0 && Date.now() - settledAt > STUCK_AFTER_MS && !/评审中|自动验收|验收命令执行中/.test(ctx.statusText)) {
       end = { kind: "stuck", dirty: gitDirty(paths.repo) };
     } else await sleep(POLL_MS);
   }

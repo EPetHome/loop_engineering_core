@@ -5,6 +5,7 @@
  * 评审输入拼接、总结渲染。所有函数可被 Node 直接单测。
  */
 import { createHash } from "node:crypto";
+import { formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria } from "./acceptance-core.ts";
 
 export const MARKER_DELIVERED = "【交付完成】";
 export const MARKER_DECISION = "【需要你决定】";
@@ -43,10 +44,12 @@ export type RoundRecord = ParsedReview & {
   durationMs: number;
   /** 本轮评审失败时的错误摘要。 */
   failed?: string;
+  /** 本轮的验收结果（配了 acceptance 时）。 */
+  acceptance?: AcceptanceRecord;
 };
 
-/** 验收命令的一次执行；只有 pi 扩展配置了验收命令时才有。 */
-export interface AcceptanceRecord {
+/** 验收命令（--autoreview-accept-cmd）的一次执行；与自动验收无关，只有 pi 扩展配置了验收命令时才有。 */
+export interface AcceptRunRecord {
   command: string;
   trigger: "auto" | "command";
   /** 触发时已完成的评审轮数。 */
@@ -74,7 +77,14 @@ export interface SummaryInput {
   changedFiles?: string[];
   gitStatusShort: string;
   notes?: string;
-  acceptance?: AcceptanceRecord;
+  /** 冻结的验收标准（配了 acceptance 时）。 */
+  criteria?: Criteria;
+  /** 最近一次验收没通过的条目。 */
+  unresolvedAcceptance?: string;
+  /** 需要你做的事（暂停时怎么继续、人工验收的条目、接入提醒），放在总结开头。 */
+  todos?: string[];
+  /** 最近一次验收命令的执行结果。 */
+  acceptRun?: AcceptRunRecord;
 }
 
 export interface ReviewInputOptions {
@@ -87,6 +97,8 @@ export interface ReviewInputOptions {
   diff: string;
   diffStat: string;
   untracked: string[];
+  /** 本轮验收结果一节（验收通过后才会评审）。 */
+  acceptance?: string;
 }
 
 /** 判断开发方最后一条回复的标记：只看最后一个非空行。 */
@@ -204,21 +216,29 @@ export function buildReviewInput(options: ReviewInputOptions): string {
   change.push("", "新增未跟踪文件：");
   change.push(...(options.untracked.length > 0 ? options.untracked.map((path) => `- ${path}`) : ["- 无"]));
   parts.push(change.join("\n"));
+  if (options.acceptance) parts.push(options.acceptance);
   return `${parts.join("\n\n")}\n`;
 }
 
-/** 由开发会话 id 推出固定的评审会话 id；格式不合法时退化为 sha256 派生的 UUID 形式。 */
-export function deriveReviewerSessionId(devSessionId: string): string {
-  const candidate = `autoreview-rev-${devSessionId}`;
+/**
+ * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、acc-strong 换强模型重验、crit 起草验收标准。
+ * 格式不合法时退化为 sha256 派生的 UUID 形式；评审沿用旧算法，已有评审会话 id 不变。
+ */
+export function deriveSessionId(kind: "rev" | "acc" | "acc-strong" | "crit", devSessionId: string): string {
+  const candidate = `autoreview-${kind}-${devSessionId}`;
   if (/^[A-Za-z0-9]$/.test(candidate) || /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/.test(candidate)) {
     return candidate;
   }
-  const digest = createHash("sha256").update(devSessionId).digest("hex").slice(0, 32);
+  const digest = createHash("sha256").update(kind === "rev" ? devSessionId : `${kind}:${devSessionId}`).digest("hex").slice(0, 32);
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
 }
 
-/** 验收结果的一句话写法，总结、通知和状态命令共用。 */
-export function acceptanceLabel(record: AcceptanceRecord): string {
+export function deriveReviewerSessionId(devSessionId: string): string {
+  return deriveSessionId("rev", devSessionId);
+}
+
+/** 验收命令结果的一句话写法，总结、通知和状态命令共用。 */
+export function acceptRunLabel(record: AcceptRunRecord): string {
   return record.result === "不通过" ? `不通过（退出码 ${record.exitCode ?? "未知"}）` : record.result;
 }
 
@@ -231,18 +251,27 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
-  if (input.acceptance) lines.push(`- 验收：${acceptanceLabel(input.acceptance)}`);
+  if (input.acceptRun) lines.push(`- 验收命令：${acceptRunLabel(input.acceptRun)}`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
+  if (input.todos && input.todos.length > 0) {
+    lines.push("## 需要你做的事");
+    lines.push(...input.todos.map((todo, index) => `${index + 1}. ${todo}`));
+  }
+  if (input.criteria) {
+    const source = input.criteria.source === "用户" ? "你写的" : "自动起草，未经你确认";
+    lines.push(`## 验收标准（${source}；第 ${input.criteria.version} 版）`);
+    lines.push(formatCriteria(input.criteria.items));
+  }
   const bullets = (items: string[], prefix = ""): void => {
     lines.push(...(items.length > 0 ? items.map((item) => `- ${prefix}${item}`) : ["- 无"]));
   };
-  const accept = input.acceptance;
+  const accept = input.acceptRun;
   if (accept) {
-    lines.push("## 验收");
+    lines.push("## 验收命令");
     lines.push(`- 命令：${accept.command}`);
     lines.push(`- 触发：${accept.trigger === "auto" ? `第 ${accept.round} 轮评审完成后自动执行` : "手动 /accept"}`);
     lines.push(`- 开始：${accept.startedAt}${accept.durationMs === undefined ? "" : `，耗时 ${Math.round(accept.durationMs / 1000)} 秒`}`);
-    lines.push(`- 结果：${acceptanceLabel(accept)}`);
+    lines.push(`- 结果：${acceptRunLabel(accept)}`);
     if (accept.detail) lines.push(`- 说明：${accept.detail}`);
     if (accept.logPath) lines.push(`- 完整输出：${accept.logPath}`);
     if (accept.outputTail?.trim()) lines.push("输出最后几行：", "```text", accept.outputTail.trimEnd(), "```");
@@ -261,19 +290,28 @@ export function renderSummary(input: SummaryInput): string {
     bullets(round.recheck);
     if (round.note) lines.push(`提示：${round.note}`);
     if (round.failed) lines.push(`错误：${round.failed}`);
+    if (round.acceptance) lines.push(...renderAcceptanceLines(round.acceptance));
   }
   if (input.status === "暂停" && input.unresolvedMustFix?.trim()) {
     lines.push("## 未解决的必修");
     lines.push(input.unresolvedMustFix.trim());
   }
+  if (input.status === "暂停" && input.unresolvedAcceptance?.trim()) {
+    lines.push("## 未通过的验收标准");
+    lines.push(input.unresolvedAcceptance.trim());
+  }
   if (input.changedFiles && input.changedFiles.length > 0) {
-    lines.push("## 评审期间变化的工作区文件");
+    lines.push(`## ${input.pauseReason === "验收期间工作区变了" ? "验收" : "评审"}期间变化的工作区文件`);
     lines.push(...input.changedFiles.map((file) => `- ${file}`));
   }
   lines.push("## 小问题汇总（待你决定）");
   bullets(input.rounds.flatMap((round) => round.minor.map((item) => `第 ${round.round} 轮：${item}`)));
   lines.push("## 需求疑问（待你决定）");
   bullets(input.rounds.flatMap((round) => round.questions.map((item) => `第 ${round.round} 轮：${item}`)));
+  if (input.rounds.some((round) => round.acceptance)) {
+    lines.push("## 验收额外发现（待你决定）");
+    bullets(input.rounds.flatMap((round) => (round.acceptance?.extra ?? []).map((item) => `第 ${round.round} 轮：${item}`)));
+  }
   lines.push("## 改动文件（git status --short）");
   lines.push(input.gitStatusShort.trim() || "（干净）");
   return `${lines.join("\n")}\n`;

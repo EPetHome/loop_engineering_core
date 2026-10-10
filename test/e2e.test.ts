@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  acceptanceOf, deliveryNoteOf, hasParsedLatestRound, judge, overallOf, renderReport, statusOf, summaryFinished,
+  acceptRunOf, deliveryNoteOf, hasParsedLatestRound, judge, overallOf, renderReport, statusOf, summaryFinished,
 } from "./e2e.mjs";
 
 const E2E = join(dirname(fileURLToPath(import.meta.url)), "e2e.mjs");
@@ -23,18 +23,18 @@ test("S1 R5/R6 结构化断言不再假绿", () => {
   assert.equal(hasParsedLatestRound({ rounds: [{ conclusion: "需返修" }] }), true);
 });
 
-test("E1 终态：暂停立即结束；完成时需要验收的场景要等验收出结果", () => {
-  const summary = (status: string, acceptance?: string) =>
-    `# 自动评审总结\n- 状态：${status}\n- 评审 1 次，返修 0 次\n${acceptance ? `- 验收：${acceptance}\n` : ""}`;
+test("E1 终态：暂停立即结束；完成时需要验收命令的场景要等它出结果", () => {
+  const summary = (status: string, acceptRun?: string) =>
+    `# 自动评审总结\n- 状态：${status}\n- 评审 1 次，返修 0 次\n${acceptRun ? `- 验收命令：${acceptRun}\n` : ""}`;
   assert.equal(summaryFinished(summary("进行中")), false);
   assert.equal(summaryFinished(summary("完成")), true);
   assert.equal(summaryFinished(summary("暂停（评审失败）")), true);
-  assert.equal(summaryFinished(summary("完成"), true), false, "完成但还没开始验收");
+  assert.equal(summaryFinished(summary("完成"), true), false, "完成但验收命令还没开始");
   assert.equal(summaryFinished(summary("完成", "进行中"), true), false);
   assert.equal(summaryFinished(summary("完成", "不通过（退出码 1）"), true), true);
-  assert.equal(summaryFinished(summary("暂停（达到返修上限）"), true), true, "暂停不会触发验收，不能干等");
+  assert.equal(summaryFinished(summary("暂停（达到返修上限）"), true), true, "暂停不会触发验收命令，不能干等");
   assert.equal(statusOf(summary("完成", "通过")), "完成");
-  assert.equal(acceptanceOf(summary("完成", "通过")), "通过");
+  assert.equal(acceptRunOf(summary("完成", "通过")), "通过");
 });
 
 test("E2 交付说明提取：用于判断开发方是否写了标记", () => {
