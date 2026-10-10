@@ -67,10 +67,19 @@ export function killGroup(pgid: number, signal: NodeJS.Signals = "SIGKILL"): voi
   try { process.kill(-pgid, signal); } catch { /* 已经退出 */ }
 }
 
+function ownerAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
  * 杀掉登记里仍活着的进程组并移出登记，返回被杀的条目。
+ * 默认只处理登记者已经死掉的条目（孤儿）；给了 ownerPid 时只处理这个进程登记的条目（信号处理用）。
  * 组长还在且启动时间对得上才杀；组长不在但组里还有后代也杀；进程号被别的进程复用时只移出登记。
- * 给了 ownerPid 时只处理这个进程登记的条目（信号处理用）。
  */
 export function reapProcs(file: string, options: { ownerPid?: number } = {}): ProcEntry[] {
   const entries = readProcs(file);
@@ -78,7 +87,8 @@ export function reapProcs(file: string, options: { ownerPid?: number } = {}): Pr
   const killed: ProcEntry[] = [];
   const kept: ProcEntry[] = [];
   for (const entry of entries) {
-    if (options.ownerPid !== undefined && entry.ownerPid !== options.ownerPid) {
+    const mine = options.ownerPid !== undefined ? entry.ownerPid === options.ownerPid : !ownerAlive(entry.ownerPid);
+    if (!mine) {
       kept.push(entry);
       continue;
     }

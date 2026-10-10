@@ -10,21 +10,23 @@
  * 任何异常都只暂停并放行（退出 0），绝不卡宿主、绝不输出非法 JSON。
  */
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "../acceptance-core.ts";
+import {
+  checkAcceptanceBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, readMarker,
+} from "../config.ts";
 import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { reapProcs, registerProc, unregisterProc } from "../procs.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
-  errorText, newReviewState, runReviewRound, tail,
+  checkedFingerprint, errorText, newReviewState, runReviewRound, tail,
   type ReviewConfig, type ReviewState,
 } from "../review.ts";
 
-const HERMES_BIN = "/Users/Admin/.hermes/node/bin";
-const MARKER_FILE = ".autoreview.json";
 const INTERRUPTED = "评审被中断（宿主超时或中断）";
 /** Stop Hook 内部评审保护时长上限（分钟）；默认与 pi 扩展一致。 */
 const DEFAULT_TIMEOUT_ENV = "AUTOREVIEW_REVIEW_TIMEOUT_MIN";
@@ -153,50 +155,13 @@ export function detectHost(event: HookEvent, env: NodeJS.ProcessEnv = process.en
   return "claude";
 }
 
-/** 从 cwd 向上找 .autoreview.json 所在目录；找不到返回 undefined。 */
-export function findProjectRoot(cwd: string | undefined): string | undefined {
-  let dir: string;
-  try {
-    dir = resolve(cwd?.trim() || process.cwd());
-  } catch {
-    return undefined;
-  }
-  for (;;) {
-    if (existsSync(join(dir, MARKER_FILE))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-}
-
-function nonNegativeInt(data: Record<string, unknown>, key: string, fallback: number): number {
-  const value = data[key];
-  if (value === undefined) return fallback;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new Error(`${MARKER_FILE} 的 ${key} 必须是非负整数`);
-  }
-  return value;
-}
-
-function nonEmptyString(data: Record<string, unknown>, key: string, fallback: string): string {
-  const value = data[key];
-  if (value === undefined) return fallback;
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${MARKER_FILE} 的 ${key} 必须是非空字符串`);
-  return value.trim();
-}
+export { findProjectRoot };
 
 /** 读 .autoreview.json（可以是 {}）；可选字段非法时抛错，由统一收口记暂停。 */
 export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): ReviewConfig {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(join(root, MARKER_FILE), "utf8"));
-  } catch (error) {
-    throw new Error(`无法解析 ${MARKER_FILE}：${errorText(error)}`);
-  }
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 必须是 JSON 对象`);
-  const data = raw as Record<string, unknown>;
+  const data = readMarker(root);
   const envTimeout = Number.parseInt(env[DEFAULT_TIMEOUT_ENV] ?? "", 10);
-  return {
+  const config: ReviewConfig = {
     maxRepairs: nonNegativeInt(data, "maxRepairs", DEFAULT_MAX_REPAIRS),
     reviewerModel: nonEmptyString(data, "reviewerModel", DEFAULT_MODEL),
     reviewerThinking: nonEmptyString(data, "reviewerThinking", DEFAULT_THINKING),
@@ -204,6 +169,15 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
       ? envTimeout : nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN),
     reviewerCmd: env.AUTOREVIEW_REVIEWER_CMD?.trim() ?? "",
   };
+  const acceptance = parseAcceptanceConfig(data.acceptance, root, env);
+  if (!acceptance) return config;
+  checkAcceptanceBudget(config.reviewTimeoutMin, acceptance);
+  return { ...config, acceptance };
+}
+
+/** 注入给开发方的约定：配了验收再追加验收约定。 */
+function conventionFor(config: ReviewConfig): string {
+  return config.acceptance ? `${CONVENTION}\n${ACCEPTANCE_CONVENTION}` : CONVENTION;
 }
 
 /** 状态和总结都放在 ~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.*。 */
@@ -389,6 +363,7 @@ async function writeSummary(
   const text = renderSummary({
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
+    criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
     unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes,
   });
@@ -434,7 +409,7 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
     return contextOutput("SessionStart", repository ? "仓库还没有提交，自动评审已关闭" : "不是 git 仓库，自动评审已关闭");
   }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput("SessionStart", CONVENTION);
+  return contextOutput("SessionStart", conventionFor(ctx.config));
 }
 
 /**
@@ -456,11 +431,37 @@ function resumeOnPrompt(ctx: HookContext, state: HookState): void {
   state.repairs = 0;
 }
 
+/** 引用文件的上限：最多 3 个，每个不超过 200KB，二进制不读。 */
+const MAX_REF_FILES = 3;
+const MAX_REF_BYTES = 200 * 1024;
+
+/**
+ * 宿主交给 Hook 的 prompt 不展开「@文件」（pi 会展开）：把能读到的引用文件原文附在后面，
+ * 需求原文和验收标准都按展开后的算，两个宿主与 pi 一致。读不到的 @ 当普通文字。
+ */
+export function expandFileRefs(prompt: string, cwd: string): string {
+  const blocks: string[] = [];
+  const seen = new Set<string>();
+  for (const match of prompt.matchAll(/(?:^|\s)@("[^"]+"|\S+)/g)) {
+    const ref = match[1].replace(/^"|"$/g, "").replace(/[，。,.;；:：)）]+$/, "");
+    if (!ref || seen.has(ref) || blocks.length >= MAX_REF_FILES) continue;
+    seen.add(ref);
+    const path = resolve(cwd, ref.startsWith("~/") ? join(homedir(), ref.slice(2)) : ref);
+    try {
+      const stat = statSync(path);
+      if (!stat.isFile() || stat.size > MAX_REF_BYTES) continue;
+      const text = readFileSync(path, "utf8");
+      if (!text.includes("\0")) blocks.push(`\n\n--- @${ref} ---\n${text}`);
+    } catch { /* 不是文件 */ }
+  }
+  return `${prompt}${blocks.join("")}`;
+}
+
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
   const state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return undefined;
   resumeOnPrompt(ctx, state);
-  const prompt = typeof event.prompt === "string" ? event.prompt : "";
+  const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.workDir);
   if (state.requirement === undefined && prompt.trim()) {
     state.requirement = prompt;
     const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
@@ -468,8 +469,14 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
     state.baselineUntracked = snap.untracked.map(({ path }) => path);
     state.baselineFingerprint = snap.fingerprint;
   }
+  // 验收标准只认你发来的消息：带「## 验收标准」就定下（或替换成）新一版。
+  const criteria = ctx.config.acceptance ? criteriaFromUser(prompt, state.criteria) : undefined;
+  if (criteria) {
+    state.criteria = criteria;
+    process.stderr.write(`[autoreview] 已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）\n`);
+  }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput("UserPromptSubmit", CONVENTION);
+  return contextOutput("UserPromptSubmit", conventionFor(ctx.config));
 }
 
 /**
@@ -511,7 +518,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   // 暂停状态不自动评审，等你再提交消息（UserPromptSubmit 解除，与 pi 扩展一致）。
   if (state.phase === "paused") return undefined;
   if (marker === "none") {
-    const baseline = state.lastFingerprint ?? state.baselineFingerprint;
+    const baseline = checkedFingerprint(state);
     if (!baseline) return undefined;
     const current = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
     if (current.fingerprint === baseline) {
@@ -552,6 +559,8 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       },
       writeSummary: (status) => writeSummary(ctx, state, status),
       saveState: () => saveStateFile(ctx.paths.state, state),
+      acceptanceDir: join(ctx.paths.dir, "acceptance", basename(ctx.paths.state, ".state.json")),
+      procsFile: ctx.paths.procs,
     });
     if (outcome.kind === "done") {
       state.phase = "done";

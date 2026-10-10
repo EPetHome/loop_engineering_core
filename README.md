@@ -1,17 +1,79 @@
 # pi 自动评审扩展（autoreview）
 
-给 pi 开发会话加一个 `-e`：开发方写完（写不写【交付完成】都行），扩展自动让独立评审检查改动；有必修就发回**同一个**开发会话返修，最多 3 次；没有必修或到达上限就停下，弹 macOS 通知并写总结。
+> ⚠️ **用自动验收的项目，先看 [README-验收标准.md](README-验收标准.md)**：要在你项目的 AGENTS.md 里追加一段「验收标准」写法，头脑风暴时模型才会把标准写进需求。
+
+给 pi 开发会话加一个 `-e`：开发方写完（写不写【交付完成】都行），扩展自动让独立评审检查改动；有必修就发回**同一个**开发会话返修，最多 4 次；没有必修或到达上限就停下，弹 macOS 通知并写总结。
+
+项目的 `.autoreview.json` 里配了 `acceptance` 时，评审之前还会先做一次**自动验收**：程序把系统真的跑起来，由验收方（默认 ds4.1-flash）按验收标准黑盒实操、留证据，程序逐条判定；不通过就带着复现步骤和系统日志打回同一个会话。见下面「自动验收」一节。
 
 同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。安装后只有带 `.autoreview.json` 的项目才生效。
 
 ## Claude Code / Codex 用法
 
-- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`。
-- 开发方最后一行写【交付完成】触发评审；有必修时 Hook 把返修消息发回同一会话，最多 `maxRepairs` 次。
+- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`acceptance`（自动验收，见下文）。
+- 开发方最后一行写【交付完成】触发评审；有必修时 Hook 把返修消息发回同一会话，最多 `maxRepairs` 次（验收打回和评审打回共用）。
 - 暂停（包括评审被宿主超时或中断）后，在原会话再发一条消息让开发方继续，自动评审就恢复，返修计数重新算。
+- 消息里的 `@文件` 由 Hook 展开（最多 3 个，每个 200KB 以内），需求原文和验收标准都按展开后的内容算，和 pi 一致。
 - 状态与总结写到 `~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.state.json` 和 `.md`，不写进项目。
 - Codex 首次安装后需要在 Codex 里用 `/hooks` 确认信任；未经信任时 Hook 不执行。
-- 联调可用假评审：`AUTOREVIEW_REVIEWER_CMD=/Users/Admin/Desktop/loop/test/fake-reviewer.mjs`、`FAKE_MODE=pass|pass-after-1|always-fix|fail|modify`。
+- 联调可用假评审：`AUTOREVIEW_REVIEWER_CMD=/Users/Admin/Desktop/loop/test/fake-reviewer.mjs`、`FAKE_MODE=pass|pass-after-1|always-fix|fail|modify`；假验收方 / 假起草方：`AUTOREVIEW_ACCEPTANCE_CMD=…/test/fake-tester.mjs`、`AUTOREVIEW_CRITERIA_CMD=…/test/fake-drafter.mjs`。
+
+## 自动验收（可选）
+
+在 `.autoreview.json` 里加 `acceptance` 一节才开启（pi 扩展也读同一个文件）。所有字段都可选，`"acceptance": {}` 就是「命令行项目、默认设置」：
+
+```json
+{
+  "acceptance": {
+    "start": "npm run start",
+    "readyUrl": "http://localhost:3000/health",
+    "logs": ["logs/app.log"],
+    "guide": "docs/how-to-use.md",
+    "timeoutMin": 20
+  }
+}
+```
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `start` | 无 | 被测系统启动命令（`sh -c`，在开发目录执行）。不写表示没有常驻服务，验收方直接调用命令 |
+| `readyUrl` | 无 | 就绪检查：GET 返回状态码小于 500 就算就绪；启动前也用它查端口是否被占 |
+| `readyLog` | 无 | 就绪检查：系统输出里出现这句就算就绪（和 `readyUrl` 二选一；都不写就等 2 秒看进程还在） |
+| `readyTimeoutSec` | `60` | 等就绪的上限 |
+| `logs` | `[]` | 还要收集的日志文件（相对 `.autoreview.json` 所在目录），只截取本轮新增的部分 |
+| `errorPatterns` | `ERROR` `FATAL` `Traceback` `Unhandled` `panic:` | 系统日志里出现这些就判 G2 不通过；写 `[]` 关掉 |
+| `ignorePatterns` | `[]` | 含这些文字的日志行不算错误（过滤已知噪音） |
+| `guide` | 无 | 项目操作说明文件（访问地址、测试账号等），原文交给验收方 |
+| `model` | `opencode-go/deepseek-v4.1-flash` | 验收方模型 |
+| `thinking` | 不传 | 验收方思考档位 |
+| `criteriaModel` | 评审模型 | 需求里没写标准时，起草标准用的模型 |
+| `timeoutMin` | `20` | 一轮里验收最多用多少分钟，从 `reviewTimeoutMin`（一轮总预算，默认 60）里扣，必须小于它 |
+| `env` | `{}` | 给被测系统的额外环境变量；系统还会拿到 `AUTOREVIEW_RUN_DIR`（本轮运行目录） |
+
+**一轮怎么跑**（先验收、再评审，共用一轮 60 分钟）：
+
+1. 开发方对标准提了异议（「A2：异议：…」）→ 暂停，等你决定。
+2. 取验收标准：你发的消息里有 `## 验收标准` 就用它；没有就由强模型只看需求原文起草一份。定下后整个会话冻结，只有你再发一条带 `## 验收标准` 的消息才替换。
+3. 程序查端口 → 启动被测系统 → 等就绪；系统输出逐行加时间戳写进 `system.log`。
+4. 验收方按标准黑盒实操，必须用运行目录里的工具留证据：`./ev A1 -- <命令>`（跑命令）、`./browser A1 步骤.json`（无头浏览器操作网页，需要 Playwright）。
+5. 程序关停系统、截取日志、扫错误，再逐条判定（见下表）。证据对不上时，在同一个验收会话里让它重做一次。
+6. 不通过 → 带复现步骤、预期、实际、相关日志和证据路径打回开发方，这一轮不评审；通过 → 评审，评审输入里附验收结果。
+
+| 层 | 结果 | 条件 |
+|---|---|---|
+| 单条 | 通过 | 按「操作」做了、结果符合「预期」，证据文件存在且「证据摘录」确实在里面 |
+| | 不通过 | 结果和预期不符，同样要有证据 |
+| | 无法验证 | 做不了，或者报了通过/不通过但证据对不上 |
+| 程序自带 | G1 | 系统能启动、就绪，并在验收过程中一直运行 |
+| | G2 | 验收期间系统日志里没有错误 |
+| 验收 | 不通过 | 有任何一条不通过（含 G1、G2）→ 打回 |
+| | 无法验收 | 有无法验证的条目 → 暂停交给你 |
+| | 通过 | 全部通过 → 进入评审 |
+| 整轮 | 完成 | 同一份工作区快照上验收通过、评审没有必修 |
+
+验收也会暂停的情况：端口在启动前就被占用（环境问题，不算开发方的错）、验收期间项目里的文件变了（把运行产物加进 `.gitignore`，或让系统写到 `$AUTOREVIEW_RUN_DIR`）、没有需求原文也没有标准、起草失败。暂停后你发消息让开发方继续就恢复。
+
+运行材料（`system.log`、`logs/`、`evidence/`、验收方输入、`result.json`）在 `~/.pi-autoreview/<项目目录名>/acceptance/<会话>/r<轮次>/`，不写进项目。
 
 ## 启动
 
@@ -60,10 +122,10 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" /Users/Admin/.local/bin/pi \
 
 | flag | 默认 | 用途 |
 |---|---|---|
-| `--autoreview-max-repairs` | `3` | 返修上限 |
+| `--autoreview-max-repairs` | `4` | 返修上限（验收打回和评审打回共用） |
 | `--autoreview-reviewer-model` | `openai-codex/gpt-6-astra` | 评审模型 |
 | `--autoreview-reviewer-thinking` | `xhigh` | 评审思考档位 |
-| `--autoreview-review-timeout-min` | `60` | 一轮评审（首次 + 1 次重试）共用的总时限（分钟） |
+| `--autoreview-review-timeout-min` | `60` | 一轮总时限（分钟）：验收（如果有）、评审首次和 1 次重试共用 |
 | `--autoreview-reviewer-cmd` | 空 | 仅测试：外部评审命令 |
 
 ## 规则边界
@@ -76,7 +138,12 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" /Users/Admin/.local/bin/pi \
 - 任何异常都是暂停，不是终止：不回滚、不删成果。再给开发方发消息继续干活就恢复自动评审，或输入 `/review` 立即接着评审；失败不会推进成功评审检查点。
 - 关闭或重载会取消正在跑的评审；恢复中断会话时不会自己重启评审，你发消息让开发方继续后恢复自动评审，或输入 `/review` 立即评审。
 - Claude Code / Codex 里评审期间 Hook 被中断或杀掉，评审子进程不会留在后台：收到中断信号时当场清理；被强杀时，下一次开会话或你发消息时先清理再恢复。
+- 自动验收只验标准里写了的内容；「完成」不等于就是你想要的，业务验收仍由你做。
+- 验收方是弱模型：通过与否由程序按证据判，不信它的自报结论；没有证据、摘录对不上都不算通过。
+- 黑盒是软约束：验收方拿不到 diff、工作目录在项目外，但它有 bash，技术上仍能读到源码。
+- 验收方的操作是真实执行的：被测系统只能指向测试环境（测试库、测试账号、沙箱支付），否则真发邮件、真扣款的后果会真的发生。
+- 被测系统、验收方、评审都登记了进程组，验收结束或被中断都会关停，不会占着端口。
 
 ## 总结
 
-写到 `~/.pi-autoreview/<项目目录名>/<开发会话id>.md`，每轮评审后覆盖写一次，包括各轮必修/小问题/需求疑问、未解决必修和改动文件。
+写到 `~/.pi-autoreview/<项目目录名>/<开发会话id>.md`，每轮评审后覆盖写一次，包括各轮必修/小问题/需求疑问、未解决必修和改动文件；配了自动验收时还有：验收标准（来源和版本）、每轮的逐条验收结果、未通过的验收标准、验收额外发现。

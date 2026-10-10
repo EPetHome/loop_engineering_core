@@ -7,11 +7,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "./acceptance-core.ts";
+import { checkAcceptanceBudget, loadAcceptanceConfig, type AcceptanceConfig } from "./config.ts";
 import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "./core.ts";
 import { createGitEvidence, GitReadError, type Exec } from "./git.ts";
+import { reapProcs } from "./procs.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, INTERRUPTED,
-  errorText, newReviewState, runReviewRound, tail,
+  checkedFingerprint, errorText, newReviewState, runReviewRound, tail,
   type ReviewConfig, type ReviewState,
 } from "./review.ts";
 
@@ -66,8 +69,15 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   };
   const evidence = (ctx: ExtensionContext, life: Lifecycle, signal?: AbortSignal) =>
     createGitEvidence(wrappedExec(life, signal), ctx.cwd, signal);
-  const summaryPath = (ctx: ExtensionContext): string =>
-    join(homedir(), ".pi-autoreview", basename(ctx.cwd), `${ctx.sessionManager.getSessionId()}.md`);
+  const dataDir = (ctx: ExtensionContext): string => join(homedir(), ".pi-autoreview", basename(ctx.cwd));
+  const summaryPath = (ctx: ExtensionContext): string => join(dataDir(ctx), `${ctx.sessionManager.getSessionId()}.md`);
+  const procsPath = (ctx: ExtensionContext): string => join(dataDir(ctx), `${ctx.sessionManager.getSessionId()}.procs.json`);
+  /** .autoreview.json 的 acceptance 一节；配置非法时抛错（评审路径里会变成暂停）。 */
+  const acceptanceConfig = (ctx: ExtensionContext): AcceptanceConfig | undefined => loadAcceptanceConfig(ctx.cwd);
+  /** 只用于注入约定和取标准：配置非法时当作没配，错误留给评审路径报。 */
+  const acceptanceEnabled = (ctx: ExtensionContext): boolean => {
+    try { return acceptanceConfig(ctx) !== undefined; } catch { return false; }
+  };
   const saveState = (life: Lifecycle): void => {
     checkLive(life);
     pi.appendEntry("autoreview-state", state);
@@ -112,6 +122,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
+      criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
     });
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
@@ -165,13 +176,19 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     return false;
   };
 
-  const currentConfig = (): ReviewConfig => ({
-    maxRepairs: positiveInt(flagString(pi, "autoreview-max-repairs", String(DEFAULT_MAX_REPAIRS)), DEFAULT_MAX_REPAIRS),
-    reviewerModel: flagString(pi, "autoreview-reviewer-model", DEFAULT_MODEL),
-    reviewerThinking: flagString(pi, "autoreview-reviewer-thinking", DEFAULT_THINKING),
-    reviewTimeoutMin: positiveInt(flagString(pi, "autoreview-review-timeout-min", String(DEFAULT_TIMEOUT_MIN)), DEFAULT_TIMEOUT_MIN),
-    reviewerCmd: flagString(pi, "autoreview-reviewer-cmd", ""),
-  });
+  const currentConfig = (ctx: ExtensionContext): ReviewConfig => {
+    const config: ReviewConfig = {
+      maxRepairs: positiveInt(flagString(pi, "autoreview-max-repairs", String(DEFAULT_MAX_REPAIRS)), DEFAULT_MAX_REPAIRS),
+      reviewerModel: flagString(pi, "autoreview-reviewer-model", DEFAULT_MODEL),
+      reviewerThinking: flagString(pi, "autoreview-reviewer-thinking", DEFAULT_THINKING),
+      reviewTimeoutMin: positiveInt(flagString(pi, "autoreview-review-timeout-min", String(DEFAULT_TIMEOUT_MIN)), DEFAULT_TIMEOUT_MIN),
+      reviewerCmd: flagString(pi, "autoreview-reviewer-cmd", ""),
+    };
+    const acceptance = acceptanceConfig(ctx);
+    if (!acceptance) return config;
+    checkAcceptanceBudget(config.reviewTimeoutMin, acceptance);
+    return { ...config, acceptance };
+  };
 
   const runReview = async (ctx: ExtensionContext, round: number, task: ReviewTask): Promise<void> => {
     const { lifecycle: life, controller } = task;
@@ -180,7 +197,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     const outcome = await runReviewRound({
       cwd, devSessionId: ctx.sessionManager.getSessionId(), round,
       deliveryNote: lastAssistantText(ctx.sessionManager.getEntries()),
-      state, config: currentConfig(),
+      state, config: currentConfig(ctx),
       exec: wrappedExec(life, signal),
       checkLive: () => checkLive(life, signal),
       onProgress: (text) => { if (live(life, signal)) ctx.ui.setStatus("autoreview", text); },
@@ -194,6 +211,8 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       writeSummary: (status) => writeSummary(ctx, status, life, undefined, undefined, undefined, undefined, signal),
       saveState: () => saveState(life),
       signal,
+      acceptanceDir: join(dataDir(ctx), "acceptance", ctx.sessionManager.getSessionId()),
+      procsFile: procsPath(ctx),
     });
     checkLive(life, signal);
     if (outcome.kind === "done") {
@@ -302,6 +321,9 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         `自动评审：${state.enabled ? "开启" : "关闭"}`, `状态：${phase}`,
         `评审 ${state.rounds.length} 次，返修 ${state.repairs} 次`,
         `评审会话：${state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId)}`, `总结：${summaryPath(ctx)}`,
+        `自动验收：${!acceptanceEnabled(ctx) ? "未配置" : state.criteria
+          ? `标准第 ${state.criteria.version} 版（${state.criteria.items.length} 条，${state.criteria.source === "用户" ? "你写的" : "自动起草"}）`
+          : "还没有标准（需求里没有「## 验收标准」时，第一次验收前自动起草）"}`,
       ].join("\n"), "info");
     },
   });
@@ -314,6 +336,8 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     reviewRunning = false;
     activeTask = undefined;
     try {
+      // 上次 pi 进程异常退出时留下的被测系统（登记者已死）先清掉。
+      reapProcs(procsPath(ctx));
       const entries = ctx.sessionManager.getEntries();
       for (let i = entries.length - 1; i >= 0; i -= 1) {
         const entry = entries[i];
@@ -339,6 +363,8 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     activeTask?.controller.abort();
     activeTask = undefined;
     reviewRunning = false;
+    // abort 后的异步关停未必来得及跑完：同步杀掉本进程登记的被测系统。
+    try { reapProcs(procsPath(ctx), { ownerPid: process.pid }); } catch { /* 尽力 */ }
     if (!interrupted) return;
     // 旧任务已失效；只有 shutdown 本身能在处理函数返回前使用仍有效的上下文。
     const cleanup: Lifecycle = { active: true };
@@ -377,9 +403,18 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         state.baselineFingerprint = snap.fingerprint;
         saveState(life);
       }
+      // 验收标准只认用户消息：返修消息里不会出现「## 验收标准」标题。
+      const acceptance = acceptanceEnabled(ctx);
+      const criteria = acceptance ? criteriaFromUser(event.prompt, state.criteria) : undefined;
+      if (criteria) {
+        state.criteria = criteria;
+        saveState(life);
+        ctx.ui.notify(`自动验收：已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`, "info");
+      }
       if (state.enabled) {
+        const convention = acceptance ? `${CONVENTION}\n${ACCEPTANCE_CONVENTION}` : CONVENTION;
         const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
-        event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${CONVENTION}` : CONVENTION;
+        event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }
     } catch (error) { await pauseForError(ctx, error, life); }
   });
@@ -397,7 +432,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       // 暂停状态不自动评审，等你发消息让开发方继续（before_agent_start 解除）或输入 /review。
       if (state.phase === "paused") return;
       if (marker === "none") {
-        const baseline = state.lastFingerprint ?? state.baselineFingerprint;
+        const baseline = checkedFingerprint(state);
         if (!state.enabled || !baseline) return;
         const current = await evidence(ctx, life).snapshot();
         checkLive(life);

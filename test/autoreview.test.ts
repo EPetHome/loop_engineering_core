@@ -1,13 +1,16 @@
-/** 无模型入口回归 G1–G9；所有运行产物只写 os.tmpdir()。 */
+/** 无模型入口回归 G1–G11；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import autoreview from "../autoreview.ts";
+import { CONVENTION } from "../core.ts";
 
 type Result = { stdout: string; stderr: string; code: number; killed: boolean };
 type Call = { command: string; args: string[]; options: { cwd?: string; signal?: AbortSignal; timeout?: number } };
@@ -74,6 +77,11 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown> 
       const call = { command, args, options: execOptions }; calls.push(call);
       if (basename(command) === "osascript") return notifier(call);
       if (command === "/fake-reviewer") { inputs.push(readFileSync(args[1], "utf8")); return reviewer(call); }
+      if (basename(command).startsWith("fake-")) {
+        // 假验收方 / 假起草方是真脚本：照常执行，验证证据工具和判定的整条链路。
+        const res = spawnSync(command, args, { cwd: execOptions.cwd, env: process.env, encoding: "utf8" });
+        return result(res.stdout || "", res.status ?? 1, res.stderr || "", Boolean(res.signal));
+      }
       assert.equal(basename(command), "git");
       const plain = args[0] === "-c" ? args.slice(2) : args;
       const injected = inject?.(plain, call);
@@ -534,6 +542,71 @@ test("G10 暂停后你再让开发方干活：自动评审恢复，返修计数�
       await h.begin(h.messages[0]);
       assert.equal(h.state().phase, "idle");
       assert.equal(h.state().repairs, 1);
+    } finally { await h.close(); }
+  });
+});
+
+test("G11 pi 扩展的自动验收：读 .autoreview.json、标准只认用户消息、不通过打回且不评审", async (t) => {
+  const accEnv = (root: string, extra: Record<string, string> = {}) => ({
+    AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),
+    AUTOREVIEW_CRITERIA_CMD: fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url)),
+    FAKE_STATE_DIR: join(root, "fake"), ...extra,
+  });
+  const withEnv = async (vars: Record<string, string>, body: () => Promise<void>) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try { await body(); } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  };
+  const requirement = "做待办\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加";
+
+  await t.test("通过：约定追加验收约定，记下标准，验收通过后评审输入带验收结果", async () => {
+    const h = harness();
+    try {
+      await withEnv(accEnv(h.root), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start");
+        const options: { appendSystemPrompt?: string } = {};
+        await h.event("before_agent_start", { prompt: requirement, systemPromptOptions: options });
+        assert.equal(options.appendSystemPrompt, `${CONVENTION}\n${ACCEPTANCE_CONVENTION}`);
+        assert.equal((h.state() as any).criteria.items.length, 1);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "done");
+        assert.match(h.inputs[0], /## 验收结果\n程序已经启动系统/);
+        assert.match(h.summary(), /验收：通过/);
+      });
+    } finally { await h.close(); }
+  });
+
+  await t.test("不通过：返修消息是自动验收的，评审没被调用；返修消息开工不会被当成新标准", async () => {
+    const h = harness();
+    try {
+      await withEnv(accEnv(h.root, { FAKE_ACC_FAIL: "A1" }), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start"); await h.begin(requirement);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了\n【交付完成】"); await h.event("agent_settled");
+        await until(() => h.messages.length === 1, "验收返修消息");
+        assert.match(h.messages[0], /^【自动验收 · 第 1 次返修】/);
+        assert.equal(h.inputs.length, 0, "验收不通过时不评审");
+        assert.equal(h.state().repairs, 1);
+        await h.begin(h.messages[0]);
+        assert.equal((h.state() as any).criteria.version, 1, "返修消息不会替换验收标准");
+      });
+    } finally { await h.close(); }
+  });
+
+  await t.test("acceptance 配置非法：评审时暂停并说明，不当作没配", async () => {
+    const h = harness();
+    try {
+      writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: { timeoutMin: "很久" } }));
+      await h.event("session_start"); await h.begin();
+      h.write("file.txt", "base\nTODO\n");
+      h.assistant(); await h.command(); await h.terminal();
+      assert.equal(h.state().phase, "paused");
+      assert.match(h.summary(), /acceptance\.timeoutMin 必须是非负整数/);
     } finally { await h.close(); }
   });
 });
