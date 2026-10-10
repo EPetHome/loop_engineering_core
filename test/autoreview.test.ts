@@ -457,3 +457,83 @@ test("G9 无标记自动评审：有改动就评审、无改动不动作、返�
     } finally { await h.close(); }
   });
 });
+
+test("G10 暂停后你再让开发方干活：自动评审恢复，返修计数重新算", async (t) => {
+  await t.test("会话在评审中异常关闭，恢复后发消息继续 → 下次停下自动评审", async () => {
+    const h = harness({ restored: { enabled: true, rounds: [], repairs: 0, phase: "reviewing" } });
+    try {
+      await h.event("session_start");
+      assert.equal(h.state().phase, "paused");
+      assert.ok(h.notifications.some((text) => text.includes("给开发方发消息继续干活即恢复自动评审")));
+      await h.begin("继续干活");
+      assert.equal(h.state().phase, "idle");
+      assert.equal(h.state().pauseReason, undefined);
+      assert.ok(h.notifications.some((text) => text.includes("自动评审：已恢复（上次暂停：评审被中断")));
+      h.write("file.txt", "base\nAFTER_RESUME\n");
+      h.assistant("继续做完了，不写标记");
+      await h.event("agent_settled"); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      assert.equal(h.inputs.length, 1);
+      assert.ok(h.inputs[0].includes("+AFTER_RESUME"));
+    } finally { await h.close(); }
+  });
+  await t.test("【需要你决定】暂停后你回复 → 下次停下自动评审，需求原文不变", async () => {
+    const h = harness();
+    try {
+      await h.event("session_start"); await h.begin();
+      h.assistant("卡住了\n【需要你决定】");
+      await h.event("agent_settled");
+      assert.equal(h.state().phase, "paused");
+      await h.begin("用方案 A");
+      assert.equal(h.state().phase, "idle");
+      h.write("file.txt", "base\nDECIDED\n");
+      h.assistant("按方案 A 做完了");
+      await h.event("agent_settled"); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      assert.ok(h.inputs[0].includes("+DECIDED"));
+      assert.ok(h.inputs[0].includes("ORIGINAL_REQUIREMENT"));
+    } finally { await h.close(); }
+  });
+  await t.test("达到返修上限暂停后你接手 → 返修计数重新算，必修照常发回", async () => {
+    const h = harness({ restored: { enabled: true, rounds: [], repairs: 3, phase: "paused", pauseReason: "达到返修上限" } });
+    try {
+      await h.event("session_start");
+      await h.begin("剩下的必修你接着修");
+      assert.equal(h.state().repairs, 0);
+      h.write("file.txt", "base\nTAKEOVER\n");
+      h.reviewer = () => result(FIX);
+      h.assistant("修了\n【交付完成】");
+      await h.event("agent_settled");
+      await until(() => h.messages.length === 1, "返修消息");
+      assert.match(h.messages[0], /第 1 次返修/);
+      assert.equal(h.state().repairs, 1);
+    } finally { await h.close(); }
+  });
+  await t.test("开会话时 git 探测异常 → 你发消息时重新探测并恢复", async () => {
+    const h = harness();
+    try {
+      h.inject = (args) => args.includes("--git-dir") ? result("", 1, "PROBE_FAILURE") : undefined;
+      await h.event("session_start");
+      assert.equal(h.state().phase, "paused");
+      h.inject = undefined;
+      await h.begin();
+      assert.equal(h.state().phase, "idle");
+      h.write("file.txt", "base\nREPROBED\n");
+      h.assistant("做完了");
+      await h.event("agent_settled"); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      assert.ok(h.inputs[0].includes("+REPROBED"));
+    } finally { await h.close(); }
+  });
+  await t.test("返修消息开工不算接手：返修计数不清零", async () => {
+    const h = harness();
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      h.reviewer = () => result(FIX); h.assistant(); await h.command();
+      await until(() => h.messages.length === 1, "返修消息");
+      await h.begin(h.messages[0]);
+      assert.equal(h.state().phase, "idle");
+      assert.equal(h.state().repairs, 1);
+    } finally { await h.close(); }
+  });
+});

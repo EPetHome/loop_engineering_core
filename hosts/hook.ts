@@ -2,7 +2,8 @@
  * hosts/hook.ts — Claude Code / Codex 共用的自动评审 Hook 入口。
  *
  * 一个可执行文件按 hook_event_name 分派：
- *   SessionStart / UserPromptSubmit → 注入开发约定；本会话第一次提交时记需求原文与基线
+ *   SessionStart / UserPromptSubmit → 注入开发约定；本会话第一次提交时记需求原文与基线；
+ *     暂停或评审中断后再提交即恢复自动评审
  *   Stop → 交付标记触发评审；有必修用 {"decision":"block","reason":…} 打回原会话
  *
  * 只有当前目录或某个上级目录存在 .autoreview.json 的项目才生效，普通会话零影响。
@@ -269,6 +270,13 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/** 锁文件存在且属于活进程；不存在、读不出或进程已死都算 false。 */
+function lockAlive(lockPath: string): boolean {
+  let pid: unknown;
+  try { pid = (JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown }).pid; } catch { pid = undefined; }
+  return typeof pid === "number" && Number.isInteger(pid) && pid > 0 && processAlive(pid);
+}
+
 /** 返回 acquired（新建）/ busy（活进程持有）/ stale（死进程残留）。 */
 function acquireLock(lockPath: string): "acquired" | "busy" | "stale" {
   try {
@@ -278,10 +286,7 @@ function acquireLock(lockPath: string): "acquired" | "busy" | "stale" {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
-  let pid: unknown;
-  try { pid = (JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown }).pid; } catch { pid = undefined; }
-  if (typeof pid === "number" && Number.isInteger(pid) && pid > 0 && processAlive(pid)) return "busy";
-  return "stale";
+  return lockAlive(lockPath) ? "busy" : "stale";
 }
 
 function releaseLock(lockPath: string): void {
@@ -402,9 +407,27 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
   return contextOutput("SessionStart", CONVENTION);
 }
 
+/**
+ * 你再提交消息就是接管：解除暂停、清掉被中断评审的残留（死锁、卡住的 reviewing），
+ * 下一次 Stop 照常自动评审，返修计数重新算。活进程还在评审时一律不动。
+ * Stop 的 block 续跑不经过 UserPromptSubmit；即使经过，那时 phase 已是 idle、锁已释放。
+ */
+function resumeOnPrompt(ctx: HookContext, state: HookState): void {
+  if (lockAlive(ctx.paths.lock)) return;
+  releaseLock(ctx.paths.lock);
+  if (state.phase !== "paused" && state.phase !== "reviewing") return;
+  const previous = state.phase === "paused" ? `暂停：${state.pauseReason ?? "未知原因"}` : INTERRUPTED;
+  process.stderr.write(`[autoreview] 已恢复自动评审（上次${previous}）\n`);
+  state.phase = "idle";
+  state.pauseReason = undefined;
+  state.awaitingRepair = false;
+  state.repairs = 0;
+}
+
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
   const state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return undefined;
+  resumeOnPrompt(ctx, state);
   const prompt = typeof event.prompt === "string" ? event.prompt : "";
   if (state.requirement === undefined && prompt.trim()) {
     state.requirement = prompt;
@@ -428,7 +451,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     await pause(ctx, state, "开发方需要你决定");
     return undefined;
   }
-  // 暂停状态不自动评审（与 pi 扩展一致）。
+  // 暂停状态不自动评审，等你再提交消息（UserPromptSubmit 解除，与 pi 扩展一致）。
   if (state.phase === "paused") return undefined;
   if (marker === "none") {
     const baseline = state.lastFingerprint ?? state.baselineFingerprint;

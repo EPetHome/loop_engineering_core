@@ -39,6 +39,7 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs R1
 - 本仓库是本地市场 `autoreview-local`，插件名 `autoreview`；Hook 命令直接执行 `hosts/hook.ts`，改代码立即生效。
 - 只有当前目录或某个上级目录存在 `.autoreview.json` 的项目才生效；字段可选：`maxRepairs`、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`。
 - 开发方最后一行写【交付完成】触发评审；不写标记但工作区有未评审改动时也会自动评审。有必修时 Stop Hook 返回 `{"decision":"block","reason":…}`，宿主在原会话继续返修，最多 `maxRepairs`（默认 3）次。
+- 暂停或评审被中断（死锁 + `reviewing`）后，用户再提交消息即恢复自动评审、返修计数清零：Hook 在 UserPromptSubmit 做，pi 扩展在 `before_agent_start` 做；活进程持锁时不动。
 - 状态与总结在 `~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.state.json` / `.md`。
 - Codex 首次安装后需要在 Codex 里用 `/hooks` 确认信任 Hook。
 - 测试用假评审：环境变量 `AUTOREVIEW_REVIEWER_CMD`（语义同 `autoreview-reviewer-cmd`）、`FAKE_MODE`、`FAKE_STATE_DIR`。
