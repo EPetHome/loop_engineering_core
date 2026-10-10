@@ -116,7 +116,7 @@ function defaultCallReviewer(deps: ReviewDeps) {
     if (config.reviewerCmd) {
       const raw = config.reviewerCmd;
       const cmd = raw.includes("/") && !isAbsolute(raw) ? resolve(EXT_DIR, raw) : raw;
-      return exec(cmd, [String(round), inputPath, reviewerSessionId], { cwd, timeout: timeoutMs, signal });
+      return exec(cmd, [String(round), inputPath, reviewerSessionId], { cwd, timeout: timeoutMs, signal, role: "评审" });
     }
     const args = [
       "--offline", "-p", "--session-id", reviewerSessionId, "--model", config.reviewerModel, "--thinking", config.reviewerThinking,
@@ -124,7 +124,7 @@ function defaultCallReviewer(deps: ReviewDeps) {
       "--tools", "read,grep,find,ls,bash", "-e", PERMISSION_EXT,
       "--append-system-prompt", REVIEW_PROMPT_PATH, `@${inputPath}`,
     ];
-    return exec(PI_BIN, args, { cwd, timeout: timeoutMs, signal });
+    return exec(PI_BIN, args, { cwd, timeout: timeoutMs, signal, role: "评审" });
   };
 }
 

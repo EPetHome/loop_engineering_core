@@ -8,6 +8,7 @@
 - `review.ts`：评审一轮的共用流程（快照、输入、调用重试、解析、指纹比较、完成/返修/暂停决策），pi 扩展与宿主 Hook 共用。
 - `hosts/hook.ts`：Claude Code / Codex 的 Hook 入口，按 `hook_event_name` 分派 SessionStart / UserPromptSubmit / Stop。
 - `git.ts`：git 快照、指纹、NUL 路径列表和 diff 取证，注入 exec 便于测试。
+- `procs.ts`：长进程登记（评审等子进程自成进程组，组号记到 `<宿主>-<会话id>.procs.json`），Hook 被杀后据此清理孤儿。
 - `core.ts`：纯函数（标记判断、评审解析、下一步决策、消息/输入/总结渲染）与开发约定原文，不导入 pi。
 - `review-prompt.md`：评审规则，通过 `--append-system-prompt` 原样交给评审。
 - `plugins/autoreview/`：插件清单与 `hooks/hooks.json`；根目录 `.claude-plugin/marketplace.json`、`.agents/plugins/marketplace.json` 是本地市场 `autoreview-local`。
@@ -40,6 +41,7 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs R1
 - 只有当前目录或某个上级目录存在 `.autoreview.json` 的项目才生效；字段可选：`maxRepairs`、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`。
 - 开发方最后一行写【交付完成】触发评审；不写标记但工作区有未评审改动时也会自动评审。有必修时 Stop Hook 返回 `{"decision":"block","reason":…}`，宿主在原会话继续返修，最多 `maxRepairs`（默认 3）次。
 - 暂停或评审被中断（死锁 + `reviewing`）后，用户再提交消息即恢复自动评审、返修计数清零：Hook 在 UserPromptSubmit 做，pi 扩展在 `before_agent_start` 做；活进程持锁时不动。
+- Stop Hook 收到 SIGTERM/SIGINT/SIGHUP 时先杀掉自己登记的子进程组再退出；被 SIGKILL 时，下一次 SessionStart / UserPromptSubmit / Stop（死锁）先清理登记里的残留进程（核对启动时间，防止进程号复用误杀）。
 - 状态与总结在 `~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.state.json` / `.md`。
 - Codex 首次安装后需要在 Codex 里用 `/hooks` 确认信任 Hook。
 - 测试用假评审：环境变量 `AUTOREVIEW_REVIEWER_CMD`（语义同 `autoreview-reviewer-cmd`）、`FAKE_MODE`、`FAKE_STATE_DIR`。

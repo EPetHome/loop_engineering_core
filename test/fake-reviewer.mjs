@@ -5,7 +5,7 @@
  * 环境：FAKE_MODE=pass|pass-after-1|always-fix|fail|modify
  *       FAKE_FIX_COUNTS=1,3（指定第几次调用返回必修，优先级高于 FAKE_MODE）
  *       FAKE_SLEEP_SECONDS=<秒>（调用后先睡，用于验证宿主 Hook 超时）
- *       FAKE_STATE_DIR=<目录>（记录调用次数与参数）
+ *       FAKE_STATE_DIR=<目录>（记录调用次数、参数和本进程 pid）
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,6 +22,7 @@ if (stateDir) {
   count = existsSync(countFile) ? Number.parseInt(readFileSync(countFile, "utf8"), 10) || 0 : 0;
   count += 1;
   writeFileSync(countFile, String(count));
+  writeFileSync(join(stateDir, "reviewer.pid"), String(process.pid));
 }
 
 if (mode === "fail") {

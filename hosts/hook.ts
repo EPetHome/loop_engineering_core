@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
+import { reapProcs, registerProc, unregisterProc } from "../procs.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
   errorText, newReviewState, runReviewRound, tail,
@@ -48,6 +49,8 @@ export interface HookPaths {
   state: string;
   summary: string;
   lock: string;
+  /** 长进程登记（评审、验收方、被测系统）。 */
+  procs: string;
 }
 
 interface HookContext {
@@ -62,8 +65,11 @@ interface HookContext {
   config: ReviewConfig;
 }
 
-/** 外部 exec：子进程 PATH 自己补 hermes 的 node；超时杀整个进程组并有界结束等待。 */
-export const childExec: Exec = (command, args, options) => new Promise<ExecResult>((resolvePromise) => {
+/**
+ * 外部 exec：子进程 PATH 自己补 hermes 的 node；超时杀整个进程组并有界结束等待。
+ * 带 role 的长进程登记到 procsFile：Hook 被宿主杀掉后，下一次事件据此清理。
+ */
+export const createChildExec = (procsFile?: string): Exec => (command, args, options) => new Promise<ExecResult>((resolvePromise) => {
   const env = { ...process.env, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}` };
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
@@ -71,11 +77,15 @@ export const childExec: Exec = (command, args, options) => new Promise<ExecResul
   let done = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reapTimer: ReturnType<typeof setTimeout> | undefined;
+  let registered: number | undefined;
   const finish = (code: number, killedFlag: boolean): void => {
     if (done) return;
     done = true;
     if (timer) clearTimeout(timer);
     if (reapTimer) clearTimeout(reapTimer);
+    if (registered !== undefined && procsFile) {
+      try { unregisterProc(procsFile, registered); } catch { /* 登记清理失败不影响结果 */ }
+    }
     resolvePromise({
       stdout: Buffer.concat(stdout).toString("utf8"),
       stderr: Buffer.concat(stderr).toString("utf8"),
@@ -92,6 +102,14 @@ export const childExec: Exec = (command, args, options) => new Promise<ExecResul
     process.stderr.write(`autoreview hook: 无法启动 ${command}：${errorText(error)}\n`);
     finish(1, false);
     return;
+  }
+  if (options.role && procsFile && child.pid) {
+    try {
+      registerProc(procsFile, child.pid, options.role, command);
+      registered = child.pid;
+    } catch (error) {
+      process.stderr.write(`autoreview hook: 进程登记失败：${errorText(error)}\n`);
+    }
   }
   child.stdout?.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
@@ -115,6 +133,8 @@ export const childExec: Exec = (command, args, options) => new Promise<ExecResul
     }, options.timeout);
   }
 });
+
+export const childExec: Exec = createChildExec();
 
 /**
  * 宿主识别：AUTOREVIEW_HOST 可强制指定；Codex 的 UserPromptSubmit/Stop 带 turn_id，
@@ -195,6 +215,7 @@ export function hookPaths(projectDir: string, host: string, sessionId: string): 
     state: join(dir, `${stem}.state.json`),
     summary: join(dir, `${stem}.md`),
     lock: join(dir, `${stem}.lock`),
+    procs: join(dir, `${stem}.procs.json`),
   };
 }
 
@@ -391,7 +412,16 @@ async function pause(
   await notify(`${basename(ctx.workDir)}：暂停（${reason}）`, ctx.exec);
 }
 
+/** 没有活进程持锁时，清掉上一个 Hook 被杀后留下的子进程。 */
+function reapOrphans(ctx: HookContext): void {
+  if (lockAlive(ctx.paths.lock)) return;
+  for (const entry of reapProcs(ctx.paths.procs)) {
+    process.stderr.write(`[autoreview] 已清理残留进程：${entry.role}（进程组 ${entry.pgid}）\n`);
+  }
+}
+
 async function sessionStart(ctx: HookContext): Promise<string | undefined> {
+  reapOrphans(ctx);
   const state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return undefined;
   const git = createGitEvidence(ctx.exec, ctx.workDir);
@@ -414,6 +444,8 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
  */
 function resumeOnPrompt(ctx: HookContext, state: HookState): void {
   if (lockAlive(ctx.paths.lock)) return;
+  // 锁的持有者死了，它起的评审等子进程可能还活着：先清掉，再算恢复。
+  reapOrphans(ctx);
   releaseLock(ctx.paths.lock);
   if (state.phase !== "paused" && state.phase !== "reviewing") return;
   const previous = state.phase === "paused" ? `暂停：${state.pauseReason ?? "未知原因"}` : INTERRUPTED;
@@ -438,6 +470,31 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   }
   saveStateFile(ctx.paths.state, state);
   return contextOutput("UserPromptSubmit", CONVENTION);
+}
+
+/**
+ * Stop 持锁期间宿主发来 SIGTERM/SIGINT/SIGHUP：杀掉本进程登记的子进程组，
+ * 状态记暂停「评审被中断」，释放锁再退出。SIGKILL 拦不住，交给下一次事件清理。
+ */
+function guardSignals(ctx: HookContext): () => void {
+  const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
+  const handler = (signal: NodeJS.Signals): void => {
+    try { reapProcs(ctx.paths.procs, { ownerPid: process.pid }); } catch { /* 尽力 */ }
+    try {
+      const state = loadStateFile(ctx.paths.state);
+      if (state.phase === "reviewing") {
+        state.phase = "paused";
+        state.pauseReason = INTERRUPTED;
+        state.awaitingRepair = false;
+        saveStateFile(ctx.paths.state, state);
+      }
+    } catch { /* 尽力 */ }
+    releaseLock(ctx.paths.lock);
+    process.stderr.write(`[autoreview] 收到 ${signal}，已清理子进程并暂停\n`);
+    process.exit(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143);
+  };
+  for (const signal of signals) process.on(signal, handler);
+  return () => { for (const signal of signals) process.off(signal, handler); };
 }
 
 /** 未交付提醒已按新规则移除：无标记但有改动时直接评审。 */
@@ -466,6 +523,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
 
   const lock = acquireLock(ctx.paths.lock);
   if (lock === "stale") {
+    reapProcs(ctx.paths.procs);
     releaseLock(ctx.paths.lock);
     await pause(ctx, state, INTERRUPTED);
     return undefined;
@@ -474,6 +532,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     process.stderr.write("autoreview hook: 已有评审在进行，放行\n");
     return undefined;
   }
+  const unguard = guardSignals(ctx);
   try {
     // 上一轮已完成后再次交付：按 pi 规则开新一轮，返修计数清零。
     if (state.phase === "done") state.repairs = 0;
@@ -509,6 +568,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     saveStateFile(ctx.paths.state, state);
     return JSON.stringify({ decision: "block", reason: outcome.message ?? "" });
   } finally {
+    unguard();
     releaseLock(ctx.paths.lock);
   }
 }
@@ -522,10 +582,10 @@ async function dispatch(event: HookEvent): Promise<string | undefined> {
   const host = detectHost(event);
   const sessionId = sessionIdOf(event);
   const workDir = resolve(event.cwd?.trim() || process.cwd());
+  const paths = hookPaths(workDir, host, sessionId);
   const ctx: HookContext = {
-    host, configRoot: root, workDir, sessionId,
-    paths: hookPaths(workDir, host, sessionId),
-    exec: childExec,
+    host, configRoot: root, workDir, sessionId, paths,
+    exec: createChildExec(paths.procs),
     config: loadConfig(root),
   };
   const kind = event.hook_event_name;

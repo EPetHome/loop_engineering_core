@@ -1,6 +1,6 @@
-/** hosts/hook.ts 无模型回归 H1–H8；所有运行产物只写 os.tmpdir()。 */
+/** hosts/hook.ts 无模型回归 H1–H10；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -592,5 +592,75 @@ test("H9 暂停或评审中断后再提交消息：恢复自动评审，返修�
       assert.equal(h.readState().repairs, 1);
       assert.ok(existsSync(lockOf(h)), "活锁不能被清掉");
     } finally { h.close(); }
+  });
+});
+
+test("H10 Stop Hook 被宿主杀掉：评审子进程不留孤儿", async (t) => {
+  const alive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  const waitFor = async (predicate: () => boolean, ms: number, what: string): Promise<void> => {
+    const deadline = Date.now() + ms;
+    while (!predicate() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(predicate(), `等待失败：${what}`);
+  };
+  /** 异步起 Stop Hook（假评审睡 30 秒），等评审进程起来后返回 Hook 子进程和评审 pid。 */
+  const startSlowStop = async (h: ReturnType<typeof fixture>) => {
+    h.run(h.event("SessionStart"));
+    h.run(h.event("UserPromptSubmit", { prompt: "需求" }));
+    h.write("file.txt", "base\nA\n");
+    const env: Record<string, string | undefined> = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    for (const key of ["CLAUDECODE", "CLAUDE_PLUGIN_ROOT", "CLAUDE_CODE_ENTRYPOINT", "AUTOREVIEW_HOST"]) delete env[key];
+    const hook = spawn(process.execPath, [HOOK], {
+      cwd: h.repo, stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...env, HOME: h.home, PATH: `${join(h.root, "bin")}:${process.env.PATH}`,
+        AUTOREVIEW_REVIEWER_CMD: FAKE, FAKE_MODE: "pass", FAKE_SLEEP_SECONDS: "30",
+        FAKE_STATE_DIR: join(h.root, "fake"),
+      },
+    });
+    hook.stdin.end(JSON.stringify(h.delivered()));
+    const pidFile = join(h.root, "fake", "reviewer.pid");
+    await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "", 10_000, "假评审启动");
+    const reviewer = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+    const procs = h.statePath().replace(/\.state\.json$/, ".procs.json");
+    await waitFor(() => existsSync(procs), 5000, "评审进程已登记");
+    const exited = new Promise<void>((resolveExit) => hook.on("exit", () => resolveExit()));
+    return { hook, reviewer, procs, exited };
+  };
+  await t.test("SIGTERM：Hook 先杀评审进程组，状态记「评审被中断」并释放锁", async () => {
+    const h = fixture();
+    try {
+      const { hook, reviewer, procs, exited } = await startSlowStop(h);
+      assert.ok(alive(reviewer));
+      hook.kill("SIGTERM");
+      await exited;
+      await waitFor(() => !alive(reviewer), 3000, "评审进程随 Hook 一起结束");
+      const state = h.readState();
+      assert.equal(state.phase, "paused");
+      assert.match(state.pauseReason, /评审被中断/);
+      assert.ok(!existsSync(h.statePath().replace(/\.state\.json$/, ".lock")), "锁已释放");
+      assert.ok(!existsSync(procs), "登记已清空");
+    } finally { h.close(); }
+  });
+  await t.test("SIGKILL：评审进程残留，下一次提交消息先清掉再恢复", async () => {
+    const h = fixture();
+    let reviewerPid = 0;
+    try {
+      const { hook, reviewer, procs, exited } = await startSlowStop(h);
+      reviewerPid = reviewer;
+      hook.kill("SIGKILL");
+      await exited;
+      await new Promise((r) => setTimeout(r, 200));
+      assert.ok(alive(reviewer), "SIGKILL 拦不住：评审进程还在（这正是要清理的孤儿）");
+      const res = h.run(h.event("UserPromptSubmit", { prompt: "继续" }));
+      assert.match(res.stderr, /已清理残留进程：评审/);
+      await waitFor(() => !alive(reviewer), 3000, "孤儿评审被清理");
+      assert.ok(!existsSync(procs), "登记已清空");
+      assert.equal(h.readState().phase, "idle");
+    } finally {
+      if (reviewerPid && alive(reviewerPid)) try { process.kill(-reviewerPid, "SIGKILL"); } catch { /* 已退出 */ }
+      h.close();
+    }
   });
 });

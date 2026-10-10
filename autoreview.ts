@@ -57,7 +57,8 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   const checkLive = (life: Lifecycle, signal?: AbortSignal): void => {
     if (!live(life, signal)) throw new Error(INTERRUPTED);
   };
-  const wrappedExec = (life: Lifecycle, signal?: AbortSignal): Exec => async (cmd, args, options) => {
+  // role 只给宿主 Hook 的进程登记用；pi 的子进程由 pi.exec 和会话关闭时的 abort 管。
+  const wrappedExec = (life: Lifecycle, signal?: AbortSignal): Exec => async (cmd, args, { role: _role, ...options }) => {
     checkLive(life, signal);
     const res = await pi.exec(cmd, args, options);
     checkLive(life, signal);
