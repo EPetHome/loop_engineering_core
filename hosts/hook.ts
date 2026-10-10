@@ -20,10 +20,11 @@ import {
 } from "../config.ts";
 import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
+import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { reapProcs, registerProc, unregisterProc } from "../procs.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
-  checkedFingerprint, errorText, newReviewState, runReviewRound, tail,
+  checkedFingerprint, errorText, lastAcceptance, newReviewState, runReviewRound, tail,
   type ReviewConfig, type ReviewState,
 } from "../review.ts";
 
@@ -288,8 +289,16 @@ function releaseLock(lockPath: string): void {
   try { rmSync(lockPath, { force: true }); } catch { /* 尽力 */ }
 }
 
-function contextOutput(eventName: string, additionalContext: string): string {
-  return JSON.stringify({ hookSpecificOutput: { hookEventName: eventName, additionalContext } });
+/** additionalContext 只给模型看；要让你看到的话放 systemMessage（只对 Claude Code 输出，Codex 是否支持未实测）。 */
+function contextOutput(ctx: HookContext, eventName: string, additionalContext: string, userText?: string): string {
+  const output: Record<string, unknown> = { hookSpecificOutput: { hookEventName: eventName, additionalContext } };
+  if (userText && ctx.host === "claude") output.systemMessage = userText;
+  return JSON.stringify(output);
+}
+
+/** Stop 时只给你看的一句话（不阻止停下）；不是 Claude Code 时不输出。 */
+function userOutput(ctx: HookContext, text: string | undefined): string | undefined {
+  return text && ctx.host === "claude" ? JSON.stringify({ systemMessage: text }) : undefined;
 }
 
 function contentText(content: unknown): string | undefined {
@@ -340,11 +349,12 @@ export function lastAssistantMessage(event: HookEvent): string {
   try { return lastAssistantFromTranscript(readFileSync(path, "utf8")); } catch { return ""; }
 }
 
-async function notify(body: string, exec: Exec): Promise<void> {
+/** SessionStart 只有 10 秒时限，那里发通知要传更短的 timeoutMs。 */
+async function notify(body: string, exec: Exec, timeoutMs = 15_000): Promise<void> {
   process.stderr.write(`[autoreview] ${body}\n`);
   try {
     const escaped = body.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    await exec("osascript", ["-e", `display notification "${escaped}" with title "自动评审"`], { cwd: homedir(), timeout: 15_000 });
+    await exec("osascript", ["-e", `display notification "${escaped}" with title "自动评审"`], { cwd: homedir(), timeout: timeoutMs });
   } catch { /* 通知失败不影响评审结果 */ }
 }
 
@@ -360,8 +370,12 @@ async function writeSummary(
     if (status !== "暂停") throw error;
     gitStatusShort = `（${errorText(error)}；无法确认是否干净）`;
   }
+  const todos = acceptanceTodos({
+    acceptance: ctx.config.acceptance, host: ctx.host, phase: state.phase, pauseHint: state.pauseHint,
+    criteria: state.criteria, lastAcceptance: lastAcceptance(state),
+  });
   const text = renderSummary({
-    cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`,
+    cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
     criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
@@ -371,12 +385,13 @@ async function writeSummary(
   writeFileSync(ctx.paths.summary, text);
 }
 
-/** 暂停：存状态、写总结、尽力通知；每一步失败都不阻断下一步。 */
+/** 暂停：存状态、写总结、尽力通知；每一步失败都不阻断下一步。hint 是给你的下一步。 */
 async function pause(
-  ctx: HookContext, state: HookState, reason: string, changedFiles?: string[], notes?: string,
+  ctx: HookContext, state: HookState, reason: string, changedFiles?: string[], notes?: string, hint?: string,
 ): Promise<void> {
   state.phase = "paused";
   state.pauseReason = reason;
+  state.pauseHint = hint;
   state.awaitingRepair = false;
   try { saveStateFile(ctx.paths.state, state); } catch (error) {
     process.stderr.write(`autoreview hook: 状态保存失败：${errorText(error)}\n`);
@@ -384,7 +399,8 @@ async function pause(
   try { await writeSummary(ctx, state, "暂停", reason, changedFiles, notes); } catch (error) {
     process.stderr.write(`autoreview hook: 总结写入失败：${errorText(error)}\n`);
   }
-  await notify(`${basename(ctx.workDir)}：暂停（${reason}）`, ctx.exec);
+  // Claude Code 里下一步走 systemMessage；其他宿主只有系统通知，就把下一步带上。
+  await notify(`${basename(ctx.workDir)}：暂停（${reason}）${hint && ctx.host !== "claude" ? `。${hint}` : ""}`, ctx.exec);
 }
 
 /** 没有活进程持锁时，清掉上一个 Hook 被杀后留下的子进程。 */
@@ -406,10 +422,19 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
     state.enabled = false;
     state.phase = "idle";
     saveStateFile(ctx.paths.state, state);
-    return contextOutput("SessionStart", repository ? "仓库还没有提交，自动评审已关闭" : "不是 git 仓库，自动评审已关闭");
+    return contextOutput(ctx, "SessionStart", repository ? "仓库还没有提交，自动评审已关闭" : "不是 git 仓库，自动评审已关闭");
+  }
+  // 开了验收但项目里没有（或是旧版）验收标准写法：每个会话提醒一次「复制【块 1】到哪」。
+  let notice: string | undefined;
+  if (ctx.config.acceptance && !state.conventionNoticed) {
+    try { notice = conventionNotice(ctx.config.acceptance.root, ctx.host); } catch { notice = undefined; }
+    if (notice) {
+      state.conventionNoticed = true;
+      if (ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
+    }
   }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput("SessionStart", conventionFor(ctx.config));
+  return contextOutput(ctx, "SessionStart", conventionFor(ctx.config), notice);
 }
 
 /**
@@ -427,6 +452,7 @@ function resumeOnPrompt(ctx: HookContext, state: HookState): void {
   process.stderr.write(`[autoreview] 已恢复自动评审（上次${previous}）\n`);
   state.phase = "idle";
   state.pauseReason = undefined;
+  state.pauseHint = undefined;
   state.awaitingRepair = false;
   state.repairs = 0;
 }
@@ -476,7 +502,7 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
     process.stderr.write(`[autoreview] 已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）\n`);
   }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput("UserPromptSubmit", conventionFor(ctx.config));
+  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
 }
 
 /**
@@ -566,12 +592,14 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       state.phase = "done";
       state.awaitingRepair = false;
       saveStateFile(ctx.paths.state, state);
-      await notify(`${basename(ctx.workDir)}：完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`, ctx.exec);
-      return undefined;
+      const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
+      await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
+      return userOutput(ctx, outcome.hint && `自动评审${done}。${outcome.hint}`);
     }
     if (outcome.kind === "paused") {
-      await pause(ctx, state, outcome.reason ?? "评审失败", outcome.changedFiles, outcome.notes);
-      return undefined;
+      const reason = outcome.reason ?? "评审失败";
+      await pause(ctx, state, reason, outcome.changedFiles, outcome.notes, outcome.hint);
+      return userOutput(ctx, outcome.hint && `自动评审暂停（${reason}）。${outcome.hint}`);
     }
     state.phase = "idle";
     saveStateFile(ctx.paths.state, state);

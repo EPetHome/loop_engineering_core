@@ -1,4 +1,4 @@
-/** hosts/hook.ts 无模型回归 H1–H11；所有运行产物只写 os.tmpdir()。 */
+/** hosts/hook.ts 无模型回归 H1–H12；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -808,6 +808,84 @@ test("H11 自动验收：先验收再评审，不通过直接打回，标准只�
       h.run(h.event("UserPromptSubmit", { prompt: "按原标准做" }), { env: ACC_ENV });
       assert.equal(h.readState().phase, "idle");
       assert.equal(h.readState().criteria.version, 1);
+    } finally { h.close(); }
+  });
+});
+
+test("H12 接入提示：写法段缺失每会话提醒一次；无法验收、部分验证都告诉你下一步", async (t) => {
+  const marker = JSON.stringify({ acceptance: {} });
+  const requirement = "做一个待办命令行\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜";
+  const reviewerCalled = (h: ReturnType<typeof fixture>) => existsSync(join(h.root, "fake", "calls.log"));
+
+  await t.test("Claude Code：项目没有写法段 → SessionStart 用 systemMessage 提醒复制【块 1】到 CLAUDE.md，只提醒一次", () => {
+    const h = fixture({ marker });
+    try {
+      const first = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
+      assert.match(first.systemMessage, /【块 1】复制到 .*\/repo\/CLAUDE\.md 末尾/);
+      assert.match(first.systemMessage, /setup-acceptance\.ts/);
+      assert.equal(first.hookSpecificOutput.additionalContext, `${CONVENTION}\n${ACCEPTANCE_CONVENTION}`);
+      const second = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
+      assert.equal(second.systemMessage, undefined, "同一会话只提醒一次");
+    } finally { h.close(); }
+  });
+
+  await t.test("Codex：没有 systemMessage，改走系统通知；写法段已是最新就不提醒", () => {
+    const h = fixture({ marker });
+    try {
+      const out = JSON.parse(h.run(h.event("SessionStart"), { env: { ...ACC_ENV, AUTOREVIEW_HOST: "codex" } }).stdout);
+      assert.equal(out.systemMessage, undefined);
+      assert.match(h.notifications(), /【块 1】复制到 .*\/repo\/AGENTS\.md 末尾/);
+      const block = readFileSync(join(fileURLToPath(new URL("..", import.meta.url)), "README-验收标准.md"), "utf8")
+        .split("````markdown\n")[1].split("\n````")[0];
+      h.write("AGENTS.md", `${block}\n`);
+      const fresh = JSON.parse(h.run(h.event("SessionStart", {}, "s2"), { env: ACC_ENV }).stdout);
+      assert.match(fresh.systemMessage ?? "", /CLAUDE\.md/, "Claude Code 读 CLAUDE.md，仍要提醒");
+      h.write("CLAUDE.md", "@AGENTS.md\n");
+      const done = JSON.parse(h.run(h.event("SessionStart", {}, "s3"), { env: ACC_ENV }).stdout);
+      assert.equal(done.systemMessage, undefined, "CLAUDE.md 引入了 AGENTS.md 且写法段最新，不再提醒");
+    } finally { h.close(); }
+  });
+
+  await t.test("没配启动却连不上：不打回开发方，暂停并提示复制【块 2】到 .autoreview.json；你发消息后恢复", () => {
+    const h = fixture({ marker });
+    const env = { ...ACC_ENV, FAKE_ACC_MODE: "unreachable" };
+    try {
+      h.run(h.event("SessionStart"), { env });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
+      h.write("file.txt", "base\nTODO\n");
+      const res = h.run(h.delivered(), { env });
+      const out = JSON.parse(res.stdout);
+      assert.equal(out.decision, undefined, "不是开发方的错，不打回");
+      assert.match(out.systemMessage, /^自动评审暂停（无法验收：没有配置怎么启动被测系统（A1、A2））。/);
+      assert.match(out.systemMessage, /【块 2】复制到 .*\/repo\/\.autoreview\.json/);
+      const state = h.readState();
+      assert.equal(state.phase, "paused");
+      assert.equal(state.repairs, 0);
+      assert.ok(!reviewerCalled(h));
+      assert.match(h.summary(), /## 需要你做的事\n1\. 把 .*【块 2】复制到/);
+      h.run(h.event("UserPromptSubmit", { prompt: "配好了，继续" }), { env });
+      assert.equal(h.readState().phase, "idle");
+      assert.equal(h.readState().pauseHint, undefined);
+    } finally { h.close(); }
+  });
+
+  await t.test("个别条目验证不了：不卡住，照常评审到完成，最后告诉你哪条要人工验收", () => {
+    const h = fixture({ marker });
+    const env = { ...ACC_ENV, FAKE_ACC_UNKNOWN: "A2" };
+    try {
+      h.run(h.event("SessionStart"), { env });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
+      h.write("file.txt", "base\nTODO\n");
+      const out = JSON.parse(h.run(h.delivered(), { env }).stdout);
+      assert.match(out.systemMessage, /^自动评审完成（评审 1 次，返修 0 次）。A2 没能自动验证，需要你人工验收/);
+      const state = h.readState();
+      assert.equal(state.phase, "done");
+      assert.equal(state.rounds[0].acceptance.verdict, "部分验证");
+      assert.ok(reviewerCalled(h));
+      const input = readFileSync(join(h.home, ".pi-autoreview", basename(h.repo), "review-input-claude-s1-r1.md"), "utf8");
+      assert.match(input, /其余全部通过，A2 没能自动验证/);
+      assert.match(h.summary(), /人工验收 A2（操作：todo list）：程序没能自动验证，原因：标准写得含糊/);
+      assert.match(h.notifications(), /A2 没能自动验证/);
     } finally { h.close(); }
   });
 });

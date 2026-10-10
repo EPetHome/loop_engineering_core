@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, criteriaFromUser, extractCriteria,
-  findObjections, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft, scanLogs, MAX_CRITERIA,
+  findObjections, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
 import { runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
@@ -84,14 +84,14 @@ test("A4 判定：证据核对、不通过、缺条目、G1/G2，按逐条结果
     return parsed.ok ? parsed.report : undefined;
   };
   const passed = judgeAcceptance({
-    criteria: criteriaItems, logErrors: [], runDir: "/run",
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true,
     report: report(["A1：通过", "- 证据摘录：「已添加」", "A2：通过", "- 证据摘录：买菜   牛奶"]),
     evidence: evidenceOf({ A1: block("A1", "已添加"), A2: block("A2", "买菜\n牛奶") }),
   });
   assert.equal(passed.verdict, "通过", "去掉引号、折叠空白后能在证据里找到");
 
   const lazy = judgeAcceptance({
-    criteria: criteriaItems, logErrors: [], runDir: "/run",
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true,
     report: report(["A1：通过", "- 证据摘录：已添加", "A2：通过", "- 证据摘录：编的"]),
     evidence: evidenceOf({ A2: block("A2", "买菜") }),
   });
@@ -101,7 +101,7 @@ test("A4 判定：证据核对、不通过、缺条目、G1/G2，按逐条结果
   assert.match(lazy.items[1].detail, /证据摘录在 \/run\/evidence\/A2\.txt 里找不到/);
 
   const failed = judgeAcceptance({
-    criteria: criteriaItems, logErrors: ["[12:00] ERROR boom"], runDir: "/run",
+    criteria: criteriaItems, logErrors: ["[12:00] ERROR boom"], runDir: "/run", hasService: true,
     report: report(["A1：通过", "- 证据摘录：已添加", "A2：不通过", "- 复现：list", "- 预期：有买菜", "- 实际：空", "- 证据摘录：（空）"]),
     evidence: evidenceOf({ A1: block("A1", "已添加"), A2: block("A2", "（空）") }),
   });
@@ -110,18 +110,20 @@ test("A4 判定：证据核对、不通过、缺条目、G1/G2，按逐条结果
   assert.match(failed.note!, /自报「通过」，程序按逐条结果判为「不通过」/);
 
   const missing = judgeAcceptance({
-    criteria: criteriaItems, logErrors: [], runDir: "/run",
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true,
     report: report(["A1：通过", "- 证据摘录：已添加"]), evidence: evidenceOf({ A1: block("A1", "已添加") }),
   });
   assert.equal(missing.verdict, "无法验收");
-  assert.equal(missing.reason, "A2 无法验证");
+  assert.equal(missing.blocker, "验收方");
+  assert.equal(missing.reason, "验收方没按要求留证据或输出格式不对（A2）");
 
-  const down = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", evidence: () => undefined, systemFailure: "系统启动后就退出了" });
+  const down = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, evidence: () => undefined, systemFailure: "系统启动后就退出了" });
   assert.equal(down.verdict, "不通过");
   assert.deepEqual(down.items.map((item) => item.id), ["G1"]);
 
-  const silent = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", evidence: () => undefined, reportError: "两次都无法解析" });
+  const silent = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, evidence: () => undefined, reportError: "两次都无法解析" });
   assert.equal(silent.verdict, "无法验收");
+  assert.equal(silent.blocker, "验收方");
   assert.match(silent.items[0].detail, /两次都无法解析/);
 });
 
@@ -278,7 +280,7 @@ test("A10 没有常驻服务（命令行项目）+ 偷懒的验收方：证据�
   } finally { h.close(); }
 });
 
-test("A11 验收方输出乱写两次：无法验收；需求里没标准时先起草一次并冻结", async () => {
+test("A11 验收方一直乱写：重做一次、再换强模型重验一次，仍不行才无法验收；需求里没标准时先起草一次并冻结", async () => {
   const h = await harness({}, { FAKE_ACC_MODE: "garbage" });
   try {
     h.state.requirement = "做一个待办命令行";
@@ -288,8 +290,12 @@ test("A11 验收方输出乱写两次：无法验收；需求里没标准时先�
     assert.equal(stage.kind, "judged");
     if (stage.kind !== "judged") return;
     assert.equal(stage.record.verdict, "无法验收");
+    assert.equal(stage.record.blocker, "验收方");
+    assert.equal(stage.record.escalated, true);
     assert.match(stage.record.items[0].detail, /无法解析/);
-    assert.equal(h.calls().length, 2);
+    const calls = h.calls();
+    assert.equal(calls.length, 3);
+    assert.match(calls[2].split("\t")[2], /^autoreview-acc-strong-/, "第三次换强模型另开会话");
     const again = await runAcceptanceStage(h.deps({ round: 2, runDir: join(h.root, "acc", "r2") }));
     assert.equal(again.kind, "judged");
     const drafts = readFileSync(join(h.root, "fake", "draft-calls.log"), "utf8").trim().split("\n");
@@ -356,4 +362,52 @@ test("A15 弱模型常见写法：粗体编号、粗体字段名、三级标题�
   }
   assert.deepEqual(extractCriteria("## 验收标准\n**A1.** 操作：add\n**2.** 操作：list")?.map((item) => item.text), ["操作：add", "操作：list"]);
   assert.deepEqual(findObjections("**A2**：异议：标准写错了"), ["A2"]);
+});
+
+test("A16 无法验证分原因：没配启动时连不上改判、缺工具、个别含糊 → 部分验证、全部含糊 → 无法验收", () => {
+  const report = (lines: string[]) => {
+    const parsed = parseAcceptanceReport(["## 结论：不通过", "## 逐条结果", ...lines].join("\n"));
+    assert.ok(parsed.ok);
+    return parsed.ok ? parsed.report : undefined;
+  };
+  const refused = report(["A1：不通过", "- 实际：Connection refused", "- 证据摘录：已添加", "A2：通过", "- 证据摘录：买菜"]);
+  const evidence = evidenceOf({ A1: block("A1", "已添加"), A2: block("A2", "买菜") });
+  const noService = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: false, report: refused, evidence });
+  assert.equal(noService.verdict, "无法验收", "没配启动时连不上不打回开发方");
+  assert.equal(noService.blocker, "没配启动");
+  assert.match(noService.items[0].detail, /不算开发方的错/);
+  const withService = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, report: refused, evidence });
+  assert.equal(withService.verdict, "不通过", "配了启动还连不上，照常算不通过");
+
+  const tool = judgeAcceptance({
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true,
+    report: report(["A1：无法验证", "- 原因：工具报错", "A2：通过", "- 证据摘录：买菜"]),
+    evidence: evidenceOf({ A1: block("A1", `${NO_PLAYWRIGHT}：…`), A2: block("A2", "买菜") }),
+  });
+  assert.equal(tool.blocker, "缺工具");
+
+  const vague = report(["A1：无法验证", "- 原因：标准写得含糊", "A2：通过", "- 证据摘录：买菜"]);
+  const partial = judgeAcceptance({ criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, report: vague, evidence });
+  assert.equal(partial.verdict, "部分验证");
+  assert.equal(partial.reason, "A1 没能自动验证，需要人工验收");
+  assert.equal(partial.blocker, undefined);
+  const allVague = judgeAcceptance({
+    criteria: criteriaItems, logErrors: [], runDir: "/run", hasService: true, evidence,
+    report: report(["A1：无法验证", "- 原因：含糊", "A2：无法验证", "- 原因：含糊"]),
+  });
+  assert.equal(allVague.verdict, "无法验收");
+  assert.equal(allVague.blocker, "其他");
+});
+
+test("A17 换强模型重验能救回来：第一位乱写，强模型按要求做完 → 通过，并记下换过模型", async () => {
+  const h = await harness({}, { FAKE_ACC_MODE: "garbage", FAKE_ACC_STRONG: "pass" });
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "通过");
+    assert.equal(stage.record.escalated, true);
+    assert.equal(h.calls().length, 3);
+    assert.match(readFileSync(join(stage.record.runDir, "strong.md"), "utf8"), /上一位验收方没按要求/);
+  } finally { h.close(); }
 });

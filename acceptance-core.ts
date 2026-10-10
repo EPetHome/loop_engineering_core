@@ -43,6 +43,12 @@ export interface ParsedAcceptance {
   extra: string[];
 }
 
+/**
+ * 无法验证的原因，决定后续怎么走：验收方没做好 → 换强模型重验；没配启动、缺工具 → 暂停并告诉你复制哪一块；
+ * 其他（标准含糊、环境不通）→ 个别条目留给人工，全部都这样才暂停。
+ */
+export type UnknownCause = "验收方" | "没配启动" | "缺工具" | "其他";
+
 export interface AcceptanceItemResult {
   id: string;
   /** 标准原文；G1/G2 是程序自带的全局标准。 */
@@ -52,17 +58,24 @@ export interface AcceptanceItemResult {
   detail: string;
   /** 证据有问题（可以让验收方重做一次）。 */
   evidenceProblem?: boolean;
+  /** 无法验证时的原因分类。 */
+  cause?: UnknownCause;
 }
 
 export interface AcceptanceRecord {
-  verdict: "通过" | "不通过" | "无法验收";
+  /** 部分验证：其余全部通过，只有个别条目没法自动验证（留给你人工验收），照常进入评审。 */
+  verdict: "通过" | "部分验证" | "不通过" | "无法验收";
   items: AcceptanceItemResult[];
   logErrors: string[];
   extra: string[];
   runDir: string;
   durationMs: number;
-  /** 无法验收的原因。 */
+  /** 无法验收、部分验证的说明。 */
   reason?: string;
+  /** 无法验收时卡在哪类原因上。 */
+  blocker?: UnknownCause;
+  /** 验收方没做好，换强模型重验过。 */
+  escalated?: boolean;
   note?: string;
 }
 
@@ -220,6 +233,26 @@ export interface JudgeInput {
   systemFailure?: string;
   logErrors: string[];
   runDir: string;
+  /** 配置了怎么启动被测系统（acceptance.start）。 */
+  hasService: boolean;
+}
+
+const UNREACHABLE = /连不上|无法连接|连接被拒|拒绝连接|connection refused|ECONNREFUSED|failed to connect|couldn't connect|could not connect|ERR_CONNECTION/i;
+const NEEDS_URL = /https?:\/\/|localhost|127\.0\.0\.1/i;
+/** browser.mjs 找不到 Playwright 时写进证据的固定文字。 */
+export const NO_PLAYWRIGHT = "缺少 Playwright";
+const BLOCKER_TEXT: Record<UnknownCause, string> = {
+  验收方: "验收方没按要求留证据或输出格式不对",
+  没配启动: "没有配置怎么启动被测系统",
+  缺工具: "缺少浏览器工具 Playwright",
+  其他: "全部标准都没能验证",
+};
+
+/** 验收方报「无法验证」时归类：缺工具 → 没配启动（标准或原因里要连系统，却没配 start）→ 其他。 */
+function classifyUnknown(criterion: CriterionItem, reason: string, evidence: string | undefined, hasService: boolean): UnknownCause {
+  if (evidence?.includes(NO_PLAYWRIGHT) || /playwright|浏览器工具/i.test(reason)) return "缺工具";
+  if (!hasService && (UNREACHABLE.test(reason) || NEEDS_URL.test(reason) || NEEDS_URL.test(criterion.text))) return "没配启动";
+  return "其他";
 }
 
 const G1_TEXT = "系统能按配置启动、就绪，并在验收过程中一直运行";
@@ -234,7 +267,9 @@ function failDetail(item: ReportItem, evidencePath: string): string {
 
 /**
  * 逐条判定。通过/不通过都必须有工具写下的证据，且证据摘录确实在证据文件里，否则降为无法验证。
- * 有不通过（含 G1/G2）→ 不通过；否则有无法验证 → 无法验收；否则通过。
+ * 没配启动时「连不上」不算开发方的错：报了不通过也改判为无法验证。
+ * 有不通过（含 G1/G2）→ 不通过；无法验证里有验收方没做好、没配启动、缺工具，或者全部都没验证 → 无法验收；
+ * 其余只有个别条目无法验证 → 部分验证（留给人工）；全部通过 → 通过。
  */
 export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "durationMs"> {
   const items: AcceptanceItemResult[] = [];
@@ -245,22 +280,31 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
     for (const criterion of input.criteria) {
       const reported = input.report.items.find((item) => item.id === criterion.id);
       const evidencePath = `${input.runDir}/evidence/${criterion.id}.txt`;
+      const content = input.evidence(criterion.id);
       if (!reported) {
-        items.push({ ...criterion, verdict: "无法验证", detail: "验收方没有报告这一条", evidenceProblem: true });
+        items.push({ ...criterion, verdict: "无法验证", detail: "验收方没有报告这一条", evidenceProblem: true, cause: "验收方" });
         continue;
       }
       if (reported.verdict === "无法验证") {
-        items.push({ ...criterion, verdict: "无法验证", detail: `原因：${reported.fields["原因"] || "验收方没写原因"}` });
+        const reason = reported.fields["原因"] || "验收方没写原因";
+        items.push({ ...criterion, verdict: "无法验证", detail: `原因：${reason}`, cause: classifyUnknown(criterion, reason, content, input.hasService) });
         continue;
       }
-      const content = input.evidence(criterion.id);
       const excerpt = normalize(reported.fields["证据摘录"] ?? "");
       let problem = "";
       if (!content || !content.includes(`=== ${criterion.id} `)) problem = `没有用 ./ev 或 ./browser 留下证据（${evidencePath}）`;
       else if (excerpt.length < 2) problem = "没有写证据摘录";
       else if (!normalize(content).includes(excerpt)) problem = `证据摘录在 ${evidencePath} 里找不到`;
       if (problem) {
-        items.push({ ...criterion, verdict: "无法验证", detail: `原因：报告「${reported.verdict}」，但${problem}`, evidenceProblem: true });
+        items.push({ ...criterion, verdict: "无法验证", detail: `原因：报告「${reported.verdict}」，但${problem}`, evidenceProblem: true, cause: "验收方" });
+        continue;
+      }
+      const observed = [reported.fields["实际"], reported.fields["证据摘录"], reported.fields["相关日志"]].join("\n");
+      if (reported.verdict === "不通过" && !input.hasService && UNREACHABLE.test(observed)) {
+        items.push({
+          ...criterion, verdict: "无法验证", cause: "没配启动",
+          detail: "原因：连不上被测系统，但 .autoreview.json 没有配置怎么启动它（验收方报了不通过，程序改判为无法验证，不算开发方的错）",
+        });
         continue;
       }
       items.push({
@@ -270,7 +314,7 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
     }
   } else if (!input.systemFailure) {
     for (const criterion of input.criteria) {
-      items.push({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}` });
+      items.push({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}`, cause: "验收方" });
     }
   }
   if (input.logErrors.length > 0) {
@@ -278,11 +322,18 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   }
   const failed = items.some((item) => item.verdict === "不通过");
   const unknown = items.filter((item) => item.verdict === "无法验证");
-  const verdict = failed ? "不通过" : unknown.length > 0 ? "无法验收" : "通过";
+  const ids = unknown.map((item) => item.id).join("、");
+  const blocker = (["没配启动", "缺工具", "验收方"] as const).find((cause) => unknown.some((item) => item.cause === cause))
+    ?? (unknown.length > 0 && unknown.length === input.criteria.length ? "其他" : undefined);
+  const verdict = failed ? "不通过" : unknown.length === 0 ? "通过" : blocker ? "无法验收" : "部分验证";
   const record: Omit<AcceptanceRecord, "durationMs"> = {
     verdict, items, logErrors: input.logErrors, extra: input.report?.extra ?? [], runDir: input.runDir,
   };
-  if (verdict === "无法验收") record.reason = `${unknown.map((item) => item.id).join("、")} 无法验证`;
+  if (verdict === "无法验收") {
+    record.blocker = blocker;
+    record.reason = `${BLOCKER_TEXT[blocker!]}（${ids}）`;
+  }
+  if (verdict === "部分验证") record.reason = `${ids} 没能自动验证，需要人工验收`;
   if (input.systemFailure && input.report === undefined) record.note = "系统没能正常运行，其余标准没有实测";
   const claimed = input.report?.conclusion ?? "";
   if (claimed && !claimed.startsWith(verdict)) record.note = `验收方自报「${claimed}」，程序按逐条结果判为「${verdict}」`;
@@ -320,7 +371,8 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
   const env = [
     `- 你的当前目录（运行目录）：${options.runDir}`,
     `- 被测项目目录：${options.workDir}（只在这里运行命令，不要读源码）`,
-    options.baseUrl ? `- 系统地址：${options.baseUrl}（程序已经启动好）` : "- 系统没有常驻服务：直接调用命令来验收",
+    options.baseUrl ? `- 系统地址：${options.baseUrl}（程序已经启动好）`
+      : "- 系统没有常驻服务：直接调用命令来验收；标准要访问网址却连不上时，报「无法验证」，原因写「连不上被测系统」",
     options.systemLog ? `- 系统输出日志（实时写入）：${options.systemLog}` : "",
     ...options.logFiles.map((file) => `- 系统日志：${file}`),
     "- 留证据跑命令：./ev A1 -- <命令>；在项目目录里跑：./ev A1 --cwd <项目目录> -- <命令>",
@@ -375,9 +427,12 @@ export function buildAcceptanceRepairMessage(repairRound: number, record: Accept
 
 /** 评审输入里的验收结果：告诉评审不用再启动系统。 */
 export function renderAcceptanceForReview(record: AcceptanceRecord): string {
+  const summary = record.verdict === "部分验证"
+    ? `程序已经启动系统、按验收标准黑盒实测：其余全部通过，${record.reason}；验收期间系统日志没有错误。`
+    : "程序已经启动系统、按验收标准黑盒实测，全部通过，验收期间系统日志没有错误。";
   return [
     "## 验收结果",
-    "程序已经启动系统、按验收标准黑盒实测，全部通过，验收期间系统日志没有错误。你不需要再启动系统或跑端到端测试。",
+    `${summary}你不需要再启动系统或跑端到端测试。`,
     ...record.items.map((item) => `- ${item.id}：${item.verdict} —— ${item.text.split("\n")[0]}`),
   ].join("\n");
 }
@@ -385,6 +440,7 @@ export function renderAcceptanceForReview(record: AcceptanceRecord): string {
 /** 总结里一轮验收的几行。 */
 export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   const lines = [`验收：${record.verdict}（耗时 ${Math.round(record.durationMs / 1000)} 秒；材料：${record.runDir}）`];
+  if (record.escalated) lines.push("验收方：第一位没按要求做，已换强模型重验");
   if (record.reason) lines.push(`验收说明：${record.reason}`);
   if (record.note) lines.push(`验收提示：${record.note}`);
   for (const item of record.items) {

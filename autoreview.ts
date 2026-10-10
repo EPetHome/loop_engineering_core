@@ -11,10 +11,11 @@ import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "./acceptance-core.ts";
 import { checkAcceptanceBudget, loadAcceptanceConfig, type AcceptanceConfig } from "./config.ts";
 import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "./core.ts";
 import { createGitEvidence, GitReadError, type Exec } from "./git.ts";
+import { acceptanceTodos, conventionNotice } from "./onboarding.ts";
 import { reapProcs } from "./procs.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, INTERRUPTED,
-  checkedFingerprint, errorText, newReviewState, runReviewRound, tail,
+  checkedFingerprint, errorText, lastAcceptance, newReviewState, runReviewRound, tail,
   type ReviewConfig, type ReviewState,
 } from "./review.ts";
 
@@ -91,11 +92,12 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     else if (gitAvailability === "available" && !state.enabled) text = "自动评审：已关闭";
     ctx.ui.setStatus("autoreview", text);
   };
+  /** detail 只显示在 pi 界面里（下一步怎么做），系统通知保持简短。 */
   const notifyUser = async (
-    ctx: ExtensionContext, body: string, type: "info" | "warning", life: Lifecycle, signal?: AbortSignal,
+    ctx: ExtensionContext, body: string, type: "info" | "warning", life: Lifecycle, signal?: AbortSignal, detail?: string,
   ): Promise<void> => {
     if (!live(life, signal)) return;
-    try { ctx.ui.notify(body, type); } catch { /* 无 UI 时仍尝试系统通知 */ }
+    try { ctx.ui.notify(detail ? `${body}\n${detail}` : body, type); } catch { /* 无 UI 时仍尝试系统通知 */ }
     if (!live(life, signal)) return;
     try {
       const escaped = body.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -117,12 +119,18 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     }
     checkLive(life, signal);
     const devSessionId = ctx.sessionManager.getSessionId();
+    let acceptance: AcceptanceConfig | undefined;
+    try { acceptance = acceptanceConfig(ctx); } catch { acceptance = undefined; }
+    const todos = acceptanceTodos({
+      acceptance, host: "pi", phase: state.phase, pauseHint: state.pauseHint,
+      criteria: state.criteria, lastAcceptance: lastAcceptance(state),
+    });
     const text = renderSummary({
       cwd: ctx.cwd, devSessionId,
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
-      criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
+      criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance, todos,
     });
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
@@ -132,11 +140,12 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   /** 错误处理的副作用逐个隔离；任何一步失败都不能挡住后面的通知。 */
   const pause = async (
     ctx: ExtensionContext, reason: string, life: Lifecycle,
-    unresolvedMustFix = state.unresolvedMustFix, changedFiles?: string[], notes?: string, signal?: AbortSignal,
+    unresolvedMustFix = state.unresolvedMustFix, changedFiles?: string[], notes?: string, signal?: AbortSignal, hint?: string,
   ): Promise<void> => {
     if (!live(life, signal)) return;
     state.phase = "paused";
     state.pauseReason = reason;
+    state.pauseHint = hint;
     state.unresolvedMustFix = unresolvedMustFix;
     state.awaitingRepair = false;
     const errors: string[] = [];
@@ -146,7 +155,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       await writeSummary(ctx, "暂停", life, reason, unresolvedMustFix, changedFiles, notes, signal);
     } catch (error) { errors.push(`总结写入失败：${errorText(error)}`); }
     if (!live(life, signal)) return;
-    await notifyUser(ctx, `${basename(ctx.cwd)}：暂停（${reason}）${errors.length ? `；${errors.join("；")}` : ""}`, "warning", life, signal);
+    await notifyUser(ctx, `${basename(ctx.cwd)}：暂停（${reason}）${errors.length ? `；${errors.join("；")}` : ""}`, "warning", life, signal, hint);
   };
   const pauseForError = async (ctx: ExtensionContext, error: unknown, life: Lifecycle, signal?: AbortSignal): Promise<void> => {
     if (!live(life, signal)) return;
@@ -220,11 +229,11 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       state.awaitingRepair = false;
       saveState(life);
       updateStatus(ctx, life);
-      await notifyUser(ctx, `${basename(cwd)}：完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`, "info", life, signal);
+      await notifyUser(ctx, `${basename(cwd)}：完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`, "info", life, signal, outcome.hint);
       return;
     }
     if (outcome.kind === "paused") {
-      await pause(ctx, outcome.reason!, life, state.unresolvedMustFix, outcome.changedFiles, outcome.notes, signal);
+      await pause(ctx, outcome.reason!, life, state.unresolvedMustFix, outcome.changedFiles, outcome.notes, signal, outcome.hint);
       return;
     }
     // 后面的保存与消息交接是同步的，异步准备完成前不能提前解锁 phase。
@@ -353,6 +362,19 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       if (state.phase === "paused") {
         ctx.ui.notify(`自动评审：上次暂停（${state.pauseReason ?? "未知原因"}），给开发方发消息继续干活即恢复自动评审，或输入 /review 立即评审`, "info");
       }
+      // 开了验收但项目里没有（或是旧版）验收标准写法：每个会话提醒一次「复制【块 1】到哪」。
+      if (!state.conventionNoticed) {
+        let notice: string | undefined;
+        try {
+          const acceptance = acceptanceConfig(ctx);
+          notice = acceptance ? conventionNotice(acceptance.root, "pi") : undefined;
+        } catch { notice = undefined; }
+        if (notice) {
+          ctx.ui.notify(notice, "info");
+          state.conventionNoticed = true;
+          saveState(life);
+        }
+      }
     } catch (error) { await pauseForError(ctx, error, life); }
   });
 
@@ -385,6 +407,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         const reason = state.pauseReason ?? "未知原因";
         state.phase = "idle";
         state.pauseReason = undefined;
+        state.pauseHint = undefined;
         state.awaitingRepair = false;
         state.repairs = 0;
         saveState(life);

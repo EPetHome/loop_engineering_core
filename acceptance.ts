@@ -2,7 +2,7 @@
  * acceptance.ts — 自动验收一轮的流程，经 review.ts 由 pi 扩展与宿主 Hook 共用。
  *
  * 负责：异议检查 → 取或起草验收标准（冻结）→ 查端口、启动被测系统、等就绪、记系统日志
- * → 调验收方（证据有问题在同一会话重做 1 次）→ 关停系统、截取日志、扫错误 → 程序逐条判定。
+ * → 调验收方（证据有问题在同一会话重做 1 次，还不行换强模型重验 1 次）→ 关停系统、截取日志、扫错误 → 程序逐条判定。
  * 被测系统自成进程组并登记，任何退出路径都会关停；判定交给 acceptance-core.ts 的纯函数。
  */
 import { spawn } from "node:child_process";
@@ -61,7 +61,8 @@ export interface AcceptanceDeps {
 
 export type AcceptanceStage =
   | { kind: "judged"; record: AcceptanceRecord }
-  | { kind: "paused"; reason: string; notes?: string };
+  /** hint：给你看的下一步（怎么处理、处理完怎么继续）。 */
+  | { kind: "paused"; reason: string; notes?: string; hint: string };
 
 const shellQuote = (text: string): string => `'${text.replace(/'/g, "'\\''")}'`;
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -84,7 +85,7 @@ function execError(result: ExecResult, label: string): string {
 // —— 验收标准 ——
 
 /** 已有标准直接用；需求里有「## 验收标准」就采用；否则由起草模型只看需求原文起草，冻结进状态。 */
-async function ensureCriteria(deps: AcceptanceDeps): Promise<Criteria | { reason: string; notes?: string }> {
+async function ensureCriteria(deps: AcceptanceDeps): Promise<Criteria | { reason: string; notes?: string; hint: string }> {
   const { state, config } = deps;
   if (state.criteria) return state.criteria;
   const updatedAt = new Date().toISOString();
@@ -95,7 +96,8 @@ async function ensureCriteria(deps: AcceptanceDeps): Promise<Criteria | { reason
     return state.criteria;
   }
   if (!state.requirement?.trim()) {
-    return { reason: "没有需求原文，无法起草验收标准", notes: "给开发方发一条带「## 验收标准」的消息，下次停下时按它验收" };
+    const hint = "给开发方发一条带「## 验收标准」的消息，下次停下时按它验收";
+    return { reason: "没有需求原文，无法起草验收标准", notes: hint, hint };
   }
   deps.onProgress?.(`自动验收：起草验收标准（第 ${deps.round} 轮）`);
   const baseDir = dirname(deps.runDir);
@@ -117,7 +119,7 @@ async function ensureCriteria(deps: AcceptanceDeps): Promise<Criteria | { reason
         ? await deps.exec(resolveTestCmd(config.drafterCmd), [inputPath, sessionId], { cwd: baseDir, timeout, signal: deps.signal, role: "起草验收标准" })
         : await deps.exec(PI_BIN, [
           "--offline", "-p", "--session-id", sessionId,
-          "--model", config.criteriaModel ?? deps.reviewerModel, "--thinking", deps.reviewerThinking,
+          "--model", config.strongModel ?? deps.reviewerModel, "--thinking", deps.reviewerThinking,
           "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
           "--tools", "read", "-e", PERMISSION_EXT, "--append-system-prompt", CRITERIA_PROMPT_PATH, `@${inputPath}`,
         ], { cwd: baseDir, timeout, signal: deps.signal, role: "起草验收标准" });
@@ -138,7 +140,10 @@ async function ensureCriteria(deps: AcceptanceDeps): Promise<Criteria | { reason
     await deps.saveState();
     return state.criteria;
   }
-  return { reason: "验收标准起草失败", notes: lastError };
+  return {
+    reason: "验收标准起草失败", notes: lastError,
+    hint: "起草失败的原因见总结；给开发方发一条带「## 验收标准」的消息，下次停下时按它验收",
+  };
 }
 
 // —— 被测系统 ——
@@ -295,54 +300,75 @@ function writeTools(runDir: string, workDir: string): void {
   }
 }
 
-async function callTester(deps: AcceptanceDeps, inputPath: string, timeout: number): Promise<ExecResult> {
+/** strong：换强模型（另开会话）重验。 */
+async function callTester(deps: AcceptanceDeps, inputPath: string, timeout: number, strong = false): Promise<ExecResult> {
   const { config } = deps;
-  const sessionId = deriveSessionId("acc", deps.devSessionId);
+  const sessionId = deriveSessionId(strong ? "acc-strong" : "acc", deps.devSessionId);
   const options = { cwd: deps.runDir, timeout, signal: deps.signal, role: "验收方" };
   if (config.testerCmd) {
     return deps.exec(resolveTestCmd(config.testerCmd), [String(deps.round), inputPath, sessionId, deps.runDir], options);
   }
+  const model = strong ? ["--model", config.strongModel ?? deps.reviewerModel, "--thinking", deps.reviewerThinking]
+    : ["--model", config.model, ...(config.thinking ? ["--thinking", config.thinking] : [])];
   return deps.exec(PI_BIN, [
-    "--offline", "-p", "--session-id", sessionId, "--model", config.model,
-    ...(config.thinking ? ["--thinking", config.thinking] : []),
+    "--offline", "-p", "--session-id", sessionId, ...model,
     "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
     "--tools", "read,write,bash,grep,find,ls", "-e", PERMISSION_EXT,
     "--append-system-prompt", ACCEPTANCE_PROMPT_PATH, `@${inputPath}`,
   ], options);
 }
 
+interface TesterRun {
+  report?: ParsedAcceptance;
+  error: string;
+  escalated: boolean;
+}
+
 /**
- * 最多两次：第 1 次按输入实测；输出解析不了、或通过/不通过的证据对不上时，
- * 在同一会话里发更正要求重做 1 次。两次共用验收截止时间。
+ * 第 1 次按输入实测；输出解析不了、或通过/不通过的证据对不上时，在同一会话里发更正要求重做 1 次；
+ * 还是验收方的问题（证据对不上、漏报、没给出报告）就换强模型另开会话从头重验 1 次。共用验收截止时间。
  */
-async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: string): Promise<{ report?: ParsedAcceptance; error: string }> {
+async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: string): Promise<TesterRun> {
   const evidence = (id: string) => readIfExists(join(deps.runDir, "evidence", `${id}.txt`));
+  const hasService = Boolean(deps.config.start);
+  const testerFault = (report?: ParsedAcceptance): boolean => !report || judgeAcceptance({
+    criteria: criteria.items, report, evidence, logErrors: [], runDir: deps.runDir, hasService,
+  }).items.some((item) => item.cause === "验收方");
   let report: ParsedAcceptance | undefined;
   let error = "";
   let input = inputPath;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  let escalated = false;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const strong = attempt === 3;
+    if (strong) {
+      if (!testerFault(report)) break;
+      input = join(deps.runDir, "strong.md");
+      writeFileSync(input, `${readFileSync(inputPath, "utf8")}\n## 说明\n上一位验收方没按要求留证据或输出格式不对，请你从头逐条实测；evidence/ 里已有的证据可以参考，但每条都要自己用工具再验一次。\n`);
+    }
     const remaining = deps.deadline - deps.now();
     if (remaining < 60_000) {
       error ||= "验收时间用完";
       break;
     }
-    deps.onProgress?.(`自动验收中（第 ${deps.round} 轮${attempt > 1 ? "，重做" : ""}）`);
+    deps.onProgress?.(`自动验收中（第 ${deps.round} 轮${attempt === 2 ? "，重做" : strong ? "，换强模型重验" : ""}）`);
     let result: ExecResult | undefined;
     try {
-      result = await callTester(deps, input, remaining);
+      result = await callTester(deps, input, remaining, strong);
     } catch (callError) {
       error = `第 ${attempt} 次验收调用失败：${tailText(errorText(callError), 300)}`;
     }
     deps.checkLive?.();
+    if (strong) escalated = true;
     if (result) error = execError(result, `第 ${attempt} 次验收`);
     if (result && !error) {
       const parsed = parseAcceptanceReport(result.stdout);
       if (parsed.ok) report = parsed.report;
       else error = `第 ${attempt} 次验收输出无法解析：${parsed.error}`;
     }
-    if (attempt === 2) break;
+    if (strong) break;
+    if (attempt === 2) continue;
     if (report && !error) {
-      const preview = judgeAcceptance({ criteria: criteria.items, report, evidence, logErrors: [], runDir: deps.runDir });
+      const preview = judgeAcceptance({ criteria: criteria.items, report, evidence, logErrors: [], runDir: deps.runDir, hasService });
       if (!preview.items.some((item) => item.evidenceProblem)) break;
       input = join(deps.runDir, "correction.md");
       writeFileSync(input, buildCorrectionInput(preview));
@@ -351,7 +377,7 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
       writeFileSync(input, `## 上次输出无法解析\n${error}\n\n已经留下的证据不用重跑；请按系统提示里的格式，重新输出全部条目的结果。\n`);
     }
   }
-  return { report, error: report ? "" : error };
+  return { report, error: report ? "" : error, escalated };
 }
 
 /**
@@ -361,14 +387,12 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
 export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<AcceptanceStage> {
   const objections = findObjections(deps.deliveryNote);
   if (objections.length > 0) {
-    return {
-      kind: "paused", reason: `开发方对验收标准有异议（${objections.join("、")}）`,
-      notes: "验收标准只有你能改：同意就发一条带「## 验收标准」的新消息替换；不同意就直接让开发方按原标准继续",
-    };
+    const hint = `开发方对 ${objections.join("、")} 有异议（理由见它的回复）。验收标准只有你能改：同意就发一条带「## 验收标准」的新消息替换；不同意就发消息让它按原标准继续`;
+    return { kind: "paused", reason: `开发方对验收标准有异议（${objections.join("、")}）`, notes: hint, hint };
   }
   const criteria = await ensureCriteria(deps);
   deps.checkLive?.();
-  if (!("items" in criteria)) return { kind: "paused", reason: criteria.reason, notes: criteria.notes };
+  if (!("items" in criteria)) return { kind: "paused", reason: criteria.reason, notes: criteria.notes, hint: criteria.hint };
 
   const { config, runDir } = deps;
   const startedAt = deps.now();
@@ -382,15 +406,13 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   const offsets = logOffsets(config.logs);
   let system: RunningSystem | undefined;
   let systemFailure: string | undefined;
-  let tester: { report?: ParsedAcceptance; error: string } = { error: "" };
+  let tester: TesterRun = { error: "", escalated: false };
   try {
     if (config.start) {
       if (config.readyUrl && await portBusy(new URL(config.readyUrl))) {
         const url = new URL(config.readyUrl);
-        return {
-          kind: "paused", reason: `端口 ${url.port || url.protocol} 已被占用（环境问题，不算开发方的错）`,
-          notes: `启动被测系统前 ${config.readyUrl} 已经有程序在监听；关掉它后发消息让开发方继续即可`,
-        };
+        const hint = `启动被测系统前 ${config.readyUrl} 已经有程序在监听：关掉它（或改 ${join(config.root, ".autoreview.json")} 里的端口），再给开发方发一条消息继续`;
+        return { kind: "paused", reason: `端口 ${url.port || url.protocol} 已被占用（环境问题，不算开发方的错）`, notes: hint, hint };
       }
       deps.onProgress?.(`自动验收：启动被测系统（第 ${deps.round} 轮）`);
       system = startSystem(deps, logPath);
@@ -428,9 +450,10 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   const judged = judgeAcceptance({
     criteria: criteria.items, report: tester.report, reportError: tester.error,
     evidence: (id) => readIfExists(join(runDir, "evidence", `${id}.txt`)),
-    systemFailure, logErrors, runDir,
+    systemFailure, logErrors, runDir, hasService: Boolean(config.start),
   });
   const record: AcceptanceRecord = { ...judged, durationMs: deps.now() - startedAt };
+  if (tester.escalated) record.escalated = true;
   writeFileSync(join(runDir, "result.json"), JSON.stringify(record, null, 2));
   return { kind: "judged", record };
 }

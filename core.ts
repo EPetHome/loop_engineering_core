@@ -64,6 +64,8 @@ export interface SummaryInput {
   criteria?: Criteria;
   /** 最近一次验收没通过的条目。 */
   unresolvedAcceptance?: string;
+  /** 需要你做的事（暂停时怎么继续、人工验收的条目、接入提醒），放在总结开头。 */
+  todos?: string[];
 }
 
 export interface ReviewInputOptions {
@@ -200,10 +202,10 @@ export function buildReviewInput(options: ReviewInputOptions): string {
 }
 
 /**
- * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、crit 起草验收标准。
+ * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、acc-strong 换强模型重验、crit 起草验收标准。
  * 格式不合法时退化为 sha256 派生的 UUID 形式；评审沿用旧算法，已有评审会话 id 不变。
  */
-export function deriveSessionId(kind: "rev" | "acc" | "crit", devSessionId: string): string {
+export function deriveSessionId(kind: "rev" | "acc" | "acc-strong" | "crit", devSessionId: string): string {
   const candidate = `autoreview-${kind}-${devSessionId}`;
   if (/^[A-Za-z0-9]$/.test(candidate) || /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/.test(candidate)) {
     return candidate;
@@ -226,6 +228,10 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
+  if (input.todos && input.todos.length > 0) {
+    lines.push("## 需要你做的事");
+    lines.push(...input.todos.map((todo, index) => `${index + 1}. ${todo}`));
+  }
   if (input.criteria) {
     const source = input.criteria.source === "用户" ? "你写的" : "自动起草，未经你确认";
     lines.push(`## 验收标准（${source}；第 ${input.criteria.version} 版）`);

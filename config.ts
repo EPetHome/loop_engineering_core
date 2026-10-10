@@ -27,6 +27,8 @@ export const DEFAULT_READY_TIMEOUT_SEC = 60;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
 
 export interface AcceptanceConfig {
+  /** .autoreview.json 所在目录：相对路径按它解析，提示里的目标文件也按它算。 */
+  root: string;
   /** 被测系统启动命令（sh -c，在开发目录执行）；不写表示没有常驻服务，验收方直接调用命令。 */
   start?: string;
   /** 就绪检查：GET 返回状态码小于 500 即就绪。 */
@@ -42,8 +44,8 @@ export interface AcceptanceConfig {
   guide?: string;
   model: string;
   thinking?: string;
-  /** 起草验收标准的模型；不写就用评审模型。 */
-  criteriaModel?: string;
+  /** 强模型：起草验收标准、验收方没做好时重验都用它；不写就用评审模型。 */
+  strongModel?: string;
   /** 一轮里验收最多用多少分钟，从一轮总预算（reviewTimeoutMin）里扣。 */
   timeoutMin: number;
   /** 给被测系统的额外环境变量。 */
@@ -139,6 +141,7 @@ export function parseAcceptanceConfig(
   }
   const guide = optionalString(data, "guide");
   return {
+    root,
     start: optionalString(data, "start"),
     readyUrl,
     readyLog: optionalString(data, "readyLog"),
@@ -149,7 +152,7 @@ export function parseAcceptanceConfig(
     guide: guide === undefined ? undefined : resolve(root, guide),
     model: nonEmptyString(data, "model", DEFAULT_ACCEPTANCE_MODEL, "acceptance.model"),
     thinking: optionalString(data, "thinking"),
-    criteriaModel: optionalString(data, "criteriaModel"),
+    strongModel: optionalString(data, "strongModel"),
     timeoutMin: positiveInt(data, "timeoutMin", DEFAULT_ACCEPTANCE_TIMEOUT_MIN),
     env: { ...(envValue as Record<string, string> | undefined) },
     testerCmd: env.AUTOREVIEW_ACCEPTANCE_CMD?.trim() ?? "",

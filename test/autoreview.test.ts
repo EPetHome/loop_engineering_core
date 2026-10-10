@@ -610,3 +610,63 @@ test("G11 pi 扩展的自动验收：读 .autoreview.json、标准只认用户�
     } finally { await h.close(); }
   });
 });
+
+test("G12 pi 的接入提示：写法段缺失提醒一次；没配启动暂停并指到【块 2】；部分验证完成时列出人工验收", async (t) => {
+  const accEnv = (root: string, extra: Record<string, string> = {}) => ({
+    AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),
+    AUTOREVIEW_CRITERIA_CMD: fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url)),
+    FAKE_STATE_DIR: join(root, "fake"), ...extra,
+  });
+  const withEnv = async (vars: Record<string, string>, body: () => Promise<void>) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try { await body(); } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  };
+  const requirement = "做待办\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜";
+
+  await t.test("开会话提醒复制【块 1】到 AGENTS.md，恢复会话不再重复", async () => {
+    const h = harness();
+    try {
+      writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+      await h.event("session_start");
+      const notices = () => h.notifications.filter((text) => text.includes("【块 1】"));
+      assert.equal(notices().length, 1);
+      assert.ok(notices()[0].includes(join(h.repo, "AGENTS.md")));
+      await h.event("session_start");
+      assert.equal(notices().length, 1, "状态里记着提醒过，同一会话不再提醒");
+    } finally { await h.close(); }
+  });
+
+  await t.test("没配启动连不上 → 暂停，界面里写明复制【块 2】到 .autoreview.json，不打回开发方", async () => {
+    const h = harness();
+    try {
+      await withEnv(accEnv(h.root, { FAKE_ACC_MODE: "unreachable" }), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start"); await h.begin(requirement);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "paused");
+        assert.equal(h.messages.length, 0, "不打回开发方");
+        assert.ok(h.notifications.some((text) => text.includes("【块 2】复制到") && text.includes(join(h.repo, ".autoreview.json"))));
+        assert.match(h.summary(), /## 需要你做的事\n1\. 把 .*【块 2】/);
+      });
+    } finally { await h.close(); }
+  });
+
+  await t.test("个别条目验证不了 → 评审后完成，界面提示 A2 要人工验收", async () => {
+    const h = harness();
+    try {
+      await withEnv(accEnv(h.root, { FAKE_ACC_UNKNOWN: "A2" }), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start"); await h.begin(requirement);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "done");
+        assert.equal(h.inputs.length, 1, "照常评审");
+        assert.ok(h.notifications.some((text) => text.includes("完成") && text.includes("A2 没能自动验证，需要你人工验收")));
+      });
+    } finally { await h.close(); }
+  });
+});

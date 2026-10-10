@@ -17,6 +17,7 @@ import {
 } from "./core.ts";
 import { EXT_DIR, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
+import { blockerHint, manualHint } from "./onboarding.ts";
 
 export { PI_BIN, PERMISSION_EXT };
 export const REVIEW_PROMPT_PATH = join(EXT_DIR, "review-prompt.md");
@@ -44,6 +45,10 @@ export interface ReviewState extends AcceptanceState {
   repairs: number;
   phase: "idle" | "reviewing" | "done" | "paused";
   pauseReason?: string;
+  /** 暂停时给你看的下一步（写进总结「需要你做的事」），恢复时清掉。 */
+  pauseHint?: string;
+  /** 本会话已经提醒过写法段缺失或过期（每个会话只提醒一次）。 */
+  conventionNoticed?: boolean;
   unresolvedMustFix?: string;
   /** 最近一次验收没通过的条目（暂停时写进总结）。 */
   unresolvedAcceptance?: string;
@@ -71,6 +76,8 @@ export interface ReviewOutcome {
   changedFiles?: string[];
   /** kind=paused：写入总结「说明」的细节（评审失败原因等）。 */
   notes?: string;
+  /** 给你看的下一步：暂停时怎么处理、完成时哪些条目要人工验收。 */
+  hint?: string;
 }
 
 export interface ReviewDeps {
@@ -104,6 +111,11 @@ export interface ReviewDeps {
 
 export function newReviewState(): ReviewState {
   return { enabled: true, rounds: [], repairs: 0, phase: "idle" };
+}
+
+/** 最近一轮的验收结果（总结和提醒用）。 */
+export function lastAcceptance(state: ReviewState): AcceptanceRecord | undefined {
+  return [...state.rounds].reverse().find((round) => round.acceptance)?.acceptance;
 }
 
 /** 无标记时比较用的指纹：最近一次给出结论时 → 上次成功评审 → 开发基线。 */
@@ -162,7 +174,7 @@ async function acceptanceStep(
   const acceptance = config.acceptance!;
   if (!deps.acceptanceDir) throw new Error("配置了 acceptance 但没有给验收材料目录");
   const live = (): void => { deps.checkLive?.(); };
-  const previous = [...state.rounds].reverse().find((round) => round.acceptance)?.acceptance;
+  const previous = lastAcceptance(state);
   const stage = await runAcceptanceStage({
     workDir: deps.cwd, devSessionId: deps.devSessionId, round: deps.round, deliveryNote: deps.deliveryNote,
     state, config: acceptance, reviewerModel: config.reviewerModel, reviewerThinking: config.reviewerThinking,
@@ -172,7 +184,7 @@ async function acceptanceStep(
     signal: deps.signal, checkLive: deps.checkLive, onProgress: deps.onProgress, saveState: deps.saveState,
   });
   live();
-  if (stage.kind === "paused") return { outcome: { kind: "paused", reason: stage.reason, notes: stage.notes } };
+  if (stage.kind === "paused") return { outcome: { kind: "paused", reason: stage.reason, notes: stage.notes, hint: stage.hint } };
   const record = stage.record;
   const pushRound = (conclusion: string): void => {
     state.rounds.push({
@@ -193,14 +205,19 @@ async function acceptanceStep(
       },
     };
   }
-  if (record.verdict === "通过") {
+  if (record.verdict === "通过" || record.verdict === "部分验证") {
     state.unresolvedAcceptance = undefined;
     return { record };
   }
   if (record.verdict === "无法验收") {
     pushRound("未评审（无法验收）");
     const unknown = record.items.filter((item) => item.verdict === "无法验证").map((item) => `${item.id}：${item.detail}`);
-    return { outcome: { kind: "paused", reason: `无法验收（${record.reason ?? "有标准无法验证"}）`, notes: unknown.join("；") } };
+    return {
+      outcome: {
+        kind: "paused", reason: `无法验收：${record.reason ?? "有标准无法验证"}`, notes: unknown.join("；"),
+        hint: blockerHint(record, deps.cwd, acceptance),
+      },
+    };
   }
   pushRound("未评审（验收不通过）");
   state.lastCheckedFingerprint = before.fingerprint;
@@ -328,7 +345,7 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   if (action === "done") {
     await deps.writeSummary?.("完成");
     live();
-    return { kind: "done" };
+    return { kind: "done", hint: manualHint(acceptance) };
   }
   if (action === "pause") return { kind: "paused", reason: "达到返修上限" };
   state.repairs += 1;
