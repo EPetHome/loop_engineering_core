@@ -45,6 +45,23 @@ export type RoundRecord = ParsedReview & {
   failed?: string;
 };
 
+/** 验收命令的一次执行；只有 pi 扩展配置了验收命令时才有。 */
+export interface AcceptanceRecord {
+  command: string;
+  trigger: "auto" | "command";
+  /** 触发时已完成的评审轮数。 */
+  round: number;
+  startedAt: string;
+  result: "进行中" | "通过" | "不通过" | "超时" | "中断" | "无法执行";
+  durationMs?: number;
+  exitCode?: number;
+  /** 完整输出所在的日志文件。 */
+  logPath?: string;
+  /** 输出最后几行，写进总结。 */
+  outputTail?: string;
+  detail?: string;
+}
+
 export interface SummaryInput {
   cwd: string;
   devSessionId: string;
@@ -57,6 +74,7 @@ export interface SummaryInput {
   changedFiles?: string[];
   gitStatusShort: string;
   notes?: string;
+  acceptance?: AcceptanceRecord;
 }
 
 export interface ReviewInputOptions {
@@ -199,6 +217,11 @@ export function deriveReviewerSessionId(devSessionId: string): string {
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
 }
 
+/** 验收结果的一句话写法，总结、通知和状态命令共用。 */
+export function acceptanceLabel(record: AcceptanceRecord): string {
+  return record.result === "不通过" ? `不通过（退出码 ${record.exitCode ?? "未知"}）` : record.result;
+}
+
 /** 渲染总结（6.13 格式），每轮评审后覆盖写。 */
 export function renderSummary(input: SummaryInput): string {
   const lines: string[] = [];
@@ -208,10 +231,22 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
+  if (input.acceptance) lines.push(`- 验收：${acceptanceLabel(input.acceptance)}`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
   const bullets = (items: string[], prefix = ""): void => {
     lines.push(...(items.length > 0 ? items.map((item) => `- ${prefix}${item}`) : ["- 无"]));
   };
+  const accept = input.acceptance;
+  if (accept) {
+    lines.push("## 验收");
+    lines.push(`- 命令：${accept.command}`);
+    lines.push(`- 触发：${accept.trigger === "auto" ? `第 ${accept.round} 轮评审完成后自动执行` : "手动 /accept"}`);
+    lines.push(`- 开始：${accept.startedAt}${accept.durationMs === undefined ? "" : `，耗时 ${Math.round(accept.durationMs / 1000)} 秒`}`);
+    lines.push(`- 结果：${acceptanceLabel(accept)}`);
+    if (accept.detail) lines.push(`- 说明：${accept.detail}`);
+    if (accept.logPath) lines.push(`- 完整输出：${accept.logPath}`);
+    if (accept.outputTail?.trim()) lines.push("输出最后几行：", "```text", accept.outputTail.trimEnd(), "```");
+  }
   lines.push("## 各轮");
   for (const round of input.rounds) {
     lines.push(`### 第 ${round.round} 轮（${round.startedAt}，耗时 ${Math.round(round.durationMs / 1000)} 秒）`);

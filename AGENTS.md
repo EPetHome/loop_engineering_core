@@ -4,14 +4,14 @@
 
 ## 文件
 
-- `autoreview.ts`：pi 扩展入口。注册事件与命令、成功评审检查点、可取消评审任务、返修消息、通知和总结。
+- `autoreview.ts`：pi 扩展入口。注册事件与命令、成功评审检查点、可取消评审任务、返修消息、评审完成后的验收命令、通知和总结。
 - `review.ts`：评审一轮的共用流程（快照、输入、调用重试、解析、指纹比较、完成/返修/暂停决策），pi 扩展与宿主 Hook 共用。
 - `hosts/hook.ts`：Claude Code / Codex 的 Hook 入口，按 `hook_event_name` 分派 SessionStart / UserPromptSubmit / Stop。
 - `git.ts`：git 快照、指纹、NUL 路径列表和 diff 取证，注入 exec 便于测试。
 - `core.ts`：纯函数（标记判断、评审解析、下一步决策、消息/输入/总结渲染）与开发约定原文，不导入 pi。
 - `review-prompt.md`：评审规则，通过 `--append-system-prompt` 原样交给评审。
 - `plugins/autoreview/`：插件清单与 `hooks/hooks.json`；根目录 `.claude-plugin/marketplace.json`、`.agents/plugins/marketplace.json` 是本地市场 `autoreview-local`。
-- `test/*.test.ts`：core 单测、fake pi 入口回归、git 取证、宿主 Hook 回归和联调断言测试；`test/fake-reviewer.mjs`：联调假评审；`test/e2e.mjs`：RPC 联调驱动。
+- `test/*.test.ts`：core 单测、fake pi 入口回归、git 取证、宿主 Hook 回归、E2E 判定与驱动回归；`test/fake-reviewer.mjs`：假评审；`test/e2e.mjs`：E2E 实操验收（RPC 驱动 pi，场景 A1–A7）。
 - `docs/`：历史资料，不改；`temp/`：用户资料区，不碰。
 
 ## 怎么跑
@@ -28,11 +28,13 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node --test test/*.test.ts
 pi --offline --no-extensions -e ./autoreview.ts --help
 ```
 
-联调（会调用模型，几到几十分钟；不加参数跑 R1–R6 全部）：
+E2E 实操验收（开发方与真实评审都用 ds4.1-flash，几到几十分钟；不加参数跑 A1–A7 全部）：
 
 ```bash
-PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs R1
+PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs A1
 ```
+
+验收标准写在 `test/e2e.mjs` 的 `SCENARIOS` 和 `commonChecks` 里；报告在系统临时目录 `autoreview-e2e-*/report.md`。开发本仓库时用 `--autoreview-accept-cmd "node test/e2e.mjs"`，评审完成后由扩展自动执行，开发方不用自己跑、也不在简报里自报结果。
 
 ## Claude Code / Codex 插件
 
@@ -47,5 +49,6 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs R1
 
 - 只改本仓库，不 commit/add/stash/reset（交付留给用户）。
 - `docs/` 是历史资料，`temp/` 是用户资料区，一行不动。
-- 不乱建文件；测试产物（含临时 HOME、会话、总结）只写系统临时目录，收尾清理。
+- 不乱建文件；测试产物（含临时 HOME、会话、总结）只写系统临时目录，收尾清理。例外：E2E 的报告和未通过场景的现场留在 `autoreview-e2e-*`，由用户看完删除。
+- 验收标准（`test/e2e.mjs` 的场景与断言）是用户的验收口径，改动要在交付说明里写明改了哪条、为什么。
 - 开发方约定文本和 `review-prompt.md` 是产品行为，改动要连同单测一起。

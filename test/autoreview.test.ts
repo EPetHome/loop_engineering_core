@@ -1,7 +1,7 @@
-/** 无模型入口回归 G1–G9；所有运行产物只写 os.tmpdir()。 */
+/** 无模型入口回归 G1–G10；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -15,6 +15,7 @@ type State = {
   enabled: boolean; phase: string; baseline?: string; baselineFingerprint?: string;
   lastSnapshot?: string; lastFingerprint?: string; unresolvedMustFix?: string;
   pauseReason?: string; repairs: number; rounds: { failed?: string; conclusion: string }[];
+  acceptance?: { result: string; trigger: string; round: number; exitCode?: number; detail?: string; logPath?: string; outputTail?: string };
 };
 const result = (stdout = "", code = 0, stderr = "", killed = false): Result => ({ stdout, code, stderr, killed });
 const PASS = "## 结论：通过\n## 必修\n无\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n";
@@ -27,7 +28,7 @@ async function until(predicate: () => boolean, description: string): Promise<voi
   for (let i = 0; i < 8; i += 1) await nextTurn();
 }
 
-function harness(options: { empty?: boolean; restored?: Record<string, unknown> } = {}) {
+function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "autoreview-unit-"));
   const repo = join(root, "repo");
   const home = join(root, "home");
@@ -53,16 +54,21 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown> 
   const notifications: string[] = [];
   const messages: string[] = [];
   const inputs: string[] = [];
+  const accepts: Call[] = [];
   let inject: ((args: string[], call: Call) => Result | Promise<Result> | undefined) | undefined;
   let reviewer: (call: Call) => Result | Promise<Result> = () => result(PASS);
   let notifier: (call: Call) => Result | Promise<Result> = () => result();
+  let acceptor: (call: Call) => Result | Promise<Result> = () => result("ACCEPT_OUTPUT_SENTINEL\n验收结论：通过\n");
   let failAppend = false;
   let failStatus = false;
   const pi = {
     on: (event: string, handler: any) => { handlers.set(event, handler); return () => handlers.delete(event); },
     registerCommand: (name: string, command: any) => commands.set(name, command),
     registerFlag: (name: string, flag: { default: string }) => flags.set(name, flag.default),
-    getFlag: (name: string) => { apiCalls.push("getFlag"); return name === "autoreview-reviewer-cmd" ? "/fake-reviewer" : flags.get(name); },
+    getFlag: (name: string) => {
+      apiCalls.push("getFlag");
+      return options.flags?.[name] ?? (name === "autoreview-reviewer-cmd" ? "/fake-reviewer" : flags.get(name));
+    },
     appendEntry: (customType: string, data: unknown) => {
       apiCalls.push("appendEntry");
       if (failAppend) throw new Error("appendEntry 故意失败");
@@ -74,6 +80,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown> 
       const call = { command, args, options: execOptions }; calls.push(call);
       if (basename(command) === "osascript") return notifier(call);
       if (command === "/fake-reviewer") { inputs.push(readFileSync(args[1], "utf8")); return reviewer(call); }
+      if (command === "/bin/sh") { accepts.push(call); return acceptor(call); }
       assert.equal(basename(command), "git");
       const plain = args[0] === "-c" ? args.slice(2) : args;
       const injected = inject?.(plain, call);
@@ -105,11 +112,13 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown> 
     await event("before_agent_start", { prompt, systemPromptOptions: {} });
   };
   const terminal = async () => until(() => ["done", "paused"].includes(state()?.phase), "完成或暂停");
+  const accepted = async () => until(() => Boolean(state()?.acceptance && state().acceptance!.result !== "进行中"), "验收结束");
   return {
-    root, repo, home, git, write, entries, calls, apiCalls, notifications, messages, inputs, state, event, command, assistant, begin, terminal,
+    root, repo, home, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
     set inject(fn: typeof inject) { inject = fn; },
     set reviewer(fn: typeof reviewer) { reviewer = fn; },
     set notifier(fn: typeof notifier) { notifier = fn; },
+    set acceptor(fn: typeof acceptor) { acceptor = fn; },
     set failAppend(value: boolean) { failAppend = value; },
     set failStatus(value: boolean) { failStatus = value; },
     summary: () => readFileSync(join(home, ".pi-autoreview", "repo", "unit-dev.md"), "utf8"),
@@ -454,6 +463,178 @@ test("G9 无标记自动评审：有改动就评审、无改动不动作、返�
       await h.event("agent_settled");
       assert.equal(h.inputs.length, 0);
       assert.equal(h.state().phase, "idle");
+    } finally { await h.close(); }
+  });
+});
+
+const ACCEPT = { "autoreview-accept-cmd": "ACCEPT_CMD --all" };
+
+test("G10 评审完成必触发验收命令：/review、无标记自动评审、返修后完成", async (t) => {
+  await t.test("/review 完成后执行一次，结果写进状态、总结、日志和通知", async () => {
+    const h = harness({ flags: ACCEPT });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      h.assistant(); await h.command(); await h.accepted();
+      assert.equal(h.accepts.length, 1);
+      const call = h.accepts[0];
+      assert.deepEqual(call.args, ["-c", "ACCEPT_CMD --all"]);
+      assert.equal(call.options.cwd, h.repo);
+      assert.equal(call.options.timeout, 120 * 60_000);
+      assert.ok(call.options.signal instanceof AbortSignal);
+      const acceptance = h.state().acceptance!;
+      assert.equal(h.state().phase, "done");
+      assert.deepEqual([acceptance.result, acceptance.trigger, acceptance.round], ["通过", "auto", 1]);
+      const summary = h.summary();
+      assert.match(summary, /^- 状态：完成$/m);
+      assert.match(summary, /^- 验收：通过$/m);
+      assert.match(summary, /第 1 轮评审完成后自动执行/);
+      assert.match(summary, /ACCEPT_OUTPUT_SENTINEL/);
+      const log = join(h.home, ".pi-autoreview", "repo", "accept-unit-dev-r1.log");
+      assert.equal(acceptance.logPath, log);
+      assert.match(readFileSync(log, "utf8"), /ACCEPT_OUTPUT_SENTINEL/);
+      assert.ok(h.notifications.some((text) => text.includes("完成（评审 1 次，返修 0 次），开始验收")));
+      assert.ok(h.notifications.some((text) => text.includes("验收通过")));
+    } finally { await h.close(); }
+  });
+  await t.test("无标记自动评审完成后同样执行", async () => {
+    const h = harness({ flags: ACCEPT });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nAUTO\n");
+      h.assistant("改完了，不写标记"); await h.event("agent_settled"); await h.accepted();
+      assert.equal(h.accepts.length, 1);
+      assert.equal(h.state().acceptance!.result, "通过");
+    } finally { await h.close(); }
+  });
+  await t.test("返修轮不执行，返修后评审完成才执行", async () => {
+    const h = harness({ flags: ACCEPT });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      let calls = 0;
+      h.reviewer = () => result((calls += 1) === 1 ? FIX : PASS);
+      h.assistant(); await h.command();
+      await until(() => h.messages.length === 1, "返修消息");
+      assert.equal(h.accepts.length, 0, "返修轮不能执行验收");
+      assert.equal(h.state().acceptance, undefined);
+      h.write("file.txt", "base\nB\n"); h.assistant("第 1 条：已修\n【交付完成】");
+      await h.event("agent_settled"); await h.accepted();
+      assert.equal(h.accepts.length, 1);
+      assert.deepEqual([h.state().acceptance!.result, h.state().acceptance!.round], ["通过", 2]);
+    } finally { await h.close(); }
+  });
+});
+
+test("G10 未配置或评审暂停时不执行验收", async (t) => {
+  await t.test("未配置验收命令：行为与以前一致", async () => {
+    const h = harness();
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      await h.command(); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      assert.equal(h.accepts.length, 0);
+      assert.equal(h.state().acceptance, undefined);
+      assert.doesNotMatch(h.summary(), /验收/);
+    } finally { await h.close(); }
+  });
+  for (const kind of ["达到返修上限", "评审失败"]) {
+    await t.test(`${kind}暂停时不执行`, async () => {
+      const h = harness({ flags: { ...ACCEPT, "autoreview-max-repairs": "0" } });
+      try {
+        await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+        h.reviewer = () => kind === "评审失败" ? result("", 1, "FAIL") : result(FIX);
+        await h.command(); await h.terminal();
+        assert.equal(h.state().phase, "paused");
+        assert.match(h.state().pauseReason!, new RegExp(kind));
+        for (let i = 0; i < 16; i += 1) await nextTurn();
+        assert.equal(h.accepts.length, 0);
+      } finally { await h.close(); }
+    });
+  }
+});
+
+test("G10 验收结果：不通过、超时、无法执行都记录并通知，评审状态不变", async (t) => {
+  const cases: { name: string; respond: () => Result | Promise<Result>; label: string; detail?: RegExp }[] = [
+    { name: "不通过", respond: () => result("A2 🔴\n验收结论：不通过\n", 3, "STDERR_SENTINEL"), label: "不通过（退出码 3）" },
+    { name: "超时", respond: () => result("跑到一半\n", 137, "", true), label: "超时", detail: /超过 5 分钟被终止/ },
+    { name: "无法执行", respond: () => Promise.reject(new Error("spawn ENOENT")), label: "无法执行", detail: /spawn ENOENT/ },
+  ];
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const h = harness({ flags: { ...ACCEPT, "autoreview-accept-timeout-min": "5" } });
+      try {
+        await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+        h.acceptor = item.respond;
+        await h.command(); await h.accepted();
+        assert.equal(h.accepts[0].options.timeout, 5 * 60_000);
+        assert.equal(h.state().phase, "done", "验收结果不改变评审阶段");
+        assert.match(h.summary(), new RegExp(`^- 验收：${item.label.replace(/[()（）]/g, ".")}$`, "m"));
+        assert.ok(h.notifications.some((text) => text.includes(`验收${item.label}`)));
+        if (item.detail) assert.match(h.state().acceptance!.detail ?? "", item.detail);
+        if (item.name === "不通过") assert.match(h.summary(), /STDERR_SENTINEL/);
+      } finally { await h.close(); }
+    });
+  }
+});
+
+test("G10 验收期间互斥；关闭记为中断，恢复时提示 /accept", async (t) => {
+  await t.test("验收期间不自动评审，/review 提示已有任务；关闭后取消命令并记中断", async () => {
+    const h = harness({ flags: ACCEPT }); let release!: (value: Result) => void;
+    const pending = new Promise<Result>((resolve) => { release = resolve; });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      h.acceptor = () => pending;
+      await h.command(); await until(() => h.accepts.length === 1, "验收已启动");
+      assert.equal(h.state().acceptance!.result, "进行中");
+      assert.match(h.summary(), /^- 验收：进行中$/m);
+      h.write("file.txt", "base\nDURING_ACCEPT\n"); h.assistant("顺手又改了");
+      await h.event("agent_settled"); await h.command();
+      assert.equal(h.inputs.length, 1, "验收期间不能开始新评审");
+      assert.ok(h.notifications.some((text) => text.includes("已有评审或验收在进行")));
+      await h.event("session_shutdown", { reason: "reload" });
+      assert.equal(h.accepts[0].options.signal!.aborted, true);
+      assert.equal(h.state().acceptance!.result, "中断");
+      assert.equal(h.state().phase, "done");
+      assert.match(h.summary(), /^- 验收：中断$/m);
+      assert.ok(h.notifications.some((text) => text.includes("验收中断，输入 /accept 重新验收")));
+      const count = h.apiCalls.length;
+      release(result("迟到的输出")); for (let i = 0; i < 16; i += 1) await nextTurn();
+      assert.equal(h.apiCalls.length, count, "关闭后旧验收任务不能再调用接口");
+    } finally { release(result()); await h.close(); }
+  });
+  await t.test("恢复时验收仍是进行中（进程被强杀）→ 记中断并提示", async () => {
+    const h = harness({
+      flags: ACCEPT,
+      restored: { enabled: true, rounds: [], repairs: 0, phase: "done", acceptance: { command: "ACCEPT_CMD --all", trigger: "auto", round: 1, startedAt: "x", result: "进行中" } },
+    });
+    try {
+      await h.event("session_start");
+      assert.equal(h.state().acceptance!.result, "中断");
+      assert.ok(h.notifications.some((text) => text.includes("/accept")));
+      assert.equal(h.accepts.length, 0, "恢复时不自动重跑");
+    } finally { await h.close(); }
+  });
+});
+
+test("G10 /accept 手动验收；新一轮评审清掉旧结果", async (t) => {
+  await t.test("未配置时提示", async () => {
+    const h = harness();
+    try {
+      await h.event("session_start"); await h.command("accept");
+      assert.ok(h.notifications.some((text) => text.includes("没有配置验收命令")));
+      assert.equal(h.accepts.length, 0);
+    } finally { await h.close(); }
+  });
+  await t.test("手动执行后，新一轮评审先清掉旧结果", async () => {
+    const h = harness({ flags: ACCEPT });
+    try {
+      await h.event("session_start"); await h.begin();
+      await h.command("accept"); await h.accepted();
+      assert.deepEqual([h.state().acceptance!.trigger, h.state().acceptance!.result], ["command", "通过"]);
+      assert.equal(h.state().phase, "idle");
+      assert.match(h.summary(), /手动 \/accept/);
+      h.write("file.txt", "base\nA\n"); h.reviewer = () => result(FIX);
+      await h.command(); await until(() => h.messages.length === 1, "返修消息");
+      assert.equal(h.state().acceptance, undefined);
+      assert.equal(h.accepts.length, 1);
     } finally { await h.close(); }
   });
 });

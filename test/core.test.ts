@@ -1,5 +1,5 @@
 /**
- * core.ts 单测（T1–T10）。
+ * core.ts 单测（T1–T12）。
  * 运行：PATH="/Users/Admin/.hermes/node/bin:$PATH" node --test test/core.test.ts
  */
 import assert from "node:assert/strict";
@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   CONVENTION,
   MAX_DIFF_BYTES,
+  acceptanceLabel,
   buildRepairMessage,
   buildReviewInput,
   classifyMarker,
@@ -248,4 +249,36 @@ test("T11 开发约定：标记可选、改动也会自动评审", () => {
   assert.ok(CONVENTION.includes("需要用户决定时，最后一行写【需要你决定】。"));
   assert.ok(CONVENTION.includes("第 N 条：已修"));
   assert.ok(CONVENTION.includes("第 N 条：异议：理由"));
+});
+
+test("T12 总结渲染验收：状态行下多一行验收，详情一节带命令、触发、输出尾部", () => {
+  const plain = renderSummary(summaryInput({ status: "完成" }));
+  assert.ok(!plain.includes("验收"), "没有验收记录时总结不变");
+
+  const failed = renderSummary(summaryInput({
+    status: "完成",
+    acceptance: {
+      command: "node test/e2e.mjs", trigger: "auto", round: 2, startedAt: "2026-10-10 10:00:00",
+      result: "不通过", exitCode: 1, durationMs: 61_400, logPath: "/tmp/accept.log", outputTail: "验收结论：🔴 不通过",
+    },
+  }));
+  assert.match(failed, /^- 状态：完成$/m);
+  assert.match(failed, /^- 验收：不通过（退出码 1）$/m);
+  assert.ok(failed.includes("## 验收"));
+  assert.ok(failed.includes("- 命令：node test/e2e.mjs"));
+  assert.ok(failed.includes("- 触发：第 2 轮评审完成后自动执行"));
+  assert.ok(failed.includes("耗时 61 秒"));
+  assert.ok(failed.includes("- 完整输出：/tmp/accept.log"));
+  assert.ok(failed.includes("验收结论：🔴 不通过"));
+
+  const running = renderSummary(summaryInput({
+    status: "进行中",
+    acceptance: { command: "x", trigger: "command", round: 0, startedAt: "t", result: "进行中" },
+  }));
+  assert.match(running, /^- 验收：进行中$/m);
+  assert.ok(running.includes("- 触发：手动 /accept"));
+  assert.match(running, /^- 开始：t$/m, "未结束时不写耗时");
+
+  assert.equal(acceptanceLabel({ command: "x", trigger: "auto", round: 1, startedAt: "t", result: "通过", exitCode: 0 }), "通过");
+  assert.equal(acceptanceLabel({ command: "x", trigger: "auto", round: 1, startedAt: "t", result: "中断" }), "中断");
 });
