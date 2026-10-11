@@ -10,7 +10,8 @@ export interface ExecResult {
 export type Exec = (
   command: string,
   args: string[],
-  options: { cwd: string; timeout: number; signal?: AbortSignal },
+  /** role：需要登记的长进程角色（评审、验收方），宿主 Hook 被杀后据此清理。 */
+  options: { cwd: string; timeout: number; signal?: AbortSignal; role?: string },
 ) => Promise<ExecResult>;
 
 export interface Snapshot {
