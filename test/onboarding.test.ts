@@ -32,8 +32,8 @@ test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   assert.match(block1, /不要写联调或端到端测试的步骤/);
   assert.match(block1, /「A3\. \[乙\] 操作：/);
   assert.equal(block1.split("\n").at(-1), "<!-- /autoreview:acceptance -->");
-  // v3：验收方验不了的条目标 [人工]，写明哪三种算人工、哪些不算。
-  assert.match(block1, /开头标「\[人工\]」[\s\S]*桌面应用的图形界面[\s\S]*真实账号[\s\S]*主观判断[\s\S]*不算人工：网页操作/);
+  // v3：[人工] 按权限划分：要用户的权限或拍板才算；图形界面操作、步骤多、耗时长不算。
+  assert.match(block1, /按权限划分，不按难易[\s\S]*要用户的权限[\s\S]*要用户拍板[\s\S]*难做不算人工：图形界面操作/);
   const examples = extractCriteria(block1)!;
   assert.deepEqual(examples.map((item) => item.id), ["A1", "A2", "A3"], "块 1 里的示例格式能被程序取到");
   assert.deepEqual(examples.map((item) => isManualCriterion(item.text)), [false, false, true], "示例里的 [人工] 能被程序认出");
