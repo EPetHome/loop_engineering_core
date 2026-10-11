@@ -14,7 +14,7 @@ import {
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
 import { ACCEPTANCE_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
-import { checkAcceptanceBudget, DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
+import { checkRoundBudget, DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
 import { blockerHint } from "../onboarding.ts";
 import { createChildExec } from "../hosts/hook.ts";
 import { readProcs } from "../procs.ts";
@@ -164,8 +164,8 @@ test("A6 acceptance 配置：默认值、路径解析、非法字段、预算", 
   assert.throws(() => parseAcceptanceConfig({ timeoutMin: 0 }, "/p"), /timeoutMin/);
   assert.throws(() => parseAcceptanceConfig({ env: { A: 1 } }, "/p"), /env/);
   assert.throws(() => parseAcceptanceConfig([], "/p"), /acceptance/);
-  assert.throws(() => checkAcceptanceBudget(20, config), /必须小于/);
-  checkAcceptanceBudget(60, config);
+  assert.throws(() => checkRoundBudget(20, config), /必须小于/);
+  checkRoundBudget(60, config);
 });
 
 async function freePort(): Promise<number> {

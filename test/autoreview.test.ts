@@ -1,4 +1,4 @@
-/** 无模型入口回归 G1–G13；所有运行产物只写 os.tmpdir()。 */
+/** 无模型入口回归 G1–G14；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import autoreview from "../autoreview.ts";
-import { CONVENTION } from "../core.ts";
+import { CONVENTION, conventionText } from "../core.ts";
 
 type Result = { stdout: string; stderr: string; code: number; killed: boolean };
 type Call = { command: string; args: string[]; options: { cwd?: string; signal?: AbortSignal; timeout?: number } };
@@ -969,5 +969,39 @@ test("G13 总结记录开发方在基线之后新增的提交", async () => {
     h.write("file.txt", "base\nCOMMITTED\nMORE\n");
     await h.command(); await h.terminal();
     assert.match(h.summary(), /^- 开发方新增提交：1 个（基线之后，只记录不评判）$/m);
+  } finally { await h.close(); }
+});
+
+test("G14 pi 扩展的门禁：读 .autoreview.json、约定写明命令、不通过带输出打回且不评审、修好后照常评审", async () => {
+  const h = harness();
+  const gate = "grep -q FIXED file.txt || { echo 'no FIXED in file.txt'; exit 1; }";
+  try {
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ gate: { cmd: gate } }));
+    h.acceptor = (call) => {
+      const res = spawnSync("/bin/sh", call.args, { cwd: call.options.cwd, encoding: "utf8" });
+      return result(res.stdout || "", res.status ?? 1, res.stderr || "", Boolean(res.signal));
+    };
+    await h.event("session_start");
+    const options: { appendSystemPrompt?: string } = {};
+    await h.event("before_agent_start", { prompt: "修好 file.txt", systemPromptOptions: options });
+    assert.equal(options.appendSystemPrompt, conventionText({ gate }));
+
+    h.write("file.txt", "base\nTODO\n");
+    h.assistant(); await h.event("agent_settled");
+    await until(() => h.messages.length === 1, "门禁返修消息");
+    assert.match(h.messages[0], /^【门禁 · 第 1 次返修】\n门禁命令不通过（退出码 1）/);
+    assert.ok(h.messages[0].includes("no FIXED in file.txt"));
+    assert.equal(h.inputs.length, 0, "门禁不通过时不评审");
+    assert.equal(h.accepts[0].options.cwd, h.repo);
+    assert.equal(h.state().repairs, 1);
+
+    await h.begin(h.messages[0]);
+    h.write("file.txt", "base\nFIXED\n");
+    h.assistant("已修\n【交付完成】"); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    assert.ok(h.inputs[0].includes("## 门禁\n程序已在项目目录执行门禁命令"));
+    assert.match(h.summary(), /门禁：不通过（退出码 1）[\s\S]*门禁：通过/);
+    await h.command("review-status");
+    assert.ok(h.notifications.some((text) => text.includes(`门禁：${gate}`)));
   } finally { await h.close(); }
 });

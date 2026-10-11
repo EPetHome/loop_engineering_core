@@ -1,5 +1,5 @@
 /**
- * pi 自动评审扩展：交付标记触发评审，必修回送原开发会话；评审完成后执行验收命令（如有配置）。
+ * pi 自动评审扩展：交付标记触发评审（配了门禁先跑门禁），必修回送原开发会话；评审完成后执行验收命令（如有配置）。
  * 失败调用不推进成功检查点；git 取证失败或指纹变化只暂停；暂停后你再让开发方干活即恢复自动评审。
  * 加载：pi -e /Users/Admin/Desktop/loop/autoreview.ts
  */
@@ -7,10 +7,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "./acceptance-core.ts";
-import { checkAcceptanceBudget, loadAcceptanceConfig, type AcceptanceConfig } from "./config.ts";
+import { criteriaFromUser } from "./acceptance-core.ts";
+import { checkRoundBudget, loadAcceptanceConfig, loadGateConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import {
-  acceptRunLabel, classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
+  acceptRunLabel, classifyMarker, conventionText, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
 } from "./core.ts";
 import { createGitEvidence, GitReadError, type Exec, type ExecResult } from "./git.ts";
 import { acceptanceTodos, conventionNotice } from "./onboarding.ts";
@@ -102,6 +102,12 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   /** 只用于注入约定和取标准：配置非法时当作没配，错误留给评审路径报。 */
   const acceptanceEnabled = (ctx: ExtensionContext): boolean => {
     try { return acceptanceConfig(ctx) !== undefined; } catch { return false; }
+  };
+  /** .autoreview.json 的 gate 一节；配置非法时抛错（评审路径里会变成暂停）。 */
+  const gateConfig = (ctx: ExtensionContext): GateConfig | undefined => loadGateConfig(ctx.cwd);
+  /** 只用于注入约定：配置非法时当作没配，错误留给评审路径报。 */
+  const gateCommand = (ctx: ExtensionContext): string | undefined => {
+    try { return gateConfig(ctx)?.cmd; } catch { return undefined; }
   };
   const saveState = (life: Lifecycle): void => {
     checkLive(life);
@@ -233,9 +239,9 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       reviewerCmd: flagString(pi, "autoreview-reviewer-cmd", ""),
     };
     const acceptance = acceptanceConfig(ctx);
-    if (!acceptance) return config;
-    checkAcceptanceBudget(config.reviewTimeoutMin, acceptance);
-    return { ...config, acceptance };
+    const gate = gateConfig(ctx);
+    checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
+    return { ...config, ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}) };
   };
 
   const acceptCommand = (): string => flagString(pi, "autoreview-accept-cmd", "");
@@ -544,6 +550,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         `自动评审：${state.enabled ? "开启" : "关闭"}`, `状态：${phase}`,
         `评审 ${state.rounds.length} 次，返修 ${state.repairs} 次`,
         `验收命令：${state.acceptRun ? acceptRunLabel(state.acceptRun) : acceptCommand() ? "未执行" : "未配置"}`,
+        `门禁：${gateCommand(ctx) ?? "未配置"}`,
         `评审会话：${state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId)}`, `总结：${summaryPath(ctx)}`,
         `自动验收：${!acceptanceEnabled(ctx) ? "未配置" : state.criteria
           ? `标准第 ${state.criteria.version} 版（${state.criteria.items.length} 条，${state.criteria.source === "用户" ? "你写的" : "自动起草"}）`
@@ -672,7 +679,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`自动验收：已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`, "info");
       }
       if (state.enabled) {
-        const convention = acceptance ? `${CONVENTION}\n${ACCEPTANCE_CONVENTION}` : CONVENTION;
+        const convention = conventionText({ acceptance, gate: gateCommand(ctx) });
         const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
         event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }

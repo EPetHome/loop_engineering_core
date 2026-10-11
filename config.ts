@@ -1,8 +1,8 @@
 /**
  * config.ts — .autoreview.json 的查找与字段校验，宿主 Hook 和 pi 扩展共用。
  *
- * 评审字段由宿主 Hook 读（pi 扩展用 flag）；acceptance 一节两边都从这里读，
- * 只有写了 acceptance 的项目才做自动验收。
+ * 评审字段由宿主 Hook 读（pi 扩展用 flag）；gate、acceptance 两节两边都从这里读，
+ * 只有写了 gate 的项目才跑门禁，只有写了 acceptance 的项目才做自动验收。
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -26,6 +26,15 @@ export const DEFAULT_ACCEPTANCE_TIMEOUT_MIN = 20;
 export const DEFAULT_READY_TIMEOUT_SEC = 60;
 export const DEFAULT_RESET_TIMEOUT_SEC = 120;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
+export const DEFAULT_GATE_TIMEOUT_MIN = 10;
+
+/** 门禁：每轮验收和评审之前由程序执行的确定性检查（单测、类型检查、e2e 脚本等）。 */
+export interface GateConfig {
+  /** 在开发目录用 /bin/sh -c 执行，退出码 0 为通过。 */
+  cmd: string;
+  /** 一轮里门禁最多用多少分钟，从一轮总预算（reviewTimeoutMin）里扣。 */
+  timeoutMin: number;
+}
 
 export interface AcceptanceConfig {
   /** .autoreview.json 所在目录：相对路径按它解析，提示里的目标文件也按它算。 */
@@ -166,10 +175,25 @@ export function parseAcceptanceConfig(
   };
 }
 
-/** 验收从一轮总预算里扣，必须给评审留时间。 */
-export function checkAcceptanceBudget(reviewTimeoutMin: number, acceptance: AcceptanceConfig | undefined): void {
+/** 解析 gate 一节；没写返回 undefined（不跑门禁）。字段非法时抛错。 */
+export function parseGateConfig(raw: unknown): GateConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 gate 必须是 JSON 对象`);
+  const data = raw as Record<string, unknown>;
+  if (data.cmd === undefined) throw new Error(`${MARKER_FILE} 的 gate.cmd 必须写（门禁命令）`);
+  const timeoutMin = nonNegativeInt(data, "timeoutMin", DEFAULT_GATE_TIMEOUT_MIN, "gate.timeoutMin");
+  if (timeoutMin === 0) throw new Error(`${MARKER_FILE} 的 gate.timeoutMin 必须大于 0`);
+  return { cmd: nonEmptyString(data, "cmd", "", "gate.cmd"), timeoutMin };
+}
+
+/** 门禁和验收都从一轮总预算里扣，必须给评审留时间。 */
+export function checkRoundBudget(reviewTimeoutMin: number, acceptance: AcceptanceConfig | undefined, gate?: GateConfig): void {
   if (acceptance && acceptance.timeoutMin >= reviewTimeoutMin) {
     throw new Error(`${MARKER_FILE} 的 acceptance.timeoutMin（${acceptance.timeoutMin}）必须小于一轮总预算 reviewTimeoutMin（${reviewTimeoutMin}）`);
+  }
+  if (gate && gate.timeoutMin + (acceptance?.timeoutMin ?? 0) >= reviewTimeoutMin) {
+    const used = acceptance ? `加 acceptance.timeoutMin（${acceptance.timeoutMin}）` : "";
+    throw new Error(`${MARKER_FILE} 的 gate.timeoutMin（${gate.timeoutMin}）${used}必须小于一轮总预算 reviewTimeoutMin（${reviewTimeoutMin}）`);
   }
 }
 
@@ -177,4 +201,10 @@ export function checkAcceptanceBudget(reviewTimeoutMin: number, acceptance: Acce
 export function loadAcceptanceConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): AcceptanceConfig | undefined {
   const root = findProjectRoot(cwd);
   return root ? parseAcceptanceConfig(readMarker(root).acceptance, root, env) : undefined;
+}
+
+/** pi 扩展用：从 cwd 向上找 .autoreview.json，只取 gate 一节。 */
+export function loadGateConfig(cwd: string): GateConfig | undefined {
+  const root = findProjectRoot(cwd);
+  return root ? parseGateConfig(readMarker(root).gate) : undefined;
 }

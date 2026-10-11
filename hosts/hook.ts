@@ -14,11 +14,11 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, 
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "../acceptance-core.ts";
+import { criteriaFromUser } from "../acceptance-core.ts";
 import {
-  checkAcceptanceBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, readMarker,
+  checkRoundBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
-import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "../core.ts";
+import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { reapProcs, registerProc, unregisterProc } from "../procs.ts";
@@ -180,14 +180,14 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
     reviewerCmd: env.AUTOREVIEW_REVIEWER_CMD?.trim() ?? "",
   };
   const acceptance = parseAcceptanceConfig(data.acceptance, root, env);
-  if (!acceptance) return config;
-  checkAcceptanceBudget(config.reviewTimeoutMin, acceptance);
-  return { ...config, acceptance };
+  const gate = parseGateConfig(data.gate);
+  checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
+  return { ...config, ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}) };
 }
 
-/** 注入给开发方的约定：配了验收再追加验收约定。 */
+/** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */
 function conventionFor(config: ReviewConfig): string {
-  return config.acceptance ? `${CONVENTION}\n${ACCEPTANCE_CONVENTION}` : CONVENTION;
+  return conventionText({ acceptance: Boolean(config.acceptance), gate: config.gate?.cmd });
 }
 
 /** 状态和总结都放在 ~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.*。 */

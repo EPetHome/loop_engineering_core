@@ -1,22 +1,22 @@
 # pi 自动评审扩展
 
-本仓库现在是 pi 自动评审扩展 + Claude Code / Codex 插件（旧的 Loop 0.4.0 已删除，代码留在 git 历史 `f16edc4`）。配了 `acceptance` 的项目在评审前先做自动验收（黑盒实操 + 系统日志 + 程序判定）；配了 `--autoreview-accept-cmd` 时评审完成后再执行验收命令（本仓库用它跑 E2E），两者互不相干。
+本仓库现在是 pi 自动评审扩展 + Claude Code / Codex 插件（旧的 Loop 0.4.0 已删除，代码留在 git 历史 `f16edc4`）。配了 `gate` 的项目每轮最先跑门禁（确定性命令，退出码非 0 带输出打回开发方）；配了 `acceptance` 的项目在评审前先做自动验收（黑盒实操 + 系统日志 + 程序判定）；配了 `--autoreview-accept-cmd` 时评审完成后再执行验收命令（本仓库用它跑 E2E），两者互不相干。
 
 ## 文件
 
 - `autoreview.ts`：pi 扩展入口。注册事件与命令、成功评审检查点、可取消评审任务、返修消息、评审完成后的验收命令（`--autoreview-accept-cmd`、`/accept`）、流水线段的状态文件与收件箱、通知和总结。
 - `pipeline.ts`：流水线命令（`node pipeline.ts <计划.json>`）：解析计划（每段写 `prompt` 时按日常配置生成 pi 命令，`pi` 一节或每段可覆盖；也可以写 `start`）、开跑前检查（目录、git、提示词、pi 与扩展、同步目录、e2e 端口、Playwright，不过就不开跑）、开终端窗口或后台启动各段、按步骤等完成、联调准备、程序跑 e2e（复用自动验收）、失败按 `[段名]` 回流、报告。
 - `pipeline-core.ts`：流水线共用约定：环境变量 `AUTOREVIEW_PIPELINE_DIR` / `AUTOREVIEW_STAGE`、`<段>.status.json` / `<段>.inbox.json` 的格式和原子读写。
-- `review.ts`：一轮的共用流程（快照、先验收、输入、调用重试、解析、指纹比较、完成/返修/暂停决策），pi 扩展与宿主 Hook 共用。
+- `review.ts`：一轮的共用流程（快照、先门禁、再验收、输入、调用重试、解析、指纹比较、完成/返修/暂停决策），pi 扩展与宿主 Hook 共用。
 - `acceptance.ts`：自动验收一轮的流程（异议检查、取或起草标准、查端口、启停被测系统、记系统日志、调验收方并在证据有问题时重做 1 次、截日志、判定）。
 - `acceptance-core.ts`：验收纯函数（取「## 验收标准」、解析报告、扫日志、核对证据、逐条判定、验收方输入与返修消息）与验收约定原文。
-- `config.ts`：`.autoreview.json` 查找与字段校验（含 `acceptance` 一节）、本机路径常量。
+- `config.ts`：`.autoreview.json` 查找与字段校验（含 `gate`、`acceptance` 两节和一轮总预算检查）、本机路径常量。
 - `onboarding.ts`：接入手册的复制块（只在 `README-验收标准.md` 维护一份）、项目里的目标文件、写法段缺失或过期、「把【块 N】复制到 <完整路径>」提示、总结「需要你做的事」。
 - `setup-acceptance.ts`：接入命令，探测项目类型、启动命令和端口，先给计划、确认后写 `.autoreview.json` 和【块 1】；可重复跑。
 - `hosts/hook.ts`：Claude Code / Codex 的 Hook 入口，按 `hook_event_name` 分派 SessionStart / UserPromptSubmit / Stop。
 - `git.ts`：git 快照、指纹、NUL 路径列表和 diff 取证，注入 exec 便于测试。
 - `procs.ts`：长进程登记（评审等子进程自成进程组，组号记到 `<宿主>-<会话id>.procs.json`），Hook 被杀后据此清理孤儿。
-- `core.ts`：纯函数（标记判断、评审解析、下一步决策、消息/输入/总结渲染）与开发约定原文，不导入 pi。
+- `core.ts`：纯函数（标记判断、评审解析、下一步决策、评审与门禁的消息/输入/总结渲染）与开发约定原文（含门禁约定），不导入 pi。
 - `review-prompt.md`：评审规则，通过 `--append-system-prompt` 原样交给评审。
 - `acceptance-prompt.md`、`criteria-prompt.md`：验收方规则、起草验收标准规则，同样原样交给模型；示例格式由单测核对能被解析。
 - `acceptance-tools/`：验收方的工具，`ev.mjs`（跑命令留证据）、`browser.mjs`（无头 Chromium 操作网页留证据；`browser.mjs --check <目录>` 只检查能不能找到 Playwright，流水线开跑前用）；每轮在运行目录生成 `./ev`、`./browser` 包装脚本。
@@ -50,8 +50,9 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node test/e2e.mjs A1
 ## Claude Code / Codex 插件
 
 - 本仓库是本地市场 `autoreview-local`，插件名 `autoreview`；Hook 命令直接执行 `hosts/hook.ts`，改代码立即生效。
-- 只有当前目录或某个上级目录存在 `.autoreview.json` 的项目才生效；字段可选：`maxRepairs`、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`acceptance`（字段见 README「自动验收」，pi 扩展也读这一节）。
-- 开发方最后一行写【交付完成】触发评审；不写标记但工作区有未评审改动时也会自动评审。有必修时 Stop Hook 返回 `{"decision":"block","reason":…}`，宿主在原会话继续返修，最多 `maxRepairs`（默认 4，验收打回和评审打回共用）次。
+- 只有当前目录或某个上级目录存在 `.autoreview.json` 的项目才生效；字段可选：`maxRepairs`、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（字段见 README「门禁」）、`acceptance`（字段见 README「自动验收」）；pi 扩展也读 `gate`、`acceptance` 两节。
+- 开发方最后一行写【交付完成】触发评审；不写标记但工作区有未评审改动时也会自动评审。有必修时 Stop Hook 返回 `{"decision":"block","reason":…}`，宿主在原会话继续返修，最多 `maxRepairs`（默认 4，门禁、验收打回和评审打回共用）次。
+- 门禁：每轮最先执行（`/bin/sh -c`，stderr 并进 stdout，进程登记角色「门禁」），时限从一轮总预算里扣；跑完且退出码非 0 才打回（「【门禁 · 第 N 次返修】」，不验收、不评审），超时、126/127、起不来都暂停；门禁改了工作区暂停「门禁期间工作区变了」。验收的时限从验收开始算，门禁加验收必须小于 `reviewTimeoutMin`。
 - 自动验收：先验收后评审，共用一轮 `reviewTimeoutMin`；验收不通过直接打回、不评审；验收标准只从用户消息（UserPromptSubmit / `before_agent_start`）的「## 验收标准」取，冻结，用户再发新的才替换；开发方写「A2：异议」时暂停交用户。
 - 无法验证分原因：验收方没做好 → 同会话重做 1 次、再换强模型（`strongModel`，默认评审模型）另开会话重验 1 次；没配启动（连不上也改判，不打回）、缺工具、全部没验证 → 暂停并给出「复制【块 N】到 <路径>」；只有个别条目 → 部分验证，照常评审，完成时列给人工。
 - 给用户看的提示走 `systemMessage`（只对 Claude Code）、pi `ctx.ui.notify`、系统通知、总结「需要你做的事」；`additionalContext` 只有模型看得到。写法段缺失或过期每个会话提醒一次（`conventionNoticed`）。

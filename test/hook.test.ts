@@ -1,4 +1,4 @@
-/** hosts/hook.ts 无模型回归 H1–H12；所有运行产物只写 os.tmpdir()。 */
+/** hosts/hook.ts 无模型回归 H1–H15；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
-import { CONVENTION } from "../core.ts";
+import { CONVENTION, conventionText } from "../core.ts";
 import { childExec, detectHost, findProjectRoot, lastAssistantFromTranscript, loadConfig } from "../hosts/hook.ts";
 
 const HOOK = fileURLToPath(new URL("../hosts/hook.ts", import.meta.url));
@@ -953,5 +953,58 @@ test("H14 Hook 的总结也记录开发方在基线之后新增的提交", () =>
     h.run(h.delivered());
     assert.equal(h.readState().phase, "done");
     assert.match(h.summary(), /^- 开发方新增提交：1 个（基线之后，只记录不评判）$/m);
+  } finally { h.close(); }
+});
+
+test("H15 门禁：先于验收和评审执行；不通过带输出打回、不验收不评审；修好后照常验收、评审", () => {
+  const gate = "grep -q FIXED file.txt || { echo '测试失败：file.txt 里没有 FIXED'; exit 1; }";
+  const h = fixture({ marker: JSON.stringify({ gate: { cmd: gate }, acceptance: {} }) });
+  const requirement = "修好 file.txt\n## 验收标准\n1. 操作：cat file.txt\n   预期：有 FIXED";
+  const fakeLog = (name: string) => existsSync(join(h.root, "fake", name)) ? readFileSync(join(h.root, "fake", name), "utf8").trim().split("\n") : [];
+  try {
+    const start = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
+    assert.equal(start.hookSpecificOutput.additionalContext, conventionText({ acceptance: true, gate }));
+    h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+
+    h.write("file.txt", "base\nTODO\n");
+    const failed = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
+    assert.equal(failed.decision, "block");
+    assert.match(failed.reason, /^【门禁 · 第 1 次返修】\n门禁命令不通过（退出码 1）/);
+    assert.ok(failed.reason.includes("测试失败：file.txt 里没有 FIXED"));
+    assert.equal(fakeLog("calls.log").length, 0, "门禁不通过时不评审");
+    assert.equal(fakeLog("acc-calls.log").length, 0, "门禁不通过时不验收");
+    assert.equal(h.readState().repairs, 1);
+    assert.match(h.summary(), /门禁：不通过（退出码 1）/);
+
+    h.write("file.txt", "base\nFIXED\n");
+    assert.equal(h.run(h.delivered(), { env: ACC_ENV }).stdout, "");
+    const state = h.readState();
+    assert.equal(state.phase, "done");
+    assert.equal(state.rounds[1].gate.result, "通过");
+    assert.equal(state.rounds[1].acceptance.verdict, "通过");
+    assert.equal(fakeLog("acc-calls.log").length, 1);
+    assert.equal(fakeLog("calls.log").length, 1);
+    const input = readFileSync(join(h.home, ".pi-autoreview", basename(h.repo), "review-input-claude-s1-r2.md"), "utf8");
+    assert.ok(input.includes("## 门禁\n程序已在项目目录执行门禁命令"));
+    assert.match(h.summary(), /门禁：通过（耗时/);
+  } finally { h.close(); }
+});
+
+test("H15 补充：gate 配置非法或超出一轮总预算 → 暂停并说明，不评审", () => {
+  const root = mkdtempSync(join(tmpdir(), "autoreview-gate-config-"));
+  try {
+    writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ gate: { cmd: "npm test", timeoutMin: 5 } }));
+    assert.deepEqual(loadConfig(root, {}).gate, { cmd: "npm test", timeoutMin: 5 });
+    writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ reviewTimeoutMin: 30, acceptance: {}, gate: { cmd: "npm test" } }));
+    assert.throws(() => loadConfig(root, {}), /gate\.timeoutMin（10）加 acceptance\.timeoutMin（20）必须小于一轮总预算 reviewTimeoutMin（30）/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const h = fixture({ marker: JSON.stringify({ gate: { timeoutMin: 5 } }) });
+  try {
+    h.write("file.txt", "base\nCHANGE\n");
+    assert.equal(h.run(h.delivered()).stdout, "");
+    assert.equal(h.readState().phase, "paused");
+    assert.match(h.summary(), /gate\.cmd 必须写/);
+    assert.ok(!existsSync(join(h.root, "fake", "calls.log")));
   } finally { h.close(); }
 });
