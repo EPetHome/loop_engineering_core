@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { extractCriteria, type AcceptanceRecord } from "../acceptance-core.ts";
+import { extractCriteria, isAuthorizationCriterion, isManualCriterion, type AcceptanceRecord } from "../acceptance-core.ts";
 import { parseAcceptanceConfig } from "../config.ts";
 import {
   acceptanceTodos, blockerHint, blockVersion, conventionNotice, conventionStatus, conventionTarget, extractBlock,
@@ -24,10 +24,20 @@ const write = (root: string, path: string, text: string): void => {
 test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   const doc = readFileSync(GUIDE_DOC, "utf8");
   const block1 = extractBlock(doc, 1)!;
-  assert.equal(blockVersion(block1), 1);
-  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v1/);
+  assert.equal(blockVersion(block1), 3);
+  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v3/);
+  // v2：起草任务提示词只写四节、不做的事、流水线 e2e 标归属。
+  assert.match(block1, /## 起草任务提示词（自动评审 v2）[\s\S]*只写四节/);
+  assert.match(block1, /不要通读代码，不要跑命令核实现状/);
+  assert.match(block1, /不要写联调或端到端测试的步骤/);
+  assert.match(block1, /「A3\. \[乙\] 操作：/);
   assert.equal(block1.split("\n").at(-1), "<!-- /autoreview:acceptance -->");
-  assert.deepEqual(extractCriteria(block1)?.map((item) => item.id), ["A1", "A2"], "块 1 里的示例格式能被程序取到");
+  // v3：按权限划分：[授权] 用户同意后执行，[人工] 要用户拍板；图形界面操作、步骤多、耗时长都不算。
+  assert.match(block1, /按权限划分，不按难易[\s\S]*「\[授权\]」[\s\S]*同意授权：A3[\s\S]*不要替用户写「同意授权」[\s\S]*「\[人工\]」：要用户拍板[\s\S]*难做不算：图形界面操作/);
+  const examples = extractCriteria(block1)!;
+  assert.deepEqual(examples.map((item) => item.id), ["A1", "A2", "A3", "A4"], "块 1 里的示例格式能被程序取到");
+  assert.deepEqual(examples.map((item) => [isAuthorizationCriterion(item.text), isManualCriterion(item.text)]),
+    [[false, false], [false, false], [true, false], [false, true]], "示例里的 [授权]、[人工] 能被程序认出");
   const block2 = JSON.parse(extractBlock(doc, 2)!);
   const config = parseAcceptanceConfig(block2.acceptance, "/p", {})!;
   assert.ok(config.start && config.readyUrl, "块 2 是一份能直接用的启动配置");
@@ -60,7 +70,7 @@ test("O3 写法段状态与提醒：缺失 → 旧版 → 最新；提醒里写�
     for (const part of [GUIDE_DOC, "【块 1】", join(root, "AGENTS.md"), SETUP_SCRIPT]) assert.ok(missing.includes(part), `缺少：${part}`);
     write(root, "AGENTS.md", "## 起草需求时写验收标准（自动验收）\n旧的\n");
     assert.equal(conventionStatus(root, "codex").status, "旧版");
-    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v1）/);
+    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v3）/);
     write(root, "AGENTS.md", `# 我的规则\n\n${readBlock(1)}\n`);
     assert.equal(conventionStatus(root, "codex").status, "最新");
     assert.equal(conventionNotice(root, "codex"), undefined);
@@ -89,6 +99,14 @@ test("O4 下一步提示：按卡住的原因指到具体的块和文件；部�
   });
   assert.equal(manualHint(partial), "A2 没能自动验证，需要你人工验收（原因见总结「需要你做的事」）");
   assert.equal(manualHint(record({ verdict: "通过" })), undefined);
+  const tagged = record({
+    verdict: "部分验证",
+    items: [
+      { id: "A1", text: "操作：a", verdict: "无法验证", detail: "原因：标准含糊", cause: "其他" },
+      { id: "A3", text: "[人工] 操作：c", verdict: "需人工", detail: "标了 [人工]" },
+    ],
+  });
+  assert.equal(manualHint(tagged), "A1 没能自动验证，A3 标了 [人工]，需要你人工验收（原因见总结「需要你做的事」）");
 });
 
 test("O5 总结「需要你做的事」：暂停的下一步、人工验收、自动起草的标准、写法段缺失", () => {
@@ -97,7 +115,10 @@ test("O5 总结「需要你做的事」：暂停的下一步、人工验收、�
     const acceptance = parseAcceptanceConfig({}, root, {})!;
     const partial = record({
       verdict: "部分验证",
-      items: [{ id: "A2", text: "操作：b", verdict: "无法验证", detail: "原因：标准含糊", cause: "其他" }],
+      items: [
+        { id: "A2", text: "操作：b", verdict: "无法验证", detail: "原因：标准含糊", cause: "其他" },
+        { id: "A3", text: "[人工] 操作：c\n预期：d", verdict: "需人工", detail: "标了 [人工]" },
+      ],
     });
     const todos = acceptanceTodos({
       acceptance, host: "codex", phase: "paused", pauseHint: "先做这个",
@@ -105,8 +126,9 @@ test("O5 总结「需要你做的事」：暂停的下一步、人工验收、�
     });
     assert.equal(todos[0], "先做这个");
     assert.match(todos[1], /^人工验收 A2（操作：b）：程序没能自动验证，原因：标准含糊/);
-    assert.match(todos[2], /自动起草/);
-    assert.ok(todos[3].includes("【块 1】") && todos[3].includes(join(root, "AGENTS.md")));
+    assert.equal(todos[2], "人工验收 A3（[人工] 操作：c）：标了 [人工]，程序不自动验");
+    assert.match(todos[3], /自动起草/);
+    assert.ok(todos[4].includes("【块 1】") && todos[4].includes(join(root, "AGENTS.md")));
     assert.deepEqual(acceptanceTodos({ host: "codex", phase: "paused", pauseHint: "只剩这个" }), ["只剩这个"]);
     assert.deepEqual(acceptanceTodos({ host: "codex", phase: "done", pauseHint: "暂停已解除" }), []);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -148,7 +170,7 @@ test("O7 插入或更新【块 1】：追加、按标记替换、已是最新、
   assert.equal(appended.action, "追加");
   assert.equal(appended.text, `# 我的规则\n保留\n\n${block}\n`);
   assert.equal(upsertBlock(appended.text, block).action, "已是最新");
-  const older = appended.text.replace("autoreview:acceptance v1", "autoreview:acceptance v0").replace("旧内容不存在", "");
+  const older = appended.text.replace("autoreview:acceptance v3", "autoreview:acceptance v0").replace("旧内容不存在", "");
   const updated = upsertBlock(`${older}\n## 之后的规则\n也保留\n`, block);
   assert.equal(updated.action, "更新");
   assert.ok(updated.text.includes("# 我的规则\n保留") && updated.text.includes("## 之后的规则\n也保留"));
@@ -177,8 +199,8 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
     const config = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));
     assert.equal(config.maxRepairs, 2);
     assert.equal(config.acceptance.start, "npm run dev");
-    assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /autoreview:acceptance v1/);
-    assert.match(readFileSync(join(root, "CLAUDE.md"), "utf8"), /autoreview:acceptance v1/, "CLAUDE.md 没引入 AGENTS.md 时也写一份");
+    assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /autoreview:acceptance v3/);
+    assert.match(readFileSync(join(root, "CLAUDE.md"), "utf8"), /autoreview:acceptance v3/, "CLAUDE.md 没引入 AGENTS.md 时也写一份");
     const again = await planSetup(root);
     assert.equal(again.config, undefined);
     assert.match(again.configAction, /已有 acceptance，保留你的配置/);

@@ -1,8 +1,9 @@
 /**
  * review.ts — 自动评审一轮的共用流程，pi 扩展与宿主 Hook 共用。
  *
- * 负责：取快照 →（配了 acceptance 时先验收：不通过直接返修、不评审）→ 拼输入 → 调评审（失败重试 1 次）
- * → 解析 → 比较指纹 → 决定完成/返修/暂停。验收与评审共用一轮总预算。
+ * 负责：取快照 →（配了 gate 时先跑门禁：不通过直接返修，不验收、不评审）
+ * →（配了 acceptance 时再验收：不通过直接返修、不评审）→ 拼输入 → 调评审（失败重试 1 次）
+ * → 解析 → 比较指纹 → 决定完成/返修/暂停。门禁、验收与评审共用一轮总预算。
  * exec、状态读写、总结、进度等副作用全部通过参数注入；调用方负责把 outcome 变成
  * pi 的返修消息或宿主的 block JSON。
  */
@@ -12,10 +13,10 @@ import {
   buildAcceptanceRepairMessage, formatFailedItems, renderAcceptanceForReview, type AcceptanceRecord,
 } from "./acceptance-core.ts";
 import {
-  buildRepairMessage, buildReviewInput, decideNext, deriveReviewerSessionId, parseReview,
-  type ParsedReview, type RoundRecord,
+  buildGateRepairMessage, buildRepairMessage, buildReviewInput, decideNext, deriveReviewerSessionId, gateOutputTail,
+  parseReview, type GateRecord, type ParsedReview, type RoundRecord,
 } from "./core.ts";
-import { EXT_DIR, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig } from "./config.ts";
+import { EXT_DIR, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
 import { blockerHint, manualHint } from "./onboarding.ts";
 
@@ -23,7 +24,7 @@ export { PI_BIN, PERMISSION_EXT };
 export const REVIEW_PROMPT_PATH = join(EXT_DIR, "review-prompt.md");
 export const DEFAULT_MODEL = "openai-codex/gpt-6-astra";
 export const DEFAULT_THINKING = "xhigh";
-/** 验收打回和评审打回共用。 */
+/** 门禁、验收打回和评审打回共用。 */
 export const DEFAULT_MAX_REPAIRS = 4;
 export const DEFAULT_TIMEOUT_MIN = 60;
 /** 取消正在进行的评审时使用的固定原因。 */
@@ -38,7 +39,7 @@ export interface ReviewState extends AcceptanceState {
   lastSnapshot?: string;
   lastUntracked?: string[];
   lastFingerprint?: string;
-  /** 最近一次对代码给出结论（验收不通过或评审成功）时的指纹，用来判断「返修后没有任何改动」。 */
+  /** 最近一次对代码给出结论（门禁或验收不通过、评审成功）时的指纹，用来判断「返修后没有任何改动」。 */
   lastCheckedFingerprint?: string;
   reviewerSessionId?: string;
   rounds: RoundRecord[];
@@ -64,6 +65,8 @@ export interface ReviewConfig {
   reviewerCmd: string;
   /** .autoreview.json 的 acceptance 一节；没有就不验收。 */
   acceptance?: AcceptanceConfig;
+  /** .autoreview.json 的 gate 一节；没有就不跑门禁。 */
+  gate?: GateConfig;
 }
 
 export interface ReviewOutcome {
@@ -93,7 +96,7 @@ export interface ReviewDeps {
   checkLive?: () => void;
   /** 评审重试等进度文本。 */
   onProgress?: (text: string) => void;
-  /** 写评审输入文件，返回绝对路径。 */
+  /** 写评审输入、门禁日志等材料文件，返回绝对路径。 */
   writeInput: (name: string, text: string) => string;
   /** 成功评审后的总结（完成/进行中）；抛错由调用方处理。 */
   writeSummary?: (status: "进行中" | "完成") => Promise<void>;
@@ -163,12 +166,103 @@ interface RoundClock {
   now: () => number;
 }
 
+/** 门禁和验收没走到评审的轮次也记进 rounds，便于总结。 */
+function pushUnreviewedRound(
+  deps: ReviewDeps, clock: RoundClock, conclusion: string, extra: Pick<RoundRecord, "gate" | "acceptance">,
+): void {
+  deps.state.rounds.push({
+    round: deps.round, startedAt: clock.startedAt, durationMs: clock.now() - clock.startedTs, conclusion,
+    mustFixRaw: "", mustFix: [], minor: [], questions: [], recheck: [], ...extra,
+  });
+}
+
+/** sh 的「命令找不到」「不能执行」：多半是环境或配置问题，不算开发方的错。 */
+const SHELL_CANNOT_RUN = new Set([126, 127]);
+
+/**
+ * 门禁这一步：在开发目录用 /bin/sh -c 执行 gate.cmd，退出码 0 才往下走。
+ * 命令跑完且退出码非 0 → 打回开发方（这一轮不验收、不评审）；超时、命令找不到、起不来 → 暂停；
+ * 门禁改了项目里的文件 → 暂停。通过返回记录，接着验收或评审。
+ */
+async function gateStep(
+  deps: ReviewDeps, before: Snapshot, git: ReturnType<typeof createGitEvidence>, clock: RoundClock,
+): Promise<{ outcome: ReviewOutcome } | { record: GateRecord }> {
+  const { state, config } = deps;
+  const gate = config.gate!;
+  const live = (): void => { deps.checkLive?.(); };
+  const startedTs = clock.now();
+  const timeout = Math.min(gate.timeoutMin * 60_000, clock.deadline - startedTs);
+  deps.onProgress?.(`门禁命令执行中（第 ${deps.round} 轮）`);
+  let res: ExecResult | undefined;
+  let failure = "";
+  try {
+    // stderr 并进 stdout：返修消息里的输出和在终端里看到的顺序一致。
+    res = await deps.exec("/bin/sh", ["-c", `exec 2>&1\n${gate.cmd}`], { cwd: deps.cwd, timeout, signal: deps.signal, role: "门禁" });
+  } catch (error) { failure = errorText(error); }
+  live();
+  const output = res ? `${res.stdout}${res.stderr.trim() ? `\n${res.stderr}` : ""}` : "";
+  const record: GateRecord = { command: gate.cmd, result: "通过", durationMs: clock.now() - startedTs };
+  if (!res) {
+    record.result = "无法执行";
+    record.detail = tail(failure, 300);
+  } else {
+    record.exitCode = res.code;
+    record.outputTail = gateOutputTail(output);
+    if (res.killed) {
+      record.result = "超时";
+      record.detail = `超过 ${Math.round(timeout / 60_000)} 分钟没跑完，被终止`;
+    } else if (SHELL_CANNOT_RUN.has(res.code)) {
+      record.result = "无法执行";
+      record.detail = `退出码 ${res.code}：命令找不到或不能执行`;
+    } else if (res.code !== 0) record.result = "不通过";
+    record.logPath = deps.writeInput(
+      `gate-${deps.devSessionId}-r${deps.round}.log`,
+      [`$ ${gate.cmd}`, `退出码：${res.code}${res.killed ? "（被终止）" : ""}`, "", output].join("\n"),
+    );
+  }
+  const middle = await git.snapshot();
+  live();
+  if (middle.fingerprint !== before.fingerprint) {
+    pushUnreviewedRound(deps, clock, "未评审（门禁期间工作区变了）", { gate: record });
+    const changed = await git.changedFiles(before, middle);
+    live();
+    return {
+      outcome: {
+        kind: "paused", reason: "门禁期间工作区变了", changedFiles: changed,
+        notes: "门禁命令改了项目里的文件：把构建产物、缓存、报告加进 .gitignore，或让命令写到项目外面",
+      },
+    };
+  }
+  if (record.result === "通过") return { record };
+  if (record.result !== "不通过") {
+    pushUnreviewedRound(deps, clock, `未评审（门禁${record.result}）`, { gate: record });
+    return {
+      outcome: {
+        kind: "paused", reason: `门禁${record.result}`,
+        notes: [record.detail, record.outputTail && `输出最后几行：${tail(record.outputTail, 300)}`].filter(Boolean).join("；"),
+        hint: `检查 .autoreview.json 的 gate（命令：${gate.cmd}，时限 ${gate.timeoutMin} 分钟）能在项目目录跑完，再发消息继续`,
+      },
+    };
+  }
+  pushUnreviewedRound(deps, clock, "未评审（门禁不通过）", { gate: record });
+  state.lastCheckedFingerprint = before.fingerprint;
+  if (decideNext(1, state.repairs, config.maxRepairs) === "pause") {
+    return { outcome: { kind: "paused", reason: "达到返修上限" } };
+  }
+  state.repairs += 1;
+  state.awaitingRepair = true;
+  await deps.writeSummary?.("进行中");
+  live();
+  return { outcome: { kind: "repair", message: buildGateRepairMessage(state.repairs, record) } };
+}
+
 /**
  * 验收这一步：不通过就打回（这一轮不评审），无法验收、被暂停或改了工作区就暂停；
  * 通过返回记录，接着评审。没通过的轮次也记进 rounds，便于总结。
+ * 验收的时限从验收开始算（前面的门禁不占验收自己的时间），仍不超过一轮总预算。
  */
 async function acceptanceStep(
-  deps: ReviewDeps, before: Snapshot, git: ReturnType<typeof createGitEvidence>, clock: RoundClock,
+  deps: ReviewDeps, before: Snapshot, git: ReturnType<typeof createGitEvidence>, clock: RoundClock, gate?: GateRecord,
 ): Promise<{ outcome: ReviewOutcome } | { record: AcceptanceRecord }> {
   const { state, config } = deps;
   const acceptance = config.acceptance!;
@@ -179,19 +273,14 @@ async function acceptanceStep(
     workDir: deps.cwd, devSessionId: deps.devSessionId, round: deps.round, deliveryNote: deps.deliveryNote,
     state, config: acceptance, reviewerModel: config.reviewerModel, reviewerThinking: config.reviewerThinking,
     exec: deps.exec, runDir: acceptanceRunDir(deps.acceptanceDir, deps.round), procsFile: deps.procsFile,
-    deadline: Math.min(clock.startedTs + acceptance.timeoutMin * 60_000, clock.deadline), now: clock.now,
-    previousFailed: previous ? previous.items.filter((item) => item.verdict !== "通过").map((item) => item.id) : [],
+    deadline: Math.min(clock.now() + acceptance.timeoutMin * 60_000, clock.deadline), now: clock.now,
+    previousFailed: previous ? previous.items.filter((item) => item.verdict !== "通过" && item.verdict !== "需人工").map((item) => item.id) : [],
     signal: deps.signal, checkLive: deps.checkLive, onProgress: deps.onProgress, saveState: deps.saveState,
   });
   live();
   if (stage.kind === "paused") return { outcome: { kind: "paused", reason: stage.reason, notes: stage.notes, hint: stage.hint } };
   const record = stage.record;
-  const pushRound = (conclusion: string): void => {
-    state.rounds.push({
-      round: deps.round, startedAt: clock.startedAt, durationMs: clock.now() - clock.startedTs, conclusion,
-      mustFixRaw: "", mustFix: [], minor: [], questions: [], recheck: [], acceptance: record,
-    });
-  };
+  const pushRound = (conclusion: string): void => pushUnreviewedRound(deps, clock, conclusion, { gate, acceptance: record });
   const middle = await git.snapshot();
   live();
   if (middle.fingerprint !== before.fingerprint) {
@@ -246,7 +335,7 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   const startedAt = nowStamp();
   const now = deps.now ?? Date.now;
   const startedTs = now();
-  // 一轮总预算：验收（如果有）、评审首次调用和 1 次重试共用；后面的只能用剩余时间。
+  // 一轮总预算：门禁、验收（如果有）、评审首次调用和 1 次重试共用；后面的只能用剩余时间。
   const deadline = startedTs + timeoutMs;
 
   const before = await git.snapshot();
@@ -257,9 +346,16 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     state.baselineFingerprint = before.fingerprint;
     await deps.saveState();
   }
+  const clock: RoundClock = { startedAt, startedTs, deadline, now };
+  let gate: GateRecord | undefined;
+  if (config.gate) {
+    const step = await gateStep(deps, before, git, clock);
+    if ("outcome" in step) return step.outcome;
+    gate = step.record;
+  }
   let acceptance: AcceptanceRecord | undefined;
   if (config.acceptance) {
-    const step = await acceptanceStep(deps, before, git, { startedAt, startedTs, deadline, now });
+    const step = await acceptanceStep(deps, before, git, clock, gate);
     if ("outcome" in step) return step.outcome;
     acceptance = step.record;
   }
@@ -272,12 +368,14 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     round: deps.round, firstReview, requirement: state.requirement,
     deliveryNote: deps.deliveryNote, previousMustFix: state.unresolvedMustFix,
     diff, diffStat: stat, untracked: git.newUntrackedFiles(before, baseUntracked),
-    acceptance: acceptance ? renderAcceptanceForReview(acceptance) : undefined,
+    acceptance: acceptance ? renderAcceptanceForReview(acceptance) : undefined, gate: gate?.command,
   });
   const inputPath = deps.writeInput(`review-input-${deps.devSessionId}-r${deps.round}.md`, inputText);
   const reviewerSessionId = state.reviewerSessionId ?? deriveReviewerSessionId(deps.devSessionId);
   state.reviewerSessionId = reviewerSessionId;
   await deps.saveState();
+  // 门禁、验收改过进度文字，进入评审时改回来。
+  if (gate || acceptance) deps.onProgress?.(`自动评审中（第 ${deps.round} 轮）`);
 
   let parsed: ParsedReview | undefined;
   let lastError = "";
@@ -289,7 +387,7 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
       timedOut = true;
       lastError = attempt > 1
         ? `第 ${attempt} 次评审不再重试：两次尝试共用 ${Math.round(timeoutMs / 60_000)} 分钟已用完（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`
-        : `验收用掉了本轮预算，评审剩余不足 1 分钟（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`;
+        : `门禁和验收用掉了本轮预算，评审剩余不足 1 分钟（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`;
       break;
     }
     const attemptTimeout = remaining;
@@ -320,7 +418,7 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     round: deps.round, startedAt, durationMs: now() - startedTs,
     conclusion: parsed?.conclusion ?? "", mustFixRaw: parsed?.mustFixRaw ?? "",
     mustFix: parsed?.mustFix ?? [], minor: parsed?.minor ?? [], questions: parsed?.questions ?? [],
-    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, acceptance,
+    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, acceptance, gate,
   };
   state.rounds.push(record);
   const after = await git.snapshot();

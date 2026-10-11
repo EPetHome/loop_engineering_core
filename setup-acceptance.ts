@@ -10,7 +10,7 @@ import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { checkAcceptanceBudget, MARKER_FILE, parseAcceptanceConfig } from "./config.ts";
+import { checkRoundBudget, MARKER_FILE, parseAcceptanceConfig, parseGateConfig } from "./config.ts";
 import { BLOCK_END, BLOCK_START, blockVersion, conventionTarget, copyNotice, GUIDE_DOC, readBlock } from "./onboarding.ts";
 import { DEFAULT_TIMEOUT_MIN } from "./review.ts";
 
@@ -185,7 +185,7 @@ export async function planSetup(root: string, host?: string): Promise<Plan> {
     const next = { ...data, acceptance: detection.acceptance };
     // 写之前按程序的规则校验一遍，保证写进去的配置一定能用。
     const timeout = typeof data.reviewTimeoutMin === "number" ? data.reviewTimeoutMin : DEFAULT_TIMEOUT_MIN;
-    checkAcceptanceBudget(timeout, parseAcceptanceConfig(next.acceptance, root, {}));
+    checkRoundBudget(timeout, parseAcceptanceConfig(next.acceptance, root, {}), parseGateConfig(data.gate));
     config = `${JSON.stringify(next, null, 2)}\n`;
     configAction = existsSync(configPath) ? "加上 acceptance 一节（其他字段保留）" : "新建";
   }

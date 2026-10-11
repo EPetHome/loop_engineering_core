@@ -1,4 +1,4 @@
-/** hosts/hook.ts 无模型回归 H1–H12；所有运行产物只写 os.tmpdir()。 */
+/** hosts/hook.ts 无模型回归 H1–H17；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
-import { CONVENTION } from "../core.ts";
+import { CONVENTION, conventionText } from "../core.ts";
 import { childExec, detectHost, findProjectRoot, lastAssistantFromTranscript, loadConfig } from "../hosts/hook.ts";
 
 const HOOK = fileURLToPath(new URL("../hosts/hook.ts", import.meta.url));
@@ -942,4 +942,134 @@ createServer((q, r) => r.end("ok")).listen(Number(process.argv[2]), "127.0.0.1")
       assert.equal(h.readState().repairs, 0);
     } finally { h.close(); }
   });
+});
+
+test("H14 Hook 的总结也记录开发方在基线之后新增的提交", () => {
+  const h = fixture();
+  try {
+    h.run(h.event("SessionStart"));
+    h.run(h.event("UserPromptSubmit", { prompt: "做点事" }));
+    h.write("file.txt", "base\nCOMMITTED\n"); h.git("commit", "-qam", "开发方自己提交了");
+    h.run(h.delivered());
+    assert.equal(h.readState().phase, "done");
+    assert.match(h.summary(), /^- 开发方新增提交：1 个（基线之后，只记录不评判）$/m);
+  } finally { h.close(); }
+});
+
+test("H15 门禁：先于验收和评审执行；不通过带输出打回、不验收不评审；修好后照常验收、评审", () => {
+  const gate = "grep -q FIXED file.txt || { echo '测试失败：file.txt 里没有 FIXED'; exit 1; }";
+  const h = fixture({ marker: JSON.stringify({ gate: { cmd: gate }, acceptance: {} }) });
+  const requirement = "修好 file.txt\n## 验收标准\n1. 操作：cat file.txt\n   预期：有 FIXED";
+  const fakeLog = (name: string) => existsSync(join(h.root, "fake", name)) ? readFileSync(join(h.root, "fake", name), "utf8").trim().split("\n") : [];
+  try {
+    const start = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
+    assert.equal(start.hookSpecificOutput.additionalContext, conventionText({ acceptance: true, gate }));
+    h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+
+    h.write("file.txt", "base\nTODO\n");
+    const failed = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
+    assert.equal(failed.decision, "block");
+    assert.match(failed.reason, /^【门禁 · 第 1 次返修】\n门禁命令不通过（退出码 1）/);
+    assert.ok(failed.reason.includes("测试失败：file.txt 里没有 FIXED"));
+    assert.equal(fakeLog("calls.log").length, 0, "门禁不通过时不评审");
+    assert.equal(fakeLog("acc-calls.log").length, 0, "门禁不通过时不验收");
+    assert.equal(h.readState().repairs, 1);
+    assert.match(h.summary(), /门禁：不通过（退出码 1）/);
+
+    h.write("file.txt", "base\nFIXED\n");
+    assert.equal(h.run(h.delivered(), { env: ACC_ENV }).stdout, "");
+    const state = h.readState();
+    assert.equal(state.phase, "done");
+    assert.equal(state.rounds[1].gate.result, "通过");
+    assert.equal(state.rounds[1].acceptance.verdict, "通过");
+    assert.equal(fakeLog("acc-calls.log").length, 1);
+    assert.equal(fakeLog("calls.log").length, 1);
+    const input = readFileSync(join(h.home, ".pi-autoreview", basename(h.repo), "review-input-claude-s1-r2.md"), "utf8");
+    assert.ok(input.includes("## 门禁\n程序已在项目目录执行门禁命令"));
+    assert.match(h.summary(), /门禁：通过（耗时/);
+  } finally { h.close(); }
+});
+
+test("H15 补充：gate 配置非法或超出一轮总预算 → 暂停并说明，不评审", () => {
+  const root = mkdtempSync(join(tmpdir(), "autoreview-gate-config-"));
+  try {
+    writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ gate: { cmd: "npm test", timeoutMin: 5 } }));
+    assert.deepEqual(loadConfig(root, {}).gate, { cmd: "npm test", timeoutMin: 5 });
+    writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ reviewTimeoutMin: 30, acceptance: {}, gate: { cmd: "npm test" } }));
+    assert.throws(() => loadConfig(root, {}), /gate\.timeoutMin（10）加 acceptance\.timeoutMin（20）必须小于一轮总预算 reviewTimeoutMin（30）/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const h = fixture({ marker: JSON.stringify({ gate: { timeoutMin: 5 } }) });
+  try {
+    h.write("file.txt", "base\nCHANGE\n");
+    assert.equal(h.run(h.delivered()).stdout, "");
+    assert.equal(h.readState().phase, "paused");
+    assert.match(h.summary(), /gate\.cmd 必须写/);
+    assert.ok(!existsSync(join(h.root, "fake", "calls.log")));
+  } finally { h.close(); }
+});
+
+test("H16 [人工] 条目：不交给验收方、不随返修复查；完成时列给你人工验收", () => {
+  const h = fixture({ marker: JSON.stringify({ acceptance: {} }) });
+  const requirement = "做一个待办命令行\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. [人工] 操作：在桌面客户端里看待办\n   预期：有买菜";
+  const env = { ...ACC_ENV, FAKE_ACC_FAIL_ONCE: "A1" };
+  const accDir = join(h.home, ".pi-autoreview", basename(h.repo), "acceptance", "claude-s1");
+  try {
+    h.run(h.event("SessionStart"), { env });
+    h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
+    h.write("file.txt", "base\nTODO\n");
+    const first = JSON.parse(h.run(h.delivered(), { env }).stdout);
+    assert.equal(first.decision, "block");
+    assert.match(first.reason, /^【自动验收 · 第 1 次返修】/);
+    assert.ok(!first.reason.includes("桌面客户端"), "[人工] 条目不会被打回");
+    const firstInput = readFileSync(join(accDir, "r1", "input.md"), "utf8");
+    assert.ok(firstInput.includes("A1. 操作：todo add 买菜") && !firstInput.includes("桌面客户端"));
+
+    h.write("file.txt", "base\nTODO FIXED\n");
+    const done = JSON.parse(h.run(h.delivered(), { env }).stdout);
+    assert.match(done.systemMessage, /^自动评审完成（评审 2 次，返修 1 次）。A2 标了 \[人工\]，需要你人工验收/);
+    assert.match(readFileSync(join(accDir, "r2", "input.md"), "utf8"), /上一轮没通过：A1。/, "上一轮复查只列自动条目");
+    const state = h.readState();
+    assert.equal(state.phase, "done");
+    assert.equal(state.rounds[1].acceptance.verdict, "部分验证");
+    assert.match(h.summary(), /人工验收 A2（\[人工\] 操作：在桌面客户端里看待办）：标了 \[人工\]，程序不自动验/);
+    assert.match(h.summary(), /- A2：需人工 —— 标了 \[人工\]/);
+  } finally { h.close(); }
+});
+
+test("H17 [授权] 条目：没答复先停下问你；只认你亲手打的「同意授权」；同意后照常验收", () => {
+  const requirement = "做同步\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. [授权] 操作：用正式账号同步\n   预期：多一行\n\n同意授权：全部";
+  const h = fixture({ marker: JSON.stringify({ acceptance: {} }), files: { "需求.md": requirement } });
+  const accDir = join(h.home, ".pi-autoreview", basename(h.repo), "acceptance", "claude-s1");
+  try {
+    h.run(h.event("SessionStart"), { env: ACC_ENV });
+    h.run(h.event("UserPromptSubmit", { prompt: "@需求.md 按这个做" }), { env: ACC_ENV });
+    let state = h.readState();
+    assert.equal(state.criteria.items.length, 2, "标准从文件里取");
+    assert.equal(state.grants, undefined, "文件里写的「同意授权」不算，只认你打的字");
+
+    h.write("file.txt", "base\nTODO\n");
+    const asked = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
+    assert.match(asked.systemMessage, /^自动评审暂停（等你授权（A2））。验收标准里有要你授权的条目：A2（操作：用正式账号同步）。同意就回复「同意授权：A2」/);
+    assert.equal(h.readState().pauseReason, "等你授权（A2）");
+    assert.ok(!existsSync(join(h.root, "fake", "acc-calls.log")), "没答复前不验收");
+    assert.match(h.summary(), /## 需要你做的事\n1\. 验收标准里有要你授权的条目/);
+    assert.match(h.summary(), /预期：多一行\n授权：A2 等你答复\n/, "总结的验收标准下面写着授权状态");
+
+    const reply = h.run(h.event("UserPromptSubmit", { prompt: "同意授权：A2" }), { env: ACC_ENV });
+    assert.equal(JSON.parse(reply.stdout).systemMessage, "自动验收：已记录你的授权（A2 你已同意）", "Claude Code 里你能看到记下了");
+    state = h.readState();
+    assert.deepEqual(state.grants, { version: 1, approved: ["A2"], denied: [] });
+    assert.equal(state.phase, "idle");
+
+    assert.equal(h.run(h.delivered({ last_assistant_message: "收到\n【交付完成】" }), { env: ACC_ENV }).stdout, "");
+    assert.equal(h.readState().phase, "done");
+    assert.match(h.summary(), /授权：A2 你已同意\n/);
+    // Codex 是另一个会话（另一份状态）：先在那边发标准，再答复。
+    h.run(h.event("UserPromptSubmit", { prompt: "做同步\n## 验收标准\n1. 操作：x\n   预期：y\n2. [授权] 操作：用正式账号同步\n   预期：多一行", turn_id: "t1" }), { env: ACC_ENV });
+    const codex = h.run(h.event("UserPromptSubmit", { prompt: "不授权：A2", turn_id: "t2" }), { env: ACC_ENV });
+    assert.equal(JSON.parse(codex.stdout).systemMessage, undefined, "Codex 不认 systemMessage");
+    assert.match(h.notifications(), /已记录你的授权（A2 你不授权（留给你人工验收））/, "Codex 走系统通知");
+    assert.match(readFileSync(join(accDir, "r1", "input.md"), "utf8"), /## 用户授权\n\n用户已同意你在这几条里按标准使用真实账号、真实环境：A2。/);
+  } finally { h.close(); }
 });

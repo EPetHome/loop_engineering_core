@@ -14,11 +14,11 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, 
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "../acceptance-core.ts";
+import { authorizationLine, criteriaFromUser, grantsFromUser, typedByUser } from "../acceptance-core.ts";
 import {
-  checkAcceptanceBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, readMarker,
+  checkRoundBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
-import { classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary } from "../core.ts";
+import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { reapProcs, registerProc, unregisterProc } from "../procs.ts";
@@ -180,14 +180,14 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
     reviewerCmd: env.AUTOREVIEW_REVIEWER_CMD?.trim() ?? "",
   };
   const acceptance = parseAcceptanceConfig(data.acceptance, root, env);
-  if (!acceptance) return config;
-  checkAcceptanceBudget(config.reviewTimeoutMin, acceptance);
-  return { ...config, acceptance };
+  const gate = parseGateConfig(data.gate);
+  checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
+  return { ...config, ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}) };
 }
 
-/** 注入给开发方的约定：配了验收再追加验收约定。 */
+/** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */
 function conventionFor(config: ReviewConfig): string {
-  return config.acceptance ? `${CONVENTION}\n${ACCEPTANCE_CONVENTION}` : CONVENTION;
+  return conventionText({ acceptance: Boolean(config.acceptance), gate: config.gate?.cmd });
 }
 
 /** 状态和总结都放在 ~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.*。 */
@@ -379,6 +379,9 @@ async function writeSummary(
     if (status !== "暂停") throw error;
     gitStatusShort = `（${errorText(error)}；无法确认是否干净）`;
   }
+  // 提交数只是记录，取不到就不写。
+  let newCommits: number | undefined;
+  try { if (state.baseline) newCommits = await createGitEvidence(ctx.exec, ctx.workDir).commitsSince(state.baseline); } catch { /* 不影响总结 */ }
   const todos = acceptanceTodos({
     acceptance: ctx.config.acceptance, host: ctx.host, phase: state.phase, pauseHint: state.pauseHint,
     criteria: state.criteria, lastAcceptance: lastAcceptance(state),
@@ -386,9 +389,9 @@ async function writeSummary(
   const text = renderSummary({
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
-    criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
+    criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
-    unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes,
+    unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
   });
   mkdirSync(dirname(ctx.paths.summary), { recursive: true });
   writeFileSync(ctx.paths.summary, text);
@@ -510,8 +513,19 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
     state.criteria = criteria;
     process.stderr.write(`[autoreview] 已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）\n`);
   }
+  // 授权只认你亲手打的字：用没展开 @文件 的原文，程序发的返修消息也不算。
+  const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
+  const grants = ctx.config.acceptance ? grantsFromUser(typed, state.criteria, state.grants) : undefined;
+  let notice: string | undefined;
+  if (grants && state.criteria) {
+    state.grants = grants;
+    notice = `自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的 [授权] 条目"}）`;
+    process.stderr.write(`[autoreview] ${notice}\n`);
+  }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
+  // 记下授权要让你看到：Claude Code 走 systemMessage，其他宿主发系统通知（UserPromptSubmit 只有 10 秒）。
+  if (notice && ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
+  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
 }
 
 /**

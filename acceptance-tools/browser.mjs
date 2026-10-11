@@ -15,6 +15,7 @@
  *   {"screenshot": "保存后"}                 截图
  *   {"wait": 500}                            等若干毫秒
  * Playwright 依次从 AUTOREVIEW_PLAYWRIGHT、项目依赖、全局 npm 里找；找不到时退出码 2，并在证据里写明。
+ * 只检查能不能找到（流水线开跑前用）：browser.mjs --check <项目目录>，找到退出码 0，找不到 2。
  */
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -24,6 +25,11 @@ import { pathToFileURL } from "node:url";
 
 const STEP_TIMEOUT = 15_000;
 const [runDir, workDir, id, stepsArg] = process.argv.slice(2);
+if (runDir === "--check") {
+  const found = await loadPlaywright();
+  process.stdout.write(found ? "找到了 Playwright\n" : "缺少 Playwright\n");
+  process.exit(found ? 0 : 2);
+}
 if (!runDir || !id || !/^[AG]\d+$/.test(id) || !stepsArg) {
   process.stderr.write("用法：./browser <条目，如 A3> <步骤文件.json>\n");
   process.exit(2);

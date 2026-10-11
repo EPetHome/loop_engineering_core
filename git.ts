@@ -112,6 +112,12 @@ export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal)
       }
       return [...files].sort();
     },
+    /** 某个快照（或提交）之后 HEAD 上新增的提交数。 */
+    async commitsSince(base: string): Promise<number> {
+      objectId(base, "提交数基线");
+      const count = Number.parseInt((await run(["rev-list", "--count", `${base}..HEAD`])).trim(), 10);
+      return Number.isFinite(count) ? count : 0;
+    },
     async statusShort(): Promise<string> {
       return pathsFromNul(await run(["status", "--short", "-z"])).join("\n");
     },

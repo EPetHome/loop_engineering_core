@@ -1,7 +1,7 @@
 /**
  * acceptance.ts — 自动验收一轮的流程，经 review.ts 由 pi 扩展与宿主 Hook 共用。
  *
- * 负责：异议检查 → 取或起草验收标准（冻结）→ 查端口、启动被测系统、等就绪、记系统日志
+ * 负责：异议检查 → 取或起草验收标准（冻结）→ [授权] 条目等你答复 → 查端口、启动被测系统、等就绪、记系统日志
  * → 每次调验收方前按配置重置数据 → 调验收方（证据有问题在同一会话重做 1 次，还不行换强模型重验 1 次）
  * → 关停系统、清理端口上的残留进程、截取日志、扫错误 → 程序逐条判定。
  * 被测系统自成进程组并登记，任何退出路径都会关停；验收途中系统退出就立即停掉验收方，
@@ -14,8 +14,8 @@ import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   buildAcceptanceInput, buildCorrectionInput, buildCriteriaDraftInput, classifySystemExit, dataStateNote, extractCriteria,
-  findObjections, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft, scanLogs,
-  type AcceptanceRecord, type Criteria, type ParsedAcceptance,
+  authorizationHint, authorizationStatus, findObjections, forUser, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft,
+  scanLogs, type AcceptanceRecord, type Criteria, type Grants, type ParsedAcceptance,
 } from "./acceptance-core.ts";
 import { EXT_DIR, HERMES_BIN, MARKER_FILE, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig } from "./config.ts";
 import { deriveSessionId } from "./core.ts";
@@ -34,6 +34,8 @@ const MAX_LOG_BYTES = 2 * 1024 * 1024;
 export interface AcceptanceState {
   requirement?: string;
   criteria?: Criteria;
+  /** 用户对 [授权] 条目的答复（只认用户亲手写的「同意授权：…」「不授权：…」）。 */
+  grants?: Grants;
 }
 
 export interface AcceptanceDeps {
@@ -232,7 +234,7 @@ function startSystem(deps: AcceptanceDeps, logPath: string): RunningSystem {
 }
 
 /** 有进程在这个地址上监听就算占用。 */
-function portBusy(url: URL): Promise<boolean> {
+export function portBusy(url: URL): Promise<boolean> {
   const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
   const host = url.hostname.replace(/^\[|\]$/g, "");
   return new Promise((resolveBusy) => {
@@ -299,7 +301,7 @@ function listeners(port: string): Listener[] {
 const portOf = (url: URL): string => url.port || (url.protocol === "https:" ? "443" : "80");
 
 /** 端口被占时给你看的「谁占着」。 */
-function describeListeners(url: URL): string {
+export function describeListeners(url: URL): string {
   const found = listeners(portOf(url));
   return found.length > 0 ? found.map((item) => `pid ${item.pid}（${item.command}）`).join("、") : "找不到占用的进程（需要 lsof）";
 }
@@ -521,11 +523,30 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
     const hint = `开发方对 ${objections.join("、")} 有异议（理由见它的回复）。验收标准只有你能改：同意就发一条带「## 验收标准」的新消息替换；不同意就发消息让它按原标准继续`;
     return { kind: "paused", reason: `开发方对验收标准有异议（${objections.join("、")}）`, notes: hint, hint };
   }
-  const criteria = await ensureCriteria(deps);
+  const frozen = await ensureCriteria(deps);
   deps.checkLive?.();
-  if (!("items" in criteria)) return { kind: "paused", reason: criteria.reason, notes: criteria.notes, hint: criteria.hint };
+  if (!("items" in frozen)) return { kind: "paused", reason: frozen.reason, notes: frozen.notes, hint: frozen.hint };
+  // [授权] 条目要你先答复：同意就照常交给验收方，不授权就留给你人工验收；还没答复就停下来问你。
+  const auth = authorizationStatus(frozen, deps.state.grants);
+  if (auth.pending.length > 0) {
+    const hint = authorizationHint(frozen, auth.pending);
+    return { kind: "paused", reason: `等你授权（${auth.pending.join("、")}）`, notes: hint, hint };
+  }
+  const criteria: Criteria = auth.denied.length === 0 ? frozen
+    : { ...frozen, items: frozen.items.map((item) => auth.denied.includes(item.id) ? { ...item, declined: true } : item) };
 
   const { config, runDir } = deps;
+  // 标准全部交给你（[人工] 或不授权）：没有要验收方做的，不启动系统、不调验收方，整轮记部分验证，完成时列给你。
+  if (criteria.items.every(forUser)) {
+    rmSync(runDir, { recursive: true, force: true });
+    mkdirSync(runDir, { recursive: true });
+    const record: AcceptanceRecord = {
+      ...judgeAcceptance({ criteria: criteria.items, evidence: () => undefined, logErrors: [], runDir, hasService: Boolean(config.start) }),
+      durationMs: 0,
+    };
+    writeFileSync(join(runDir, "result.json"), JSON.stringify(record, null, 2));
+    return { kind: "judged", record };
+  }
   const startedAt = deps.now();
   /** 墙上时间：判断端口上的进程是不是验收开始后才起的。 */
   const wallStart = Date.now();
@@ -565,6 +586,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
         systemLog: config.start ? logPath : undefined, logFiles: config.logs,
         guide: config.guide ? readIfExists(config.guide) ?? `（操作说明文件读不到：${config.guide}）` : undefined,
         deliveryNote: deps.deliveryNote, previousFailed: deps.previousFailed, resetConfigured: Boolean(config.reset),
+        authorized: auth.approved,
       }));
       // 系统一退出就停掉验收方和重置命令；外层取消也一并传下去。
       const testerAbort = new AbortController();

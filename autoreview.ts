@@ -1,5 +1,5 @@
 /**
- * pi 自动评审扩展：交付标记触发评审，必修回送原开发会话；评审完成后执行验收命令（如有配置）。
+ * pi 自动评审扩展：交付标记触发评审（配了门禁先跑门禁），必修回送原开发会话；评审完成后执行验收命令（如有配置）。
  * 失败调用不推进成功检查点；git 取证失败或指纹变化只暂停；暂停后你再让开发方干活即恢复自动评审。
  * 加载：pi -e /Users/Admin/Desktop/loop/autoreview.ts
  */
@@ -7,13 +7,17 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { ACCEPTANCE_CONVENTION, criteriaFromUser } from "./acceptance-core.ts";
-import { checkAcceptanceBudget, loadAcceptanceConfig, type AcceptanceConfig } from "./config.ts";
+import { authorizationLine, criteriaFromUser, grantsFromUser, typedByUser } from "./acceptance-core.ts";
+import { checkRoundBudget, loadAcceptanceConfig, loadGateConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import {
-  acceptRunLabel, classifyMarker, CONVENTION, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
+  acceptRunLabel, classifyMarker, conventionText, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
 } from "./core.ts";
 import { createGitEvidence, GitReadError, type Exec, type ExecResult } from "./git.ts";
 import { acceptanceTodos, conventionNotice } from "./onboarding.ts";
+import {
+  inboxPath, pollMs, readJson, stageFromEnv, writeStageStatus,
+  type InboxMessage, type StageEvent, type StageLink,
+} from "./pipeline-core.ts";
 import { reapProcs } from "./procs.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, INTERRUPTED,
@@ -23,8 +27,11 @@ import {
 
 interface Lifecycle { active: boolean }
 interface ReviewTask { lifecycle: Lifecycle; controller: AbortController }
-/** pi 扩展独有的验收命令记录挂在评审状态上一起存（与自动验收无关）。 */
-type PiState = ReviewState & { acceptRun?: AcceptRunRecord };
+/**
+ * pi 扩展独有的状态，挂在评审状态上一起存：验收命令记录（与自动验收无关）；
+ * 流水线收件箱已收下的序号、正在等开发方处理的那一条。
+ */
+type PiState = ReviewState & { acceptRun?: AcceptRunRecord; inboxHandled?: number; awaitingInbox?: number };
 
 const DEFAULT_ACCEPT_TIMEOUT_MIN = 120;
 /** 总结里保留的验收命令输出行数；完整输出写日志文件。 */
@@ -68,6 +75,11 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   let reviewRunning = false;
   let lifecycle: Lifecycle = { active: true };
   let activeTask: ReviewTask | undefined;
+  /** 由流水线启动时：属于哪个流水线目录、哪一段；收件箱轮询用的最近一次上下文。 */
+  let pipelineLink: StageLink | undefined;
+  let inboxTimer: ReturnType<typeof setInterval> | undefined;
+  let inboxBusy = false;
+  let latestCtx: ExtensionContext | undefined;
 
   const live = (life: Lifecycle, signal?: AbortSignal): boolean => life.active && !signal?.aborted;
   const checkLive = (life: Lifecycle, signal?: AbortSignal): void => {
@@ -91,9 +103,24 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   const acceptanceEnabled = (ctx: ExtensionContext): boolean => {
     try { return acceptanceConfig(ctx) !== undefined; } catch { return false; }
   };
+  /** .autoreview.json 的 gate 一节；配置非法时抛错（评审路径里会变成暂停）。 */
+  const gateConfig = (ctx: ExtensionContext): GateConfig | undefined => loadGateConfig(ctx.cwd);
+  /** 只用于注入约定：配置非法时当作没配，错误留给评审路径报。 */
+  const gateCommand = (ctx: ExtensionContext): string | undefined => {
+    try { return gateConfig(ctx)?.cmd; } catch { return undefined; }
+  };
   const saveState = (life: Lifecycle): void => {
     checkLive(life);
     pi.appendEntry("autoreview-state", state);
+  };
+  /** 流水线里的段：把完成、暂停、返修后没改动写进状态文件，编排程序据此接力。写失败不影响评审。 */
+  const reportStage = (ctx: ExtensionContext, event: StageEvent, extra: { pauseReason?: string; reply?: string } = {}): void => {
+    if (!pipelineLink) return;
+    try {
+      writeStageStatus(pipelineLink, {
+        sessionId: ctx.sessionManager.getSessionId(), summary: summaryPath(ctx), event, inbox: state.inboxHandled ?? 0, ...extra,
+      });
+    } catch { /* 编排程序会因为等不到状态而提醒你 */ }
   };
   const updateStatus = (ctx: ExtensionContext, life: Lifecycle): void => {
     checkLive(life);
@@ -131,6 +158,9 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       gitStatusShort = `（${errorText(error)}；无法确认是否干净）`;
     }
     checkLive(life, signal);
+    // 提交数只是记录，取不到就不写。
+    let newCommits: number | undefined;
+    try { if (state.baseline) newCommits = await evidence(ctx, life, signal).commitsSince(state.baseline); } catch { checkLive(life, signal); }
     const devSessionId = ctx.sessionManager.getSessionId();
     let acceptance: AcceptanceConfig | undefined;
     try { acceptance = acceptanceConfig(ctx); } catch { acceptance = undefined; }
@@ -143,7 +173,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
-      criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun,
+      criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
     });
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
@@ -161,8 +191,10 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     state.pauseHint = hint;
     state.unresolvedMustFix = unresolvedMustFix;
     state.awaitingRepair = false;
+    state.awaitingInbox = undefined;
     const errors: string[] = [];
     try { saveState(life); } catch (error) { errors.push(`状态保存失败：${errorText(error)}`); }
+    reportStage(ctx, "paused", { pauseReason: reason });
     try { updateStatus(ctx, life); } catch (error) { errors.push(`状态栏更新失败：${errorText(error)}`); }
     try {
       await writeSummary(ctx, "暂停", life, reason, unresolvedMustFix, changedFiles, notes, signal);
@@ -207,9 +239,9 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       reviewerCmd: flagString(pi, "autoreview-reviewer-cmd", ""),
     };
     const acceptance = acceptanceConfig(ctx);
-    if (!acceptance) return config;
-    checkAcceptanceBudget(config.reviewTimeoutMin, acceptance);
-    return { ...config, acceptance };
+    const gate = gateConfig(ctx);
+    checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
+    return { ...config, ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}) };
   };
 
   const acceptCommand = (): string => flagString(pi, "autoreview-accept-cmd", "");
@@ -351,11 +383,13 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     if (outcome.kind === "done") {
       state.phase = "done";
       state.awaitingRepair = false;
+      state.awaitingInbox = undefined;
       // 评审完成必触发验收命令：「进行中」与完成一起保存，中途关闭也能在关闭或恢复时记为中断。
       const acceptRun = acceptCommand() ? newAcceptRun("auto") : undefined;
       state.acceptRun = acceptRun;
       saveState(life);
       updateStatus(ctx, life);
+      reportStage(ctx, "done");
       await notifyUser(
         ctx, `${basename(cwd)}：完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）${acceptRun ? "，开始执行验收命令" : ""}`,
         "info", life, signal, outcome.hint,
@@ -374,6 +408,46 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     const message = outcome.message!;
     if (ctx.isIdle()) pi.sendUserMessage(message);
     else pi.sendUserMessage(message, { deliverAs: "followUp" });
+  };
+
+  /**
+   * 流水线收件箱：编排程序把 e2e 没通过、归这一段的条目写进来，开发方空闲时发给它。
+   * 发之前把评审起点重定到此刻，下一轮评审只看这次返修的改动（同一仓库里别的段的改动不算到这一段头上）；
+   * 这些条目当作「上一轮必修」交给评审复查。
+   */
+  const checkInbox = async (): Promise<void> => {
+    const link = pipelineLink;
+    const ctx = latestCtx;
+    const life = lifecycle;
+    if (!link || !ctx || inboxBusy || !life.active || reviewRunning || state.phase === "reviewing" || gitAvailability !== "available") return;
+    const inbox = readJson<InboxMessage>(inboxPath(link.dir, link.stage));
+    if (!inbox || !(inbox.seq > (state.inboxHandled ?? 0)) || !ctx.isIdle()) return;
+    inboxBusy = true;
+    try {
+      const snap = await evidence(ctx, life).snapshot();
+      checkLive(life);
+      state.lastSnapshot = snap.ref;
+      state.lastUntracked = snap.untracked.map(({ path }) => path);
+      state.lastFingerprint = snap.fingerprint;
+      state.lastCheckedFingerprint = snap.fingerprint;
+      state.unresolvedMustFix = inbox.mustFix;
+      state.repairs = 0;
+      state.awaitingRepair = false;
+      if (state.phase === "paused") {
+        state.phase = "idle";
+        state.pauseReason = undefined;
+        state.pauseHint = undefined;
+      }
+      state.inboxHandled = inbox.seq;
+      state.awaitingInbox = inbox.seq;
+      saveState(life);
+      updateStatus(ctx, life);
+      pi.sendUserMessage(inbox.message);
+    } catch (error) {
+      await pauseForError(ctx, error, life);
+    } finally {
+      inboxBusy = false;
+    }
   };
 
   /** 整个后台入口都在 try 内；收尾没有能再次拒绝的副作用。 */
@@ -476,10 +550,12 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         `自动评审：${state.enabled ? "开启" : "关闭"}`, `状态：${phase}`,
         `评审 ${state.rounds.length} 次，返修 ${state.repairs} 次`,
         `验收命令：${state.acceptRun ? acceptRunLabel(state.acceptRun) : acceptCommand() ? "未执行" : "未配置"}`,
+        `门禁：${gateCommand(ctx) ?? "未配置"}`,
         `评审会话：${state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId)}`, `总结：${summaryPath(ctx)}`,
         `自动验收：${!acceptanceEnabled(ctx) ? "未配置" : state.criteria
           ? `标准第 ${state.criteria.version} 版（${state.criteria.items.length} 条，${state.criteria.source === "用户" ? "你写的" : "自动起草"}）`
           : "还没有标准（需求里没有「## 验收标准」时，第一次验收前自动起草）"}`,
+        ...(state.criteria && authorizationLine(state.criteria, state.grants) ? [`授权：${authorizationLine(state.criteria, state.grants)}`] : []),
       ].join("\n"), "info");
     },
   });
@@ -491,6 +567,10 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
     gitAvailability = "unknown";
     reviewRunning = false;
     activeTask = undefined;
+    latestCtx = ctx;
+    pipelineLink = stageFromEnv(process.env);
+    if (inboxTimer) clearInterval(inboxTimer);
+    inboxTimer = undefined;
     try {
       // 上次 pi 进程异常退出时留下的被测系统（登记者已死）先清掉。
       reapProcs(procsPath(ctx));
@@ -510,6 +590,14 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       if (state.acceptRun?.result === "进行中") await interruptAcceptRun(ctx, life);
       else if (state.acceptRun?.result === "中断") ctx.ui.notify("自动评审：上次验收命令被中断，输入 /accept 重新执行", "info");
       checkLive(life);
+      // 流水线里的段：报一次当前状态（重开的会话如果已经完成或暂停，就照实报；e2e 返修还没处理完时只报 started，
+      // 免得编排程序误以为已经修好），开始看收件箱。
+      if (pipelineLink) {
+        const event = state.awaitingInbox !== undefined ? "started" : state.phase === "done" ? "done" : state.phase === "paused" ? "paused" : "started";
+        reportStage(ctx, event, { pauseReason: state.pauseReason });
+        inboxTimer = setInterval(() => void checkInbox(), pollMs());
+        inboxTimer.unref?.();
+      }
       if (state.phase === "paused") {
         ctx.ui.notify(`自动评审：上次暂停（${state.pauseReason ?? "未知原因"}），给开发方发消息继续干活即恢复自动评审，或输入 /review 立即评审`, "info");
       }
@@ -530,6 +618,8 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    if (inboxTimer) clearInterval(inboxTimer);
+    inboxTimer = undefined;
     if (!lifecycle.active) return;
     const interrupted = state.phase === "reviewing";
     const accepting = state.acceptRun?.result === "进行中";
@@ -549,6 +639,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    latestCtx = ctx;
     const life = lifecycle;
     if (!life.active || gitAvailability === "unsupported") return;
     try {
@@ -588,8 +679,15 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         saveState(life);
         ctx.ui.notify(`自动验收：已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`, "info");
       }
+      // 授权只认你亲手打的字：@文件 展开的内容、程序自己发的返修消息都不算。
+      const grants = acceptance ? grantsFromUser(typedByUser(event.prompt), state.criteria, state.grants) : undefined;
+      if (grants && state.criteria) {
+        state.grants = grants;
+        saveState(life);
+        ctx.ui.notify(`自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的 [授权] 条目"}）`, "info");
+      }
       if (state.enabled) {
-        const convention = acceptance ? `${CONVENTION}\n${ACCEPTANCE_CONVENTION}` : CONVENTION;
+        const convention = conventionText({ acceptance, gate: gateCommand(ctx) });
         const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
         event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }
@@ -597,6 +695,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    latestCtx = ctx;
     const life = lifecycle;
     if (!life.active || gitAvailability !== "available" || reviewRunning || state.phase === "reviewing") return;
     try {
@@ -608,6 +707,19 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       }
       // 暂停状态不自动评审，等你发消息让开发方继续（before_agent_start 解除）或输入 /review。
       if (state.phase === "paused") return;
+      // 流水线 e2e 返修：有改动就评审（不看标记）；没改代码多半是认为不归自己，报给编排程序（它会找你），不评审。
+      if (state.awaitingInbox !== undefined) {
+        const current = await evidence(ctx, life).snapshot();
+        checkLive(life);
+        if (current.fingerprint !== checkedFingerprint(state)) {
+          if (state.enabled) void startReview(ctx, "auto");
+          return;
+        }
+        state.awaitingInbox = undefined;
+        saveState(life);
+        reportStage(ctx, "no-change", { reply: lastAssistantText(ctx.sessionManager.getEntries()) });
+        return;
+      }
       if (marker === "none") {
         const baseline = checkedFingerprint(state);
         if (!state.enabled || !baseline) return;
