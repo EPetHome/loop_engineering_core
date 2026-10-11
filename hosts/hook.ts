@@ -14,7 +14,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, 
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { criteriaFromUser, grantsFromUser, grantsLabel, typedByUser } from "../acceptance-core.ts";
+import { authorizationLine, criteriaFromUser, grantsFromUser, typedByUser } from "../acceptance-core.ts";
 import {
   checkRoundBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
@@ -389,7 +389,7 @@ async function writeSummary(
   const text = renderSummary({
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
-    criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
+    criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
     unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
   });
@@ -516,12 +516,16 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   // 授权只认你亲手打的字：用没展开 @文件 的原文，程序发的返修消息也不算。
   const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
   const grants = ctx.config.acceptance ? grantsFromUser(typed, state.criteria, state.grants) : undefined;
-  if (grants) {
+  let notice: string | undefined;
+  if (grants && state.criteria) {
     state.grants = grants;
-    process.stderr.write(`[autoreview] 已记录授权：${grantsLabel(grants)}\n`);
+    notice = `自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的 [授权] 条目"}）`;
+    process.stderr.write(`[autoreview] ${notice}\n`);
   }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
+  // 记下授权要让你看到：Claude Code 走 systemMessage，其他宿主发系统通知（UserPromptSubmit 只有 10 秒）。
+  if (notice && ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
+  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
 }
 
 /**

@@ -1020,6 +1020,8 @@ test("G15 pi 扩展的授权：只认你打的字，pi 展开的 <file> 内容�
     assert.equal(state().grants, undefined, "程序发的返修消息不算");
     await h.begin("同意授权：A2");
     assert.deepEqual(state().grants!.approved, ["A2"]);
-    assert.ok(h.notifications.some((text) => text.includes("已记录授权（同意 A2）")));
+    assert.ok(h.notifications.some((text) => text.includes("已记录你的授权（A2 你已同意）")));
+    await h.command("review-status");
+    assert.ok(h.notifications.some((text) => text.includes("授权：A2 你已同意")), "/review-status 能看到授权状态");
   } finally { await h.close(); }
 });

@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import {
-  ACCEPTANCE_CONVENTION, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria,
+  ACCEPTANCE_CONVENTION, authorizationLine, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria, type Grants,
 } from "./acceptance-core.ts";
 
 export const MARKER_DELIVERED = "【交付完成】";
@@ -119,6 +119,8 @@ export interface SummaryInput {
   notes?: string;
   /** 冻结的验收标准（配了 acceptance 时）。 */
   criteria?: Criteria;
+  /** 你对 [授权] 条目的答复。 */
+  grants?: Grants;
   /** 最近一次验收没通过的条目。 */
   unresolvedAcceptance?: string;
   /** 需要你做的事（暂停时怎么继续、人工验收的条目、接入提醒），放在总结开头。 */
@@ -345,6 +347,8 @@ export function renderSummary(input: SummaryInput): string {
     const source = input.criteria.source === "用户" ? "你写的" : "自动起草，未经你确认";
     lines.push(`## 验收标准（${source}；第 ${input.criteria.version} 版）`);
     lines.push(formatCriteria(input.criteria.items));
+    const authorization = authorizationLine(input.criteria, input.grants);
+    if (authorization) lines.push(`授权：${authorization}`);
   }
   const bullets = (items: string[], prefix = ""): void => {
     lines.push(...(items.length > 0 ? items.map((item) => `- ${prefix}${item}`) : ["- 无"]));

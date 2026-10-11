@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { criteriaFromUser, grantsFromUser, grantsLabel, typedByUser } from "./acceptance-core.ts";
+import { authorizationLine, criteriaFromUser, grantsFromUser, typedByUser } from "./acceptance-core.ts";
 import { checkRoundBudget, loadAcceptanceConfig, loadGateConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import {
   acceptRunLabel, classifyMarker, conventionText, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
@@ -173,7 +173,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
-      criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
+      criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
     });
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
@@ -555,6 +555,7 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         `自动验收：${!acceptanceEnabled(ctx) ? "未配置" : state.criteria
           ? `标准第 ${state.criteria.version} 版（${state.criteria.items.length} 条，${state.criteria.source === "用户" ? "你写的" : "自动起草"}）`
           : "还没有标准（需求里没有「## 验收标准」时，第一次验收前自动起草）"}`,
+        ...(state.criteria && authorizationLine(state.criteria, state.grants) ? [`授权：${authorizationLine(state.criteria, state.grants)}`] : []),
       ].join("\n"), "info");
     },
   });
@@ -680,10 +681,10 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
       }
       // 授权只认你亲手打的字：@文件 展开的内容、程序自己发的返修消息都不算。
       const grants = acceptance ? grantsFromUser(typedByUser(event.prompt), state.criteria, state.grants) : undefined;
-      if (grants) {
+      if (grants && state.criteria) {
         state.grants = grants;
         saveState(life);
-        ctx.ui.notify(`自动验收：已记录授权（${grantsLabel(grants)}）`, "info");
+        ctx.ui.notify(`自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的 [授权] 条目"}）`, "info");
       }
       if (state.enabled) {
         const convention = conventionText({ acceptance, gate: gateCommand(ctx) });

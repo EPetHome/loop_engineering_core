@@ -1054,15 +1054,22 @@ test("H17 [授权] 条目：没答复先停下问你；只认你亲手打的「�
     assert.equal(h.readState().pauseReason, "等你授权（A2）");
     assert.ok(!existsSync(join(h.root, "fake", "acc-calls.log")), "没答复前不验收");
     assert.match(h.summary(), /## 需要你做的事\n1\. 验收标准里有要你授权的条目/);
+    assert.match(h.summary(), /预期：多一行\n授权：A2 等你答复\n/, "总结的验收标准下面写着授权状态");
 
     const reply = h.run(h.event("UserPromptSubmit", { prompt: "同意授权：A2" }), { env: ACC_ENV });
-    assert.match(reply.stderr, /已记录授权：同意 A2/);
+    assert.equal(JSON.parse(reply.stdout).systemMessage, "自动验收：已记录你的授权（A2 你已同意）", "Claude Code 里你能看到记下了");
     state = h.readState();
     assert.deepEqual(state.grants, { version: 1, approved: ["A2"], denied: [] });
     assert.equal(state.phase, "idle");
 
     assert.equal(h.run(h.delivered({ last_assistant_message: "收到\n【交付完成】" }), { env: ACC_ENV }).stdout, "");
     assert.equal(h.readState().phase, "done");
+    assert.match(h.summary(), /授权：A2 你已同意\n/);
+    // Codex 是另一个会话（另一份状态）：先在那边发标准，再答复。
+    h.run(h.event("UserPromptSubmit", { prompt: "做同步\n## 验收标准\n1. 操作：x\n   预期：y\n2. [授权] 操作：用正式账号同步\n   预期：多一行", turn_id: "t1" }), { env: ACC_ENV });
+    const codex = h.run(h.event("UserPromptSubmit", { prompt: "不授权：A2", turn_id: "t2" }), { env: ACC_ENV });
+    assert.equal(JSON.parse(codex.stdout).systemMessage, undefined, "Codex 不认 systemMessage");
+    assert.match(h.notifications(), /已记录你的授权（A2 你不授权（留给你人工验收））/, "Codex 走系统通知");
     assert.match(readFileSync(join(accDir, "r1", "input.md"), "utf8"), /## 用户授权\n\n用户已同意你在这几条里按标准使用真实账号、真实环境：A2。/);
   } finally { h.close(); }
 });

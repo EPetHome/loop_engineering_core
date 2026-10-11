@@ -103,10 +103,15 @@ export function typedByUser(prompt: string): string {
   return prompt.replace(/<file name="[^"]*">[\s\S]*?<\/file>/g, "");
 }
 
-/** 记录授权后的一句话。 */
-export function grantsLabel(grants: Grants): string {
-  return [grants.approved.length && `同意 ${grants.approved.join("、")}`, grants.denied.length && `不授权 ${grants.denied.join("、")}`]
-    .filter(Boolean).join("；") || "没有对应的 [授权] 条目";
+/** 授权状态的一句话（总结、状态命令用）；标准里没有 [授权] 条目返回 undefined。 */
+export function authorizationLine(criteria: Criteria, grants?: Grants): string | undefined {
+  const status = authorizationStatus(criteria, grants);
+  const parts = [
+    status.approved.length && `${status.approved.join("、")} 你已同意`,
+    status.denied.length && `${status.denied.join("、")} 你不授权（留给你人工验收）`,
+    status.pending.length && `${status.pending.join("、")} 等你答复`,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join("；") : undefined;
 }
 
 /** 当前标准里 [授权] 条目的状态：已同意、不授权、还没答复。 */
