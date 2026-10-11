@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { createServer } from "node:net";
 import {
-  buildRepairMessage, dispatchBatches, parseOwner, parsePlan, PlanError, routeFailures, runPipeline, stageScript,
-  type PipelineIO, type Plan,
+  buildRepairMessage, DEFAULT_PI, dispatchBatches, parseOwner, parsePlan, piCommand, PlanError, preflight, routeFailures,
+  runPipeline, stageScript, type PipelineIO, type Plan,
 } from "../pipeline.ts";
 
 const FAKE_STAGE = fileURLToPath(new URL("./fake-stage.mjs", import.meta.url));
@@ -17,6 +18,17 @@ const CRITERIA = "需求：甲做接口，乙做页面\n\n## 验收标准\nA1. [
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "autoreview-pipeline-"));
+}
+
+/** 自动评审只在有提交的 git 仓库里工作：测试里的段目录都建成这样。 */
+function gitRepo(dir: string): string {
+  mkdirSync(dir, { recursive: true });
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const git = (...args: string[]) => spawnSync("git", args, { cwd: dir, env, encoding: "utf8" });
+  if (git("rev-parse", "--verify", "HEAD").status === 0) return dir;
+  git("init", "-q"); git("config", "user.email", "t@example.com"); git("config", "user.name", "t");
+  writeFileSync(join(dir, "README.md"), "x\n"); git("add", "README.md"); git("commit", "-qm", "init");
+  return dir;
 }
 
 test("P1 计划解析：相对路径、默认步骤与目录、标签去掉后交给验收方", () => {
@@ -106,7 +118,7 @@ function scene(options: {
   const vars = { AUTOREVIEW_ACCEPTANCE_CMD: TESTER, FAKE_STATE_DIR: join(root, "fake"), FAKE_STAGE_DELAY_MS: "80", ...options.env };
   for (const [key, value] of Object.entries(vars)) { saved[key] = process.env[key]; process.env[key] = value; }
   const stages = Object.fromEntries(Object.entries(options.stages).map(([name, value]) => {
-    const cwd = value.cwd ?? join(root, `work-${name}`);
+    const cwd = value.cwd ?? gitRepo(join(root, `work-${name}`));
     mkdirSync(cwd, { recursive: true });
     return [name, { start: `"${process.execPath}" "${FAKE_STAGE}" ${value.mode ?? "fix"}`, cwd }];
   }));
@@ -137,6 +149,7 @@ function io(s: Scene, silenceMs = 30_000): PipelineIO {
     log: () => {},
     pollMs: 20,
     silenceMs,
+    preflightEnv: { playwright: () => true },
   };
 }
 
@@ -209,8 +222,7 @@ test("P7 回流到停：认为不归自己、没标归属、超过轮数都停�
 
 test("P8 同一仓库的两段逐个派，不同仓库同时派", async (t) => {
   await t.test("同一个 git 仓库：乙等甲修完才收到返修", async () => {
-    const shared = mkdtempSync(join(tmpdir(), "autoreview-pipeline-repo-"));
-    spawnSync("git", ["init", "-q"], { cwd: shared });
+    const shared = gitRepo(mkdtempSync(join(tmpdir(), "autoreview-pipeline-repo-")));
     const s = scene({ stages: { 甲: { cwd: shared }, 乙: { cwd: join(shared, "front") } }, env: { FAKE_ACC_FAIL_ONCE: "A1,A2", FAKE_STAGE_DELAY_MS: "150" } });
     try {
       assert.equal(await runPipeline(s.plan, io(s)), 0, s.notes.join("\n"));
@@ -258,4 +270,87 @@ test("P10 --from e2e：各段已完成时直接跑 e2e；还有没完成的就�
     assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), 0, s.notes.join("\n"));
     assert.ok(!existsSync(join(s.plan.dir, "甲.events.log")), "没有重新启动任何一段");
   } finally { s.close(); }
+});
+
+test("P11 计划里写提示词：程序按日常配置生成 pi 启动命令，pi 一节和每段可以覆盖", () => {
+  const root = tempDir();
+  try {
+    const plan = parsePlan({
+      name: "V2",
+      pi: { thinking: "high", args: ["--autoreview-max-repairs", "2"] },
+      stages: {
+        甲: { prompt: "方案二.md", cwd: "." },
+        乙: { prompt: "提示词/方案三.md", model: "opencode-go/deepseek-v4.1-flash" },
+        丁: { start: "bash 自己的.sh" },
+      },
+    }, root, {});
+    const jia = plan.stages.get("甲")!;
+    assert.equal(jia.prompt, join(root, "方案二.md"));
+    assert.equal(jia.start, piCommand("V2", "甲", join(root, "方案二.md"), { ...DEFAULT_PI, thinking: "high", args: ["--autoreview-max-repairs", "2"] }));
+    assert.match(jia.start, /^PATH='.*hermes\/node\/bin':"\$PATH" '.*\/pi' '--offline' '--model' 'openai-codex\/gpt-6\.1-sol' '--thinking' 'high'/);
+    assert.match(jia.start, /'-e' '[^']*pi-permission-system[^']*' '-e' '[^']*\/autoreview\.ts' '--name' 'V2·甲' '--autoreview-max-repairs' '2' '@[^']*\/方案二\.md'$/);
+    assert.match(plan.stages.get("乙")!.start, /'--model' 'opencode-go\/deepseek-v4\.1-flash' '--thinking' 'high'/, "每段可以覆盖模型，其余沿用 pi 一节");
+    assert.equal(plan.stages.get("丁")!.start, "bash 自己的.sh");
+    assert.equal(plan.stages.get("丁")!.prompt, undefined);
+    assert.throws(() => parsePlan({ name: "x", stages: { 甲: { prompt: "a.md", start: "b" } } }, root, {}), /两个只能写一个/);
+    assert.throws(() => parsePlan({ name: "x", stages: { 甲: { cwd: "." } } }, root, {}), /要写 prompt（提示词文件，推荐）或 start/);
+    assert.throws(() => parsePlan({ name: "x", pi: { args: "--x" }, stages: { 甲: { prompt: "a.md" } } }, root, {}), /pi\.args 必须是字符串数组/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("P12 开跑前检查：全部满足才开跑；任何一项不过就停下，不开窗口", async (t) => {
+  const root = tempDir();
+  const tools = join(root, "tools");
+  mkdirSync(tools);
+  for (const name of ["pi", "permission.ts", "autoreview.ts"]) writeFileSync(join(tools, name), "");
+  const env = { pi: join(tools, "pi"), permission: join(tools, "permission.ts"), autoreview: join(tools, "autoreview.ts"), playwright: () => true };
+  const port = await new Promise<number>((resolvePort) => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1", () => { const { port: p } = server.address() as { port: number }; server.close(() => resolvePort(p)); });
+  });
+  writeFileSync(join(root, "e2e.md"), CRITERIA);
+  writeFileSync(join(root, "甲.md"), "做接口");
+  gitRepo(join(root, "jia")); gitRepo(join(root, "yi"));
+  const planOf = (overrides: Record<string, unknown> = {}) => parsePlan({
+    name: "check", dir: join(root, "run"),
+    stages: { 甲: { prompt: "甲.md", cwd: "jia" }, 乙: { prompt: "乙.md", cwd: "yi" } },
+    e2e: { workDir: ".", criteria: "e2e.md", acceptance: { start: "node s.js", readyUrl: `http://127.0.0.1:${port}/` } },
+    ...overrides,
+  }, root, {});
+  try {
+    await t.test("缺提示词、目录不是 git 仓库、同一步同目录、端口被占、缺 Playwright、缺 pi：逐项标出", async () => {
+      mkdirSync(join(root, "plain"));
+      const squatter = createServer().listen(port, "127.0.0.1");
+      await new Promise((r) => squatter.once("listening", r));
+      try {
+        const plan = planOf({ stages: { 甲: { prompt: "甲.md", cwd: "jia" }, 乙: { prompt: "乙.md", cwd: "plain" }, 丙: { start: "x", cwd: "jia" } } });
+        const checks = await preflight(plan, { env: { ...env, pi: join(tools, "没有的 pi"), playwright: () => false } });
+        const bad = checks.filter((check) => !check.ok).map((check) => check.name);
+        assert.deepEqual(bad, [
+          "乙 的目录是有提交的 git 仓库", "乙 的提示词", "第 1 步里并行的段不在同一目录", "pi",
+          `e2e 的地址 127.0.0.1:${port} 现在空着`, "Playwright（e2e 要操作网页）",
+        ]);
+        assert.match(checks.find((check) => check.name === "第 1 步里并行的段不在同一目录")!.detail, /丙 和同一步的别的段在同一个目录/);
+        const notes: string[] = [];
+        const launched: string[] = [];
+        const code = await runPipeline(plan, {
+          launch: (stage) => launched.push(stage.name), notify: (m) => notes.push(m), log: () => {}, pollMs: 20, silenceMs: 1000,
+          preflightEnv: { ...env, playwright: () => false },
+        });
+        assert.equal(code, 2);
+        assert.deepEqual(launched, [], "检查不过就不开任何窗口");
+        assert.match(notes.at(-1)!, /开跑前检查没通过：乙 的目录是有提交的 git 仓库/);
+        assert.match(readFileSync(join(plan.dir, "report.md"), "utf8"), /## 开跑前检查\n(- (🟢|🔴) .*\n)+/);
+      } finally { squatter.close(); }
+    });
+    await t.test("都满足：全部 🟢；从 e2e 接着跑时只查 e2e 相关的", async () => {
+      writeFileSync(join(root, "乙.md"), "做页面");
+      const checks = await preflight(planOf(), { env });
+      assert.deepEqual(checks.filter((check) => !check.ok), [], JSON.stringify(checks));
+      assert.ok(checks.some((check) => check.name === "Playwright（e2e 要操作网页）"));
+      const e2eOnly = await preflight(planOf(), { fromE2e: true, env });
+      assert.ok(e2eOnly.every((check) => !check.name.startsWith("甲") && !check.name.startsWith("乙")));
+      assert.ok(e2eOnly.some((check) => check.name === "pi"), "e2e 的验收方也要用 pi");
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

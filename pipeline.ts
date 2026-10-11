@@ -9,18 +9,19 @@
  *   --from e2e：各段已经完成、窗口还开着（比如上次 e2e 暂停后处理好了），直接从联调准备 / e2e 接着跑。
  * 退出码：0 完成；1 e2e 超过轮数仍没通过；2 暂停（需要你处理）；3 计划文件有错。
  *
- * 每段的会话必须加载 autoreview.ts：扩展按 AUTOREVIEW_PIPELINE_DIR / AUTOREVIEW_STAGE 写状态、读收件箱。
+ * 每段写 prompt（提示词文件）时，程序按你日常的配置生成 pi 启动命令（加载权限扩展和 autoreview.ts）；
+ * 写 start 时原样执行，那条命令里的 pi 必须加载 autoreview.ts。开任何窗口之前先做开跑前检查，有一项不过就不开跑。
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   extractCriteria, formatFailedItems, type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
-import { acceptanceRunDir, runAcceptanceStage } from "./acceptance.ts";
-import { parseAcceptanceConfig, type AcceptanceConfig } from "./config.ts";
+import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
+import { EXT_DIR, HERMES_BIN, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, type AcceptanceConfig } from "./config.ts";
 import { createChildExec } from "./hosts/hook.ts";
 import { blockerHint } from "./onboarding.ts";
 import {
@@ -30,10 +31,22 @@ import {
 import { DEFAULT_MODEL, DEFAULT_THINKING } from "./review.ts";
 
 export const DEFAULT_MAX_ROUNDS = 3;
+/** 每段 pi 的默认配置（你日常的启动配置），计划的 pi 一节和每段自己的同名字段可以覆盖。 */
+export const DEFAULT_PI: PiOptions = { model: "openai-codex/gpt-6.1-sol", thinking: "max", tools: "read,edit,write,bash", args: [] };
+const AUTOREVIEW_PATH = join(EXT_DIR, "autoreview.ts");
+const BROWSER_TOOL = join(EXT_DIR, "acceptance-tools", "browser.mjs");
 /** 段开窗后这么久还没报状态，提醒你检查启动命令有没有加载 autoreview.ts。 */
 const SILENCE_MS = 3 * 60_000;
 
-export interface StagePlan { name: string; start: string; cwd: string }
+export interface PiOptions { model: string; thinking: string; tools: string; args: string[] }
+export interface StagePlan {
+  name: string;
+  /** 实际执行的启动命令：写了 start 就是它，写了 prompt 就是程序生成的 pi 命令。 */
+  start: string;
+  cwd: string;
+  /** 写了 prompt 时的提示词文件（绝对路径）。 */
+  prompt?: string;
+}
 export interface E2ePlan {
   workDir: string;
   /** 验收标准所在文件的原文（交给验收方当需求原文）。 */
@@ -65,6 +78,7 @@ const text = (value: unknown, label: string): string => {
   return value.trim();
 };
 const fileSafe = (name: string): string => name.replace(/[/\\:*?"<>|\s]+/g, "_");
+const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
 /** 标准开头的「[段名]」：返回归属和去掉标签后的原文。 */
 export function parseOwner(item: string): { owner?: string; text: string } {
@@ -72,16 +86,47 @@ export function parseOwner(item: string): { owner?: string; text: string } {
   return match ? { owner: match[1].trim(), text: item.slice(match[0].length) } : { text: item };
 }
 
+/** 读 model / thinking / tools / args 覆盖 base（计划的 pi 一节和每段都用这几个字段名）。 */
+function piOptions(value: Record<string, unknown>, label: string, base: PiOptions): PiOptions {
+  const pick = (key: "model" | "thinking" | "tools"): string => value[key] === undefined ? base[key] : text(value[key], `${label}.${key}`);
+  let args = base.args;
+  if (value.args !== undefined) {
+    if (!Array.isArray(value.args) || value.args.some((item) => typeof item !== "string")) throw new PlanError(`${label}.args 必须是字符串数组`);
+    args = value.args as string[];
+  }
+  return { model: pick("model"), thinking: pick("thinking"), tools: pick("tools"), args };
+}
+
+/** 按提示词生成一段的 pi 启动命令：和 README「启动」一节同样的配置，外加 --name 方便认窗口。 */
+export function piCommand(planName: string, stage: string, prompt: string, pi: PiOptions): string {
+  const args = [
+    "--offline", "--model", pi.model, "--thinking", pi.thinking,
+    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--tools", pi.tools,
+    "-e", PERMISSION_EXT, "-e", AUTOREVIEW_PATH, "--name", `${planName}·${stage}`, ...pi.args, `@${prompt}`,
+  ];
+  return `PATH=${shellQuote(HERMES_BIN)}:"$PATH" ${shellQuote(PI_BIN)} ${args.map(shellQuote).join(" ")}`;
+}
+
 /** 解析并校验计划文件；相对路径按计划文件所在目录解析。 */
 export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv = process.env): Plan {
   if (!isObject(raw)) throw new PlanError("计划文件必须是 JSON 对象");
   const name = text(raw.name, "name");
   if (!isObject(raw.stages) || Object.keys(raw.stages).length === 0) throw new PlanError("计划文件的 stages 至少要有一段");
+  if (raw.pi !== undefined && !isObject(raw.pi)) throw new PlanError("计划文件的 pi 必须是对象");
+  const planPi = raw.pi === undefined ? DEFAULT_PI : piOptions(raw.pi, "pi", DEFAULT_PI);
   const stages = new Map<string, StagePlan>();
   for (const [stage, value] of Object.entries(raw.stages)) {
     if (!isObject(value)) throw new PlanError(`stages.${stage} 必须是对象`);
     const cwd = value.cwd === undefined ? planDir : resolve(planDir, text(value.cwd, `stages.${stage}.cwd`));
-    stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd });
+    if ((value.prompt === undefined) === (value.start === undefined)) {
+      throw new PlanError(`stages.${stage} 要写 prompt（提示词文件，推荐）或 start（自己的启动命令），两个只能写一个`);
+    }
+    if (value.prompt !== undefined) {
+      const prompt = resolve(planDir, text(value.prompt, `stages.${stage}.prompt`));
+      stages.set(stage, { name: stage, start: piCommand(name, stage, prompt, piOptions(value, `stages.${stage}`, planPi)), cwd, prompt });
+    } else {
+      stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd });
+    }
   }
   let steps: string[][];
   if (raw.steps === undefined) steps = [[...stages.keys()]];
@@ -175,13 +220,67 @@ export function buildRepairMessage(stage: string, round: number, items: Acceptan
   return { message, mustFix };
 }
 
+export interface Check { name: string; ok: boolean; detail: string }
+/** 开跑前检查用到的本机路径和 Playwright 探测；测试可以替换。 */
+export interface PreflightEnv { pi: string; permission: string; autoreview: string; playwright: (workDir: string) => boolean }
+
+const defaultPreflightEnv = (): PreflightEnv => ({
+  pi: PI_BIN, permission: PERMISSION_EXT, autoreview: AUTOREVIEW_PATH,
+  playwright: (workDir) => spawnSync(process.execPath, [BROWSER_TOOL, "--check", workDir], { encoding: "utf8", timeout: 30_000 }).status === 0,
+});
+const isDir = (path: string): boolean => { try { return statSync(path).isDirectory(); } catch { return false; } };
+/** 标准里要开网页、点页面时，e2e 需要 Playwright。 */
+const NEEDS_BROWSER = /页面|网页|浏览器|点击|按钮|输入框|表单/;
+
+/**
+ * 开跑前检查（不调用模型，几秒钟）：目录、git 仓库、提示词、pi 和扩展、同一步里目录不重复、e2e 端口、Playwright。
+ * fromE2e 时只查 e2e 相关的几项。
+ */
+export async function preflight(plan: Plan, options: { fromE2e?: boolean; env?: Partial<PreflightEnv> } = {}): Promise<Check[]> {
+  const env = { ...defaultPreflightEnv(), ...options.env };
+  const checks: Check[] = [];
+  const add = (name: string, ok: boolean, detail: string): void => { if (!checks.some((check) => check.name === name)) checks.push({ name, ok, detail }); };
+  const needsPi = (!options.fromE2e && [...plan.stages.values()].some((stage) => stage.prompt))
+    || Boolean(plan.e2e && !plan.e2e.acceptance.testerCmd);
+  if (!options.fromE2e) {
+    for (const stage of plan.stages.values()) {
+      add(`${stage.name} 的目录`, isDir(stage.cwd), stage.cwd);
+      const head = isDir(stage.cwd) && spawnSync("git", ["-C", stage.cwd, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).status === 0;
+      add(`${stage.name} 的目录是有提交的 git 仓库`, head, head ? stage.cwd : "自动评审只在有提交的 git 仓库里工作");
+      if (stage.prompt) add(`${stage.name} 的提示词`, existsSync(stage.prompt), stage.prompt);
+    }
+    for (const [index, step] of plan.steps.entries()) {
+      const dirs = step.map((stage) => resolve(plan.stages.get(stage)!.cwd));
+      const clash = step.filter((_, i) => dirs.indexOf(dirs[i]) !== i);
+      add(`第 ${index + 1} 步里并行的段不在同一目录`, clash.length === 0, clash.length ? `${clash.join("、")} 和同一步的别的段在同一个目录，改动会混在一起` : step.join("、"));
+    }
+  }
+  if (needsPi) {
+    add("pi", existsSync(env.pi), env.pi);
+    add("权限扩展", existsSync(env.permission), env.permission);
+  }
+  if (!options.fromE2e && [...plan.stages.values()].some((stage) => stage.prompt)) add("autoreview.ts", existsSync(env.autoreview), env.autoreview);
+  const e2e = plan.e2e;
+  if (e2e) {
+    add("e2e 工作目录", isDir(e2e.workDir), e2e.workDir);
+    if (e2e.acceptance.readyUrl) {
+      const url = new URL(e2e.acceptance.readyUrl);
+      const busy = await portBusy(url);
+      add(`e2e 的地址 ${url.host} 现在空着`, !busy, busy ? `已经有程序在监听：${describeListeners(url)}` : e2e.acceptance.readyUrl);
+    }
+    if (e2e.items.some((item) => NEEDS_BROWSER.test(item.text))) {
+      const found = isDir(e2e.workDir) && env.playwright(e2e.workDir);
+      add("Playwright（e2e 要操作网页）", found, found ? "找到了" : `找不到：在 ${e2e.workDir} 里执行接入手册的【块 3】`);
+    }
+  }
+  return checks;
+}
+
 /** cwd 所在的 git 仓库根目录；不是 git 仓库就用 cwd 本身。 */
 export function repoKey(cwd: string): string {
   const res = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
   return res.status === 0 && res.stdout.trim() ? res.stdout.trim() : resolve(cwd);
 }
-
-const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
 /** 段的启动脚本：进目录、带上流水线环境变量，再跑计划里的启动命令。 */
 export function stageScript(plan: Plan, stage: StagePlan): string {
@@ -194,6 +293,8 @@ export interface PipelineIO {
   log: (message: string) => void;
   pollMs: number;
   silenceMs: number;
+  /** 测试用：替换开跑前检查里的本机路径和 Playwright 探测。 */
+  preflightEnv?: Partial<PreflightEnv>;
 }
 
 /** 跑一条流水线，返回退出码（见文件头）。 */
@@ -209,6 +310,15 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
   };
   const sleep = (ms: number) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
   rmSync(resolve(plan.dir, "pipeline.finished"), { force: true });
+
+  // 开跑前检查：有一项不过就不开任何窗口。
+  const checks = await preflight(plan, { fromE2e: options.fromE2e, env: io.preflightEnv });
+  report.push("", "## 开跑前检查", ...checks.map((check) => `- ${check.ok ? "🟢" : "🔴"} ${check.name}：${check.detail}`), "");
+  for (const check of checks) io.log(`${check.ok ? "🟢" : "🔴"} ${check.name}：${check.detail}`);
+  const failed = checks.filter((check) => !check.ok);
+  if (failed.length > 0) {
+    return finish(2, `开跑前检查没通过：${failed.map((check) => `${check.name}（${check.detail}）`).join("；")}`);
+  }
 
   /** 等某一段出现「派发之后」的完成或没改动；暂停时提醒你，接着等你在它的窗口里处理。 */
   const waitStage = async (stage: string, afterSeq: number, inboxSeq = 0): Promise<StageStatus> => {

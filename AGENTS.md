@@ -5,7 +5,7 @@
 ## 文件
 
 - `autoreview.ts`：pi 扩展入口。注册事件与命令、成功评审检查点、可取消评审任务、返修消息、评审完成后的验收命令（`--autoreview-accept-cmd`、`/accept`）、流水线段的状态文件与收件箱、通知和总结。
-- `pipeline.ts`：流水线命令（`node pipeline.ts <计划.json>`）：解析计划、开终端窗口或后台启动各段、按步骤等完成、联调准备、程序跑 e2e（复用自动验收）、失败按 `[段名]` 回流、报告。
+- `pipeline.ts`：流水线命令（`node pipeline.ts <计划.json>`）：解析计划（每段写 `prompt` 时按日常配置生成 pi 命令，`pi` 一节或每段可覆盖；也可以写 `start`）、开跑前检查（目录、git、提示词、pi 与扩展、同步目录、e2e 端口、Playwright，不过就不开跑）、开终端窗口或后台启动各段、按步骤等完成、联调准备、程序跑 e2e（复用自动验收）、失败按 `[段名]` 回流、报告。
 - `pipeline-core.ts`：流水线共用约定：环境变量 `AUTOREVIEW_PIPELINE_DIR` / `AUTOREVIEW_STAGE`、`<段>.status.json` / `<段>.inbox.json` 的格式和原子读写。
 - `review.ts`：一轮的共用流程（快照、先验收、输入、调用重试、解析、指纹比较、完成/返修/暂停决策），pi 扩展与宿主 Hook 共用。
 - `acceptance.ts`：自动验收一轮的流程（异议检查、取或起草标准、查端口、启停被测系统、记系统日志、调验收方并在证据有问题时重做 1 次、截日志、判定）。
@@ -19,7 +19,7 @@
 - `core.ts`：纯函数（标记判断、评审解析、下一步决策、消息/输入/总结渲染）与开发约定原文，不导入 pi。
 - `review-prompt.md`：评审规则，通过 `--append-system-prompt` 原样交给评审。
 - `acceptance-prompt.md`、`criteria-prompt.md`：验收方规则、起草验收标准规则，同样原样交给模型；示例格式由单测核对能被解析。
-- `acceptance-tools/`：验收方的工具，`ev.mjs`（跑命令留证据）、`browser.mjs`（无头 Chromium 操作网页留证据）；每轮在运行目录生成 `./ev`、`./browser` 包装脚本。
+- `acceptance-tools/`：验收方的工具，`ev.mjs`（跑命令留证据）、`browser.mjs`（无头 Chromium 操作网页留证据；`browser.mjs --check <目录>` 只检查能不能找到 Playwright，流水线开跑前用）；每轮在运行目录生成 `./ev`、`./browser` 包装脚本。
 - `README-验收标准.md`：接入手册，【块 1】写法段（带版本与起止标记）、【块 2】启动配置、【块 3】浏览器工具；程序提示和接入命令都引用它，单测核对三块都在且能用。
 - `plugins/autoreview/`：插件清单与 `hooks/hooks.json`；根目录 `.claude-plugin/marketplace.json`、`.agents/plugins/marketplace.json` 是本地市场 `autoreview-local`。
 - `test/*.test.ts`：core 单测、验收单测（含真起被测系统）、接入单测（手册、提示、接入命令）、fake pi 入口回归、git 取证、宿主 Hook 回归、E2E 判定与驱动回归；`test/fake-reviewer.mjs`、`test/fake-tester.mjs`、`test/fake-drafter.mjs`、`test/fake-stage.mjs`：假评审、假验收方、假起草方、假流水线段；`test/e2e.mjs`：E2E 实操验收（RPC 驱动 pi，场景 A1–A9：A7 验收命令，A8、A9 自动验收的系统被关掉与数据重置）。

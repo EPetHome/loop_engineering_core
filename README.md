@@ -114,8 +114,8 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 {
   "name": "V2首批",
   "stages": {
-    "甲": { "start": "bash 方案二-启动Pi.sh", "cwd": "worktree" },
-    "乙": { "start": "bash 方案三-启动Pi.sh", "cwd": "worktree/promate-frontend" }
+    "甲": { "prompt": "提示词/方案二.md", "cwd": "worktree" },
+    "乙": { "prompt": "提示词/方案三.md", "cwd": "worktree/promate-frontend" }
   },
   "steps": [["甲", "乙"]],
   "prepare": "bash 联调准备.sh",
@@ -130,7 +130,8 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 
 | 字段 | 作用 |
 |---|---|
-| `stages` | 每段的启动命令（就是你现在开 pi 的脚本，不用改）和启动目录。每段的 pi 必须加载 `autoreview.ts` |
+| `stages` | 每段的提示词文件 `prompt` 和启动目录 `cwd`。程序按你日常的配置生成 pi 启动命令（`--offline`、gpt-6.1-sol、max、`read,edit,write,bash`、权限扩展、`autoreview.ts`，`--name 计划名·段名` 方便认窗口），不用再写启动脚本。特殊情况可以改写 `start`（自己的启动命令，里面的 pi 必须加载 `autoreview.ts`），两个只能写一个 |
+| `pi` | 可选：改默认配置，字段 `model`、`thinking`、`tools`、`args`（追加的参数，比如 `["--autoreview-max-repairs", "2"]`）；每段也可以写同名字段单独覆盖 |
 | `steps` | 先后顺序：每一步里的段并行，步与步之间串行。`[["甲","乙"]]` 并行；`["甲","乙"]` 或 `[["甲"],["乙"]]` 串行；`[["甲","乙"],["丁"]]` 混合。不写就是全部并行 |
 | `prepare` | 可选：各段都完成后、跑 e2e 前执行的联调准备（在 `e2e.workDir` 里 `sh -c`） |
 | `e2e.criteria` | 整合 e2e 的验收标准文件，每条开头标归属：`A3. [乙] 操作：…`。没标的条目没通过时停下找你 |
@@ -140,6 +141,7 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 
 怎么跑：
 
+- **开跑前检查**：开任何窗口之前，程序先查一遍（不调用模型，几秒钟）：每段的目录在不在、是不是有提交的 git 仓库、提示词文件在不在；pi、权限扩展、`autoreview.ts` 找不找得到；同一步里并行的段是不是在同一个目录；e2e 的地址现在是不是空着；标准里要操作网页时 Playwright 装没装。结果列在终端和报告里，有一项 🔴 就停下（退出码 2），一个窗口都不开。
 - **开窗口**：macOS 上每段开一个终端窗口跑它的启动命令（带上 `AUTOREVIEW_PIPELINE_DIR`、`AUTOREVIEW_STAGE` 两个环境变量），你可以看、可以插话；`--launcher background` 改成后台跑，输出写 `<流水线目录>/<段>.log`。
 - **接力**：扩展把每段的完成、暂停写进 `<段>.status.json`；一步里的段都完成才启动下一步。某段暂停时通知你，你在它的窗口里处理好，流水线接着等。启动 3 分钟还没收到某段的状态，会提醒你检查它是否加载了 `autoreview.ts`。
 - **e2e**：程序自己跑（复用自动验收：启动整合后的系统、重置数据、验收方实测、程序判定），不需要单独的开发会话。

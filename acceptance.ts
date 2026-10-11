@@ -232,7 +232,7 @@ function startSystem(deps: AcceptanceDeps, logPath: string): RunningSystem {
 }
 
 /** 有进程在这个地址上监听就算占用。 */
-function portBusy(url: URL): Promise<boolean> {
+export function portBusy(url: URL): Promise<boolean> {
   const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
   const host = url.hostname.replace(/^\[|\]$/g, "");
   return new Promise((resolveBusy) => {
@@ -299,7 +299,7 @@ function listeners(port: string): Listener[] {
 const portOf = (url: URL): string => url.port || (url.protocol === "https:" ? "443" : "80");
 
 /** 端口被占时给你看的「谁占着」。 */
-function describeListeners(url: URL): string {
+export function describeListeners(url: URL): string {
   const found = listeners(portOf(url));
   return found.length > 0 ? found.map((item) => `pid ${item.pid}（${item.command}）`).join("、") : "找不到占用的进程（需要 lsof）";
 }
