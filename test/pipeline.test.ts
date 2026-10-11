@@ -61,6 +61,9 @@ test("P1 计划解析：相对路径、默认步骤与目录、标签去掉后�
     const manual = parsePlan({ name: "m", stages: { 甲: { start: "a" } }, e2e: { workDir: ".", criteria: "manual.md" } }, root, {});
     assert.deepEqual([...manual.e2e!.owners], [["A1", "甲"], ["A2", undefined]]);
     assert.equal(manual.e2e!.items[1].text.split("\n")[0], "[人工] 操作：在 WB 里点接入");
+    // [授权] 不是段名：写在段名前后都行，段名照常取，标签留在原文里。
+    assert.deepEqual(parseOwner("[授权] [乙] 操作：x"), { owner: "乙", text: "[授权] 操作：x" });
+    assert.deepEqual(parseOwner("[乙] [授权] 操作：x"), { owner: "乙", text: "[授权] 操作：x" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -358,6 +361,18 @@ test("P12 开跑前检查：全部满足才开跑；任何一项不过就停下�
       const e2eOnly = await preflight(planOf(), { fromE2e: true, env });
       assert.ok(e2eOnly.every((check) => !check.name.startsWith("甲") && !check.name.startsWith("乙")));
       assert.ok(e2eOnly.some((check) => check.name === "pi"), "e2e 的验收方也要用 pi");
+    });
+    await t.test("e2e 标准里的 [授权] 条目：标准文件里没答复就不开跑，答复了才过", async () => {
+      writeFileSync(join(root, "auth.md"), `${CRITERIA}A3. [甲] [授权] 操作：用正式账号同步\n    预期：多一行\n`);
+      const name = "e2e 的 [授权] 条目都已答复";
+      const waiting = (await preflight(planOf({ e2e: { workDir: ".", criteria: "auth.md" } }), { fromE2e: true, env })).find((check) => check.name === name)!;
+      assert.equal(waiting.ok, false);
+      assert.match(waiting.detail, /A3 还没答复：在 .*auth\.md 里加一行「同意授权：A3」或「不授权：A3」/);
+      writeFileSync(join(root, "auth.md"), `${CRITERIA}A3. [甲] [授权] 操作：用正式账号同步\n    预期：多一行\n\n同意授权：A3\n`);
+      const plan = planOf({ e2e: { workDir: ".", criteria: "auth.md" } });
+      assert.equal((await preflight(plan, { fromE2e: true, env })).find((check) => check.name === name)!.ok, true);
+      assert.equal(plan.e2e!.items.length, 3, "答复行不会变成标准");
+      assert.equal(plan.e2e!.owners.get("A3"), "甲");
     });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

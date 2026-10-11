@@ -3,14 +3,16 @@
  *
  * 负责：从用户消息取「## 验收标准」、解析起草结果和验收方报告、扫日志、核对证据、
  * 逐条判定、拼验收方输入和返修消息、验收约定原文。判定只看逐条结果和证据，不信验收方自报的结论。
- * 开头标了「[人工]」的条目不交给验收方，判为「需人工」，完成时列给用户人工验收。
+ * 开头标了「[人工]」的条目不交给验收方，判为「需人工」，完成时列给用户人工验收；
+ * 标了「[授权]」的条目等用户亲手写「同意授权：A4」后照常交给验收方，用户不授权就和 [人工] 一样留给用户。
  */
 
 /** 配了 acceptance 的项目，追加在开发约定后面注入。 */
 export const ACCEPTANCE_CONVENTION = [
   "【自动验收约定】",
   "- 用户让你起草需求或提示词时，末尾加「## 验收标准」：每条写「操作」和「预期」，只写外部看得到的结果（命令输出、页面、接口返回、数据变化、日志），一条只验一个行为，最多 10 条，只覆盖本次需求。",
-  "- 只有必须由用户本人来做或来定的条目才在开头标「[人工]」，由用户验收：要用真实账号、凭证、外部平台或会产生真实后果又没有测试替身的，或要用户主观判断的；图形界面操作、步骤多、耗时长都不算人工。",
+  "- 要用用户的真实账号、凭证、外部平台或会产生真实后果、又没有测试替身的条目，开头标「[授权]」：用户同意后程序照常执行；要用户主观拍板的条目开头标「[人工]」，由用户验收。图形界面操作、步骤多、耗时长都不算。不要替用户写「同意授权」。",
+  "- 用户消息里的「同意授权：…」「不授权：…」是给程序的：你不用处理，回一句收到，最后一行写【交付完成】。",
   "- 开发时不要补写或修改验收标准，标准只认用户发来的。",
   "- 交付说明里写清新功能怎么用（命令、地址、参数），验收方按它操作。",
   "- 收到「自动验收」消息后，逐条写「A2：已修」或「A2：异议：理由」；异议交用户决定。",
@@ -21,6 +23,8 @@ export const MAX_CRITERIA = 10;
 export interface CriterionItem {
   id: string;
   text: string;
+  /** 只在一轮验收里用：[授权] 条目用户不授权，交给用户人工验收（不写进冻结的标准）。 */
+  declined?: boolean;
 }
 
 export interface Criteria {
@@ -31,15 +35,108 @@ export interface Criteria {
 }
 
 export type ItemVerdict = "通过" | "不通过" | "无法验证";
-/** 判定结果多一种「需人工」：标了 [人工] 的条目，程序不交给验收方。 */
+/** 判定结果多一种「需人工」：标了 [人工]，或 [授权] 条目用户不授权，程序不交给验收方。 */
 export type ResultVerdict = ItemVerdict | "需人工";
 
-/** 条目开头（可以在别的 [标签] 或「操作：」之后）写了「[人工]」或「【人工】」。 */
-const MANUAL_TAG = /^\s*(?:[[【][^\]】\n]*[\]】]\s*)*(?:操作\s*[:：]\s*)?[[【]\s*人工\s*[\]】]/;
+/** 条目开头（可以在别的 [标签] 或「操作：」之后）写了「[名字]」或「【名字】」。 */
+const leadingTag = (name: string): RegExp =>
+  new RegExp(`^\\s*(?:[[【][^\\]】\\n]*[\\]】]\\s*)*(?:操作\\s*[:：]\\s*)?[[【]\\s*${name}\\s*[\\]】]`);
+const MANUAL_TAG = leadingTag("人工");
+const AUTH_TAG = leadingTag("授权");
 
-/** 标了 [人工] 的验收标准：要用户本人的权限或拍板，由用户人工验收。 */
+/** 标了 [人工] 的验收标准：要用户主观拍板，由用户人工验收。 */
 export function isManualCriterion(text: string): boolean {
   return MANUAL_TAG.test(text);
+}
+
+/** 标了 [授权] 的验收标准：要用用户的真实账号、凭证、外部平台或会产生真实后果，用户同意后才执行。 */
+export function isAuthorizationCriterion(text: string): boolean {
+  return AUTH_TAG.test(text) && !MANUAL_TAG.test(text);
+}
+
+/** 这一条交给用户：标了 [人工]，或 [授权] 条目用户不授权。 */
+export function forUser(item: CriterionItem): boolean {
+  return isManualCriterion(item.text) || item.declined === true;
+}
+
+/** 用户对 [授权] 条目的答复，跟着标准版本走：标准换了版本要重新授权。 */
+export interface Grants {
+  version: number;
+  approved: string[];
+  denied: string[];
+}
+
+/** 「同意授权：A4、A5」「同意授权：全部」「不授权：A4」（也认「不同意授权」），可以是列表项。 */
+const GRANT_LINE = /^\s*(?:[-*]\s*)?(不同意授权|不授权|同意授权)\s*[：:]?\s*((?:全部|所有)[。.!！]?|A\s*\d+.*?)\s*$/i;
+
+/**
+ * 从用户亲手写的文字里取授权答复，只认当前标准里的 [授权] 条目；没有这类行返回 undefined。
+ * 调用方只传用户打的字：不含 @文件 展开的内容，也不含程序自己发的返修消息，免得模型替用户授权。
+ */
+export function grantsFromUser(text: string, criteria: Criteria | undefined, previous?: Grants): Grants | undefined {
+  if (!criteria) return undefined;
+  const authIds = criteria.items.filter((item) => isAuthorizationCriterion(item.text)).map((item) => item.id);
+  const base = previous?.version === criteria.version ? previous : undefined;
+  const approved = new Set(base?.approved ?? []);
+  const denied = new Set(base?.denied ?? []);
+  let found = false;
+  for (const line of text.split(/\r?\n/)) {
+    const match = GRANT_LINE.exec(unbold(line));
+    if (!match) continue;
+    found = true;
+    const value = match[2].replace(/[。.！!]+$/, "").trim();
+    const ids = /^(全部|所有)$/.test(value) ? authIds
+      : [...value.matchAll(/A\s*(\d+)/gi)].map((id) => `A${id[1]}`).filter((id) => authIds.includes(id));
+    for (const id of ids) {
+      if (match[1] === "同意授权") { approved.add(id); denied.delete(id); } else { denied.add(id); approved.delete(id); }
+    }
+  }
+  return found ? { version: criteria.version, approved: [...approved], denied: [...denied] } : undefined;
+}
+
+/** 程序自己发给开发方的消息（返修、门禁、流水线 e2e 返修）：不是用户打的字。 */
+const LOOP_MESSAGE = /^\s*【(?:自动评审|自动验收|门禁|流水线 e2e 返修) · /;
+
+/** 用户亲手打的字：程序自己发的消息不算，pi 展开的 <file> 块去掉（宿主 Hook 直接传没展开的原文）。 */
+export function typedByUser(prompt: string): string {
+  if (LOOP_MESSAGE.test(prompt)) return "";
+  return prompt.replace(/<file name="[^"]*">[\s\S]*?<\/file>/g, "");
+}
+
+/** 记录授权后的一句话。 */
+export function grantsLabel(grants: Grants): string {
+  return [grants.approved.length && `同意 ${grants.approved.join("、")}`, grants.denied.length && `不授权 ${grants.denied.join("、")}`]
+    .filter(Boolean).join("；") || "没有对应的 [授权] 条目";
+}
+
+/** 当前标准里 [授权] 条目的状态：已同意、不授权、还没答复。 */
+export function authorizationStatus(criteria: Criteria, grants?: Grants): { approved: string[]; denied: string[]; pending: string[] } {
+  const ids = criteria.items.filter((item) => isAuthorizationCriterion(item.text)).map((item) => item.id);
+  const current = grants?.version === criteria.version ? grants : undefined;
+  return {
+    approved: ids.filter((id) => current?.approved.includes(id)),
+    denied: ids.filter((id) => current?.denied.includes(id)),
+    pending: ids.filter((id) => !current?.approved.includes(id) && !current?.denied.includes(id)),
+  };
+}
+
+/** 要你人工验收的条目按原因分开说：没能自动验证、标了 [人工]、你没授权。 */
+export function handOverParts(items: Pick<AcceptanceItemResult, "id" | "text" | "verdict">[]): string[] {
+  const ids = (pick: (item: Pick<AcceptanceItemResult, "id" | "text" | "verdict">) => boolean): string =>
+    items.filter(pick).map((item) => item.id).join("、");
+  const unknown = ids((item) => item.verdict === "无法验证");
+  const tagged = ids((item) => item.verdict === "需人工" && isManualCriterion(item.text));
+  const declined = ids((item) => item.verdict === "需人工" && !isManualCriterion(item.text));
+  return [unknown && `${unknown} 没能自动验证`, tagged && `${tagged} 标了 [人工]`, declined && `${declined} 你没授权`].filter(Boolean);
+}
+
+/** 等授权时给你的提示：哪几条、要做什么、怎么答复。 */
+export function authorizationHint(criteria: Criteria, pending: string[]): string {
+  const items = criteria.items.filter((item) => pending.includes(item.id))
+    .map((item) => `${item.id}（${item.text.split("\n")[0].replace(/^\s*[[【]\s*授权\s*[\]】]\s*/, "")}）`).join("；");
+  const ids = pending.join("、");
+  return `验收标准里有要你授权的条目：${items}。同意就回复「同意授权：${ids}」（全部同意写「同意授权：全部」）；`
+    + `不同意就回复「不授权：${ids}」，这几条留给你人工验收。回复后自动继续`;
 }
 
 export interface ReportItem {
@@ -110,7 +207,7 @@ export function extractCriteria(text: string | undefined): CriterionItem[] | und
     if (/^#{1,2}(?!#)\s/.test(raw.trim())) break;
     const indented = /^\s/.test(raw);
     const line = unbold(raw).trim();
-    if (!line) continue;
+    if (!line || GRANT_LINE.test(line)) continue;
     const numbered = indented ? null : ITEM_START.exec(line);
     const bullet = indented || numbered ? null : BULLET_START.exec(line);
     if (numbered) items.push(numbered[2].trim());
@@ -313,6 +410,7 @@ export function lastEvidenceAt(content: string | undefined, id: string): number 
 const G1_TEXT = "系统能按配置启动、就绪，并在验收过程中一直运行";
 const G2_TEXT = "验收期间系统日志里没有错误";
 const MANUAL_DETAIL = "标了 [人工]：程序不交给验收方，需要你人工验收";
+const DECLINED_DETAIL = "标了 [授权]，你没有授权：程序不执行，需要你人工验收";
 
 function failDetail(item: ReportItem, evidencePath: string): string {
   const order = ["复现", "预期", "实际", "相关日志"];
@@ -336,11 +434,13 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   } else if (stopped) {
     items.push({ id: "G1", text: G1_TEXT, verdict: "无法验证", detail: stopped.detail, cause: "系统被关掉" });
   }
-  /** 按标准顺序逐条判定；标了 [人工] 的不看验收方报告，直接记「需人工」。 */
+  /** 交给你的条目（[人工]、不授权的 [授权]）不看验收方报告，直接记「需人工」。 */
+  const toUser = (criterion: CriterionItem): AcceptanceItemResult => ({
+    id: criterion.id, text: criterion.text, verdict: "需人工", detail: criterion.declined ? DECLINED_DETAIL : MANUAL_DETAIL,
+  });
+  /** 按标准顺序逐条判定。 */
   const each = (judge: (criterion: CriterionItem) => AcceptanceItemResult): void => {
-    for (const criterion of input.criteria) {
-      items.push(isManualCriterion(criterion.text) ? { ...criterion, verdict: "需人工", detail: MANUAL_DETAIL } : judge(criterion));
-    }
+    for (const criterion of input.criteria) items.push(forUser(criterion) ? toUser(criterion) : judge(criterion));
   };
   if (input.report) {
     const report = input.report;
@@ -391,10 +491,8 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   } else if (!input.systemFailure) {
     each((criterion) => ({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}`, cause: "验收方" }));
   } else {
-    // 系统没能正常运行：自动的条目没有实测，不逐条列；[人工] 条目照样列给你。
-    for (const criterion of input.criteria) {
-      if (isManualCriterion(criterion.text)) items.push({ ...criterion, verdict: "需人工", detail: MANUAL_DETAIL });
-    }
+    // 系统没能正常运行：自动的条目没有实测，不逐条列；交给你的条目照样列出来。
+    for (const criterion of input.criteria) if (forUser(criterion)) items.push(toUser(criterion));
   }
   if (input.logErrors.length > 0) {
     // 被关掉时，日志里的错误可能是关停时打的：这一轮不据此打回，留给你看。
@@ -419,10 +517,7 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
     record.blocker = blocker;
     record.reason = `${BLOCKER_TEXT[blocker!]}（${ids}）`;
   }
-  if (verdict === "部分验证") {
-    const manualIds = manual.map((item) => item.id).join("、");
-    record.reason = `${[ids && `${ids} 没能自动验证`, manualIds && `${manualIds} 标了 [人工]`].filter(Boolean).join("，")}，需要人工验收`;
-  }
+  if (verdict === "部分验证") record.reason = `${handOverParts(items).join("，")}，需要人工验收`;
   if (input.systemFailure && input.report === undefined) record.note = "系统没能正常运行，其余标准没有实测";
   // 被关掉时验收方的自报结论没有意义，不再提示对比。
   const claimed = input.report?.conclusion ?? "";
@@ -469,6 +564,8 @@ export interface AcceptanceInputOptions {
   previousFailed: string[];
   /** 配置了 acceptance.reset（程序每次验收前重置数据）。 */
   resetConfigured?: boolean;
+  /** 用户已同意授权的 [授权] 条目。 */
+  authorized?: string[];
 }
 
 /** 拼验收方输入：环境、工具、需求、标准、操作说明、开发方的使用说明。 */
@@ -493,8 +590,12 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
     "## 需求原文",
     stripCriteriaSection(options.requirement ?? "").trim() || "（没有记录需求原文，只按验收标准验收）",
     `## 验收标准（第 ${options.criteria.version} 版，来源：${options.criteria.source === "用户" ? "用户" : "自动起草"}）`,
-    // 标了 [人工] 的条目不给验收方看，免得它去碰桌面应用或真实账号。
-    formatCriteria(options.criteria.items.filter((item) => !isManualCriterion(item.text))),
+    // 交给用户的条目不给验收方看，免得它去碰真实账号、正式数据。
+    formatCriteria(options.criteria.items.filter((item) => !forUser(item))),
+    ...(options.authorized?.length ? [
+      "## 用户授权",
+      `用户已同意你在这几条里按标准使用真实账号、真实环境：${options.authorized.join("、")}。只在这几条里用，不要扩大到别的条目；其余条目仍然不碰真实账号、正式数据和外部平台。`,
+    ] : []),
     "## 操作说明（项目提供）",
     options.guide?.trim() || "（无）",
     "## 开发方的交付说明（只用来知道怎么操作，不能当作通过的依据）",

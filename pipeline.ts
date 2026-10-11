@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  extractCriteria, formatFailedItems, isManualCriterion,
+  authorizationStatus, extractCriteria, formatFailedItems, grantsFromUser, isAuthorizationCriterion, isManualCriterion,
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
@@ -50,6 +50,8 @@ export interface StagePlan {
 }
 export interface E2ePlan {
   workDir: string;
+  /** 验收标准所在文件（[授权] 条目的「同意授权：…」也写在这里）。 */
+  criteriaFile: string;
   /** 验收标准所在文件的原文（交给验收方当需求原文）。 */
   requirement: string;
   /** 去掉了「[段名]」标签的标准。 */
@@ -81,11 +83,16 @@ const text = (value: unknown, label: string): string => {
 const fileSafe = (name: string): string => name.replace(/[/\\:*?"<>|\s]+/g, "_");
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
-/** 标准开头的「[段名]」：返回归属和去掉标签后的原文。标了 [人工] 的条目不自动验、不退回，没有归属，原文不动。 */
+/**
+ * 标准开头的「[段名]」：返回归属和去掉段名后的原文。标了 [人工] 的条目不自动验、不退回，没有归属，原文不动；
+ * [授权] 标签不是段名，写在段名前后都行，保留在原文里。
+ */
 export function parseOwner(item: string): { owner?: string; text: string } {
   if (isManualCriterion(item)) return { text: item };
-  const match = /^\[([^\]\n]+)\]\s*/.exec(item);
-  return match ? { owner: match[1].trim(), text: item.slice(match[0].length) } : { text: item };
+  const auth = /^\s*[[【]\s*授权\s*[\]】]\s*/.exec(item)?.[0] ?? "";
+  const rest = item.slice(auth.length);
+  const match = /^\[([^\]\n]+)\]\s*/.exec(rest);
+  return match ? { owner: match[1].trim(), text: `${auth}${rest.slice(match[0].length)}` } : { text: item };
 }
 
 /** 读 model / thinking / tools / args 覆盖 base（计划的 pi 一节和每段都用这几个字段名）。 */
@@ -177,7 +184,7 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
     } catch (error) {
       throw new PlanError(`e2e.acceptance：${(error as Error).message.replace(/^\.autoreview\.json 的 /, "")}`);
     }
-    e2e = { workDir, requirement, items, owners, acceptance, maxRounds };
+    e2e = { workDir, criteriaFile, requirement, items, owners, acceptance, maxRounds };
   }
   return { name, dir, stages, steps, prepare, e2e };
 }
@@ -235,7 +242,7 @@ const isDir = (path: string): boolean => { try { return statSync(path).isDirecto
 const NEEDS_BROWSER = /页面|网页|浏览器|点击|按钮|输入框|表单/;
 
 /**
- * 开跑前检查（不调用模型，几秒钟）：目录、git 仓库、提示词、pi 和扩展、同一步里目录不重复、e2e 端口、Playwright。
+ * 开跑前检查（不调用模型，几秒钟）：目录、git 仓库、提示词、pi 和扩展、同一步里目录不重复、e2e 端口、[授权] 答复、Playwright。
  * fromE2e 时只查 e2e 相关的几项。
  */
 export async function preflight(plan: Plan, options: { fromE2e?: boolean; env?: Partial<PreflightEnv> } = {}): Promise<Check[]> {
@@ -269,6 +276,12 @@ export async function preflight(plan: Plan, options: { fromE2e?: boolean; env?: 
       const url = new URL(e2e.acceptance.readyUrl);
       const busy = await portBusy(url);
       add(`e2e 的地址 ${url.host} 现在空着`, !busy, busy ? `已经有程序在监听：${describeListeners(url)}` : e2e.acceptance.readyUrl);
+    }
+    if (e2e.items.some((item) => isAuthorizationCriterion(item.text))) {
+      const criteria: Criteria = { source: "用户", items: e2e.items, version: 1, updatedAt: "" };
+      const pendingGrants = authorizationStatus(criteria, grantsFromUser(e2e.requirement, criteria)).pending;
+      add("e2e 的 [授权] 条目都已答复", pendingGrants.length === 0, pendingGrants.length === 0 ? "已答复"
+        : `${pendingGrants.join("、")} 还没答复：在 ${e2e.criteriaFile} 里加一行「同意授权：${pendingGrants.join("、")}」或「不授权：${pendingGrants.join("、")}」`);
     }
     if (e2e.items.some((item) => !isManualCriterion(item.text) && NEEDS_BROWSER.test(item.text))) {
       const found = isDir(e2e.workDir) && env.playwright(e2e.workDir);
@@ -376,7 +389,14 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
   }
 
   const criteria: Criteria = { source: "用户", items: e2e.items, version: 1, updatedAt: new Date().toISOString() };
-  const state = { requirement: e2e.requirement, criteria };
+  // [授权] 条目的答复写在标准文件里（你自己的文件）；没答复的停下来问你，不让验收方先动手。
+  const grants = grantsFromUser(e2e.requirement, criteria);
+  const pending = authorizationStatus(criteria, grants).pending;
+  if (pending.length > 0) {
+    return finish(2, `e2e 标准里 ${pending.join("、")} 要你授权：同意就在 ${e2e.criteriaFile} 里加一行「同意授权：${pending.join("、")}」，`
+      + `不同意就加「不授权：${pending.join("、")}」（这几条留给你人工验收），再用 --from e2e 接着跑`);
+  }
+  const state = { requirement: e2e.requirement, criteria, grants };
   const procsFile = resolve(plan.dir, "procs.json");
   const inboxSeq = new Map<string, number>([...plan.stages.keys()].map((stage) => [stage, readJson<InboxMessage>(inboxPath(plan.dir, stage))?.seq ?? 0]));
   let previousFailed: string[] = [];

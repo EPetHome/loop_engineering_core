@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { extractCriteria, isManualCriterion, type AcceptanceRecord } from "../acceptance-core.ts";
+import { extractCriteria, isAuthorizationCriterion, isManualCriterion, type AcceptanceRecord } from "../acceptance-core.ts";
 import { parseAcceptanceConfig } from "../config.ts";
 import {
   acceptanceTodos, blockerHint, blockVersion, conventionNotice, conventionStatus, conventionTarget, extractBlock,
@@ -32,11 +32,12 @@ test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   assert.match(block1, /不要写联调或端到端测试的步骤/);
   assert.match(block1, /「A3\. \[乙\] 操作：/);
   assert.equal(block1.split("\n").at(-1), "<!-- /autoreview:acceptance -->");
-  // v3：[人工] 按权限划分：要用户的权限或拍板才算；图形界面操作、步骤多、耗时长不算。
-  assert.match(block1, /按权限划分，不按难易[\s\S]*要用户的权限[\s\S]*要用户拍板[\s\S]*难做不算人工：图形界面操作/);
+  // v3：按权限划分：[授权] 用户同意后执行，[人工] 要用户拍板；图形界面操作、步骤多、耗时长都不算。
+  assert.match(block1, /按权限划分，不按难易[\s\S]*「\[授权\]」[\s\S]*同意授权：A3[\s\S]*不要替用户写「同意授权」[\s\S]*「\[人工\]」：要用户拍板[\s\S]*难做不算：图形界面操作/);
   const examples = extractCriteria(block1)!;
-  assert.deepEqual(examples.map((item) => item.id), ["A1", "A2", "A3"], "块 1 里的示例格式能被程序取到");
-  assert.deepEqual(examples.map((item) => isManualCriterion(item.text)), [false, false, true], "示例里的 [人工] 能被程序认出");
+  assert.deepEqual(examples.map((item) => item.id), ["A1", "A2", "A3", "A4"], "块 1 里的示例格式能被程序取到");
+  assert.deepEqual(examples.map((item) => [isAuthorizationCriterion(item.text), isManualCriterion(item.text)]),
+    [[false, false], [false, false], [true, false], [false, true]], "示例里的 [授权]、[人工] 能被程序认出");
   const block2 = JSON.parse(extractBlock(doc, 2)!);
   const config = parseAcceptanceConfig(block2.acceptance, "/p", {})!;
   assert.ok(config.start && config.readyUrl, "块 2 是一份能直接用的启动配置");

@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { criteriaFromUser } from "./acceptance-core.ts";
+import { criteriaFromUser, grantsFromUser, grantsLabel, typedByUser } from "./acceptance-core.ts";
 import { checkRoundBudget, loadAcceptanceConfig, loadGateConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import {
   acceptRunLabel, classifyMarker, conventionText, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
@@ -677,6 +677,13 @@ export default function autoreviewExtension(pi: ExtensionAPI): void {
         state.criteria = criteria;
         saveState(life);
         ctx.ui.notify(`自动验收：已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`, "info");
+      }
+      // 授权只认你亲手打的字：@文件 展开的内容、程序自己发的返修消息都不算。
+      const grants = acceptance ? grantsFromUser(typedByUser(event.prompt), state.criteria, state.grants) : undefined;
+      if (grants) {
+        state.grants = grants;
+        saveState(life);
+        ctx.ui.notify(`自动验收：已记录授权（${grantsLabel(grants)}）`, "info");
       }
       if (state.enabled) {
         const convention = conventionText({ acceptance, gate: gateCommand(ctx) });

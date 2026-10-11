@@ -1,4 +1,4 @@
-/** hosts/hook.ts 无模型回归 H1–H16；所有运行产物只写 os.tmpdir()。 */
+/** hosts/hook.ts 无模型回归 H1–H17；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -1034,5 +1034,35 @@ test("H16 [人工] 条目：不交给验收方、不随返修复查；完成时�
     assert.equal(state.rounds[1].acceptance.verdict, "部分验证");
     assert.match(h.summary(), /人工验收 A2（\[人工\] 操作：在桌面客户端里看待办）：标了 \[人工\]，程序不自动验/);
     assert.match(h.summary(), /- A2：需人工 —— 标了 \[人工\]/);
+  } finally { h.close(); }
+});
+
+test("H17 [授权] 条目：没答复先停下问你；只认你亲手打的「同意授权」；同意后照常验收", () => {
+  const requirement = "做同步\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. [授权] 操作：用正式账号同步\n   预期：多一行\n\n同意授权：全部";
+  const h = fixture({ marker: JSON.stringify({ acceptance: {} }), files: { "需求.md": requirement } });
+  const accDir = join(h.home, ".pi-autoreview", basename(h.repo), "acceptance", "claude-s1");
+  try {
+    h.run(h.event("SessionStart"), { env: ACC_ENV });
+    h.run(h.event("UserPromptSubmit", { prompt: "@需求.md 按这个做" }), { env: ACC_ENV });
+    let state = h.readState();
+    assert.equal(state.criteria.items.length, 2, "标准从文件里取");
+    assert.equal(state.grants, undefined, "文件里写的「同意授权」不算，只认你打的字");
+
+    h.write("file.txt", "base\nTODO\n");
+    const asked = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
+    assert.match(asked.systemMessage, /^自动评审暂停（等你授权（A2））。验收标准里有要你授权的条目：A2（操作：用正式账号同步）。同意就回复「同意授权：A2」/);
+    assert.equal(h.readState().pauseReason, "等你授权（A2）");
+    assert.ok(!existsSync(join(h.root, "fake", "acc-calls.log")), "没答复前不验收");
+    assert.match(h.summary(), /## 需要你做的事\n1\. 验收标准里有要你授权的条目/);
+
+    const reply = h.run(h.event("UserPromptSubmit", { prompt: "同意授权：A2" }), { env: ACC_ENV });
+    assert.match(reply.stderr, /已记录授权：同意 A2/);
+    state = h.readState();
+    assert.deepEqual(state.grants, { version: 1, approved: ["A2"], denied: [] });
+    assert.equal(state.phase, "idle");
+
+    assert.equal(h.run(h.delivered({ last_assistant_message: "收到\n【交付完成】" }), { env: ACC_ENV }).stdout, "");
+    assert.equal(h.readState().phase, "done");
+    assert.match(readFileSync(join(accDir, "r1", "input.md"), "utf8"), /## 用户授权\n\n用户已同意你在这几条里按标准使用真实账号、真实环境：A2。/);
   } finally { h.close(); }
 });

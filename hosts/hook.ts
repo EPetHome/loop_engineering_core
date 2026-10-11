@@ -14,7 +14,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, 
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { criteriaFromUser } from "../acceptance-core.ts";
+import { criteriaFromUser, grantsFromUser, grantsLabel, typedByUser } from "../acceptance-core.ts";
 import {
   checkRoundBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
@@ -512,6 +512,13 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   if (criteria) {
     state.criteria = criteria;
     process.stderr.write(`[autoreview] 已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）\n`);
+  }
+  // 授权只认你亲手打的字：用没展开 @文件 的原文，程序发的返修消息也不算。
+  const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
+  const grants = ctx.config.acceptance ? grantsFromUser(typed, state.criteria, state.grants) : undefined;
+  if (grants) {
+    state.grants = grants;
+    process.stderr.write(`[autoreview] 已记录授权：${grantsLabel(grants)}\n`);
   }
   saveStateFile(ctx.paths.state, state);
   return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
