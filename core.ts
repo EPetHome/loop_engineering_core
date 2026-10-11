@@ -15,6 +15,7 @@ export const CONVENTION = [
   "- 交付时最后一行写【交付完成】，评审会立即开始；不写的话，程序检测到改动也会自动评审。",
   "- 需要用户决定时，最后一行写【需要你决定】。",
   "- 收到「自动评审」消息后，逐条写「第 N 条：已修」或「第 N 条：异议：理由」。",
+  "- 需求可能只写了目标、已拍板、边界和验收标准：现状自己读代码了解，没写到的细节按现有代码习惯做，拿不准的写进交付说明。",
 ].join("\n");
 /** 超过这个字节数的 diff 不再原文附给评审。 */
 export const MAX_DIFF_BYTES = 200 * 1024;
@@ -85,6 +86,8 @@ export interface SummaryInput {
   todos?: string[];
   /** 最近一次验收命令的执行结果。 */
   acceptRun?: AcceptRunRecord;
+  /** 开发基线之后开发方新增的提交数（只记录，不评判）。 */
+  newCommits?: number;
 }
 
 export interface ReviewInputOptions {
@@ -252,6 +255,7 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
   if (input.acceptRun) lines.push(`- 验收命令：${acceptRunLabel(input.acceptRun)}`);
+  if (input.newCommits) lines.push(`- 开发方新增提交：${input.newCommits} 个（基线之后，只记录不评判）`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
   if (input.todos && input.todos.length > 0) {
     lines.push("## 需要你做的事");

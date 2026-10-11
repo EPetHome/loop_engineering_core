@@ -379,6 +379,9 @@ async function writeSummary(
     if (status !== "暂停") throw error;
     gitStatusShort = `（${errorText(error)}；无法确认是否干净）`;
   }
+  // 提交数只是记录，取不到就不写。
+  let newCommits: number | undefined;
+  try { if (state.baseline) newCommits = await createGitEvidence(ctx.exec, ctx.workDir).commitsSince(state.baseline); } catch { /* 不影响总结 */ }
   const todos = acceptanceTodos({
     acceptance: ctx.config.acceptance, host: ctx.host, phase: state.phase, pauseHint: state.pauseHint,
     criteria: state.criteria, lastAcceptance: lastAcceptance(state),
@@ -388,7 +391,7 @@ async function writeSummary(
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
     criteria: state.criteria, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
-    unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes,
+    unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
   });
   mkdirSync(dirname(ctx.paths.summary), { recursive: true });
   writeFileSync(ctx.paths.summary, text);

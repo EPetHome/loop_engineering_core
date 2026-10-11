@@ -943,3 +943,15 @@ createServer((q, r) => r.end("ok")).listen(Number(process.argv[2]), "127.0.0.1")
     } finally { h.close(); }
   });
 });
+
+test("H14 Hook 的总结也记录开发方在基线之后新增的提交", () => {
+  const h = fixture();
+  try {
+    h.run(h.event("SessionStart"));
+    h.run(h.event("UserPromptSubmit", { prompt: "做点事" }));
+    h.write("file.txt", "base\nCOMMITTED\n"); h.git("commit", "-qam", "开发方自己提交了");
+    h.run(h.delivered());
+    assert.equal(h.readState().phase, "done");
+    assert.match(h.summary(), /^- 开发方新增提交：1 个（基线之后，只记录不评判）$/m);
+  } finally { h.close(); }
+});

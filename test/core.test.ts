@@ -3,6 +3,7 @@
  * 运行：PATH="/Users/Admin/.hermes/node/bin:$PATH" node --test test/core.test.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   CONVENTION,
@@ -249,6 +250,14 @@ test("T11 开发约定：标记可选、改动也会自动评审", () => {
   assert.ok(CONVENTION.includes("需要用户决定时，最后一行写【需要你决定】。"));
   assert.ok(CONVENTION.includes("第 N 条：已修"));
   assert.ok(CONVENTION.includes("第 N 条：异议：理由"));
+  assert.ok(CONVENTION.includes("需求可能只写了目标、已拍板、边界和验收标准：现状自己读代码了解，没写到的细节按现有代码习惯做，拿不准的写进交付说明。"));
+});
+
+test("T13 评审规则不让跑端到端和联调；总结记开发方新增提交", () => {
+  const prompt = readFileSync(new URL("../review-prompt.md", import.meta.url), "utf8");
+  assert.ok(prompt.includes("不要运行会启动服务、调用模型或耗时很长的测试（端到端、联调）：程序已经负责验收，单测这类快速检查可以跑。"));
+  assert.match(renderSummary(summaryInput({ status: "完成", newCommits: 2 })), /^- 开发方新增提交：2 个（基线之后，只记录不评判）$/m);
+  assert.doesNotMatch(renderSummary(summaryInput({ status: "完成", newCommits: 0 })), /开发方新增提交/);
 });
 
 test("T12 总结渲染验收命令：状态行下多一行，详情一节带命令、触发、输出尾部", () => {

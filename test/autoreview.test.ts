@@ -1,4 +1,4 @@
-/** 无模型入口回归 G1–G12；所有运行产物只写 os.tmpdir()。 */
+/** 无模型入口回归 G1–G13；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -31,13 +31,23 @@ async function until(predicate: () => boolean, description: string): Promise<voi
   for (let i = 0; i < 8; i += 1) await nextTurn();
 }
 
-function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string> } = {}) {
+function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string>; stage?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "autoreview-unit-"));
   const repo = join(root, "repo");
   const home = join(root, "home");
+  const pipelineDir = join(root, "pipeline");
   mkdirSync(repo); mkdirSync(home);
   const oldHome = process.env.HOME;
   process.env.HOME = home;
+  // 流水线环境变量：只有指定了段名才设置，测完恢复。
+  const pipelineEnv = ["AUTOREVIEW_PIPELINE_DIR", "AUTOREVIEW_STAGE", "AUTOREVIEW_PIPELINE_POLL_MS"] as const;
+  const oldPipelineEnv = pipelineEnv.map((key) => process.env[key]);
+  for (const key of pipelineEnv) delete process.env[key];
+  if (options.stage) {
+    process.env.AUTOREVIEW_PIPELINE_DIR = pipelineDir;
+    process.env.AUTOREVIEW_STAGE = options.stage;
+    process.env.AUTOREVIEW_PIPELINE_POLL_MS = "20";
+  }
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const git = (...args: string[]) => {
     const res = spawnSync("git", args, { cwd: repo, env, encoding: "utf8" });
@@ -122,7 +132,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   const terminal = async () => until(() => ["done", "paused"].includes(state()?.phase), "完成或暂停");
   const accepted = async () => until(() => Boolean(state()?.acceptRun && state().acceptRun!.result !== "进行中"), "验收命令结束");
   return {
-    root, repo, home, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
+    root, repo, home, pipelineDir, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
     set inject(fn: typeof inject) { inject = fn; },
     set reviewer(fn: typeof reviewer) { reviewer = fn; },
     set notifier(fn: typeof notifier) { notifier = fn; },
@@ -131,8 +141,13 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     set failStatus(value: boolean) { failStatus = value; },
     summary: () => readFileSync(join(home, ".pi-autoreview", "repo", "unit-dev.md"), "utf8"),
     async close() {
+      await event("session_shutdown", { reason: "quit" }).catch(() => {});
       for (let i = 0; i < 12; i += 1) await nextTurn();
       if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      pipelineEnv.forEach((key, index) => {
+        const value = oldPipelineEnv[index];
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      });
       rmSync(root, { recursive: true, force: true });
     },
   };
@@ -850,4 +865,109 @@ test("G12 /accept 手动执行验收命令；新一轮评审清掉旧结果", as
       assert.equal(h.accepts.length, 1);
     } finally { await h.close(); }
   });
+});
+
+// —— 流水线：段会话写状态、收件箱返修 ——
+
+const stageStatus = (h: { pipelineDir: string }, stage: string) => {
+  const file = join(h.pipelineDir, `${stage}.status.json`);
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : undefined;
+};
+const sendInbox = (h: { pipelineDir: string }, stage: string, seq: number, mustFix: string) => {
+  mkdirSync(h.pipelineDir, { recursive: true });
+  writeFileSync(join(h.pipelineDir, `${stage}.inbox.json`), JSON.stringify({
+    seq, message: `【流水线 e2e 返修 · 第 ${seq} 轮】\n${mustFix}\n修好后照常交付；不归你就写「A3：不归我：理由」`, mustFix,
+  }));
+};
+
+test("G13 流水线：不带环境变量时完全不动；带了就报 started / done / paused", async (t) => {
+  await t.test("普通会话：不写状态文件、不看收件箱", async () => {
+    const h = harness();
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      sendInbox(h, "乙", 1, "A3. 不该被发出去");
+      await h.command(); await h.terminal();
+      for (let i = 0; i < 30; i += 1) await new Promise((r) => setTimeout(r, 5));
+      assert.equal(existsSync(join(h.pipelineDir, "乙.status.json")), false);
+      assert.deepEqual(h.messages, []);
+    } finally { await h.close(); }
+  });
+  await t.test("段会话：开会话、评审完成、暂停各报一次，序号递增", async () => {
+    const h = harness({ stage: "乙" });
+    try {
+      await h.event("session_start");
+      assert.equal(stageStatus(h, "乙").event, "started");
+      await h.begin(); h.write("file.txt", "base\nA\n");
+      await h.command(); await h.terminal();
+      const done = stageStatus(h, "乙");
+      assert.deepEqual([done.event, done.seq, done.inbox, done.sessionId], ["done", 2, 0, "unit-dev"]);
+      assert.match(done.summary, /unit-dev\.md$/);
+      h.assistant("卡住了\n【需要你决定】"); await h.event("agent_settled");
+      const paused = stageStatus(h, "乙");
+      assert.deepEqual([paused.event, paused.seq, paused.pauseReason], ["paused", 3, "开发方需要你决定"]);
+    } finally { await h.close(); }
+  });
+});
+
+test("G13 流水线收件箱：空闲时发给开发方；评审只看这次的改动，e2e 条目当上一轮必修复查", async (t) => {
+  await t.test("修了：评审完成后报 done，带收件箱序号", async () => {
+    const h = harness({ stage: "乙" });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      await h.command(); await h.terminal();
+      assert.equal(stageStatus(h, "乙").event, "done");
+      // 同一仓库里别的段在乙完成之后的改动，不该算进乙的返修评审。
+      h.write("other-stage.txt", "甲的改动\n");
+      sendInbox(h, "乙", 1, "A3. [乙] 打开需求现状页\n    实际：MUSTFIX_SENTINEL");
+      await until(() => h.messages.length === 1, "收件箱的返修发给了开发方");
+      assert.match(h.messages[0], /^【流水线 e2e 返修 · 第 1 轮】/);
+      assert.deepEqual([h.state().phase, (h.state() as any).inboxHandled, (h.state() as any).awaitingInbox], ["done", 1, 1]);
+      h.write("file.txt", "base\nA\nFIX_E2E\n"); h.assistant("A3：已修");
+      await h.event("agent_settled");
+      await until(() => stageStatus(h, "乙")?.seq === 3, "返修评审完成");
+      const status = stageStatus(h, "乙");
+      assert.deepEqual([status.event, status.inbox], ["done", 1]);
+      const input = h.inputs.at(-1)!;
+      assert.match(input, /## 上一轮必修\n+A3\. \[乙\] 打开需求现状页[\s\S]*MUSTFIX_SENTINEL/);
+      assert.match(input, /\+FIX_E2E/);
+      assert.doesNotMatch(input, /other-stage\.txt/, "收到返修之前别的段的改动不算这一段的");
+      for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 5));
+      assert.equal(h.messages.length, 1, "同一条收件箱不会重复发");
+    } finally { await h.close(); }
+  });
+  await t.test("没改代码：报 no-change 并带回复，不评审", async () => {
+    const h = harness({ stage: "乙" });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "base\nA\n");
+      await h.command(); await h.terminal();
+      const reviews = h.inputs.length;
+      sendInbox(h, "乙", 1, "A3. [乙] 打开需求现状页");
+      await until(() => h.messages.length === 1, "收件箱的返修发给了开发方");
+      h.assistant("A3：不归我：页面拿到的接口数据就是错的，是后端的问题\n【交付完成】");
+      await h.event("agent_settled");
+      const status = stageStatus(h, "乙");
+      assert.deepEqual([status.event, status.inbox], ["no-change", 1]);
+      assert.match(status.reply, /不归我/);
+      assert.equal(h.inputs.length, reviews, "没改动就不评审");
+      assert.equal((h.state() as any).awaitingInbox, undefined);
+    } finally { await h.close(); }
+  });
+  await t.test("返修还没处理完时会话重开：只报 started，不让编排程序误以为修好了", async () => {
+    const h = harness({ stage: "乙", restored: { enabled: true, rounds: [], repairs: 0, phase: "done", inboxHandled: 1, awaitingInbox: 1 } });
+    try {
+      await h.event("session_start");
+      assert.deepEqual([stageStatus(h, "乙").event, stageStatus(h, "乙").inbox], ["started", 1]);
+    } finally { await h.close(); }
+  });
+});
+
+test("G13 总结记录开发方在基线之后新增的提交", async () => {
+  const h = harness();
+  try {
+    await h.event("session_start"); await h.begin();
+    h.write("file.txt", "base\nCOMMITTED\n"); h.git("commit", "-qam", "开发方自己提交了");
+    h.write("file.txt", "base\nCOMMITTED\nMORE\n");
+    await h.command(); await h.terminal();
+    assert.match(h.summary(), /^- 开发方新增提交：1 个（基线之后，只记录不评判）$/m);
+  } finally { await h.close(); }
 });
