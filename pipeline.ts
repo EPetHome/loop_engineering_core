@@ -18,7 +18,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  extractCriteria, formatFailedItems, type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
+  extractCriteria, formatFailedItems, isManualCriterion,
+  type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
 import { EXT_DIR, HERMES_BIN, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, type AcceptanceConfig } from "./config.ts";
@@ -80,8 +81,9 @@ const text = (value: unknown, label: string): string => {
 const fileSafe = (name: string): string => name.replace(/[/\\:*?"<>|\s]+/g, "_");
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
-/** 标准开头的「[段名]」：返回归属和去掉标签后的原文。 */
+/** 标准开头的「[段名]」：返回归属和去掉标签后的原文。标了 [人工] 的条目不自动验、不退回，没有归属，原文不动。 */
 export function parseOwner(item: string): { owner?: string; text: string } {
+  if (isManualCriterion(item)) return { text: item };
   const match = /^\[([^\]\n]+)\]\s*/.exec(item);
   return match ? { owner: match[1].trim(), text: item.slice(match[0].length) } : { text: item };
 }
@@ -268,7 +270,7 @@ export async function preflight(plan: Plan, options: { fromE2e?: boolean; env?: 
       const busy = await portBusy(url);
       add(`e2e 的地址 ${url.host} 现在空着`, !busy, busy ? `已经有程序在监听：${describeListeners(url)}` : e2e.acceptance.readyUrl);
     }
-    if (e2e.items.some((item) => NEEDS_BROWSER.test(item.text))) {
+    if (e2e.items.some((item) => !isManualCriterion(item.text) && NEEDS_BROWSER.test(item.text))) {
       const found = isDir(e2e.workDir) && env.playwright(e2e.workDir);
       add("Playwright（e2e 要操作网页）", found, found ? "找到了" : `找不到：在 ${e2e.workDir} 里执行接入手册的【块 3】`);
     }

@@ -54,6 +54,13 @@ test("P1 计划解析：相对路径、默认步骤与目录、标签去掉后�
     assert.match(stageScript(serial, serial.stages.get("乙")!), /^cd '.*' && export AUTOREVIEW_PIPELINE_DIR='.*' AUTOREVIEW_STAGE='乙' && b$/);
     assert.deepEqual(parseOwner("[乙] 操作：打开"), { owner: "乙", text: "操作：打开" });
     assert.deepEqual(parseOwner("操作：打开"), { text: "操作：打开" });
+    // [人工] 条目不自动验、不退回：不当成段名，原文不动，不要求标归属。
+    assert.deepEqual(parseOwner("[人工] 操作：在 WB 里点接入"), { text: "[人工] 操作：在 WB 里点接入" });
+    assert.deepEqual(parseOwner("[乙] [人工] 操作：x"), { text: "[乙] [人工] 操作：x" });
+    writeFileSync(join(root, "manual.md"), "## 验收标准\nA1. [甲] 操作：调接口\n   预期：ok\nA2. [人工] 操作：在 WB 里点接入\n   预期：页面显示已接入\n");
+    const manual = parsePlan({ name: "m", stages: { 甲: { start: "a" } }, e2e: { workDir: ".", criteria: "manual.md" } }, root, {});
+    assert.deepEqual([...manual.e2e!.owners], [["A1", "甲"], ["A2", undefined]]);
+    assert.equal(manual.e2e!.items[1].text.split("\n")[0], "[人工] 操作：在 WB 里点接入");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

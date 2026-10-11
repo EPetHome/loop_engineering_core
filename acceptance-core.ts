@@ -3,12 +3,14 @@
  *
  * 负责：从用户消息取「## 验收标准」、解析起草结果和验收方报告、扫日志、核对证据、
  * 逐条判定、拼验收方输入和返修消息、验收约定原文。判定只看逐条结果和证据，不信验收方自报的结论。
+ * 开头标了「[人工]」的条目不交给验收方，判为「需人工」，完成时列给用户人工验收。
  */
 
 /** 配了 acceptance 的项目，追加在开发约定后面注入。 */
 export const ACCEPTANCE_CONVENTION = [
   "【自动验收约定】",
   "- 用户让你起草需求或提示词时，末尾加「## 验收标准」：每条写「操作」和「预期」，只写外部看得到的结果（命令输出、页面、接口返回、数据变化、日志），一条只验一个行为，最多 10 条，只覆盖本次需求。",
+  "- 验收方只能用命令、接口、无头浏览器和读日志、文件来验；只能在桌面应用图形界面里做、必须用真实账号或外部平台、要人主观判断的条目，开头标「[人工]」，由用户验收。",
   "- 开发时不要补写或修改验收标准，标准只认用户发来的。",
   "- 交付说明里写清新功能怎么用（命令、地址、参数），验收方按它操作。",
   "- 收到「自动验收」消息后，逐条写「A2：已修」或「A2：异议：理由」；异议交用户决定。",
@@ -29,6 +31,16 @@ export interface Criteria {
 }
 
 export type ItemVerdict = "通过" | "不通过" | "无法验证";
+/** 判定结果多一种「需人工」：标了 [人工] 的条目，程序不交给验收方。 */
+export type ResultVerdict = ItemVerdict | "需人工";
+
+/** 条目开头（可以在别的 [标签] 或「操作：」之后）写了「[人工]」或「【人工】」。 */
+const MANUAL_TAG = /^\s*(?:[[【][^\]】\n]*[\]】]\s*)*(?:操作\s*[:：]\s*)?[[【]\s*人工\s*[\]】]/;
+
+/** 标了 [人工] 的验收标准：验收方验不了，由用户人工验收。 */
+export function isManualCriterion(text: string): boolean {
+  return MANUAL_TAG.test(text);
+}
 
 export interface ReportItem {
   id: string;
@@ -54,7 +66,7 @@ export interface AcceptanceItemResult {
   id: string;
   /** 标准原文；G1/G2 是程序自带的全局标准。 */
   text: string;
-  verdict: ItemVerdict;
+  verdict: ResultVerdict;
   /** 给开发方和总结看的说明。 */
   detail: string;
   /** 证据有问题（可以让验收方重做一次）。 */
@@ -64,7 +76,7 @@ export interface AcceptanceItemResult {
 }
 
 export interface AcceptanceRecord {
-  /** 部分验证：其余全部通过，只有个别条目没法自动验证（留给你人工验收），照常进入评审。 */
+  /** 部分验证：其余全部通过，只有个别条目没法自动验证或标了 [人工]（留给你人工验收），照常进入评审。 */
   verdict: "通过" | "部分验证" | "不通过" | "无法验收";
   items: AcceptanceItemResult[];
   logErrors: string[];
@@ -300,6 +312,7 @@ export function lastEvidenceAt(content: string | undefined, id: string): number 
 
 const G1_TEXT = "系统能按配置启动、就绪，并在验收过程中一直运行";
 const G2_TEXT = "验收期间系统日志里没有错误";
+const MANUAL_DETAIL = "标了 [人工]：程序不交给验收方，需要你人工验收";
 
 function failDetail(item: ReportItem, evidencePath: string): string {
   const order = ["复现", "预期", "实际", "相关日志"];
@@ -313,6 +326,7 @@ function failDetail(item: ReportItem, evidencePath: string): string {
  * 没配启动时「连不上」不算开发方的错：报了不通过也改判为无法验证。
  * 有不通过（含 G1/G2）→ 不通过；无法验证里有验收方没做好、没配启动、缺工具，或者全部都没验证 → 无法验收；
  * 其余只有个别条目无法验证 → 部分验证（留给人工）；全部通过 → 通过。
+ * 标了 [人工] 的条目记「需人工」，不影响打回和暂停；其余全部通过时整体算部分验证，完成时列给你。
  */
 export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "durationMs"> {
   const items: AcceptanceItemResult[] = [];
@@ -322,22 +336,27 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   } else if (stopped) {
     items.push({ id: "G1", text: G1_TEXT, verdict: "无法验证", detail: stopped.detail, cause: "系统被关掉" });
   }
-  if (input.report) {
+  /** 按标准顺序逐条判定；标了 [人工] 的不看验收方报告，直接记「需人工」。 */
+  const each = (judge: (criterion: CriterionItem) => AcceptanceItemResult): void => {
     for (const criterion of input.criteria) {
-      const reported = input.report.items.find((item) => item.id === criterion.id);
+      items.push(isManualCriterion(criterion.text) ? { ...criterion, verdict: "需人工", detail: MANUAL_DETAIL } : judge(criterion));
+    }
+  };
+  if (input.report) {
+    const report = input.report;
+    each((criterion) => {
+      const reported = report.items.find((item) => item.id === criterion.id);
       const evidencePath = `${input.runDir}/evidence/${criterion.id}.txt`;
       const content = input.evidence(criterion.id);
       if (!reported) {
-        items.push({ ...criterion, verdict: "无法验证", detail: "验收方没有报告这一条", evidenceProblem: true, cause: "验收方" });
-        continue;
+        return { ...criterion, verdict: "无法验证", detail: "验收方没有报告这一条", evidenceProblem: true, cause: "验收方" };
       }
       if (reported.verdict === "无法验证") {
         const reason = reported.fields["原因"] || "验收方没写原因";
-        items.push({
+        return {
           ...criterion, verdict: "无法验证", detail: `原因：${reason}`,
           cause: classifyUnknown(criterion, reason, content, input.hasService, Boolean(stopped)),
-        });
-        continue;
+        };
       }
       const excerpt = normalize(reported.fields["证据摘录"] ?? "");
       let problem = "";
@@ -345,38 +364,36 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
       else if (excerpt.length < 2) problem = "没有写证据摘录";
       else if (!normalize(content).includes(excerpt)) problem = `证据摘录在 ${evidencePath} 里找不到`;
       if (problem) {
-        items.push({ ...criterion, verdict: "无法验证", detail: `原因：报告「${reported.verdict}」，但${problem}`, evidenceProblem: true, cause: "验收方" });
-        continue;
+        return { ...criterion, verdict: "无法验证", detail: `原因：报告「${reported.verdict}」，但${problem}`, evidenceProblem: true, cause: "验收方" };
       }
       // 系统被关掉之后，连到的可能是别人重启的进程或者根本连不上：这时留的证据不算数。
       const lastAt = lastEvidenceAt(content, criterion.id);
       if (stopped && (lastAt === undefined || lastAt >= stopped.at)) {
-        items.push({
+        return {
           ...criterion, verdict: "无法验证", cause: "系统被关掉",
           detail: `原因：报告「${reported.verdict}」，但证据是在被测系统被关掉之后留的，不算数`,
-        });
-        continue;
+        };
       }
       const observed = [reported.fields["实际"], reported.fields["证据摘录"], reported.fields["相关日志"]].join("\n");
       if (reported.verdict === "不通过" && !input.hasService && UNREACHABLE.test(observed)) {
-        items.push({
+        return {
           ...criterion, verdict: "无法验证", cause: "没配启动",
           detail: "原因：连不上被测系统，但 .autoreview.json 没有配置怎么启动它（验收方报了不通过，程序改判为无法验证，不算开发方的错）",
-        });
-        continue;
+        };
       }
-      items.push({
+      return {
         ...criterion, verdict: reported.verdict,
         detail: reported.verdict === "通过" ? `证据摘录：${reported.fields["证据摘录"]}` : failDetail(reported, evidencePath),
-      });
-    }
+      };
+    });
   } else if (stopped) {
-    for (const criterion of input.criteria) {
-      items.push({ ...criterion, verdict: "无法验证", detail: "原因：被测系统被关掉，没有完成实测", cause: "系统被关掉" });
-    }
+    each((criterion) => ({ ...criterion, verdict: "无法验证", detail: "原因：被测系统被关掉，没有完成实测", cause: "系统被关掉" }));
   } else if (!input.systemFailure) {
+    each((criterion) => ({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}`, cause: "验收方" }));
+  } else {
+    // 系统没能正常运行：自动的条目没有实测，不逐条列；[人工] 条目照样列给你。
     for (const criterion of input.criteria) {
-      items.push({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}`, cause: "验收方" });
+      if (isManualCriterion(criterion.text)) items.push({ ...criterion, verdict: "需人工", detail: MANUAL_DETAIL });
     }
   }
   if (input.logErrors.length > 0) {
@@ -387,10 +404,14 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   }
   const failed = items.some((item) => item.verdict === "不通过");
   const unknown = items.filter((item) => item.verdict === "无法验证");
+  const manual = items.filter((item) => item.verdict === "需人工");
+  const automatic = input.criteria.length - manual.length;
   const ids = unknown.map((item) => item.id).join("、");
   const blocker = (["系统被关掉", "数据不干净", "没配启动", "缺工具", "验收方"] as const).find((cause) => unknown.some((item) => item.cause === cause))
-    ?? (unknown.length > 0 && unknown.length === input.criteria.length ? "其他" : undefined);
-  const verdict = failed ? "不通过" : unknown.length === 0 ? "通过" : blocker ? "无法验收" : "部分验证";
+    ?? (unknown.length > 0 && unknown.length === automatic ? "其他" : undefined);
+  // 验收方只拿到自动的条目：它自报的结论和这个比；[人工] 条目只把「通过」变成「部分验证」。
+  const automaticVerdict = failed ? "不通过" : unknown.length === 0 ? "通过" : blocker ? "无法验收" : "部分验证";
+  const verdict = automaticVerdict === "通过" && manual.length > 0 ? "部分验证" : automaticVerdict;
   const record: Omit<AcceptanceRecord, "durationMs"> = {
     verdict, items, logErrors: input.logErrors, extra: input.report?.extra ?? [], runDir: input.runDir,
   };
@@ -398,11 +419,14 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
     record.blocker = blocker;
     record.reason = `${BLOCKER_TEXT[blocker!]}（${ids}）`;
   }
-  if (verdict === "部分验证") record.reason = `${ids} 没能自动验证，需要人工验收`;
+  if (verdict === "部分验证") {
+    const manualIds = manual.map((item) => item.id).join("、");
+    record.reason = `${[ids && `${ids} 没能自动验证`, manualIds && `${manualIds} 标了 [人工]`].filter(Boolean).join("，")}，需要人工验收`;
+  }
   if (input.systemFailure && input.report === undefined) record.note = "系统没能正常运行，其余标准没有实测";
   // 被关掉时验收方的自报结论没有意义，不再提示对比。
   const claimed = input.report?.conclusion ?? "";
-  if (claimed && !stopped && !claimed.startsWith(verdict)) record.note = `验收方自报「${claimed}」，程序按逐条结果判为「${verdict}」`;
+  if (claimed && !stopped && !claimed.startsWith(automaticVerdict)) record.note = `验收方自报「${claimed}」，程序按逐条结果判为「${automaticVerdict}」`;
   return record;
 }
 
@@ -469,7 +493,8 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
     "## 需求原文",
     stripCriteriaSection(options.requirement ?? "").trim() || "（没有记录需求原文，只按验收标准验收）",
     `## 验收标准（第 ${options.criteria.version} 版，来源：${options.criteria.source === "用户" ? "用户" : "自动起草"}）`,
-    formatCriteria(options.criteria.items),
+    // 标了 [人工] 的条目不给验收方看，免得它去碰桌面应用或真实账号。
+    formatCriteria(options.criteria.items.filter((item) => !isManualCriterion(item.text))),
     "## 操作说明（项目提供）",
     options.guide?.trim() || "（无）",
     "## 开发方的交付说明（只用来知道怎么操作，不能当作通过的依据）",
@@ -510,12 +535,15 @@ export function buildAcceptanceRepairMessage(repairRound: number, record: Accept
 
 /** 评审输入里的验收结果：告诉评审不用再启动系统。 */
 export function renderAcceptanceForReview(record: AcceptanceRecord): string {
-  const summary = record.verdict === "部分验证"
-    ? `程序已经启动系统、按验收标准黑盒实测：其余全部通过，${record.reason}；验收期间系统日志没有错误。`
-    : "程序已经启动系统、按验收标准黑盒实测，全部通过，验收期间系统日志没有错误。";
+  const allManual = record.items.length > 0 && record.items.every((item) => item.verdict === "需人工");
+  const summary = allManual
+    ? `验收标准全部标了 [人工]，程序没有启动系统实测，由用户人工验收；你照常评审，不需要启动系统或跑端到端测试。`
+    : record.verdict === "部分验证"
+      ? `程序已经启动系统、按验收标准黑盒实测：其余全部通过，${record.reason}；验收期间系统日志没有错误。你不需要再启动系统或跑端到端测试。`
+      : "程序已经启动系统、按验收标准黑盒实测，全部通过，验收期间系统日志没有错误。你不需要再启动系统或跑端到端测试。";
   return [
     "## 验收结果",
-    `${summary}你不需要再启动系统或跑端到端测试。`,
+    summary,
     ...record.items.map((item) => `- ${item.id}：${item.verdict} —— ${item.text.split("\n")[0]}`),
   ].join("\n");
 }

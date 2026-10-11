@@ -1,4 +1,4 @@
-/** hosts/hook.ts 无模型回归 H1–H15；所有运行产物只写 os.tmpdir()。 */
+/** hosts/hook.ts 无模型回归 H1–H16；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -1006,5 +1006,33 @@ test("H15 补充：gate 配置非法或超出一轮总预算 → 暂停并说明
     assert.equal(h.readState().phase, "paused");
     assert.match(h.summary(), /gate\.cmd 必须写/);
     assert.ok(!existsSync(join(h.root, "fake", "calls.log")));
+  } finally { h.close(); }
+});
+
+test("H16 [人工] 条目：不交给验收方、不随返修复查；完成时列给你人工验收", () => {
+  const h = fixture({ marker: JSON.stringify({ acceptance: {} }) });
+  const requirement = "做一个待办命令行\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. [人工] 操作：在桌面客户端里看待办\n   预期：有买菜";
+  const env = { ...ACC_ENV, FAKE_ACC_FAIL_ONCE: "A1" };
+  const accDir = join(h.home, ".pi-autoreview", basename(h.repo), "acceptance", "claude-s1");
+  try {
+    h.run(h.event("SessionStart"), { env });
+    h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
+    h.write("file.txt", "base\nTODO\n");
+    const first = JSON.parse(h.run(h.delivered(), { env }).stdout);
+    assert.equal(first.decision, "block");
+    assert.match(first.reason, /^【自动验收 · 第 1 次返修】/);
+    assert.ok(!first.reason.includes("桌面客户端"), "[人工] 条目不会被打回");
+    const firstInput = readFileSync(join(accDir, "r1", "input.md"), "utf8");
+    assert.ok(firstInput.includes("A1. 操作：todo add 买菜") && !firstInput.includes("桌面客户端"));
+
+    h.write("file.txt", "base\nTODO FIXED\n");
+    const done = JSON.parse(h.run(h.delivered(), { env }).stdout);
+    assert.match(done.systemMessage, /^自动评审完成（评审 2 次，返修 1 次）。A2 标了 \[人工\]，需要你人工验收/);
+    assert.match(readFileSync(join(accDir, "r2", "input.md"), "utf8"), /上一轮没通过：A1。/, "上一轮复查只列自动条目");
+    const state = h.readState();
+    assert.equal(state.phase, "done");
+    assert.equal(state.rounds[1].acceptance.verdict, "部分验证");
+    assert.match(h.summary(), /人工验收 A2（\[人工\] 操作：在桌面客户端里看待办）：标了 \[人工\]，程序不自动验/);
+    assert.match(h.summary(), /- A2：需人工 —— 标了 \[人工\]/);
   } finally { h.close(); }
 });

@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, buildCorrectionInput, classifySystemExit,
-  criteriaFromUser, extractCriteria, findObjections, judgeAcceptance, lastEvidenceAt, parseAcceptanceReport,
-  parseCriteriaDraft, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
+  criteriaFromUser, extractCriteria, findObjections, isManualCriterion, judgeAcceptance, lastEvidenceAt, parseAcceptanceReport,
+  parseCriteriaDraft, renderAcceptanceForReview, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
 import { ACCEPTANCE_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
@@ -352,7 +352,7 @@ test("A14 提示词里的输出格式示例能被解析器原样解析（改提�
   const guide = readFileSync(new URL("../README-验收标准.md", import.meta.url), "utf8");
   const snippet = /````markdown\n([\s\S]*?)\n````/.exec(guide)?.[1] ?? "";
   assert.ok(snippet.includes("## 验收标准"), "README-验收标准.md 里要有可复制的追加段");
-  assert.deepEqual(extractCriteria(snippet)?.map((item) => item.id), ["A1", "A2"], "追加段里的示例格式能被程序取到");
+  assert.deepEqual(extractCriteria(snippet)?.map((item) => item.id), ["A1", "A2", "A3"], "追加段里的示例格式能被程序取到");
 });
 
 test("A15 弱模型常见写法：粗体编号、粗体字段名、三级标题条目、粗体异议都能认", () => {
@@ -636,4 +636,83 @@ test("A27 Hook 的子进程被取消时连同后代一起杀掉（验收方起�
     for (let i = 0; i < 20 && running(); i += 1) await new Promise((r) => setTimeout(r, 50));
     assert.equal(running(), false, "后台的 sleep 也被杀掉");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("A28 [人工] 标记：开头（可在别的标签或「操作：」之后）的 [人工]/【人工】才算；判为需人工，不影响打回与暂停", () => {
+  for (const text of ["[人工] 操作：在桌面客户端点同步", "【人工】操作：看弹窗", "[乙] [人工] 操作：x", "操作：[人工] 在 WB 里点接入", " [ 人工 ] 操作：x"]) {
+    assert.ok(isManualCriterion(text), text);
+  }
+  for (const text of ["操作：打开页面 [人工]", "[人工智能] 操作：x", "操作：查看人工审核列表", "操作：x\n预期：显示 [人工] 标签"]) {
+    assert.ok(!isManualCriterion(text), text);
+  }
+  const items = [{ id: "A1", text: "操作：add\n预期：已添加" }, { id: "A2", text: "[人工] 操作：在桌面客户端点同步\n预期：网页多一条" }];
+  const report = (lines: string[]) => {
+    const parsed = parseAcceptanceReport(["## 结论：通过", "## 逐条结果", ...lines].join("\n"));
+    assert.ok(parsed.ok);
+    return parsed.ok ? parsed.report : undefined;
+  };
+  const passed = judgeAcceptance({
+    criteria: items, logErrors: [], runDir: "/run", hasService: true,
+    report: report(["A1：通过", "- 证据摘录：已添加"]), evidence: evidenceOf({ A1: block("A1", "已添加") }),
+  });
+  assert.equal(passed.verdict, "部分验证", "自动的全部通过、还有 [人工] 条目 → 部分验证，照常评审");
+  assert.deepEqual(passed.items.map((item) => [item.id, item.verdict]), [["A1", "通过"], ["A2", "需人工"]]);
+  assert.equal(passed.reason, "A2 标了 [人工]，需要人工验收");
+  assert.equal(passed.note, undefined, "验收方只验了自动的条目，自报「通过」不算矛盾");
+  assert.equal(passed.items[1].evidenceProblem, undefined, "验收方没报 [人工] 条目不算它没做好");
+
+  const failed = judgeAcceptance({
+    criteria: items, logErrors: [], runDir: "/run", hasService: true,
+    report: report(["A1：不通过", "- 实际：报错", "- 证据摘录：报错"]), evidence: evidenceOf({ A1: block("A1", "报错") }),
+  });
+  assert.equal(failed.verdict, "不通过");
+  const allUnknown = judgeAcceptance({
+    criteria: items, logErrors: [], runDir: "/run", hasService: true,
+    report: report(["A1：无法验证", "- 原因：标准含糊"]), evidence: evidenceOf({}),
+  });
+  assert.equal(allUnknown.verdict, "无法验收", "自动的条目全都没验证 → 无法验收（[人工] 条目不算数）");
+  assert.equal(allUnknown.blocker, "其他");
+  const mixed = judgeAcceptance({
+    criteria: [...items, { id: "A3", text: "操作：list\n预期：有买菜" }], logErrors: [], runDir: "/run", hasService: true,
+    report: report(["A1：通过", "- 证据摘录：已添加", "A3：无法验证", "- 原因：标准含糊"]), evidence: evidenceOf({ A1: block("A1", "已添加") }),
+  });
+  assert.equal(mixed.reason, "A3 没能自动验证，A2 标了 [人工]，需要人工验收");
+  const crashed = judgeAcceptance({ criteria: items, logErrors: [], runDir: "/run", hasService: true, systemFailure: "起不来", evidence: evidenceOf({}) });
+  assert.equal(crashed.verdict, "不通过");
+  assert.deepEqual(crashed.items.map((item) => [item.id, item.verdict]), [["G1", "不通过"], ["A2", "需人工"]], "系统起不来时 [人工] 条目照样列出");
+
+  const criteria: Criteria = { source: "用户", items, version: 1, updatedAt: "" };
+  const input = buildAcceptanceInput({ round: 1, criteria, workDir: "/w", runDir: "/r", logFiles: [], deliveryNote: "", previousFailed: [] });
+  assert.ok(input.includes("A1. 操作：add"));
+  assert.ok(!input.includes("A2") && !input.includes("桌面客户端"), "[人工] 条目不交给验收方");
+
+  const allManual = judgeAcceptance({ criteria: [items[1]], logErrors: [], runDir: "/run", hasService: false, evidence: evidenceOf({}) });
+  assert.equal(allManual.verdict, "部分验证");
+  assert.match(renderAcceptanceForReview({ ...allManual, durationMs: 0 }), /验收标准全部标了 \[人工\]，程序没有启动系统实测/);
+  assert.match(renderAcceptanceForReview({ ...passed, durationMs: 0 }), /其余全部通过，A2 标了 \[人工\]，需要人工验收/);
+});
+
+test("A29 一轮验收：[人工] 条目不出现在验收方输入里；标准全是 [人工] 时不启动系统、不调验收方", async () => {
+  const h = await harness({ start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health" }, { FAKE_ACC_URL: "http://127.0.0.1:{port}/" });
+  try {
+    h.state.requirement = "做待办\n## 验收标准\n1. 操作：GET /\n   预期：返回买菜\n2. [人工] 操作：在桌面客户端里看同步状态\n   预期：显示已同步";
+    const mixed = await runAcceptanceStage(h.deps());
+    assert.equal(mixed.kind, "judged");
+    if (mixed.kind !== "judged") return;
+    assert.equal(mixed.record.verdict, "部分验证");
+    assert.deepEqual(mixed.record.items.map((item) => [item.id, item.verdict]), [["A1", "通过"], ["A2", "需人工"]]);
+    const input = readFileSync(join(mixed.record.runDir, "input.md"), "utf8");
+    assert.ok(input.includes("A1. 操作：GET /") && !input.includes("桌面客户端"), "验收方看不到 [人工] 条目");
+    assert.equal(h.calls().length, 1);
+
+    h.state.criteria = undefined;
+    h.state.requirement = "做待办\n## 验收标准\n1. 【人工】操作：在桌面客户端里看同步状态\n   预期：显示已同步";
+    const manualOnly = await runAcceptanceStage(h.deps({ config: { ...h.config, start: "exit 1" }, round: 2, runDir: join(h.root, "acc", "r2") }));
+    assert.equal(manualOnly.kind, "judged");
+    if (manualOnly.kind !== "judged") return;
+    assert.equal(manualOnly.record.verdict, "部分验证", "系统起不来也不影响：根本没启动");
+    assert.deepEqual(manualOnly.record.items.map((item) => item.verdict), ["需人工"]);
+    assert.equal(h.calls().length, 1, "没有调验收方");
+    assert.ok(existsSync(join(manualOnly.record.runDir, "result.json")));
+  } finally { h.close(); }
 });

@@ -118,8 +118,11 @@ export function blockerHint(record: AcceptanceRecord, workDir: string, acceptanc
 /** 部分验证时的提醒：哪些条目要你人工验收。 */
 export function manualHint(record: AcceptanceRecord | undefined): string | undefined {
   if (record?.verdict !== "部分验证") return undefined;
-  const ids = record.items.filter((item) => item.verdict === "无法验证").map((item) => item.id).join("、");
-  return `${ids} 没能自动验证，需要你人工验收（原因见总结「需要你做的事」）`;
+  const idsOf = (verdict: string): string => record.items.filter((item) => item.verdict === verdict).map((item) => item.id).join("、");
+  const unknown = idsOf("无法验证");
+  const manual = idsOf("需人工");
+  const parts = [unknown && `${unknown} 没能自动验证`, manual && `${manual} 标了 [人工]`].filter(Boolean).join("，");
+  return `${parts}，需要你人工验收（原因见总结「需要你做的事」）`;
 }
 
 export interface TodoInput {
@@ -138,8 +141,9 @@ export function acceptanceTodos(input: TodoInput): string[] {
   if (!input.acceptance) return todos;
   const record = input.lastAcceptance;
   if (record?.verdict === "部分验证") {
-    for (const item of record.items.filter((entry) => entry.verdict === "无法验证")) {
-      todos.push(`人工验收 ${item.id}（${item.text.split("\n")[0]}）：程序没能自动验证，${item.detail}`);
+    for (const item of record.items.filter((entry) => entry.verdict === "无法验证" || entry.verdict === "需人工")) {
+      const why = item.verdict === "需人工" ? "标了 [人工]，程序不自动验" : `程序没能自动验证，${item.detail}`;
+      todos.push(`人工验收 ${item.id}（${item.text.split("\n")[0]}）：${why}`);
     }
   }
   if (input.criteria?.source === "自动起草") {

@@ -14,7 +14,7 @@ import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   buildAcceptanceInput, buildCorrectionInput, buildCriteriaDraftInput, classifySystemExit, dataStateNote, extractCriteria,
-  findObjections, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft, scanLogs,
+  findObjections, isManualCriterion, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft, scanLogs,
   type AcceptanceRecord, type Criteria, type ParsedAcceptance,
 } from "./acceptance-core.ts";
 import { EXT_DIR, HERMES_BIN, MARKER_FILE, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig } from "./config.ts";
@@ -526,6 +526,17 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   if (!("items" in criteria)) return { kind: "paused", reason: criteria.reason, notes: criteria.notes, hint: criteria.hint };
 
   const { config, runDir } = deps;
+  // 标准全部标了 [人工]：没有要验收方做的，不启动系统、不调验收方，整轮记部分验证，完成时列给你。
+  if (criteria.items.every((item) => isManualCriterion(item.text))) {
+    rmSync(runDir, { recursive: true, force: true });
+    mkdirSync(runDir, { recursive: true });
+    const record: AcceptanceRecord = {
+      ...judgeAcceptance({ criteria: criteria.items, evidence: () => undefined, logErrors: [], runDir, hasService: Boolean(config.start) }),
+      durationMs: 0,
+    };
+    writeFileSync(join(runDir, "result.json"), JSON.stringify(record, null, 2));
+    return { kind: "judged", record };
+  }
   const startedAt = deps.now();
   /** 墙上时间：判断端口上的进程是不是验收开始后才起的。 */
   const wallStart = Date.now();
