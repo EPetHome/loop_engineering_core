@@ -8,11 +8,24 @@ import test from "node:test";
 import { checkRoundBudget, parseAcceptanceConfig, parseGateConfig } from "../config.ts";
 import type { Exec, ExecResult } from "../git.ts";
 import { newReviewState, runReviewRound, type ReviewConfig, type ReviewDeps } from "../review.ts";
+import { classifyFailure } from "../failure.ts";
+import preparationGuard, { mayPrepareWrite } from "../preparation-guard.ts";
 
 const PASS = "## 结论：通过\n## 必修\n无\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n";
 
+test("失败归因：资源错误不因连带断言变成产品缺陷，未知不猜，脚本可明确声明", () => {
+  assert.equal(classifyFailure(1, "AssertionError\nOSError: [Errno 28] No space left on device").kind, "environment");
+  assert.equal(classifyFailure(1, "mc: Storage backend has reached its minimum free drive threshold").kind, "environment");
+  assert.equal(classifyFailure(78, "准备脚本失效").kind, "method");
+  assert.equal(classifyFailure(1, "not ok 1 - add").kind, "product");
+  assert.equal(classifyFailure(1, "opaque error").kind, "unknown");
+  assert.equal(classifyFailure(1, "AUTOREVIEW_FAILURE=product missing business file").kind, "product");
+});
+
 function harness() {
   const root = mkdtempSync(join(tmpdir(), "autoreview-budget-"));
+  const previousResources = process.env.AUTOREVIEW_RESOURCE_ROOT;
+  process.env.AUTOREVIEW_RESOURCE_ROOT = join(root, "resources");
   const repo = join(root, "repo");
   mkdirSync(repo);
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
@@ -31,7 +44,11 @@ function harness() {
   const config: ReviewConfig = {
     maxRepairs: 3, reviewerModel: "m", reviewerThinking: "xhigh", reviewTimeoutMin: 60, reviewerCmd: "",
   };
-  return { root, repo, git, exec, config, close: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, repo, git, exec, config, close: () => {
+    if (previousResources === undefined) delete process.env.AUTOREVIEW_RESOURCE_ROOT;
+    else process.env.AUTOREVIEW_RESOURCE_ROOT = previousResources;
+    rmSync(root, { recursive: true, force: true });
+  } };
 }
 
 test("评审预算：首次用掉 59.5 分钟后不再重试，暂停原因「评审超时」", async () => {
@@ -150,7 +167,12 @@ test("门禁通过：先跑门禁再评审，评审输入写明门禁已通过�
     writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
     const run = await gateRound(h, "echo GATE_OK");
     assert.equal(run.outcome.kind, "done");
-    assert.deepEqual(run.gateCalls, [{ args: ["-c", "exec 2>&1\necho GATE_OK"], cwd: h.repo, timeout: 10 * 60_000, role: "门禁" }]);
+    assert.equal(run.gateCalls.length, 1);
+    assert.ok(run.gateCalls[0].args[1].endsWith("exec 2>&1\necho GATE_OK"));
+    assert.match(run.gateCalls[0].args[1], /AUTOREVIEW_TEMP_DIR=/);
+    assert.equal(run.gateCalls[0].cwd, h.repo);
+    assert.equal(run.gateCalls[0].timeout, 10 * 60_000);
+    assert.equal(run.gateCalls[0].role, "门禁");
     assert.equal(run.reviewInputs.length, 1);
     assert.ok(run.reviewInputs[0].includes("## 门禁\n程序已在项目目录执行门禁命令 echo GATE_OK，退出码 0（通过）。"));
     const gate = run.state.rounds[0].gate!;
@@ -249,4 +271,132 @@ test("门禁用掉的时间从一轮总预算里扣，评审只拿剩余时间",
     assert.deepEqual(reviewerTimeouts, [55 * 60_000]);
     assert.equal(run.state.rounds[0].gate!.durationMs, 5 * 60_000);
   } finally { h.close(); }
+});
+
+test("环境与方法故障不消耗已使用的业务返修次数", async () => {
+  const h = harness();
+  try {
+    const state = newReviewState(); state.repairs = 2;
+    const run = await gateRound(h, "echo 'OSError: [Errno 28] No space left on device'; exit 1", { state });
+    assert.equal(run.outcome.kind, "paused");
+    assert.equal(run.outcome.failureKind, "environment");
+    assert.equal(state.repairs, 2);
+    assert.equal(run.reviewInputs.length, 0);
+    const method = await gateRound(h, "exit 78", { state });
+    assert.equal(method.outcome.failureKind, "method");
+    assert.equal(state.repairs, 2);
+  } finally { h.close(); }
+});
+
+test("静态评审有必修时不启动后置验收", async () => {
+  const h = harness();
+  try {
+    const state = newReviewState();
+    state.criteria = { source: "用户", version: 1, updatedAt: "x", items: [{ id: "A1", text: "操作：检查\n预期：通过" }] };
+    const run = await runReviewRound({
+      cwd: h.repo, devSessionId: "order", round: 1, deliveryNote: "完成", state,
+      config: { ...h.config, acceptance: parseAcceptanceConfig({}, h.repo, {}) }, exec: h.exec,
+      writeInput: (name, text) => { const p = join(h.root, name); writeFileSync(p, text); return p; },
+      acceptanceDir: join(h.root, "acceptance"), saveState: () => {},
+      callReviewer: async () => ({ stdout: PASS.replace("## 必修\n无", "## 必修\n1. 位置：file.txt:1 问题：不正确").replace("结论：通过", "结论：需返修"), stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(run.kind, "repair");
+    assert.equal(state.rounds.length, 1);
+    assert.equal(state.rounds[0].acceptance, undefined);
+    assert.equal(existsSync(join(h.root, "acceptance")), false);
+  } finally { h.close(); }
+});
+
+test("已有准备方法和自动恢复沿用原候选，保留业务计数并限制环境次数", async () => {
+  const h = harness();
+  try {
+    const { parsePreparation } = await import('../preparation.ts');
+    const flag = join(h.root, 'environment-ready');
+    const state = newReviewState(); state.repairs = 2;
+    const config = {
+      ...h.config,
+      preparation: parsePreparation({ check: 'true', recover: `touch '${flag}'`, maxRecoveries: 1 }, h.repo),
+      gate: { cmd: `test -f '${flag}' || exit 75`, timeoutMin: 1 },
+    };
+    const run = () => runReviewRound({
+      cwd: h.repo, devSessionId: 'recovery', round: state.rounds.length + 1, deliveryNote: '完成', state, config, exec: h.exec,
+      writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+      saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: '', code: 0, killed: false }),
+    });
+    const first = await run();
+    assert.equal(first.kind, 'done', JSON.stringify(first));
+    assert.equal(state.repairs, 2);
+    assert.equal(state.preparationAttempts?.environment, 1);
+    assert.equal(state.rounds.length, 2);
+    rmSync(flag);
+    assert.equal((await run()).kind, 'paused');
+    assert.equal(state.repairs, 2);
+    assert.equal(state.preparationAttempts?.environment, 1);
+  } finally { h.close(); }
+});
+
+test("准备检查不得改稳定规则；准备模型只能修改声明路径", async () => {
+  const h = harness();
+  try {
+    const { parsePreparation, runPreparation } = await import('../preparation.ts');
+    assert.throws(() => parsePreparation({ check: 'true', repair: { model: 'm', paths: ['.'] } }, h.repo), /不能/);
+    assert.throws(() => parsePreparation({ check: 'true', repair: { model: 'm', paths: ['AGENTS.md'] } }, h.repo), /不能/);
+    assert.equal(mayPrepareWrite(h.repo, ['scripts'], 'scripts/check.sh'), true);
+    assert.equal(mayPrepareWrite(h.repo, ['scripts'], 'AGENTS.md'), false);
+    assert.equal(mayPrepareWrite(h.repo, ['scripts'], '../outside'), false);
+    const result = await runPreparation({
+      cwd: h.repo, config: parsePreparation({ check: 'echo changed > AGENTS.md' }, h.repo)!,
+      state: {}, exec: h.exec, runDir: join(h.root, 'prepare'), saveState: () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason!, /稳定规则/);
+  } finally { h.close(); }
+});
+
+test("仓库外权威来源变化使当前结果失效，冻结输入且保留业务计数", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    writeFileSync(join(h.root, "requirement.md"), "original");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { root: "..", sources: [{ id: "need", path: "requirement.md", role: "requirement" }] } }));
+    const state = newReviewState(); state.repairs = 2;
+    let calls = 0;
+    const deps: ReviewDeps = {
+      cwd: h.repo, devSessionId: "frozen", round: 1, deliveryNote: "done", state, config: h.config, exec: h.exec,
+      writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; }, saveState: () => {},
+      callReviewer: async () => { calls++; writeFileSync(join(h.root, "requirement.md"), "new requirement"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    };
+    const first = await runReviewRound(deps);
+    assert.equal(first.kind, "paused"); assert.match(first.reason!, /上游来源已变化/);
+    assert.equal(state.repairs, 2);
+    const frozen = state.inputsFingerprint;
+    const second = await runReviewRound({ ...deps, round: 2 });
+    assert.equal(second.kind, "paused"); assert.equal(calls, 1); assert.equal(state.inputsFingerprint, frozen);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+
+test("准备工具按实际工作目录检查路径，不跟随悬空链接", async () => {
+  const h = harness();
+  const oldRoot = process.env.AUTOREVIEW_PREP_ROOT, oldPaths = process.env.AUTOREVIEW_PREP_PATHS;
+  try {
+    const { symlinkSync } = await import("node:fs");
+    mkdirSync(join(h.repo, "sub")); mkdirSync(join(h.repo, "deploy"));
+    symlinkSync(join(h.root, "missing.txt"), join(h.repo, "deploy", "dangling.sh"));
+    assert.equal(mayPrepareWrite(h.repo, ["deploy"], "deploy/dangling.sh"), false);
+    process.env.AUTOREVIEW_PREP_ROOT = h.repo; process.env.AUTOREVIEW_PREP_PATHS = JSON.stringify(["deploy"]);
+    let guard: any;
+    preparationGuard({ on: (_event: string, handler: any) => { guard = handler; } } as any);
+    const blocked = await guard({ toolName: "write", input: { path: "deploy/prepare.sh" } }, { cwd: join(h.repo, "sub") });
+    assert.equal(blocked.block, true);
+    assert.equal(await guard({ toolName: "write", input: { path: "../deploy/prepare.sh" } }, { cwd: join(h.repo, "sub") }), undefined);
+  } finally {
+    if (oldRoot === undefined) delete process.env.AUTOREVIEW_PREP_ROOT; else process.env.AUTOREVIEW_PREP_ROOT = oldRoot;
+    if (oldPaths === undefined) delete process.env.AUTOREVIEW_PREP_PATHS; else process.env.AUTOREVIEW_PREP_PATHS = oldPaths;
+    h.close();
+  }
 });

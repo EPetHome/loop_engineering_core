@@ -21,6 +21,10 @@ export interface StageStatus {
   sessionId: string;
   summary: string;
   event: StageEvent;
+  /** 本次完成资格的身份；恢复重发保持，任何重验或输入失效后重新生成。 */
+  readyEpoch?: string;
+  /** 此资格所依据的冻结来源版本；消费者在接力边界核对实际文件。 */
+  sourceInputs?: string;
   /** 每写一次加 1；编排程序据此认出「派发之后的新事件」。 */
   seq: number;
   /** 已经收下的最后一条收件箱序号。 */

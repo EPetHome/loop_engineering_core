@@ -258,9 +258,11 @@ test("T11 开发约定：标记可选、改动也会自动评审", () => {
   assert.ok(CONVENTION.includes("需求可能只写了目标、已拍板、边界和验收标准：现状自己读代码了解，没写到的细节按现有代码习惯做，拿不准的写进交付说明。"));
 });
 
-test("T13 评审规则不让跑端到端和联调；总结记开发方新增提交", () => {
+test("T13 评审规则仅静态读取，提示词与解析格式保持一致；总结记开发方新增提交", () => {
   const prompt = readFileSync(new URL("../review-prompt.md", import.meta.url), "utf8");
-  assert.ok(prompt.includes("不要运行会启动服务、调用模型或耗时很长的测试（端到端、联调）：程序已经负责验收，单测这类快速检查可以跑。"));
+  assert.match(prompt, /不执行测试、构建、应用加载、接口请求、服务、浏览器或真实模型/);
+  assert.match(prompt, /触发 → 入口与调用链 → 根因 → 直接后果/);
+  assert.equal(parseReview(prompt.slice(prompt.indexOf("## 结论："))).ok, true);
   assert.match(renderSummary(summaryInput({ status: "完成", newCommits: 2 })), /^- 开发方新增提交：2 个（基线之后，只记录不评判）$/m);
   assert.doesNotMatch(renderSummary(summaryInput({ status: "完成", newCommits: 0 })), /开发方新增提交/);
 });
@@ -302,7 +304,8 @@ test("T14 门禁：约定按配置追加；返修消息带命令、退出码、�
   assert.equal(conventionText({ acceptance: true }), `${CONVENTION}\n${ACCEPTANCE_CONVENTION}`);
   const withGate = conventionText({ acceptance: true, gate: "npm test" });
   assert.ok(withGate.startsWith(`${CONVENTION}\n${ACCEPTANCE_CONVENTION}\n【门禁约定】`));
-  assert.ok(withGate.includes("程序先在项目目录执行门禁命令：npm test。不通过直接打回"));
+  assert.ok(withGate.includes("交付后由程序统一执行完整门禁：npm test"));
+  assert.ok(withGate.includes("不要求你在交付前重复执行同一份完整门禁"));
   assert.ok(withGate.includes("最后一行写【需要你决定】"));
 
   const long = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
@@ -321,7 +324,8 @@ test("T14 门禁：约定按配置追加；返修消息带命令、退出码、�
   assert.match(message, /^【门禁 · 第 2 次返修】\n门禁命令不通过（退出码 1），这一轮没有验收、没有评审。/);
   assert.ok(message.includes("$ npm test\n输出最后 40 行：\n```text\nnot ok 1 - add\nexpected 3, got -1\n```"));
   assert.ok(message.includes("完整输出：/tmp/gate.log"));
-  assert.match(message, /最后一行写【需要你决定】；修好了最后一行写【交付完成】。$/);
+  assert.match(message, /完整门禁由程序重跑，不必再次自跑整套/);
+  assert.match(message, /修好了最后一行写【交付完成】。/);
 
   const input = buildReviewInput({ round: 1, requirement: "需求", deliveryNote: "说明", diff: "d", diffStat: "", untracked: [], gate: "npm test" });
   assert.ok(input.includes("## 门禁\n程序已在项目目录执行门禁命令 npm test，退出码 0（通过）。你不需要再跑它。"));

@@ -1,11 +1,11 @@
 /** 流水线：计划解析、归属、派发分批（纯函数）；接力、e2e、回流（假段进程 + 假验收方）。产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createServer } from "node:net";
 import {
   buildRepairMessage, DEFAULT_PI, dispatchBatches, parseOwner, parsePlan, piCommand, PlanError, preflight, routeFailures,
@@ -15,6 +15,9 @@ import {
 const FAKE_STAGE = fileURLToPath(new URL("./fake-stage.mjs", import.meta.url));
 const TESTER = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
 const CRITERIA = "需求：甲做接口，乙做页面\n\n## 验收标准\nA1. [甲] 操作：调接口\n    预期：返回 ok\nA2. [乙] 操作：打开页面\n    预期：显示 ok\n";
+const resourceRoot = mkdtempSync(join(tmpdir(), "autoreview-pipeline-resources-"));
+process.env.AUTOREVIEW_RESOURCE_ROOT = resourceRoot;
+after(() => rmSync(resourceRoot, { recursive: true, force: true }));
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "autoreview-pipeline-"));
@@ -263,7 +266,7 @@ test("P9 段暂停时提醒你并接着等；段一直不报状态时提醒检�
       for (let i = 0; i < 100 && !s.notes.some((note) => note.includes("还没收到「甲」的状态")); i += 1) await new Promise((r) => setTimeout(r, 20));
       assert.ok(s.notes.some((note) => /还没收到「甲」的状态，确认它的启动命令加载了 autoreview\.ts/.test(note)));
       // 补一个完成状态让流水线收尾，不留挂起的等待。
-      writeFileSync(join(s.plan.dir, "甲.status.json"), JSON.stringify({ stage: "甲", seq: 1, event: "done", inbox: 0, sessionId: "x", summary: "", updatedAt: "" }));
+      writeFileSync(join(s.plan.dir, "甲.status.json"), JSON.stringify({ stage: "甲", seq: 1, event: "done", readyEpoch: "fixture-ready", inbox: 0, sessionId: "x", summary: "", updatedAt: "" }));
       assert.equal(await running, 0);
     } finally { s.close(); }
   });
@@ -275,7 +278,7 @@ test("P10 --from e2e：各段已完成时直接跑 e2e；还有没完成的就�
     assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), 2, "没有状态就不能从 e2e 接着跑");
     assert.match(s.notes.at(-1)!, /--from e2e 需要各段都已完成，甲、乙 还没有/);
     for (const stage of ["甲", "乙"]) {
-      writeFileSync(join(s.plan.dir, `${stage}.status.json`), JSON.stringify({ stage, seq: 3, event: "done", inbox: 0, sessionId: "x", summary: "", updatedAt: "" }));
+      writeFileSync(join(s.plan.dir, `${stage}.status.json`), JSON.stringify({ stage, seq: 3, event: "done", readyEpoch: "fixture-ready", inbox: 0, sessionId: "x", summary: "", updatedAt: "" }));
     }
     assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), 0, s.notes.join("\n"));
     assert.ok(!existsSync(join(s.plan.dir, "甲.events.log")), "没有重新启动任何一段");
@@ -375,4 +378,171 @@ test("P12 开跑前检查：全部满足才开跑；任何一项不过就停下�
       assert.equal(plan.e2e!.owners.get("A3"), "甲");
     });
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Ponytail 只显式加载原生扩展，并记录角色模式；可按段关闭', () => {
+  const root = tempDir();
+  try {
+    writeFileSync(join(root, '任务.md'), '任务');
+    const plan = parsePlan({ name: 'pony', pi: { ponytail: { extension: 'pony/index.js', mode: 'full' } },
+      stages: { 开发: { cwd: '.', prompt: '任务.md' }, 其他: { cwd: 'other', prompt: '任务.md', ponytail: false } } }, root);
+    assert.match(plan.stages.get('开发')!.start, /^PONYTAIL_DEFAULT_MODE='full'/);
+    assert.ok(plan.stages.get('开发')!.start.includes(`'-e' '${join(root, 'pony/index.js')}'`));
+    assert.ok(!plan.stages.get('其他')!.start.includes('PONYTAIL_DEFAULT_MODE'));
+    assert.throws(() => parsePlan({ name: 'x', maxParallel: 0, stages: { a: { start: 'true' } } }, root), /maxParallel/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('流水线先用已有项目准备方法；准备失败不启动开发会话', async () => {
+  const root = tempDir();
+  try {
+    const repo = gitRepo(join(root, 'repo'));
+    writeFileSync(join(repo, '.autoreview.json'), JSON.stringify({ preparation: { check: 'exit 75' } }));
+    const plan = parsePlan({ name: 'prepared', dir: 'run', stages: { a: { cwd: 'repo', start: 'true' } } }, root);
+    let launches = 0;
+    const code = await runPipeline(plan, { launch: () => { launches++; }, log: () => {}, notify: () => {}, pollMs: 10, silenceMs: 100 });
+    assert.equal(code, 2);
+    assert.equal(launches, 0);
+    assert.match(readFileSync(join(plan.dir, 'report.md'), 'utf8'), /准备未完成/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("流水线 CLI 收到退出信号先取消整合验收并等待 cleanup", async (t) => {
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) await t.test(signal, async () => {
+    const root = tempDir(), dir = join(root, "run"), home = join(root, "home"), bin = join(root, "bin");
+    let child: ReturnType<typeof spawn> | undefined;
+    try {
+      gitRepo(join(root, "repo")); mkdirSync(dir); mkdirSync(home); mkdirSync(bin);
+      writeFileSync(join(bin, "osascript"), "#!/bin/sh\nexit 0\n"); chmodSync(join(bin, "osascript"), 0o755);
+      writeFileSync(join(root, "e2e.md"), "## 验收标准\nA1. [a] 操作：检查\n预期：ok\n");
+      const ready = join(root, "ready"), tester = join(root, "tester.mjs");
+      writeFileSync(tester, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(()=>{},30000);\n`); chmodSync(tester, 0o755);
+      const plan = { name: "cancel", dir, stages: { a: { cwd: "repo", start: "true" } }, e2e: {
+        workDir: "repo", criteria: "e2e.md", acceptance: { cleanup: `node -e 'setTimeout(() => require("fs").writeFileSync(process.env.AUTOREVIEW_RUN_DIR + "/released", process.env.AUTOREVIEW_RUN_ID), 100)'` },
+      } };
+      const file = join(root, "plan.json"); writeFileSync(file, JSON.stringify(plan));
+      writeFileSync(join(dir, "a.status.json"), JSON.stringify({ event: "done", readyEpoch: "fixture-ready", seq: 1, inbox: 0 }));
+      child = spawn(process.execPath, [fileURLToPath(new URL("../pipeline.ts", import.meta.url)), file, "--from", "e2e", "--launcher", "background"], {
+        stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, AUTOREVIEW_ACCEPTANCE_CMD: tester },
+      });
+      let output = ""; child.stdout!.on("data", (v) => { output += v; }); child.stderr!.on("data", (v) => { output += v; });
+      const exit = new Promise<number | null>((resolve) => child!.on("exit", resolve));
+      for (let i = 0; i < 200 && !existsSync(ready) && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 50));
+      assert.ok(existsSync(ready), output);
+      child.kill(signal); assert.equal(await exit, 2, output);
+      const run = join(dir, "e2e", "r1"), record = JSON.parse(readFileSync(join(run, "cleanup-task.json"), "utf8"));
+      assert.equal(record.status, "released"); assert.equal(readFileSync(join(run, "released"), "utf8"), record.runId);
+      assert.match(readFileSync(join(dir, "report.md"), "utf8"), /外部资源释放：released[\s\S]*已取消/);
+      assert.equal(readFileSync(join(dir, "pipeline.finished"), "utf8").trim(), "2");
+      assert.equal(JSON.parse(readFileSync(join(dir, "a.status.json"), "utf8")).event, "done", "保留开发会话交付状态");
+    } finally { if (child?.exitCode === null) child.kill("SIGKILL"); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+test("流水线恢复在端口预检前回收本任务登记的孤儿", async () => {
+  const s = scene({ stages: { a: {} }, criteria: "## 验收标准\nA1. [a] 操作：检查\n预期：ok\n" });
+  let orphan: ReturnType<typeof spawn> | undefined;
+  try {
+    const { registerProc } = await import("../procs.ts");
+    const { portBusy } = await import("../acceptance.ts");
+    mkdirSync(s.plan.dir, { recursive: true });
+    writeFileSync(join(s.plan.dir, "a.status.json"), JSON.stringify({ event: "done", readyEpoch: "fixture-ready", seq: 1, inbox: 0 }));
+    const ready = join(s.root, "port");
+    orphan = spawn(process.execPath, ["-e", `const s=require('http').createServer((q,r)=>r.end('old')); s.listen(0,'127.0.0.1',()=>require('fs').writeFileSync(${JSON.stringify(ready)},String(s.address().port)));`], { detached: true, stdio: "ignore" });
+    for (let i = 0; i < 100 && !existsSync(ready); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(existsSync(ready));
+    const url = new URL(`http://127.0.0.1:${readFileSync(ready, "utf8")}/`);
+    assert.equal(await portBusy(url), true);
+    const registry = join(s.plan.dir, "procs.json");
+    registerProc(registry, orphan.pid!, "被测系统", "owned fixture");
+    const entries = JSON.parse(readFileSync(registry, "utf8")); entries[0].ownerPid = 2147480000;
+    writeFileSync(registry, JSON.stringify(entries));
+    s.plan.e2e!.acceptance.readyUrl = url.href;
+    assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), 0, s.notes.join("\n"));
+    assert.equal(await portBusy(url), false);
+    assert.equal(existsSync(registry), false);
+  } finally { if (orphan?.exitCode === null && orphan.signalCode === null) orphan.kill("SIGKILL"); s.close(); }
+});
+
+
+test("--from e2e 不能使用尚有未接收返修的旧 done", async () => {
+  const s = scene({ stages: { a: {} }, criteria: '## 验收标准\nA1. [a] 操作：检查\n预期：ok\n' });
+  try {
+    mkdirSync(s.plan.dir, { recursive: true });
+    writeFileSync(join(s.plan.dir, 'a.status.json'), JSON.stringify({ event: 'done', readyEpoch: 'fixture-ready', seq: 2, inbox: 0 }));
+    writeFileSync(join(s.plan.dir, 'a.inbox.json'), JSON.stringify({ seq: 1, message: 'repair', mustFix: 'must fix' }));
+    assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), 2);
+    assert.equal(accCalls(s), 0);
+  } finally { s.close(); }
+});
+
+test('已完成段在等待其他段期间失效，不能启动整合验收', async () => {
+  const s = scene({ stages: { a: {}, b: {} }, criteria: '## 验收标准\nA1. [a] 操作：检查\n预期：ok\n' });
+  const timers: ReturnType<typeof setTimeout>[]=[];
+  try {
+    const {writeStageStatus}=await import('../pipeline-core.ts');
+    const base=io(s);
+    base.launch=(stage)=>{
+      const link={dir:s.plan.dir,stage:stage.name};
+      const emit=(event:'done'|'started')=>writeStageStatus(link,{sessionId:'fixture-'+stage.name,summary:'',event,inbox:0,...(event==='done'?{readyEpoch:'ready-'+stage.name}:{})});
+      if(stage.name==='a'){emit('done');timers.push(setTimeout(()=>emit('started'),30));}
+      else timers.push(setTimeout(()=>emit('done'),90));
+    };
+    assert.equal(await runPipeline(s.plan,base),2);
+    assert.equal(accCalls(s),0);
+    assert.match(readFileSync(join(s.plan.dir,'report.md'),'utf8'),/资格被撤销/);
+  } finally {for(const timer of timers)clearTimeout(timer);s.close();}
+});
+
+test('整合验收期间更换资格使结果失效；同资格恢复重发可继续', async (t) => {
+  for(const mode of ['during','cleanup','same']) await t.test(mode,async()=>{
+    const s=scene({stages:{a:{}},criteria:'## 验收标准\nA1. [a] 操作：检查\n预期：ok\n'});
+    try {
+      mkdirSync(s.plan.dir,{recursive:true});
+      const status=join(s.plan.dir,'a.status.json');
+      const ready={stage:'a',sessionId:'fixture',summary:'',event:'done',seq:1,inbox:0,readyEpoch:'ready-before'};
+      writeFileSync(status,JSON.stringify(ready));
+      const replacement={...ready,seq:2,readyEpoch:mode==='same'?'ready-before':'ready-after'};
+      const change=`require('fs').writeFileSync(${JSON.stringify(status)},${JSON.stringify(JSON.stringify(replacement))});`;
+      const cleaner=join(s.root,'cleanup.cjs');
+      writeFileSync(cleaner,(mode==='during'?'':change)+`require('fs').writeFileSync(process.env.AUTOREVIEW_RUN_DIR+'/released','yes');`);
+      s.plan.e2e!.acceptance.cleanup='node cleanup.cjs';
+      if(mode==='during'){
+        const tester=join(s.root,'hold.cjs');writeFileSync(tester,`#!${process.execPath}\n${change}setTimeout(()=>{},30000);`);chmodSync(tester,0o755);s.plan.e2e!.acceptance.testerCmd=tester;
+      }
+      assert.equal(await runPipeline(s.plan,io(s),{fromE2e:true}),mode==='same'?0:2,s.notes.join('\n'));
+      assert.equal(readFileSync(join(s.plan.dir,'e2e','r1','released'),'utf8'),'yes');
+      assert.ok(existsSync(join(s.plan.dir,'e2e','r1','upstream.json')));
+      if(mode!=='same')assert.match(readFileSync(join(s.plan.dir,'report.md'),'utf8'),/资格变化[\s\S]*结果已失效/);
+    } finally {s.close();}
+  });
+});
+
+test('消费旧 done 时核对真实来源文件，恢复与收尾均不依赖段巡检', async (t) => {
+  const { loadContext, refreshContext } = await import('../project-context.ts');
+  const oldRoot = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  for (const change of ['same', 'before', 'cleanup']) await t.test(change, async () => {
+    const s = scene({ stages: { a: {} }, criteria: '## 验收标准\nA1. [a] 操作：检查\n预期：ok\n' });
+    try {
+      process.env.AUTOREVIEW_PROJECTS_ROOT = join(s.root, 'index');
+      const cwd = s.plan.stages.get('a')!.cwd, source = join(cwd, 'need.md');
+      writeFileSync(source, 'original requirement');
+      writeFileSync(join(cwd, '.autoreview.json'), JSON.stringify({ context: { sources: [{ path: 'need.md', role: 'requirement' }] } }));
+      const sourceInputs = refreshContext(loadContext(cwd)!).snapshot.inputsFingerprint;
+      mkdirSync(s.plan.dir, { recursive: true });
+      const status = join(s.plan.dir, 'a.status.json');
+      writeFileSync(status, JSON.stringify({ event: 'done', readyEpoch: 'unchanged-ready', sourceInputs, seq: 1, inbox: 0 }));
+      if (change === 'before') writeFileSync(source, 'new requirement');
+      if (change === 'cleanup') {
+        writeFileSync(join(s.root, 'cleanup.cjs'), `require('fs').unlinkSync(${JSON.stringify(source)}); require('fs').writeFileSync(process.env.AUTOREVIEW_RUN_DIR+'/released','yes');`);
+        s.plan.e2e!.acceptance.cleanup = 'node cleanup.cjs';
+      }
+      assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), change === 'same' ? 0 : 2, s.notes.join('\n'));
+      if (change === 'before') assert.equal(accCalls(s), 0);
+      if (change === 'cleanup') assert.equal(readFileSync(join(s.plan.dir, 'e2e', 'r1', 'released'), 'utf8'), 'yes');
+      assert.equal(JSON.parse(readFileSync(status, 'utf8')).event, 'done', '测试未模拟改写段资格，程序直接核对来源');
+    } finally { s.close(); }
+  });
+  if (oldRoot === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = oldRoot;
 });

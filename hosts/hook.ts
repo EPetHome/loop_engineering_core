@@ -9,19 +9,23 @@
  * 只有当前目录或某个上级目录存在 .autoreview.json 的项目才生效，普通会话零影响。
  * 任何异常都只暂停并放行（退出 0），绝不卡宿主、绝不输出非法 JSON。
  */
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { authorizationLine, criteriaFromUser, grantsFromUser, typedByUser } from "../acceptance-core.ts";
+import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "../acceptance-core.ts";
 import {
-  checkRoundBudget, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
+  checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
-import { reapProcs, registerProc, unregisterProc } from "../procs.ts";
+import { reapProcs, registerProc, releaseProc } from "../procs.ts";
+import { reapRunResources } from "../resources.ts";
+import { parsePreparation } from "../preparation.ts";
+import { loadContext, recordProjectOutcome, refreshContext } from "../project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
   checkedFingerprint, errorText, lastAcceptance, newReviewState, runReviewRound, tail,
@@ -45,7 +49,7 @@ export interface HookEvent {
   [key: string]: unknown;
 }
 
-export interface HookState extends ReviewState {}
+export interface HookState extends ReviewState { userInputVersion?: string; resumeAfterInputChange?: boolean }
 
 export interface HookPaths {
   dir: string;
@@ -66,6 +70,7 @@ interface HookContext {
   paths: HookPaths;
   exec: Exec;
   config: ReviewConfig;
+  configError?: string;
 }
 
 /**
@@ -73,7 +78,8 @@ interface HookContext {
  * 带 role 的长进程登记到 procsFile：Hook 被宿主杀掉后，下一次事件据此清理。
  */
 export const createChildExec = (procsFile?: string): Exec => (command, args, options) => new Promise<ExecResult>((resolvePromise) => {
-  const env = { ...process.env, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}` };
+  const token = randomUUID();
+  const env = { ...process.env, AUTOREVIEW_PROCESS_OWNER: token, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}` };
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let killed = false;
@@ -90,7 +96,12 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
     // 同一个 signal 会给很多次调用用：结束后摘掉监听，免得堆积，也免得事后误杀复用的进程组号。
     if (onAbort) options.signal?.removeEventListener("abort", onAbort);
     if (registered !== undefined && procsFile) {
-      try { unregisterProc(procsFile, registered); } catch { /* 登记清理失败不影响结果 */ }
+      try {
+        if (!releaseProc(procsFile, registered)) {
+          stderr.push(Buffer.from("\nAUTOREVIEW_FAILURE=environment 子进程释放未确认，登记已保留\n"));
+          if (code === 0) code = 75;
+        }
+      } catch { if (code === 0) code = 75; }
     }
     resolvePromise({
       stdout: Buffer.concat(stdout).toString("utf8"),
@@ -112,10 +123,12 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
   }
   if (options.role && procsFile && child.pid) {
     try {
-      registerProc(procsFile, child.pid, options.role, command);
+      registerProc(procsFile, child.pid, options.role, command, token);
       registered = child.pid;
     } catch (error) {
-      process.stderr.write(`autoreview hook: 进程登记失败：${errorText(error)}\n`);
+      stderr.push(Buffer.from(`AUTOREVIEW_FAILURE=environment 进程登记失败：${errorText(error)}\n`));
+      killed = true;
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { child.kill("SIGKILL"); }
     }
   }
   child.stdout?.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
@@ -182,7 +195,8 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
   const acceptance = parseAcceptanceConfig(data.acceptance, root, env);
   const gate = parseGateConfig(data.gate);
   checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
-  return { ...config, ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}) };
+  const preparation = parsePreparation(data.preparation, root);
+  return { ...config, configurationHash: configurationHash(data), ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}) };
 }
 
 /** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */
@@ -225,12 +239,46 @@ class StateCorruptError extends Error {
 const PHASES = new Set(["idle", "reviewing", "done", "paused"]);
 
 /** 只有文件不存在才初始化；读取/解析/结构非法都抛错，由统一收口暂停。 */
+const USER_INPUT_CHANGED = "用户输入在检查期间更新，旧检查已停止";
+const stateBases = new WeakMap<HookState, HookState>();
+const inputKeys = ["requirement", "criteria", "grants", "inputsFingerprint", "userInputVersion", "resumeAfterInputChange"] as const;
+const rememberState = (state: HookState): HookState => { stateBases.set(state, structuredClone(state)); return state; };
+const copyInputs = (target: HookState, source: HookState): void => { for (const key of inputKeys) (target as any)[key] = source[key]; };
+
+/** 只锁同步读改写；评审/模型和资源收尾从不持有这个短锁。 */
+function withStateWriteLock<T>(file: string, action: () => T): T {
+  const lock = `${file}.write.lock`, recovery = `${lock}.recovery`, token = randomUUID();
+  const deadline = Date.now() + 2000;
+  mkdirSync(dirname(file), { recursive: true });
+  const owner = () => { try { return JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")); } catch { return undefined; } };
+  for (;;) {
+    try { mkdirSync(lock); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const previous = owner();
+      if (Number.isInteger(previous?.pid) && previous.pid > 1 && !processAlive(previous.pid)) {
+        let elected = false;
+        try {
+          mkdirSync(recovery); elected = true;
+          const current = owner();
+          if (current?.token === previous.token && !processAlive(current.pid)) rmSync(lock, { recursive: true, force: true });
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+        finally { if (elected) rmSync(recovery, { recursive: true, force: true }); }
+      }
+      if (Date.now() >= deadline) throw new Error("状态写入忙或锁归属未确认，未覆盖已有状态");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  try { writeFileSync(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, token })); return action(); }
+  finally { rmSync(lock, { recursive: true, force: true }); }
+}
+
 function loadStateFile(file: string): HookState {
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return newReviewState();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return rememberState(newReviewState());
     throw new StateCorruptError(`无法读取：${errorText(error)}`);
   }
   let data: unknown;
@@ -240,7 +288,7 @@ function loadStateFile(file: string): HookState {
   if (!Array.isArray(state.rounds)) throw new StateCorruptError("rounds 不是数组");
   if (typeof state.repairs !== "number" || !Number.isFinite(state.repairs)) throw new StateCorruptError("repairs 不是数字");
   if (!PHASES.has(state.phase)) throw new StateCorruptError(`phase 非法：${String(state.phase)}`);
-  return state;
+  return rememberState(state);
 }
 
 /** 收口路径专用：损坏时保留证据并回到新状态，保证不会再次抛出同一错误。 */
@@ -259,11 +307,25 @@ function loadStateFileForRecovery(file: string): HookState {
   }
 }
 
-function saveStateFile(file: string, state: HookState): void {
+function writeStateFile(file: string, state: HookState): void {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(state, null, 2));
   renameSync(tmp, file);
+}
+
+function saveStateFile(file: string, state: HookState): void {
+  withStateWriteLock(file, () => {
+    const latest = loadStateFile(file), base = stateBases.get(state) ?? newReviewState();
+    if (state.phase === "done" && latest.userInputVersion !== state.userInputVersion) throw new Error(USER_INPUT_CHANGED);
+    const next = { ...latest };
+    for (const key of new Set([...Object.keys(base), ...Object.keys(state)])) {
+      if (JSON.stringify((base as any)[key]) !== JSON.stringify((state as any)[key])) (next as any)[key] = (state as any)[key];
+    }
+    if (latest.userInputVersion !== state.userInputVersion) copyInputs(next, latest);
+    writeStateFile(file, next);
+    stateBases.set(state, structuredClone(state));
+  });
 }
 
 function processAlive(pid: number): boolean {
@@ -401,6 +463,7 @@ async function writeSummary(
 async function pause(
   ctx: HookContext, state: HookState, reason: string, changedFiles?: string[], notes?: string, hint?: string,
 ): Promise<void> {
+  try { const current = loadStateFile(ctx.paths.state); if (current.userInputVersion !== state.userInputVersion) copyInputs(state, current); } catch { /* 保留原错误现场 */ }
   state.phase = "paused";
   state.pauseReason = reason;
   state.pauseHint = hint;
@@ -418,9 +481,10 @@ async function pause(
 /** 没有活进程持锁时，清掉上一个 Hook 被杀后留下的子进程。 */
 function reapOrphans(ctx: HookContext): void {
   if (lockAlive(ctx.paths.lock)) return;
-  for (const entry of reapProcs(ctx.paths.procs)) {
+  for (const entry of [...reapProcs(ctx.paths.procs), ...reapProcs(`${ctx.paths.procs}.cleanup`)]) {
     process.stderr.write(`[autoreview] 已清理残留进程：${entry.role}（进程组 ${entry.pgid}）\n`);
   }
+  reapRunResources();
 }
 
 async function sessionStart(ctx: HookContext): Promise<string | undefined> {
@@ -496,35 +560,55 @@ export function expandFileRefs(prompt: string, cwd: string): string {
 }
 
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
-  const state = loadStateFile(ctx.paths.state);
-  if (state.enabled === false) return undefined;
-  resumeOnPrompt(ctx, state);
+  if (isLoopMessage(typeof event.prompt === "string" ? event.prompt : "")) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
   const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.workDir);
-  if (state.requirement === undefined && prompt.trim()) {
-    state.requirement = prompt;
-    const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
-    state.baseline = snap.ref;
-    state.baselineUntracked = snap.untracked.map(({ path }) => path);
-    state.baselineFingerprint = snap.fingerprint;
-  }
-  // 验收标准只认你发来的消息：带「## 验收标准」就定下（或替换成）新一版。
-  const criteria = ctx.config.acceptance ? criteriaFromUser(prompt, state.criteria) : undefined;
-  if (criteria) {
-    state.criteria = criteria;
-    process.stderr.write(`[autoreview] 已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）\n`);
-  }
-  // 授权只认你亲手打的字：用没展开 @文件 的原文，程序发的返修消息也不算。
   const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
-  const grants = ctx.config.acceptance ? grantsFromUser(typed, state.criteria, state.grants) : undefined;
-  let notice: string | undefined;
-  if (grants && state.criteria) {
-    state.grants = grants;
-    notice = `自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的 [授权] 条目"}）`;
-    process.stderr.write(`[autoreview] ${notice}\n`);
-  }
-  saveStateFile(ctx.paths.state, state);
-  // 记下授权要让你看到：Claude Code 走 systemMessage，其他宿主发系统通知（UserPromptSubmit 只有 10 秒）。
+  let notice: string | undefined, criteriaNotice: string | undefined, invalidatedDone = false;
+  // 权限和标准先独立落盘；配置、来源索引、Git 都不得成为吞掉撤权的前置条件。
+  withStateWriteLock(ctx.paths.state, () => {
+    const state = loadStateFile(ctx.paths.state);
+    const before = JSON.stringify(inputKeys.slice(0, 4).map((key) => state[key]));
+    const wasRunning = lockAlive(ctx.paths.lock), wasDone = state.phase === "done";
+    if (state.enabled !== false) resumeOnPrompt(ctx, state);
+    if (state.requirement === undefined && prompt.trim()) state.requirement = prompt;
+    const criteria = criteriaFromUser(prompt, state.criteria);
+    if (criteria) { state.criteria = criteria; state.grants = undefined; criteriaNotice = `已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`; }
+    const grants = grantsFromUser(typed, state.criteria, state.grants);
+    if (grants && state.criteria) { state.grants = grants; notice = `自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的条目"}）`; }
+    if (before !== JSON.stringify(inputKeys.slice(0, 4).map((key) => state[key]))) {
+      state.userInputVersion = randomUUID();
+      if (wasRunning || state.rounds.length > 0) state.resumeAfterInputChange = true;
+      if (wasDone) { state.phase = "idle"; state.pauseReason = undefined; invalidatedDone = true; }
+    }
+    writeStateFile(ctx.paths.state, state);
+  });
+  if (criteriaNotice) process.stderr.write(`[autoreview] ${criteriaNotice}\n`);
+  if (notice) process.stderr.write(`[autoreview] ${notice}\n`);
   if (notice && ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
+  let state = loadStateFile(ctx.paths.state);
+  if (state.enabled === false) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
+  if (ctx.configError) {
+    await pause(ctx, state, "项目配置不可用，用户输入已保存", undefined, ctx.configError);
+    return userOutput(ctx, notice);
+  }
+  if (state.baseline === undefined && state.requirement?.trim() && !lockAlive(ctx.paths.lock)) {
+    const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
+    state.baseline = snap.ref; state.baselineUntracked = snap.untracked.map(({ path }) => path); state.baselineFingerprint = snap.fingerprint;
+    saveStateFile(ctx.paths.state, state);
+  }
+  const contextConfig = loadContext(ctx.workDir);
+  const context = contextConfig ? refreshContext(contextConfig, prompt) : undefined;
+  if (context?.snapshot.missing.length) throw new Error(`上游来源缺失：${context.snapshot.missing.join("、")}`);
+  if (context) withStateWriteLock(ctx.paths.state, () => {
+    const current = loadStateFile(ctx.paths.state);
+    if ((event.prompt === "/review-inputs accept" || !current.inputsFingerprint) && current.inputsFingerprint !== context.snapshot.inputsFingerprint) {
+      current.inputsFingerprint = context.snapshot.inputsFingerprint; current.userInputVersion = randomUUID();
+      if (current.rounds.length > 0 || lockAlive(ctx.paths.lock)) current.resumeAfterInputChange = true;
+      if (current.phase === "done") { current.phase = "idle"; invalidatedDone = true; }
+      writeStateFile(ctx.paths.state, current);
+    }
+  });
+  if (invalidatedDone) { state = loadStateFile(ctx.paths.state); await writeSummary(ctx, state, "进行中", undefined, undefined, "用户输入已更新，旧完成资格已撤销。"); }
   return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
 }
 
@@ -532,22 +616,32 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
  * Stop 持锁期间宿主发来 SIGTERM/SIGINT/SIGHUP：杀掉本进程登记的子进程组，
  * 状态记暂停「评审被中断」，释放锁再退出。SIGKILL 拦不住，交给下一次事件清理。
  */
-function guardSignals(ctx: HookContext): () => void {
+function guardSignals(ctx: HookContext, controller: AbortController, finished: () => Promise<void>, cleanupRecord: () => string | undefined): () => void {
   const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
+  let stopping = false;
   const handler = (signal: NodeJS.Signals): void => {
-    try { reapProcs(ctx.paths.procs, { ownerPid: process.pid }); } catch { /* 尽力 */ }
-    try {
-      const state = loadStateFile(ctx.paths.state);
-      if (state.phase === "reviewing") {
-        state.phase = "paused";
-        state.pauseReason = INTERRUPTED;
-        state.awaitingRepair = false;
+    if (stopping) return;
+    stopping = true;
+    controller.abort();
+    try { reapProcs(ctx.paths.procs, { ownerPid: process.pid }); } catch { /* 失败保留登记 */ }
+    void (async () => {
+      try {
+        // 业务执行已取消；独立 cleanup 有自己的超时，完成后才释放宿主锁。
+        await finished();
+        const state = loadStateFile(ctx.paths.state);
+        state.phase = "paused"; state.pauseReason = INTERRUPTED; state.awaitingRepair = false;
         saveStateFile(ctx.paths.state, state);
+        const path = cleanupRecord();
+        let detail = path ? `外部资源释放记录：${path}` : undefined;
+        if (path) { try { const record = JSON.parse(readFileSync(path, "utf8")); detail = `外部资源释放：${record.status}；记录：${path}；${record.reason ?? ""}`; } catch { /* 未确认 */ } }
+        await writeSummary(ctx, state, "暂停", INTERRUPTED, undefined, detail);
+      } catch (error) { process.stderr.write(`[autoreview] 中断收尾未确认：${errorText(error)}\n`); }
+      finally {
+        releaseLock(ctx.paths.lock);
+        process.stderr.write(`[autoreview] 收到 ${signal}，已等待资源收尾并暂停\n`);
+        process.exit(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143);
       }
-    } catch { /* 尽力 */ }
-    releaseLock(ctx.paths.lock);
-    process.stderr.write(`[autoreview] 收到 ${signal}，已清理子进程并暂停\n`);
-    process.exit(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143);
+    })();
   };
   for (const signal of signals) process.on(signal, handler);
   return () => { for (const signal of signals) process.off(signal, handler); };
@@ -555,7 +649,7 @@ function guardSignals(ctx: HookContext): () => void {
 
 /** 未交付提醒已按新规则移除：无标记但有改动时直接评审。 */
 async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
-  const state = loadStateFile(ctx.paths.state);
+  let state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return undefined;
   const text = lastAssistantMessage(event);
   const marker = classifyMarker(text);
@@ -565,8 +659,8 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     return undefined;
   }
   // 暂停状态不自动评审，等你再提交消息（UserPromptSubmit 解除，与 pi 扩展一致）。
-  if (state.phase === "paused") return undefined;
-  if (marker === "none") {
+  if (state.phase === "paused" && !state.resumeAfterInputChange) return undefined;
+  if (marker === "none" && !state.resumeAfterInputChange) {
     const baseline = checkedFingerprint(state);
     if (!baseline) return undefined;
     const current = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
@@ -577,7 +671,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     // 没有交付标记但有未评审改动：直接评审，与写了【交付完成】一样。
   }
 
-  const lock = acquireLock(ctx.paths.lock);
+  const lock = withStateWriteLock(ctx.paths.state, () => acquireLock(ctx.paths.lock));
   if (lock === "stale") {
     reapProcs(ctx.paths.procs);
     releaseLock(ctx.paths.lock);
@@ -585,21 +679,46 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     return undefined;
   }
   if (lock === "busy") {
+    if (state.resumeAfterInputChange) return JSON.stringify({ decision: "block", reason: "【流程等待】上一轮正在按新输入停止并释放资源；等待它结束后再交付，无需修改产品。" });
     process.stderr.write("autoreview hook: 已有评审在进行，放行\n");
     return undefined;
   }
-  const unguard = guardSignals(ctx);
+  state = withStateWriteLock(ctx.paths.state, () => loadStateFile(ctx.paths.state));
+  const userInputVersion = state.userInputVersion;
+  const repairsBefore = state.repairs;
+  const controller = new AbortController();
+  const changedInputReason = USER_INPUT_CHANGED;
+  let inputStamp = "";
+  const checkUserInputs = (force = true): void => {
+    controller.signal.throwIfAborted();
+    try {
+      const stat = statSync(ctx.paths.state), stamp = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+      if (force || stamp !== inputStamp) {
+        inputStamp = stamp;
+        if (loadStateFile(ctx.paths.state).userInputVersion !== userInputVersion) throw new Error(changedInputReason);
+      }
+    } catch { controller.abort(new Error(changedInputReason)); }
+    controller.signal.throwIfAborted();
+  };
+  const inputWatch = setInterval(() => { try { checkUserInputs(false); } catch { /* 主任务处理取消 */ } }, 250);
+  inputWatch.unref();
+  let running: Promise<void> = Promise.resolve();
+  let cleanupRecord: string | undefined;
+  const unguard = guardSignals(ctx, controller, () => running, () => cleanupRecord);
   try {
     // 上一轮已完成后再次交付：按 pi 规则开新一轮，返修计数清零。
-    if (state.phase === "done") state.repairs = 0;
+    if (state.phase === "done" && !state.resumeAfterInputChange) state.repairs = 0;
+    state.resumeAfterInputChange = false;
     state.phase = "reviewing";
     state.pauseReason = undefined;
     state.awaitingRepair = false;
     saveStateFile(ctx.paths.state, state);
     const round = state.rounds.length + 1;
-    const outcome = await runReviewRound({
+    const work = runReviewRound({
       cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, round,
-      deliveryNote: text, state, config: ctx.config, exec: ctx.exec,
+      deliveryNote: text, state, config: ctx.config, getConfig: () => loadConfig(findProjectRoot(ctx.workDir) ?? ctx.configRoot), exec: ctx.exec,
+      signal: controller.signal, checkLive: checkUserInputs,
+      cleanupExec: createChildExec(`${ctx.paths.procs}.cleanup`), onCleanup: (_work, path) => { cleanupRecord = path; },
       writeInput: (name, content) => {
         mkdirSync(ctx.paths.dir, { recursive: true });
         const file = join(ctx.paths.dir, name);
@@ -611,12 +730,18 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       acceptanceDir: join(ctx.paths.dir, "acceptance", basename(ctx.paths.state, ".state.json")),
       procsFile: ctx.paths.procs,
     });
+    running = work.then(() => {}, () => {});
+    const outcome = await work;
+    controller.signal.throwIfAborted();
     if (outcome.kind === "done") {
       state.phase = "done";
       state.awaitingRepair = false;
       saveStateFile(ctx.paths.state, state);
+      const context = loadContext(ctx.workDir);
+      if (context) recordProjectOutcome(context, `${ctx.host}-${ctx.sessionId}`, "done", ctx.paths.summary, state.inputsFingerprint);
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
       await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
+      checkUserInputs();
       return userOutput(ctx, outcome.hint && `自动评审${done}。${outcome.hint}`);
     }
     if (outcome.kind === "paused") {
@@ -627,28 +752,33 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     state.phase = "idle";
     saveStateFile(ctx.paths.state, state);
     return JSON.stringify({ decision: "block", reason: outcome.message ?? "" });
+  } catch (error) {
+    if ((error as Error)?.message === changedInputReason) controller.abort(error);
+    if (!controller.signal.aborted) throw error;
+    if ((controller.signal.reason as Error)?.message === changedInputReason) {
+      try { copyInputs(state, loadStateFile(ctx.paths.state)); } catch { /* 暂停保留诊断 */ }
+      state.repairs = repairsBefore; state.resumeAfterInputChange = true;
+      await pause(ctx, state, changedInputReason, undefined, "最新标准和授权已保留；下次交付按新输入继续，不计业务返修。");
+    }
+    return undefined; // 操作系统信号由信号处理器负责记录并退出。
   } finally {
-    unguard();
-    releaseLock(ctx.paths.lock);
+    clearInterval(inputWatch);
+    if (!controller.signal.aborted || (controller.signal.reason as Error)?.message === changedInputReason) { unguard(); releaseLock(ctx.paths.lock); }
   }
 }
 
 async function dispatch(event: HookEvent): Promise<string | undefined> {
   const root = findProjectRoot(event.cwd);
-  if (!root) {
-    process.stderr.write("autoreview hook: 没有 .autoreview.json，跳过\n");
-    return undefined;
+  const host = detectHost(event), sessionId = sessionIdOf(event), workDir = resolve(event.cwd?.trim() || process.cwd());
+  const paths = hookPaths(workDir, host, sessionId), kind = event.hook_event_name;
+  if (!root && !(kind === "UserPromptSubmit" && existsSync(paths.state))) {
+    process.stderr.write("autoreview hook: 没有 .autoreview.json，跳过\n"); return undefined;
   }
-  const host = detectHost(event);
-  const sessionId = sessionIdOf(event);
-  const workDir = resolve(event.cwd?.trim() || process.cwd());
-  const paths = hookPaths(workDir, host, sessionId);
-  const ctx: HookContext = {
-    host, configRoot: root, workDir, sessionId, paths,
-    exec: createChildExec(paths.procs),
-    config: loadConfig(root),
-  };
-  const kind = event.hook_event_name;
+  let config: ReviewConfig = { maxRepairs: DEFAULT_MAX_REPAIRS, reviewerModel: DEFAULT_MODEL, reviewerThinking: DEFAULT_THINKING, reviewTimeoutMin: DEFAULT_TIMEOUT_MIN, reviewerCmd: "" };
+  let configError: string | undefined;
+  try { if (!root) throw new Error("没有 .autoreview.json"); config = loadConfig(root); }
+  catch (error) { if (kind !== "UserPromptSubmit") throw error; configError = errorText(error); }
+  const ctx: HookContext = { host, configRoot: root ?? workDir, workDir, sessionId, paths, exec: createChildExec(paths.procs), config, configError };
   if (kind === "SessionStart") return sessionStart(ctx);
   if (kind === "UserPromptSubmit") return userPromptSubmit(ctx, event);
   if (kind === "Stop") return stop(ctx, event);

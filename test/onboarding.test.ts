@@ -24,15 +24,15 @@ const write = (root: string, path: string, text: string): void => {
 test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   const doc = readFileSync(GUIDE_DOC, "utf8");
   const block1 = extractBlock(doc, 1)!;
-  assert.equal(blockVersion(block1), 3);
-  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v3/);
+  assert.equal(blockVersion(block1), 4);
+  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v4/);
   // v2：起草任务提示词只写四节、不做的事、流水线 e2e 标归属。
-  assert.match(block1, /## 起草任务提示词（自动评审 v2）[\s\S]*只写四节/);
-  assert.match(block1, /不要通读代码，不要跑命令核实现状/);
+  assert.match(block1, /## 起草任务提示词（自动评审 v2）[\s\S]*以下四节/);
+  assert.match(block1, /不重复全仓阅读或手工抄写/);
   assert.match(block1, /不要写联调或端到端测试的步骤/);
   assert.match(block1, /「A3\. \[乙\] 操作：/);
   assert.equal(block1.split("\n").at(-1), "<!-- /autoreview:acceptance -->");
-  // v3：按权限划分：[授权] 用户同意后执行，[人工] 要用户拍板；图形界面操作、步骤多、耗时长都不算。
+  // v4：按权限划分：[授权] 用户同意后执行，[人工] 要用户拍板；图形界面操作、步骤多、耗时长都不算。
   assert.match(block1, /按权限划分，不按难易[\s\S]*「\[授权\]」[\s\S]*同意授权：A3[\s\S]*不要替用户写「同意授权」[\s\S]*「\[人工\]」：要用户拍板[\s\S]*难做不算：图形界面操作/);
   const examples = extractCriteria(block1)!;
   assert.deepEqual(examples.map((item) => item.id), ["A1", "A2", "A3", "A4"], "块 1 里的示例格式能被程序取到");
@@ -51,14 +51,14 @@ test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   assert.equal(blockVersion("什么都没有"), undefined);
 });
 
-test("O2 目标文件：Codex/pi 读 AGENTS.md；Claude Code 读 CLAUDE.md，除非它 @AGENTS.md", () => {
+test("O2 各宿主共用可变流程入口，不改常驻规则文件", () => {
   const root = tempDir();
   try {
-    assert.equal(conventionTarget(root, "codex"), join(root, "AGENTS.md"));
-    assert.equal(conventionTarget(root, "pi"), join(root, "AGENTS.md"));
-    assert.equal(conventionTarget(root, "claude"), join(root, "CLAUDE.md"));
+    assert.equal(conventionTarget(root, "codex"), join(root, ".autoreview", "CONVENTIONS.md"));
+    assert.equal(conventionTarget(root, "pi"), join(root, ".autoreview", "CONVENTIONS.md"));
+    assert.equal(conventionTarget(root, "claude"), join(root, ".autoreview", "CONVENTIONS.md"));
     write(root, "CLAUDE.md", "# 说明\n@AGENTS.md\n");
-    assert.equal(conventionTarget(root, "claude"), join(root, "AGENTS.md"));
+    assert.equal(conventionTarget(root, "claude"), join(root, ".autoreview", "CONVENTIONS.md"));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -67,11 +67,11 @@ test("O3 写法段状态与提醒：缺失 → 旧版 → 最新；提醒里写�
   try {
     assert.equal(conventionStatus(root, "codex").status, "缺失");
     const missing = conventionNotice(root, "codex")!;
-    for (const part of [GUIDE_DOC, "【块 1】", join(root, "AGENTS.md"), SETUP_SCRIPT]) assert.ok(missing.includes(part), `缺少：${part}`);
-    write(root, "AGENTS.md", "## 起草需求时写验收标准（自动验收）\n旧的\n");
+    for (const part of [GUIDE_DOC, "【块 1】", conventionTarget(root, "pi"), SETUP_SCRIPT]) assert.ok(missing.includes(part), `缺少：${part}`);
+    write(root, ".autoreview/CONVENTIONS.md", "## 起草需求时写验收标准（自动验收）\n旧的\n");
     assert.equal(conventionStatus(root, "codex").status, "旧版");
-    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v3）/);
-    write(root, "AGENTS.md", `# 我的规则\n\n${readBlock(1)}\n`);
+    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v4）/);
+    write(root, ".autoreview/CONVENTIONS.md", `# 流程说明\n\n${readBlock(1)}\n`);
     assert.equal(conventionStatus(root, "codex").status, "最新");
     assert.equal(conventionNotice(root, "codex"), undefined);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -128,7 +128,7 @@ test("O5 总结「需要你做的事」：暂停的下一步、人工验收、�
     assert.match(todos[1], /^人工验收 A2（操作：b）：程序没能自动验证，原因：标准含糊/);
     assert.equal(todos[2], "人工验收 A3（[人工] 操作：c）：标了 [人工]，程序不自动验");
     assert.match(todos[3], /自动起草/);
-    assert.ok(todos[4].includes("【块 1】") && todos[4].includes(join(root, "AGENTS.md")));
+    assert.ok(todos[4].includes("【块 1】") && todos[4].includes(conventionTarget(root, "pi")));
     assert.deepEqual(acceptanceTodos({ host: "codex", phase: "paused", pauseHint: "只剩这个" }), ["只剩这个"]);
     assert.deepEqual(acceptanceTodos({ host: "codex", phase: "done", pauseHint: "暂停已解除" }), []);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -170,7 +170,7 @@ test("O7 插入或更新【块 1】：追加、按标记替换、已是最新、
   assert.equal(appended.action, "追加");
   assert.equal(appended.text, `# 我的规则\n保留\n\n${block}\n`);
   assert.equal(upsertBlock(appended.text, block).action, "已是最新");
-  const older = appended.text.replace("autoreview:acceptance v3", "autoreview:acceptance v0").replace("旧内容不存在", "");
+  const older = appended.text.replace("autoreview:acceptance v4", "autoreview:acceptance v0").replace("旧内容不存在", "");
   const updated = upsertBlock(`${older}\n## 之后的规则\n也保留\n`, block);
   assert.equal(updated.action, "更新");
   assert.ok(updated.text.includes("# 我的规则\n保留") && updated.text.includes("## 之后的规则\n也保留"));
@@ -190,6 +190,7 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
     write(root, "package.json", JSON.stringify({ scripts: { dev: "next dev" }, dependencies: { next: "14" } }));
     write(root, ".autoreview.json", JSON.stringify({ maxRepairs: 2 }));
     write(root, "CLAUDE.md", "# 说明\n");
+    write(root, "AGENTS.md", "# 稳定规则\n用户原文保持不变。\n");
     const dry = spawnSync(process.execPath, [SETUP, root], { encoding: "utf8", input: "" });
     assert.equal(dry.status, 0, dry.stderr);
     assert.match(dry.stdout, /没有写入：确认无误后加 --yes 再跑一次/);
@@ -199,8 +200,9 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
     const config = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));
     assert.equal(config.maxRepairs, 2);
     assert.equal(config.acceptance.start, "npm run dev");
-    assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /autoreview:acceptance v3/);
-    assert.match(readFileSync(join(root, "CLAUDE.md"), "utf8"), /autoreview:acceptance v3/, "CLAUDE.md 没引入 AGENTS.md 时也写一份");
+    assert.match(readFileSync(conventionTarget(root, "pi"), "utf8"), /autoreview:acceptance v4/);
+    assert.equal(readFileSync(join(root, "AGENTS.md"), "utf8"), "# 稳定规则\n用户原文保持不变。\n");
+    assert.equal(readFileSync(join(root, "CLAUDE.md"), "utf8"), "# 说明\n");
     const again = await planSetup(root);
     assert.equal(again.config, undefined);
     assert.match(again.configAction, /已有 acceptance，保留你的配置/);

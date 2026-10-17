@@ -10,7 +10,7 @@ import test from "node:test";
 import {
   ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, buildCorrectionInput, classifySystemExit,
   authorizationHint, authorizationStatus, criteriaFromUser, extractCriteria, findObjections, grantsFromUser, isAuthorizationCriterion,
-  isManualCriterion, judgeAcceptance, lastEvidenceAt, parseAcceptanceReport, typedByUser,
+  isManualCriterion, judgeAcceptance, lastEvidenceAt, mergeAcceptanceReports, parseAcceptanceReport, typedByUser,
   parseCriteriaDraft, renderAcceptanceForReview, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
@@ -200,7 +200,7 @@ async function harness(acceptance: Record<string, unknown>, env: Record<string, 
   writeFileSync(join(work, "server.mjs"), SERVER);
   const port = await freePort();
   const saved: Record<string, string | undefined> = {};
-  const vars = { AUTOREVIEW_ACCEPTANCE_CMD: TESTER, AUTOREVIEW_CRITERIA_CMD: DRAFTER, FAKE_STATE_DIR: join(root, "fake"), ...env };
+  const vars = { AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"), AUTOREVIEW_ACCEPTANCE_CMD: TESTER, AUTOREVIEW_CRITERIA_CMD: DRAFTER, FAKE_STATE_DIR: join(root, "fake"), ...env };
   for (const [key, value] of Object.entries(vars)) { saved[key] = process.env[key]; process.env[key] = value.replace("{port}", String(port)); }
   const raw = JSON.parse(JSON.stringify(acceptance).replaceAll("{port}", String(port)));
   const config = parseAcceptanceConfig(raw, work, process.env)!;
@@ -524,7 +524,7 @@ test("A21 验收方关掉后用 setsid 重启服务占着端口：收尾时清�
     assert.equal(stage.kind, "judged");
     if (stage.kind !== "judged") return;
     assert.equal(stage.record.blocker, "系统被关掉");
-    assert.match((stage.record.cleanup ?? []).join("\n"), /验收期间起的进程 pid \d+（.*），不是程序启动的被测系统，已关掉/);
+    assert.match((stage.record.cleanup ?? []).join("\n"), /验收期间起的进程 pid \d+（.*），不是程序启动的被测系统，已发出关闭请求[\s\S]*端口 \d+ 已释放/);
     assert.equal(await portOpen(h.port), false, "逃出进程组的重启进程也被清掉");
   } finally { h.close(); }
 });
@@ -546,7 +546,7 @@ test("A22 系统自己崩溃（非 0 退出、日志有错误）：仍算 G1 不
   } finally { h.close(); }
 });
 
-test("A23 配了 reset：每次调验收方前由程序重置，输出不进系统日志；重做时要求从头全部重测", async () => {
+test("A23 配了 reset：首次重置，格式更正复用数据与证据，输出不进系统日志", async () => {
   const h = await harness(
     {
       start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health",
@@ -561,13 +561,13 @@ test("A23 配了 reset：每次调验收方前由程序重置，输出不进系�
     if (stage.kind !== "judged") return;
     const { runDir } = stage.record;
     assert.equal(stage.record.verdict, "通过", "重置时打的 ERROR 不算 G2");
-    assert.equal(readFileSync(join(runDir, "reset-count"), "utf8").trim().split("\n").length, 2, "第 1 次和重做前各重置一次");
+    assert.equal(readFileSync(join(runDir, "reset-count"), "utf8").trim().split("\n").length, 1, "同一次格式更正不重复清数据");
     const resetLog = readFileSync(join(runDir, "reset.log"), "utf8");
-    assert.match(resetLog, /重做前/);
+    assert.doesNotMatch(resetLog, /重做前/);
     assert.match(resetLog, /ENV_OK/, "重置命令拿得到被测系统的环境变量");
     assert.doesNotMatch(readFileSync(join(runDir, "system.log"), "utf8"), /重置时打的/);
-    assert.match(readFileSync(join(runDir, "correction.md"), "utf8"), /已把数据重置到初始状态[\s\S]*从 A1 起全部重新实测/);
-    assert.match(readFileSync(join(runDir, "input.md"), "utf8"), /每次验收前都已把数据重置到初始状态/);
+    assert.match(readFileSync(join(runDir, "correction.md"), "utf8"), /已经留对的证据不用重跑/);
+    assert.match(readFileSync(join(runDir, "input.md"), "utf8"), /首次验收和换强模型重验前已把数据重置到初始状态/);
   } finally { h.close(); }
 });
 
@@ -614,7 +614,7 @@ test("A26 reset 配置、提示词硬规则、重做输入", () => {
   assert.match(prompt, /不要启动、停止、重启它，不要 kill、pkill 任何进程/);
   assert.match(prompt, /原因写「数据不是初始状态」/);
   const preview = { verdict: "无法验收" as const, items: [{ id: "A1", text: "t", verdict: "无法验证" as const, detail: "没证据", evidenceProblem: true }], logErrors: [], extra: [], runDir: "/run" };
-  assert.match(buildCorrectionInput(preview, false), /重做这几条[\s\S]*数据不是初始状态[\s\S]*不要启动、停止、重启被测系统/);
+  assert.match(buildCorrectionInput(preview, false), /重做这几条[\s\S]*同一次更正未重置数据[\s\S]*不要启动、停止、重启被测系统/);
   assert.match(buildCorrectionInput(preview, true), /从头重做[\s\S]*从 A1 起全部重新实测/);
 });
 
@@ -689,8 +689,8 @@ test("A28 [人工] 标记：开头（可在别的标签或「操作：」之后�
 
   const allManual = judgeAcceptance({ criteria: [items[1]], logErrors: [], runDir: "/run", hasService: false, evidence: evidenceOf({}) });
   assert.equal(allManual.verdict, "部分验证");
-  assert.match(renderAcceptanceForReview({ ...allManual, durationMs: 0 }), /验收标准全部标了 \[人工\]，程序没有启动系统实测/);
-  assert.match(renderAcceptanceForReview({ ...passed, durationMs: 0 }), /其余全部通过，A2 标了 \[人工\]，需要人工验收/);
+  assert.match(renderAcceptanceForReview({ ...allManual, durationMs: 0 }), /验收标准全部交给用户，程序没有启动系统实测/);
+  assert.match(renderAcceptanceForReview({ ...passed, durationMs: 0 }), /此前验收记录：部分验证。A2 标了 \[人工\]，需要人工验收/);
 });
 
 test("A29 一轮验收：[人工] 条目不出现在验收方输入里；标准全是 [人工] 时不启动系统、不调验收方", async () => {
@@ -790,4 +790,104 @@ test("A31 一轮验收：[授权] 没答复先停下问你；同意了照常交�
     assert.deepEqual(denied.record.items.map((item) => [item.id, item.verdict]), [["A1", "通过"], ["A2", "需人工"]]);
     assert.ok(!readFileSync(join(denied.record.runDir, "input.md"), "utf8").includes("正式账号"));
   } finally { h.close(); }
+});
+
+
+test("A32 中断保留逐条显式结果，未完成条目不冒充通过；新重验不读旧检查点", async () => {
+  const h = await harness({}, { FAKE_ACC_MODE: "checkpoint" });
+  try {
+    let now = Date.now();
+    const deps = h.deps();
+    const exec = deps.exec;
+    deps.now = () => now;
+    deps.deadline = now + 120_000;
+    deps.exec = async (command, args, options) => {
+      const result = await exec(command, args, options);
+      if (options.role === "验收方") { now += 120_000; return { ...result, killed: true }; }
+      return result;
+    };
+    const outcome = await runAcceptanceStage(deps);
+    assert.equal(outcome.kind, "judged");
+    if (outcome.kind !== "judged") return;
+    assert.equal(outcome.record.items.find((i) => i.id === "A1")?.verdict, "通过");
+    assert.equal(outcome.record.items.find((i) => i.id === "A2")?.verdict, "无法验证");
+    assert.equal(outcome.record.verdict, "无法验收");
+    assert.equal(h.calls().length, 1);
+    assert.ok(existsSync(join(outcome.record.runDir, "checkpoints", readFileSync(join(outcome.record.runDir, "call-id"), "utf8"), "A1.json")));
+    const next = h.deps(); next.config = { ...next.config, testerCmd: "" };
+    next.exec = async () => ({ stdout: "bad report", stderr: "", code: 0, killed: false });
+    const retried = await runAcceptanceStage(next);
+    assert.equal(retried.kind, "judged");
+    if (retried.kind === "judged") {
+      assert.notEqual(retried.record.runDir, outcome.record.runDir);
+      assert.ok(retried.record.items.every((i) => i.verdict !== "通过"));
+    }
+  } finally { h.close(); }
+});
+
+
+test("A33 项目释放脚本始终运行，失败不能发布成功", async () => {
+  const h = await harness({ cleanup: 'echo "$AUTOREVIEW_RUN_ID"; echo release-failed >&2; exit 75', env: { AUTOREVIEW_RUN_ID: "foreign-task", AUTOREVIEW_RUN_DIR: "/not-this-run" } });
+  try {
+    const outcome = await runAcceptanceStage(h.deps());
+    assert.equal(outcome.kind, "judged");
+    if (outcome.kind !== "judged") return;
+    assert.equal(outcome.record.verdict, "无法验收");
+    assert.equal(outcome.record.failureKind, "environment");
+    assert.match(readFileSync(join(outcome.record.runDir, "cleanup.log"), "utf8"), /release-failed/);
+    assert.match(outcome.record.cleanup!.join("\n"), /资源释放未确认/);
+    const identity = JSON.parse(readFileSync(join(outcome.record.runDir, "cleanup-task.json"), "utf8"));
+    assert.equal(identity.status, "failed");
+    const log = readFileSync(join(outcome.record.runDir, "cleanup.log"), "utf8");
+    assert.ok(log.includes(identity.runId)); assert.doesNotMatch(log, /foreign-task/);
+  } finally { h.close(); }
+});
+
+
+test("A34 检查点全部通过也不能掩盖执行器资源释放失败", async () => {
+  const h = await harness({}, { FAKE_ACC_MODE: "checkpoint-all" });
+  try {
+    const deps = h.deps(), exec = deps.exec;
+    deps.exec = async (command, args, options) => {
+      const result = await exec(command, args, options);
+      return options.role === "验收方" ? { ...result, code: 75, stderr: "AUTOREVIEW_FAILURE=environment 子进程释放未确认，登记已保留" } : result;
+    };
+    const outcome = await runAcceptanceStage(deps);
+    assert.equal(outcome.kind, "judged");
+    if (outcome.kind !== "judged") return;
+    assert.ok(outcome.record.items.every((item) => item.verdict === "通过"), "保留已取得的逐项业务证据");
+    assert.equal(outcome.record.verdict, "无法验收");
+    assert.equal(outcome.record.failureKind, "environment");
+    assert.match(outcome.record.reason!, /释放未确认/);
+    assert.equal(h.calls().length, 1, "执行器错误不重复派给验收模型");
+  } finally { h.close(); }
+});
+
+
+test("A35 更正的新检查点覆盖旧报告；未重跑条目保留，同次矛盾不能放行", async (t) => {
+  const duplicate = mergeAcceptanceReports(undefined, { conclusion: "通过", extra: [], items: [
+    { id: "A1", verdict: "不通过", fields: { "证据摘录": "observed" } },
+    { id: "A1", verdict: "通过", fields: { "证据摘录": "observed" } },
+  ] });
+  assert.equal(judgeAcceptance({ criteria: [{ id: "A1", text: "检查" }], report: duplicate, evidence: () => block("A1", "observed"), logErrors: [], runDir: "/run", hasService: false }).verdict, "无法验收");
+  for (const mode of ["checkpoint-regression", "checkpoint-complete", "checkpoint-conflict"]) await t.test(mode, async () => {
+    const h = await harness({}, { FAKE_ACC_MODE: mode });
+    try {
+      const outcome = await runAcceptanceStage(h.deps());
+      assert.equal(outcome.kind, "judged"); if (outcome.kind !== "judged") return;
+      const record = outcome.record, a1 = record.items.find((item) => item.id === "A1")!;
+      if (mode === "checkpoint-regression") {
+        assert.equal(record.verdict, "不通过"); assert.equal(a1.verdict, "不通过"); assert.equal(h.calls().length, 2);
+        const input = join(record.runDir, "late.json"); writeFileSync(input, JSON.stringify({ verdict: "通过", fields: { "证据摘录": "看到了 A1" } }));
+        const late = spawnSync(join(record.runDir, "result"), ["A1", input], { cwd: record.runDir, env: { ...process.env, AUTOREVIEW_ACCEPTANCE_CALL: "00000000-0000-0000-0000-000000000000" }, encoding: "utf8" });
+        assert.equal(late.status, 1); assert.match(late.stderr, /过期或无效/);
+      } else if (mode === "checkpoint-complete") {
+        assert.equal(record.verdict, "通过"); assert.equal(a1.verdict, "通过"); assert.equal(h.calls().length, 2);
+        assert.doesNotMatch(readFileSync(join(record.runDir, "evidence", "A1.txt"), "utf8"), /#2 /, "A1 的有效结果可复用，未重跑动作");
+      } else {
+        assert.equal(record.verdict, "无法验收"); assert.equal(a1.verdict, "无法验证");
+        assert.match(a1.detail, /结论冲突/); assert.equal(h.calls().length, 3);
+      }
+    } finally { h.close(); }
+  });
 });

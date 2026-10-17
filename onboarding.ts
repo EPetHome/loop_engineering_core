@@ -45,12 +45,9 @@ export function blockVersion(text: string): number | undefined {
 
 export type HostKind = "claude" | "codex" | "pi" | string;
 
-/** 头脑风暴的模型读哪个文件：Codex、pi 读 AGENTS.md；Claude Code 读 CLAUDE.md，除非它用 @AGENTS.md 引入。 */
+/** 可变流程说明有独立入口；接入和升级永不改写常驻 AGENTS.md / CLAUDE.md。 */
 export function conventionTarget(root: string, host: HostKind): string {
-  if (host !== "claude") return join(root, "AGENTS.md");
-  const claude = join(root, "CLAUDE.md");
-  const imports = existsSync(claude) && /^\s*@AGENTS\.md\s*$/m.test(readFileSync(claude, "utf8"));
-  return imports ? join(root, "AGENTS.md") : claude;
+  return join(root, ".autoreview", "CONVENTIONS.md");
 }
 
 export interface ConventionStatus {
@@ -82,7 +79,7 @@ export function conventionNotice(root: string, host: HostKind): string | undefin
   const status = conventionStatus(root, host);
   if (status.status === "最新") return undefined;
   if (status.status === "缺失") {
-    return `自动验收：项目里还没有「验收标准」写法，头脑风暴时模型不会把标准写进需求。${copyNotice(1, `${status.file} 末尾`, "", root)}`;
+    return `自动验收：可变流程说明尚未准备。${copyNotice(1, status.file, "保持 AGENTS.md 和 CLAUDE.md 不变", root)}`;
   }
   return `自动验收：${status.file} 里的「验收标准」写法是旧版（v${status.version}，最新 v${status.latest}）。`
     + `把 ${GUIDE_DOC} 的【块 1】整段替换进去（从标记到标记）。也可以直接跑：node ${SETUP_SCRIPT} ${root}`;

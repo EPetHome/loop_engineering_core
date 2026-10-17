@@ -10,6 +10,7 @@
  * 在 <流水线目录>/<段>.events.log 里记下启动、完成、收到返修、修完的时间，测试据此核对顺序。
  * 看到 <流水线目录>/pipeline.finished、流水线目录被删掉，或 60 秒后退出。
  */
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inboxPath, readJson, writeStageStatus } from "../pipeline-core.ts";
@@ -21,7 +22,7 @@ const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)
 const log = (what) => appendFileSync(join(link.dir, `${link.stage}.events.log`), `${Date.now()} ${what}\n`);
 let inbox = 0;
 const report = (event, extra = {}) => {
-  if (mode !== "silent") writeStageStatus(link, { sessionId: `fake-${link.stage}`, summary: "", event, inbox, ...extra });
+  if (mode !== "silent") writeStageStatus(link, { sessionId: `fake-${link.stage}`, summary: "", event, inbox, ...(event === "done" ? { readyEpoch: randomUUID() } : {}), ...extra });
 };
 
 log("launched");

@@ -4,8 +4,9 @@
  * 评审字段由宿主 Hook 读（pi 扩展用 flag）；gate、acceptance 两节两边都从这里读，
  * 只有写了 gate 的项目才跑门禁，只有写了 acceptance 的项目才做自动验收。
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** 本仓库根目录：提示词、验收工具、测试命令的相对路径都按它解析。 */
@@ -21,6 +22,7 @@ export function resolveTestCmd(raw: string): string {
 }
 
 export const MARKER_FILE = ".autoreview.json";
+export const configurationHash = (data: unknown): string => createHash("sha256").update(JSON.stringify(data)).digest("hex");
 export const DEFAULT_ACCEPTANCE_MODEL = "opencode-go/deepseek-v4.1-flash";
 export const DEFAULT_ACCEPTANCE_TIMEOUT_MIN = 20;
 export const DEFAULT_READY_TIMEOUT_SEC = 60;
@@ -48,6 +50,8 @@ export interface AcceptanceConfig {
   readyTimeoutSec: number;
   /** 重置数据的命令（sh -c，在开发目录执行，环境同被测系统）：每次调验收方前由程序执行，只重置数据、不重启服务。 */
   reset?: string;
+  /** 测试库、容器等项目资源的幂等释放脚本，只处理本轮运行身份。 */
+  cleanup?: string;
   resetTimeoutSec: number;
   /** 额外收集的日志文件（绝对路径，按 .autoreview.json 所在目录解析）。 */
   logs: string[];
@@ -55,6 +59,8 @@ export interface AcceptanceConfig {
   ignorePatterns: string[];
   /** 项目操作说明文件（绝对路径），原文交给验收方。 */
   guide?: string;
+  /** 项目维护的可复用黑盒操作脚本目录；每轮复制到运行目录。 */
+  actions?: string;
   model: string;
   thinking?: string;
   /** 强模型：起草验收标准、验收方没做好时重验都用它；不写就用评审模型。 */
@@ -153,6 +159,9 @@ export function parseAcceptanceConfig(
     throw new Error(`${MARKER_FILE} 的 acceptance.env 必须是字符串键值对象`);
   }
   const guide = optionalString(data, "guide");
+  const actions = optionalString(data, "actions");
+  if (actions && (isAbsolute(actions) || !relative(root, resolve(root, actions)) || relative(root, resolve(root, actions)).startsWith("..")
+    || /(^|[/\\])(?:\.git|\.ssh|\.aws|node_modules)(?:[/\\]|$)/.test(actions))) throw new Error("acceptance.actions 必须是项目内的专用动作目录");
   return {
     root,
     start: optionalString(data, "start"),
@@ -160,11 +169,13 @@ export function parseAcceptanceConfig(
     readyLog: optionalString(data, "readyLog"),
     readyTimeoutSec: positiveInt(data, "readyTimeoutSec", DEFAULT_READY_TIMEOUT_SEC),
     reset: optionalString(data, "reset"),
+    ...(optionalString(data, "cleanup") ? { cleanup: optionalString(data, "cleanup") } : {}),
     resetTimeoutSec: positiveInt(data, "resetTimeoutSec", DEFAULT_RESET_TIMEOUT_SEC),
     logs: stringList(data, "logs", []).map((path) => resolve(root, path)),
     errorPatterns: stringList(data, "errorPatterns", DEFAULT_ERROR_PATTERNS),
     ignorePatterns: stringList(data, "ignorePatterns", []),
     guide: guide === undefined ? undefined : resolve(root, guide),
+    ...(actions ? { actions: resolve(root, actions) } : {}),
     model: nonEmptyString(data, "model", DEFAULT_ACCEPTANCE_MODEL, "acceptance.model"),
     thinking: optionalString(data, "thinking"),
     strongModel: optionalString(data, "strongModel"),

@@ -67,6 +67,7 @@ const lazy = mode === "lazy" && !readFileSync(inputFile, "utf8").includes("证�
 const url = process.env.FAKE_ACC_URL;
 const lines = ["## 结论：通过", "## 逐条结果"];
 for (const id of ids) {
+  if (mode === "checkpoint-complete" && count > 1 && id === ids[0]) continue;
   let excerpt = `看到了 ${id}`;
   if (!lazy) {
     const command = url ? ["node", "-e", `fetch(${JSON.stringify(url)}).then((r) => r.text()).then((t) => console.log(t))`] : ["echo", excerpt];
@@ -84,6 +85,29 @@ for (const id of ids) {
   } else {
     lines.push(`${id}：通过`, `- 证据摘录：${excerpt}`);
   }
+}
+if (["checkpoint-regression", "checkpoint-complete", "checkpoint-conflict"].includes(mode)) {
+  if (count === 1 && mode !== "checkpoint-conflict") {
+    process.stdout.write(`## 结论：通过\n## 逐条结果\n${ids[0]}：通过\n- 证据摘录：看到了 ${ids[0]}\n`);
+    process.exit(0);
+  }
+  const file = join(runDir, "partial.json");
+  for (const id of mode === "checkpoint-complete" ? ids.slice(1) : ids) {
+    const failed = id === ids[0];
+    writeFileSync(file, JSON.stringify({ verdict: failed ? "不通过" : "通过", fields: { "证据摘录": `看到了 ${id}`, "复现": "再次检查", "预期": "符合标准", "实际": "与预期不同" } }));
+    const saved = spawnSync(join(runDir, "result"), [id, file], { cwd: runDir, encoding: "utf8" });
+    if (saved.status !== 0) throw new Error(saved.stderr);
+  }
+  if (mode !== "checkpoint-conflict") { process.stdout.write("这次没有合法最终标题\n"); process.exit(0); }
+}
+if (mode === "checkpoint" || mode === "checkpoint-all") {
+  const file = join(runDir, "partial.json");
+  for (const id of mode === "checkpoint-all" ? ids : ids.slice(0, 1)) {
+    writeFileSync(file, JSON.stringify({ verdict: "通过", fields: { "证据摘录": `看到了 ${id}` } }));
+    const saved = spawnSync(join(runDir, "result"), [id, file], { cwd: runDir, encoding: "utf8" });
+    if (saved.status !== 0) throw new Error(saved.stderr);
+  }
+  process.exit(mode === "checkpoint-all" ? 0 : 2);
 }
 lines.push("## 额外发现", "- 首页标题有错别字");
 process.stdout.write(`${lines.join("\n")}\n`);
