@@ -913,7 +913,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         if (context.snapshot.missing.length) throw new Error(`上游来源缺失：${context.snapshot.missing.join("、")}`);
         if (!state.inputsFingerprint) { state.inputsFingerprint = context.snapshot.inputsFingerprint; saveState(life); }
         event.systemPromptOptions.sections ??= {};
-        event.systemPromptOptions.sections.autoreviewContext = context.text;
+        event.systemPromptOptions.sections.autoreview_context = context.text;
       }
       if (state.enabled && prompt !== undefined) {
         const preparation = loadPreparation(ctx.cwd);

@@ -168,6 +168,28 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   };
 }
 
+test("来源索引使用 Pi 合法分段名，并保留已有提示内容", async () => {
+  const h = harness();
+  try {
+    h.write(".autoreview.json", JSON.stringify({ context: { sources: ["file.txt"] } }));
+    await h.event("session_start");
+    for (const messageType of ["user", "custom"]) {
+      const options = { sections: { other_context: "其它扩展内容" } as Record<string, string>, appendSystemPrompt: "已有约定" };
+      await h.event("before_agent_start", { messageType, prompt: "检查来源", systemPromptOptions: options });
+      assert.equal(h.state().phase, "idle");
+      assert.ok(!h.apiCalls.includes("abort"));
+      // Pi 的构建器只接受小写字母开头的分段名，preamble 是保留名。
+      for (const name of Object.keys(options.sections)) {
+        assert.match(name, /^[a-z][a-z0-9_-]*$/);
+        assert.notEqual(name, "preamble");
+      }
+      assert.match(options.sections.autoreview_context, /当前来源与定位[\s\S]*file\.txt/);
+      assert.equal(options.sections.other_context, "其它扩展内容");
+      assert.equal(options.appendSystemPrompt, `已有约定\n\n${CONVENTION}`);
+    }
+  } finally { await h.close(); }
+});
+
 test("Pi 1.2 插件消息保留约定，不恢复暂停、不覆盖需求和验收授权", async () => {
   const h = harness({ restored: {
     enabled: true, phase: "paused", pauseReason: "等你决定", repairs: 2, rounds: [],
