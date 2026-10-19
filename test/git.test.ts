@@ -72,3 +72,36 @@ test("G2 补充：tree、stat、变化列表、status 失败及 exec rejection �
     assert.ok(r.calls.filter((args) => args.includes("--name-only") || args.includes("status")).every((args) => args.includes("-z")));
   } finally { r.close(); }
 });
+
+
+test("G3：干净仓库直接复用 HEAD，未跟踪文件仍参与指纹，dirty 取证失败不吞掉", async () => {
+  const r = repository();
+  try {
+    const exec: Exec = async (command, args, options) => args.includes("stash")
+      ? { stdout: "", stderr: "", code: 1, killed: false } : r.exec(command, args, options);
+    const git = createGitEvidence(exec, r.cwd);
+    const clean = await git.snapshot();
+    assert.equal(clean.ref, r.git("rev-parse", "HEAD"));
+    assert.ok(!r.calls.some((args) => args.includes("stash")));
+    writeFileSync(join(r.cwd, "new.txt"), "A");
+    const added = await git.snapshot();
+    assert.equal(added.ref, clean.ref);
+    assert.notEqual(added.fingerprint, clean.fingerprint);
+    writeFileSync(join(r.cwd, "new.txt"), "B");
+    assert.notEqual((await git.snapshot()).fingerprint, added.fingerprint);
+    for (const staged of [false, true]) {
+      writeFileSync(join(r.cwd, "tracked.txt"), staged ? "staged\n" : "working\n");
+      if (staged) r.git("add", "tracked.txt");
+      await assert.rejects(git.snapshot(), /stash create.*退出码 1/);
+    }
+    r.git("reset", "--hard", "HEAD");
+    for (const failure of [
+      { stdout: "", stderr: "READ_FAIL", code: 128, killed: false },
+      { stdout: "", stderr: "READ_FAIL", code: 1, killed: false },
+      { stdout: "", stderr: "", code: 0, killed: true },
+    ]) {
+      const failed = createGitEvidence(async (cmd, args, opts) => args.includes("--quiet") ? failure : r.exec(cmd, args, opts), r.cwd);
+      await assert.rejects(failed.snapshot(), GitReadError);
+    }
+  } finally { r.close(); }
+});

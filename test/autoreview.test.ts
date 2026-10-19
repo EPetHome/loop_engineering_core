@@ -245,6 +245,7 @@ test("G2 B2 git 取证失败暂停；无提交仓库关闭", async (t) => {
       const h = harness();
       try {
         await h.event("session_start"); await h.begin(); h.write("new.txt", "new");
+        if (cmd === "stash") h.write("file.txt", "changed\n");
         h.inject = (args) => args[0] === cmd ? result("", 1, `${cmd} FAIL_SENTINEL`) : undefined;
         h.assistant(); await h.command(); await h.terminal();
         assert.equal(h.state().phase, "paused");
@@ -258,6 +259,7 @@ test("G2 B2 git 取证失败暂停；无提交仓库关闭", async (t) => {
     const h = harness();
     try {
       await h.event("session_start"); await h.begin();
+      h.write("file.txt", "changed\n");
       h.inject = (args) => args[0] === "stash" ? result("", 0, "killed", true) : undefined;
       await h.command(); await h.terminal();
       assert.match(h.state().pauseReason!, /无法读取工作区状态/);

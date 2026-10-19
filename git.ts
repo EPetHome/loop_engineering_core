@@ -58,6 +58,13 @@ export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal)
   };
   const run = async (args: string[]): Promise<string> => checked(await raw(args), args);
   const readHead = async (): Promise<string> => objectId(await run(["rev-parse", "--verify", "HEAD"]), "HEAD");
+  const differs = async (args: string[]): Promise<boolean> => {
+    const res = await raw(args);
+    // diff --quiet 的 1 仅在无诊断且未被终止时表示有差异；读取错误仍上抛。
+    if (res.code === 1 && !res.killed && !res.stderr.trim()) return true;
+    checked(res, args);
+    return false;
+  };
 
   return {
     async isRepository(): Promise<boolean> {
@@ -75,7 +82,10 @@ export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal)
     },
     async snapshot(): Promise<Snapshot> {
       const head = await readHead();
-      const stash = (await run(["stash", "create"])).trim();
+      // 验证批可能完全没有产品改动；确认索引和工作区均干净时无需创建新对象。
+      const changed = await differs(["diff", "--cached", "--quiet", head, "--"])
+        || await differs(["diff", "--quiet", "--"]);
+      const stash = changed ? (await run(["stash", "create"])).trim() : "";
       const ref = stash ? objectId(stash, "stash create") : head;
       const tree = objectId(await run(["rev-parse", "--verify", `${ref}^{tree}`]), "tree");
       const paths = pathsFromNul(await run(["ls-files", "--others", "--exclude-standard", "-z"])).sort();
