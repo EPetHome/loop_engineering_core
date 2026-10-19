@@ -145,6 +145,8 @@ export interface SummaryInput {
   sourceChangeNote?: string;
   /** 本次完成已登记的交付总表；只在状态为完成时写进总结开头。 */
   ledger?: { path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
+  /** Pi 开发会话启动时确认未注册 Ponytail；只在完成总结开头提醒，不改变结果。 */
+  ponytailMissing?: boolean;
 }
 
 export interface ReviewInputOptions {
@@ -353,6 +355,7 @@ export function renderSummary(input: SummaryInput): string {
   const lines: string[] = [];
   const status = input.status === "暂停" ? `暂停（${input.pauseReason ?? "未知原因"}）` : input.status;
   lines.push("# 自动评审总结");
+  if (input.status === "完成" && input.ponytailMissing) lines.push("未加载 Ponytail（开发角色要求加载）");
   if (input.status === "完成" && input.ledger) {
     if (input.ledger.failed) lines.push(`- 交付总表写入失败：${input.ledger.path}（会话照常完成）`);
     else {

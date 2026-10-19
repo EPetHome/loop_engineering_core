@@ -212,28 +212,27 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 
 ## 启动
 
-保留日常启动配置，加载权限扩展与自动评审扩展（替换下面的占位符）：
+开发会话统一用 `bin/pi-dev` 启动，不要手抄 pi 命令。脚本固定了 `--offline`、关闭其他扩展与技能、权限扩展、`autoreview.ts` 和 Ponytail（`PONYTAIL_DEFAULT_MODE=full`），找不到其中任何一项就报错退出；按任务只需给提示词，其余可选：
 
 ```bash
-cd <你的项目>
-PATH="/Users/Admin/.hermes/node/bin:$PATH" /Users/Admin/.local/bin/pi \
-  --offline \
-  --model openai-codex/gpt-6.1-sol \
-  --thinking max \
-  --no-extensions --no-skills --no-prompt-templates --no-themes \
-  --tools <按任务选> \
-  -e /Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts \
-  -e /Users/Admin/Desktop/loop/autoreview.ts \
-  "@<提示词绝对路径>"
+/Users/Admin/Desktop/loop/bin/pi-dev --cwd <你的项目> <提示词绝对路径>
 ```
 
-`--tools` 例如 `read,edit,write,bash`，按任务选择。
+| 选项 | 默认 |
+|---|---|
+| `--model` / `--thinking` | `openai-codex/gpt-6.1-sol` / `max` |
+| `--tools` | `read,edit,write,bash`，按任务选 |
+| `--session <开发会话id>` | 接着用同一个开发会话时精确恢复，不要用 `pi -c`（可能选到评审会话） |
+| `--name` | 会话显示名 |
+| `--dry-run` | 只打印完整命令，不启动 |
+| `-- <参数…>` | 之后的参数原样传给 pi，例如 `-- --autoreview-accept-cmd "node test/e2e.mjs"` |
 
-在本仓库开发时再加 `--autoreview-accept-cmd "node test/e2e.mjs"`，评审完成后自动跑 E2E 实操验收（见下面「验收命令」）。
+在本仓库开发时加 `-- --autoreview-accept-cmd "node test/e2e.mjs"`，评审完成后自动跑 E2E 实操验收（见下面「验收命令」）。脚本默认加载它所在仓库的 `autoreview.ts`；在 Loop 的隔离检出里开发 Loop 自身时，用 `LOOP_DIR=/Users/Admin/Desktop/loop` 指向正在运行的那份，不要让开发中的代码评审自己。
+
+哪些角色加载 Ponytail、路径怎么固定，见 [项目文档/运行与维护.md](项目文档/运行与维护.md)「Ponytail 与 Skill」；路径变了用环境变量 `PONYTAIL_EXTENSION` 指定。流水线由程序生成启动命令，见上面「流水线」。
 
 没有标记不代表已经评审过，可以用 `/review-status` 查。
 完成后也可以手动 `/review`。
-要接着用同一个开发会话，在上述配置中加 `--session <开发会话id>` 精确恢复，不要只用 `pi -c`（可能选到评审会话）。
 
 ## 交付标记
 

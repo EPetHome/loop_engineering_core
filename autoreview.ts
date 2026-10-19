@@ -91,6 +91,24 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   let cleanupWork: Promise<void> | undefined;
   let cleanupRecordPath: string | undefined;
   let latestCtx: ExtensionContext | undefined;
+  /** 本次 Pi 开发会话启动时是否确认没注册 Ponytail；取不到命令时保持 false（无法判断）。 */
+  let ponytailMissing = false;
+
+  /**
+   * 所有扩展的工厂都已加载后（session_start）再读实际注册的命令。
+   * 只提醒、不拦截：读取失败或返回异常当作无法判断，不影响会话。
+   */
+  const checkPonytail = (ctx: ExtensionContext): void => {
+    ponytailMissing = false;
+    let commands: ReturnType<ExtensionAPI["getCommands"]>;
+    try { commands = pi.getCommands(); } catch { return; }
+    if (!Array.isArray(commands)) return;
+    try {
+      ponytailMissing = !commands.some((command) => command?.name === "ponytail");
+    } catch { ponytailMissing = false; return; }
+    if (!ponytailMissing) return;
+    try { ctx.ui.notify("未加载 Ponytail（开发角色要求加载）；本次会话照常继续。", "warning"); } catch { /* 提醒失败不影响会话 */ }
+  };
 
   const live = (life: Lifecycle, signal?: AbortSignal): boolean => life.active && !signal?.aborted;
   const checkLive = (life: Lifecycle, signal?: AbortSignal): void => {
@@ -191,6 +209,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
       criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
       sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
+      ponytailMissing,
       ledger: state.phase === "done" && state.ledger
         ? { path: state.ledger.path, pending: state.ledger.pending, failed: state.ledger.failed } : undefined,
     });
@@ -887,6 +906,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     cleanupWork = undefined; cleanupRecordPath = undefined;
     latestCtx = ctx;
     pipelineLink = stageFromEnv(process.env);
+    checkPonytail(ctx);
     if (inboxTimer) clearInterval(inboxTimer);
     if (contextTimer) clearInterval(contextTimer);
     inboxTimer = undefined;

@@ -33,7 +33,7 @@ async function until(predicate: () => boolean, description: string): Promise<voi
   for (let i = 0; i < 8; i += 1) await nextTurn();
 }
 
-function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string>; stage?: string } = {}) {
+function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string>; stage?: string; commands?: Array<{ name: string; source?: string }> | (() => Array<{ name: string; source?: string }>) } = {}) {
   const root = mkdtempSync(join(tmpdir(), "autoreview-unit-"));
   const repo = join(root, "repo");
   const home = join(root, "home");
@@ -86,6 +86,11 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     getFlag: (name: string) => {
       apiCalls.push("getFlag");
       return options.flags?.[name] ?? (name === "autoreview-reviewer-cmd" ? "/fake-reviewer" : flags.get(name));
+    },
+    getCommands: () => {
+      apiCalls.push("getCommands");
+      const commands = options.commands ?? [{ name: "ponytail", source: "extension" }];
+      return typeof commands === "function" ? commands() : commands;
     },
     appendEntry: (customType: string, data: unknown) => {
       apiCalls.push("appendEntry");
@@ -151,6 +156,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   return {
     root, repo, home, pipelineDir, ledgerFile, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
     setFlag: (name: string, value: string) => { options.flags ??= {}; options.flags[name] = value; },
+    setCommands: (commands: NonNullable<typeof options.commands>) => { options.commands = commands; },
     set externalExec(fn: typeof externalExec) { externalExec = fn; },
     set inject(fn: typeof inject) { inject = fn; },
     set reviewer(fn: typeof reviewer) { reviewer = fn; },
@@ -1785,5 +1791,78 @@ test("G16 交付总表：Pi 完成追加一段（部分验证 + 人工），总�
         assert.match(second.slice(first.length), /^## .+ · .+ · 会话 unit-dev$/m);
       });
     } finally { await h.close(); }
+  });
+});
+
+// ───────────── Ponytail：Pi 开发会话启动检查，只提醒不拦截 ─────────────
+
+test("G17 Ponytail 未加载只在启动与完成总结提醒，不改变完成和部分验证结果", async (t) => {
+  const requirement = "做待办\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜\n3. [人工] 操作：看新首页\n   预期：布局和文案是你想要的";
+  const accEnv = (root: string, extra: Record<string, string> = {}) => ({
+    AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),
+    AUTOREVIEW_CRITERIA_CMD: fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url)),
+    FAKE_STATE_DIR: join(root, "fake"), ...extra,
+  });
+  const withEnv = async <T>(vars: Record<string, string>, body: () => Promise<T>): Promise<T> => {
+    const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try { return await body(); } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  };
+  const run = async (
+    commands: Array<{ name: string; source?: string }> | (() => Array<{ name: string; source?: string }>),
+    options: { acceptance?: boolean; env?: Record<string, string> } = {},
+  ) => {
+    const h = harness({ commands });
+    try {
+      return await withEnv(options.acceptance ? accEnv(h.root, options.env) : {}, async () => {
+        if (options.acceptance) writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start");
+        await h.begin(options.acceptance ? requirement : "改一下文件");
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了");
+        await h.event("agent_settled");
+        await h.terminal();
+        assert.equal(h.state().phase, "done", "Ponytail 检查不能暂停或拦住完成");
+        return {
+          summary: h.summary(), notifications: [...h.notifications],
+          ledger: readFileSync(h.ledgerFile, "utf8"),
+        };
+      });
+    } finally { await h.close(); }
+  };
+  const resultAndPending = (ledger: string): string => ledger.split("\n")
+    .filter((line) => /^- 结果：|^- \[ \]/.test(line)).join("\n");
+
+  await t.test("A1 注册了 ponytail：终端和总结都不出现提醒", async () => {
+    const runResult = await run([{ name: "ponytail", source: "extension" }]);
+    assert.ok(!runResult.notifications.some((text) => text.includes("未加载 Ponytail")));
+    assert.doesNotMatch(runResult.summary, /未加载 Ponytail/);
+  });
+
+  await t.test("A2 没注册 ponytail：启动提示一次，照常完成，总结开头写一行", async () => {
+    const runResult = await run([]);
+    const notices = runResult.notifications.filter((text) => text.includes("未加载 Ponytail"));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /^未加载 Ponytail（开发角色要求加载）/);
+    assert.match(runResult.summary, /^# 自动评审总结\n未加载 Ponytail（开发角色要求加载）\n/m);
+  });
+
+  await t.test("A3 部分验证：提醒不改变结果和欠项", async () => {
+    const loaded = await run([{ name: "ponytail", source: "extension" }], { acceptance: true, env: { FAKE_ACC_UNKNOWN: "A1" } });
+    const missing = await run([], { acceptance: true, env: { FAKE_ACC_UNKNOWN: "A1" } });
+    assert.doesNotMatch(loaded.summary, /未加载 Ponytail/);
+    assert.match(missing.summary, /^# 自动评审总结\n未加载 Ponytail（开发角色要求加载）\n/m);
+    assert.equal(resultAndPending(missing.ledger), resultAndPending(loaded.ledger));
+    assert.match(missing.ledger, /^- 结果：完成（部分验证）；评审 1 次，返修 0 次$/m);
+    assert.match(missing.ledger, /^- \[ \] A1 部分验证：标准写得含糊，没法判断$/m);
+    assert.match(missing.ledger, /^- \[ \] A3 人工$/m);
+  });
+
+  await t.test("A4 读取命令抛错：无法判断，不提示也不写总结", async () => {
+    const runResult = await run(() => { throw new Error("getCommands 故意失败"); });
+    assert.ok(!runResult.notifications.some((text) => text.includes("未加载 Ponytail")));
+    assert.doesNotMatch(runResult.summary, /未加载 Ponytail/);
   });
 });

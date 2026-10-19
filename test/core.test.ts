@@ -249,6 +249,18 @@ test("T10 总结渲染：完成 / 暂停（达到上限）/ 暂停（评审失�
   assert.ok(failed.includes("第 2 次评审退出码 1"));
 });
 
+test("T10b Ponytail 未加载只在完成总结开头提醒一次，不改变其余内容", () => {
+  const ledger = { path: "/tmp/交付记录.md", pending: [{ id: "A1", kind: "部分验证" as const }] };
+  const missing = renderSummary(summaryInput({ status: "完成", ponytailMissing: true, ledger }));
+  assert.match(missing, /^# 自动评审总结\n未加载 Ponytail（开发角色要求加载）\n- 已登记到交付总表：/);
+  assert.match(missing, /^- 已登记到交付总表：\/tmp\/交付记录\.md；待回写原单（A1 部分验证）$/m);
+
+  const loaded = renderSummary(summaryInput({ status: "完成", ledger }));
+  assert.equal(missing.replace("未加载 Ponytail（开发角色要求加载）\n", ""), loaded);
+  assert.doesNotMatch(renderSummary(summaryInput({ status: "进行中", ponytailMissing: true })), /未加载 Ponytail/);
+  assert.doesNotMatch(renderSummary(summaryInput({ status: "暂停", pauseReason: "等你决定", ponytailMissing: true })), /未加载 Ponytail/);
+});
+
 test("T11 开发约定：标记可选、改动也会自动评审", () => {
   assert.ok(CONVENTION.includes("【自动评审约定】"));
   assert.ok(CONVENTION.includes("交付时最后一行写【交付完成】，评审会立即开始；不写的话，程序检测到改动也会自动评审。"));
