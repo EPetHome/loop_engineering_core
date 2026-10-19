@@ -143,6 +143,8 @@ export interface SummaryInput {
   sourceChanges?: { path: string; at: string }[];
   /** 拿不到文件列表时的说明（如「来源有变化（第 3 版）」）。 */
   sourceChangeNote?: string;
+  /** 本次完成已登记的交付总表；只在状态为完成时写进总结开头。 */
+  ledger?: { path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
 }
 
 export interface ReviewInputOptions {
@@ -351,6 +353,14 @@ export function renderSummary(input: SummaryInput): string {
   const lines: string[] = [];
   const status = input.status === "暂停" ? `暂停（${input.pauseReason ?? "未知原因"}）` : input.status;
   lines.push("# 自动评审总结");
+  if (input.status === "完成" && input.ledger) {
+    if (input.ledger.failed) lines.push(`- 交付总表写入失败：${input.ledger.path}（会话照常完成）`);
+    else {
+      const pending = input.ledger.pending.length > 0
+        ? `（${input.ledger.pending.map((item) => `${item.id} ${item.kind}`).join("、")}）` : "";
+      lines.push(`- 已登记到交付总表：${input.ledger.path}；待回写原单${pending}`);
+    }
+  }
   lines.push(`- 项目：${input.cwd}`);
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);

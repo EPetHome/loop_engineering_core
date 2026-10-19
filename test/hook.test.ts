@@ -10,6 +10,7 @@ import test from "node:test";
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import { CONVENTION, conventionText } from "../core.ts";
 import { childExec, detectHost, findProjectRoot, lastAssistantFromTranscript, loadConfig } from "../hosts/hook.ts";
+import { projectRootOf, renderLedgerRecord } from "../ledger.ts";
 
 const HOOK = fileURLToPath(new URL("../hosts/hook.ts", import.meta.url));
 const FAKE = fileURLToPath(new URL("./fake-reviewer.mjs", import.meta.url));
@@ -32,6 +33,8 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
   const home = join(root, "home");
   const bin = join(root, "bin");
   const osLog = join(root, "osascript.log");
+  // 交付总表在夹具 HOME 下，不碰真实的 ~/.pi-autoreview/交付记录.md。
+  const ledger = join(home, ".pi-autoreview", "交付记录.md");
   mkdirSync(repo); mkdirSync(home); mkdirSync(bin);
   const osa = join(bin, "osascript");
   writeFileSync(osa, `#!/bin/sh\necho "$@" >> "${osLog}"\n`);
@@ -92,7 +95,7 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
   const delivered = (extra: Record<string, unknown> = {}) =>
     event("Stop", { last_assistant_message: "已完成\n【交付完成】", ...extra });
   return {
-    root, repo, home, write, git, run, event, delivered, statePath, readState, summary, notifications,
+    root, repo, home, ledger, write, git, run, event, delivered, statePath, readState, summary, notifications,
     close: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -1232,5 +1235,103 @@ test("来源、配置或 Git 不可用也不能吞掉正在验收时的撤权", 
       if(child?.exitCode===null){child.kill('SIGKILL');const {reapProcs}=await import('../procs.ts');reapProcs(h.statePath().replace(/\.state\.json$/,'.procs.json'),{ownerPid:child.pid});}
       h.close();
     }
+  });
+});
+
+// ───────────── 交付总表：完成写入、SessionStart 提醒、不可写只提示 ─────────────
+
+test("H18 交付总表：Hook 完成追加一段，SessionStart 按项目提醒回写，旧段勾掉后不再提醒", async (t) => {
+  const marker = JSON.stringify({ acceptance: {} });
+  const requirement = "自动评审总表\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜\n3. [人工] 操作：看新首页\n   预期：布局和文案是你想要的";
+  const segment = (session: string, checked: boolean, project: string): string => renderLedgerRecord({
+    project, session, task: "旧任务", result: "完成；评审 1 次，返修 0 次", summary: "/old.md", pending: [],
+  }).replace(checked ? "- [ ] 已回写原单" : "- [x] 已回写原单", checked ? "- [x] 已回写原单" : "- [ ] 已回写原单");
+
+  await t.test("完成写入总表，总结开头带总表路径；提醒只看本项目且同一会话只注入一次", () => {
+    const h = fixture({ marker });
+    try {
+      h.run(h.event("SessionStart"), { env: ACC_ENV });
+      assert.ok(!existsSync(h.ledger), "会话开始还没写总表");
+      // A2：完成时写入。
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+      h.write("file.txt", "base\nTODO\n");
+      const done = JSON.parse(h.run(h.delivered(), { env: { ...ACC_ENV, FAKE_ACC_UNKNOWN: "A1" } }).stdout);
+      assert.equal(h.readState().phase, "done", `pauseReason=${h.readState().pauseReason}`);
+      const text = readFileSync(h.ledger, "utf8");
+      assert.match(text, new RegExp(`^## .+ · ${projectRootOf(h.repo)} · 会话 claude-s1$`, "m"));
+      assert.match(text, /^- 任务：自动评审总表$/m);
+      assert.match(text, /^- 结果：完成（部分验证）；评审 1 次，返修 0 次$/m);
+      assert.match(text, /^- 总结：.*\/claude-s1\.md$/m);
+      assert.match(text, /^- \[ \] 已回写原单$/m);
+      assert.match(text, /^- \[ \] A1 部分验证：标准写得含糊，没法判断$/m);
+      assert.match(text, /^- \[ \] A3 人工$/m);
+      const summary = h.summary();
+      assert.match(summary, /^# 自动评审总结\n- 已登记到交付总表：.*；待回写原单（A1 部分验证、A3 人工）$/m);
+      assert.ok(done.systemMessage.includes("A1 没能自动验证"), "人工项照常提示");
+
+      // A4：本项目有未勾段 → 注入提醒。
+      const first = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
+      assert.match(first.hookSpecificOutput.additionalContext, /交付总表里本项目有 1 段待回写原单：.*。按 \.autoreview\/CONVENTIONS\.md「收尾回写」处理。/);
+      assert.ok(first.hookSpecificOutput.additionalContext.includes(h.ledger), "提醒写明总表路径");
+      assert.match(first.systemMessage, /交付总表里本项目有 1 段待回写原单/);
+      // 同一会话只注入一次。
+      const again = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
+      assert.doesNotMatch(again.hookSpecificOutput.additionalContext, /待回写原单/, "同一会话只提醒一次");
+      assert.equal(again.systemMessage, undefined);
+
+      // 另一个项目没有待回写段 → 不注入任何提醒。
+      const other = join(h.root, "other");
+      mkdirSync(other, { recursive: true });
+      writeFileSync(join(other, ".autoreview.json"), marker);
+      writeFileSync(join(other, "file.txt"), "x\n");
+      const gitEnv = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+      spawnSync("git", ["init", "-q"], { cwd: other, env: gitEnv });
+      spawnSync("git", ["add", "file.txt"], { cwd: other, env: gitEnv });
+      spawnSync("git", ["-c", "user.email=e@e", "-c", "user.name=e", "commit", "-qm", "b"], { cwd: other, env: gitEnv });
+      const clean = JSON.parse(h.run(h.event("SessionStart", { cwd: other }, "other-session"), { env: ACC_ENV, cwd: other }).stdout);
+      assert.doesNotMatch(clean.hookSpecificOutput.additionalContext, /待回写原单/, "别的项目不提醒");
+      assert.doesNotMatch(String(clean.systemMessage ?? ""), /待回写原单/);
+
+      // A5：同一会话的最后一段已勾 → 不再提醒。
+      writeFileSync(h.ledger, `${segment("claude-s1", false, projectRootOf(h.repo))}${segment("claude-s1", true, projectRootOf(h.repo))}`);
+      const closed = JSON.parse(h.run(h.event("SessionStart", {}, "s2"), { env: ACC_ENV }).stdout);
+      assert.doesNotMatch(closed.hookSpecificOutput.additionalContext, /待回写原单/, "最后一段已勾不再提醒");
+      assert.doesNotMatch(String(closed.systemMessage ?? ""), /待回写原单/);
+    } finally { h.close(); }
+  });
+
+  await t.test("A3 总表不可写：只提示，会话照常完成，不暂停", () => {
+    const h = fixture({ marker });
+    try {
+      // 总表位置被一个目录占着：写入必然失败。
+      const blocked = join(h.home, ".pi-autoreview", "交付记录.md");
+      mkdirSync(blocked, { recursive: true });
+      h.run(h.event("SessionStart"), { env: ACC_ENV });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+      h.write("file.txt", "base\nTODO\n");
+      const res = h.run(h.delivered(), { env: ACC_ENV });
+      assert.equal(h.readState().phase, "done", "写入失败不能暂停");
+      assert.match(h.notifications(), /交付总表写入失败：.*会话照常完成/);
+      assert.match(res.stderr, /交付总表写入失败/);
+      assert.equal(h.readState().ledger.path, blocked, "总结仍写明该往哪查");
+      assert.match(h.summary(), /^- 交付总表写入失败：.*交付记录\.md（会话照常完成）$/m);
+    } finally { h.close(); }
+  });
+
+  await t.test("读取失败或格式异常：SessionStart 跳过提醒，不报错、不拦截", () => {
+    const h = fixture({ marker });
+    try {
+      const blocked = join(h.home, ".pi-autoreview", "交付记录.md");
+      mkdirSync(blocked, { recursive: true });
+      const res = h.run(h.event("SessionStart"), { env: ACC_ENV });
+      assert.equal(res.code, 0);
+      assert.equal(JSON.parse(res.stdout).hookSpecificOutput.hookEventName, "SessionStart");
+      // 总表被目录占着（读取失败）→ 跳过；格式异常也不报错。
+      const weirdFile = join(h.root, "weird.md");
+      writeFileSync(weirdFile, "\0\u0001 乱码 ## \n");
+      const weird = h.run(h.event("SessionStart"), { env: ACC_ENV });
+      assert.equal(weird.code, 0);
+      assert.doesNotMatch(JSON.parse(weird.stdout).hookSpecificOutput.additionalContext, /待回写原单/);
+    } finally { h.close(); }
   });
 });

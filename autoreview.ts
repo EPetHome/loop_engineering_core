@@ -23,6 +23,7 @@ import { reapProcs } from "./procs.ts";
 import { classifyFailure, failureLabel } from "./failure.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
 import { createChildExec, expandFileRefs } from "./hosts/hook.ts";
+import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
 import { isRegisteredSource, loadContext, recordProjectOutcome, recordSourceChange, refreshContext, type ContextConfig, type ContextResult } from "./project-context.ts";
 import {
@@ -37,7 +38,8 @@ interface ReviewTask { lifecycle: Lifecycle; controller: AbortController; finish
  * pi 扩展独有的状态，挂在评审状态上一起存：验收命令记录（与自动验收无关）；
  * 流水线收件箱已收下的序号、正在等开发方处理的那一条。
  */
-type PiState = ReviewState & { needsInputReview?: boolean; readyEpoch?: string; pendingAcceptanceCandidate?: string; pendingAcceptanceInputs?: string; acceptRun?: AcceptRunRecord; inboxHandled?: number; awaitingInbox?: number };
+type LedgerState = { session: string; path: string; pending: PendingItem[]; failed?: boolean };
+type PiState = ReviewState & { needsInputReview?: boolean; readyEpoch?: string; pendingAcceptanceCandidate?: string; pendingAcceptanceInputs?: string; acceptRun?: AcceptRunRecord; inboxHandled?: number; awaitingInbox?: number; ledger?: LedgerState };
 
 const DEFAULT_ACCEPT_TIMEOUT_MIN = 120;
 /** 总结里保留的验收命令输出行数；完整输出写日志文件。 */
@@ -189,6 +191,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
       criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
       sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
+      ledger: state.phase === "done" && state.ledger
+        ? { path: state.ledger.path, pending: state.ledger.pending, failed: state.ledger.failed } : undefined,
     });
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
@@ -311,6 +315,34 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     return recordProjectOutcome(config, ctx.sessionManager.getSessionId(), state.phase, summaryPath(ctx));
   };
 
+  /**
+   * 完成时往交付总表追加一段。同一会话已有本完成态对应的段时不重复写；
+   * 写入失败只提示，不让会话暂停或影响完成状态。
+   */
+  const recordLedger = async (ctx: ExtensionContext, life: Lifecycle): Promise<void> => {
+    const session = ctx.sessionManager.getSessionId();
+    if (state.ledger?.session === session) return;
+    // 只认本轮（最后一段）的验收结果，避免配置去掉后把旧记录当成当前欠项。
+    const acceptance = state.rounds[state.rounds.length - 1]?.acceptance;
+    const pending = pendingItems(acceptance);
+    const record = {
+      project: projectRootOf(ctx.cwd), session, task: taskTitle(state.requirement),
+      result: resultLine(acceptance, state.rounds.length, state.repairs),
+      summary: summaryPath(ctx), pending,
+    };
+    let problem: string | undefined;
+    try {
+      state.ledger = { session, path: appendLedgerRecord(record), pending };
+    } catch (error) {
+      problem = `交付总表写入失败：${errorText(error)}`;
+      // 写入失败也在总结里写明该往哪查，但不冒充已登记。
+      state.ledger = { session, path: deliveryLedgerPath(), pending, failed: true };
+    }
+    try { saveState(life); } catch (error) { problem = problem ?? `状态保存失败：${errorText(error)}`; }
+    if (!live(life)) return;
+    if (problem) await notifyUser(ctx, `${basename(ctx.cwd)}：${problem}；会话照常完成`, "warning", life, undefined, `总表：${deliveryLedgerPath()}`);
+  };
+
   /** 所有完成发布入口共用：恢复也不能把旧记录当成当前候选的资格。 */
   const completionProblem = async (ctx: ExtensionContext, life: Lifecycle, signal?: AbortSignal, requireCommandResult = true): Promise<string | undefined> => {
     if (!state.pendingAcceptanceCandidate || !state.pendingAcceptanceInputs || !state.readyEpoch) return "完成记录缺少候选或输入依据，需要重新评审";
@@ -358,6 +390,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     previous?.controller.abort();
     state.pendingAcceptanceCandidate = undefined; state.pendingAcceptanceInputs = undefined; state.acceptRun = undefined; state.readyEpoch = undefined;
     state.needsInputReview = true; state.awaitingRepair = false;
+    // 完成资格已撤销：下一次完成要新登记一段，不能沿用旧的总表路径。
+    state.ledger = undefined;
     state.phase = "idle"; state.pauseReason = undefined; state.pauseHint = undefined;
     try {
       if (!reportStage(ctx, "started")) throw new Error("无法保存输入失效状态，旧接力标记已尝试移除，请检查存储");
@@ -399,13 +433,17 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         state.pauseReason = undefined;
         state.pauseHint = undefined;
         saveState(life);
-        await writeSummary(ctx, "完成", life, undefined, undefined, undefined, undefined, signal);
-        // 写总结是异步的：发布前再核对一次来源，缺失就不写交付、不发 done。
+        // 落盘后先写一次「进行中」：这段取证窗口里来源被删能在写交付和总表前被看见。
+        await writeSummary(ctx, "进行中", life, undefined, undefined, undefined, undefined, signal);
+        // 发布前再核对一次来源，缺失就不写交付、不发 done。
         const sourceProblem = recordOutcome(ctx, life);
         if (sourceProblem) {
           await pause(ctx, sourceProblem, life, undefined, undefined, undefined, signal, "补齐 context.sources 登记的文件后再继续接力。");
           return;
         }
+        await recordLedger(ctx, life);
+        // 状态和总表都落盘后再发布完成总结；外部只看总结判断终态，不能抢跑。
+        await writeSummary(ctx, "完成", life, undefined, undefined, undefined, undefined, signal);
         reportStage(ctx, "done");
       } else if (record.failureKind === "product" && state.repairs < currentConfig(ctx).maxRepairs) {
         state.pendingAcceptanceCandidate = undefined;
@@ -557,6 +595,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       if (acceptMode() === "required") state.readyEpoch = randomUUID();
       state.acceptRun = newAcceptRun("command");
       if (state.acceptRun.mode === "required") {
+        // 再次完成的验收要重新登记一段，不能沿用上一次的完成态。
+        state.ledger = undefined;
         state.phase = "accepting";
         saveState(life);
         reportStage(ctx, "started");
@@ -592,7 +632,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         writeFileSync(path, text);
         return path;
       },
-      writeSummary: (status) => writeSummary(ctx, status === "完成" && acceptCommand() && acceptMode() === "required" ? "进行中" : status, life, undefined, undefined, undefined, undefined, signal),
+      // 完成总结等状态和总表落盘后再写，避免外部把“总结已出现”当成终态抢先结束会话。
+      writeSummary: (status) => writeSummary(ctx, status === "完成" ? "进行中" : status, life, undefined, undefined, undefined, undefined, signal),
       saveState: () => saveState(life),
       signal,
       acceptanceDir: join(dataDir(ctx), "acceptance", ctx.sessionManager.getSessionId()),
@@ -608,6 +649,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       state.readyEpoch = randomUUID();
       state.pendingAcceptanceCandidate = state.lastFingerprint;
       state.pendingAcceptanceInputs = acceptanceInputs(ctx, usedConfig);
+      // 新一轮评审意味着要重新登记完成结果。
+      state.ledger = undefined;
       const acceptRun = acceptCommand() ? newAcceptRun("auto") : undefined;
       state.acceptRun = acceptRun;
       state.phase = acceptRun?.mode === "required" ? "accepting" : "done";
@@ -623,6 +666,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           await pause(ctx, sourceProblem, life, undefined, undefined, undefined, signal, "补齐 context.sources 登记的文件后再继续接力。");
           return;
         }
+        await recordLedger(ctx, life);
+        await writeSummary(ctx, "完成", life, undefined, undefined, undefined, undefined, signal);
       }
       reportStage(ctx, state.phase === "done" ? "done" : "started");
       await notifyUser(
@@ -669,6 +714,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       state.pendingAcceptanceCandidate = undefined; state.readyEpoch = undefined;
       state.awaitingRepair = false;
       state.acceptRun = undefined; state.phase = "idle"; state.pauseReason = undefined; state.pauseHint = undefined;
+      state.ledger = undefined;
       state.inboxHandled = inbox.seq;
       state.awaitingInbox = inbox.seq;
       saveState(life);
@@ -904,6 +950,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           // 总结处理结束后、发布 done 前再核对一次：这段异步窗口里来源可能被删。
           const finalProblem = checkPublishSources(ctx, life).problem;
           if (finalProblem) await pause(ctx, `恢复完成依据失效：${finalProblem}`, life, undefined, undefined, undefined, undefined, "补齐 context.sources 登记的文件后再继续接力。");
+          else {
+            // 本进程没登记过这个完成态（重启、进程异常退出后的恢复）：核对通过后补写一段。
+            if (!state.ledger || state.ledger.session !== ctx.sessionManager.getSessionId()) await recordLedger(ctx, life);
+            // 状态与总表都确认后再发布完成总结。
+            await writeSummary(ctx, "完成", life);
+          }
         }
       }
       // 流水线里的段：报一次当前状态（重开的会话如果已经完成或暂停，就照实报；e2e 返修还没处理完时只报 started，

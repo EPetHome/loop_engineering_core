@@ -21,6 +21,7 @@ import {
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
+import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { reapProcs, registerProc, releaseProc } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
@@ -49,7 +50,13 @@ export interface HookEvent {
   [key: string]: unknown;
 }
 
-export interface HookState extends ReviewState { userInputVersion?: string; resumeAfterInputChange?: boolean }
+export interface HookState extends ReviewState {
+  userInputVersion?: string; resumeAfterInputChange?: boolean;
+  /** 本进程最近一次往交付总表写的段：同一完成态不重复追加，总结里的总表路径与它一致。 */
+  ledger?: { session: string; path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
+  /** 本会话已经注入过待回写提醒（同一会话只注入一次）。 */
+  ledgerNoticed?: boolean;
+}
 
 export interface HookPaths {
   dir: string;
@@ -455,9 +462,40 @@ async function writeSummary(
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
     unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
     sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
+    ledger: state.phase === "done" && state.ledger
+      ? { path: state.ledger.path, pending: state.ledger.pending, failed: state.ledger.failed } : undefined,
   });
   mkdirSync(dirname(ctx.paths.summary), { recursive: true });
   writeFileSync(ctx.paths.summary, text);
+}
+
+/**
+ * 完成时往交付总表追加一段：同一会话本完成态已登记过就不重复写；
+ * 失败只提示，不暂停、不影响完成状态。
+ */
+async function recordLedger(ctx: HookContext, state: HookState): Promise<string | undefined> {
+  const session = `${ctx.host}-${ctx.sessionId}`;
+  if (state.ledger?.session === session) return undefined;
+  // 只认本轮（最后一段）的验收结果，避免配置去掉后把旧记录当成当前欠项。
+  const record = state.rounds[state.rounds.length - 1]?.acceptance;
+  const pending = pendingItems(record);
+  let problem: string | undefined;
+  try {
+    const path = appendLedgerRecord({
+      project: projectRootOf(ctx.workDir), session, task: taskTitle(state.requirement),
+      result: resultLine(record, state.rounds.length, state.repairs), summary: ctx.paths.summary, pending,
+    });
+    state.ledger = { session, path, pending };
+  } catch (error) {
+    problem = `交付总表写入失败：${errorText(error)}`;
+    // 写入失败也在总结里写明该往哪查，但不冒充已登记。
+    state.ledger = { session, path: deliveryLedgerPath(), pending, failed: true };
+  }
+  if (problem) {
+    process.stderr.write(`[autoreview] ${problem}；会话照常完成\n`);
+    await notify(`${basename(ctx.workDir)}：${problem}；会话照常完成`, ctx.exec);
+  }
+  return problem;
 }
 
 /** 暂停：存状态、写总结、尽力通知；每一步失败都不阻断下一步。hint 是给你的下一步。 */
@@ -510,8 +548,24 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
       if (ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
     }
   }
+  // 本项目有未回写的段才追加一句；读取失败、格式不认识或超时就跳过，不报错、不拦截。
+  // 提醒同时进 additionalContext（协调方 AI 要看到）和 systemMessage（人能看到；Codex 只有通知）。
+  const reminder = state.ledgerNoticed ? undefined : ledgerReminder(ctx);
+  if (reminder) {
+    state.ledgerNoticed = true;
+    notice = notice ? `${notice}\n${reminder}` : reminder;
+    if (ctx.host !== "claude") await notify(reminder, ctx.exec, 3000);
+  }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput(ctx, "SessionStart", conventionFor(ctx.config), notice);
+  return contextOutput(ctx, "SessionStart", reminder ? `${conventionFor(ctx.config)}\n${reminder}` : conventionFor(ctx.config), notice);
+}
+
+/** SessionStart 的待回写提醒：只看本项目，失败一律当作没有提醒。 */
+function ledgerReminder(ctx: HookContext): string | undefined {
+  try {
+    const text = readLedgerForReminder();
+    return text === undefined ? undefined : writebackReminder(text, projectRootOf(ctx.workDir));
+  } catch { return undefined; }
 }
 
 /**
@@ -724,6 +778,8 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   try {
     // 上一轮已完成后再次交付：按 pi 规则开新一轮，返修计数清零。
     if (state.phase === "done" && !state.resumeAfterInputChange) state.repairs = 0;
+    // 同一会话返修后再次完成：新的一段重新登记，旧段仍按自己的勾选处理。
+    state.ledger = undefined;
     state.resumeAfterInputChange = false;
     state.phase = "reviewing";
     state.pauseReason = undefined;
@@ -741,7 +797,8 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
         writeFileSync(file, content);
         return file;
       },
-      writeSummary: (status) => writeSummary(ctx, state, status),
+      // 完成总结等状态和总表落盘后再写，避免外部把“总结已出现”当成终态抢先结束会话。
+      writeSummary: (status) => writeSummary(ctx, state, status === "完成" ? "进行中" : status),
       saveState: () => saveStateFile(ctx.paths.state, state),
       acceptanceDir: join(ctx.paths.dir, "acceptance", basename(ctx.paths.state, ".state.json")),
       procsFile: ctx.paths.procs,
@@ -757,9 +814,14 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
         await pause(ctx, state, sourceProblem, undefined, undefined, "补齐 context.sources 登记的文件后再接力。");
         return userOutput(ctx, sourceProblem);
       }
-      state.phase = "done";
+  state.phase = "done";
       state.awaitingRepair = false;
-      saveStateFile(ctx.paths.state, state);
+      await recordLedger(ctx, state);
+      try { saveStateFile(ctx.paths.state, state); } catch (error) {
+        process.stderr.write(`autoreview hook: 状态保存失败：${errorText(error)}\n`);
+      }
+      // 状态和总表都落盘后再发布完成总结。
+      await writeSummary(ctx, state, "完成");
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
       await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
       checkUserInputs();

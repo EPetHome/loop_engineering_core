@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import autoreview from "../autoreview.ts";
 import { CONVENTION, conventionText } from "../core.ts";
+import { projectRootOf } from "../ledger.ts";
 import { contextDir, loadContext } from "../project-context.ts";
 
 type Result = { stdout: string; stderr: string; code: number; killed: boolean };
@@ -40,6 +41,8 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   mkdirSync(repo); mkdirSync(home);
   const oldHome = process.env.HOME;
   process.env.HOME = home;
+  // 交付总表在 HOME 下；HOME 已固定到夹具目录，测试不会碰真实的 ~/.pi-autoreview/交付记录.md。
+  const ledgerFile = join(home, ".pi-autoreview", "交付记录.md");
   // 流水线环境变量：只有指定了段名才设置，测完恢复。
   const pipelineEnv = ["AUTOREVIEW_PIPELINE_DIR", "AUTOREVIEW_STAGE", "AUTOREVIEW_PIPELINE_POLL_MS"] as const;
   const oldPipelineEnv = pipelineEnv.map((key) => process.env[key]);
@@ -146,7 +149,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   const terminal = async () => until(() => ["done", "paused"].includes(state()?.phase), "完成或暂停");
   const accepted = async () => until(() => Boolean(state()?.acceptRun && state().acceptRun!.result !== "进行中"), "验收命令结束");
   return {
-    root, repo, home, pipelineDir, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
+    root, repo, home, pipelineDir, ledgerFile, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
     setFlag: (name: string, value: string) => { options.flags ??= {}; options.flags[name] = value; },
     set externalExec(fn: typeof externalExec) { externalExec = fn; },
     set inject(fn: typeof inject) { inject = fn; },
@@ -1701,6 +1704,86 @@ test('来源巡检：内容变化保持完成并补记，缺失与配置移除�
       assert.match(after.pauseReason!, /上游来源/);
       assert.equal(stageStatus(h, '甲')?.event, 'paused');
       assert.doesNotMatch(h.summary(), /^- 状态：完成$/m);
+    } finally { await h.close(); }
+  });
+});
+
+// ───────────── 交付总表：Pi 完成写入、总结带路径、不可写只提示 ─────────────
+
+test("G16 交付总表：Pi 完成追加一段（部分验证 + 人工），总结开头带路径；不可写只提示", async (t) => {
+  const accEnv = (root: string, extra: Record<string, string> = {}) => ({
+    AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),
+    AUTOREVIEW_CRITERIA_CMD: fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url)),
+    FAKE_STATE_DIR: join(root, "fake"), ...extra,
+  });
+  const withEnv = async (vars: Record<string, string>, body: () => Promise<void>) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try { await body(); } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  };
+  const requirement = "做待办\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜\n3. [人工] 操作：看新首页\n   预期：布局和文案是你想要的";
+
+  await t.test("完成写入：项目、任务、结果、总结、已回写、两条欠项；总结开头写明路径", async () => {
+    const h = harness();
+    try {
+      await withEnv(accEnv(h.root, { FAKE_ACC_UNKNOWN: "A1" }), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start"); await h.begin(requirement);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "done");
+        const text = readFileSync(h.ledgerFile, "utf8");
+        assert.match(text, new RegExp(`^## .+ · ${projectRootOf(h.repo)} · 会话 unit-dev$`, "m"));
+        assert.match(text, /^- 任务：做待办$/m);
+        assert.match(text, /^- 结果：完成（部分验证）；评审 1 次，返修 0 次$/m);
+        assert.match(text, /^- 总结：.*\/unit-dev\.md$/m);
+        assert.match(text, /^- \[ \] 已回写原单$/m);
+        assert.match(text, /^- \[ \] A1 部分验证：标准写得含糊，没法判断$/m);
+        assert.match(text, /^- \[ \] A3 人工$/m);
+        assert.match(h.summary(), /^# 自动评审总结\n- 已登记到交付总表：.*；待回写原单（A1 部分验证、A3 人工）$/m);
+      });
+    } finally { await h.close(); }
+  });
+
+  await t.test("总表不可写：只提示，会话照常完成，不暂停", async () => {
+    const h = harness();
+    try {
+      // 总表位置被一个目录占着：写入必然失败。
+      const blocked = join(h.home, ".pi-autoreview", "交付记录.md");
+      mkdirSync(blocked, { recursive: true });
+      await withEnv(accEnv(h.root, { FAKE_ACC_UNKNOWN: "A1" }), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start"); await h.begin(requirement);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "done", "写入失败不能暂停");
+        assert.ok(h.notifications.some((text) => text.includes("交付总表写入失败") && text.includes("会话照常完成")));
+        assert.match(h.summary(), /^- 交付总表写入失败：.*交付记录\.md（会话照常完成）$/m);
+      });
+    } finally { await h.close(); }
+  });
+
+  await t.test("同一会话返修后再次完成：追加新段，旧段仍按自己的勾选算", async () => {
+    const h = harness();
+    try {
+      await withEnv(accEnv(h.root), async () => {
+        writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
+        await h.event("session_start"); await h.begin(requirement);
+        h.write("file.txt", "base\nTODO\n");
+        h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "done");
+        const first = readFileSync(h.ledgerFile, "utf8");
+        // 再改一次并显式 /review：完成态重新评审，完成时追加新段。
+        h.write("file.txt", "base\nTODO 2\n");
+        h.reviewer = () => result(PASS);
+        await h.command(); await h.terminal();
+        const second = readFileSync(h.ledgerFile, "utf8");
+        assert.ok(second.startsWith(first), "只追加不覆盖");
+        assert.equal((second.match(/^## /gm) ?? []).length, 2);
+        assert.match(second.slice(first.length), /^## .+ · .+ · 会话 unit-dev$/m);
+      });
     } finally { await h.close(); }
   });
 });
