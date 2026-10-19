@@ -519,7 +519,7 @@ test('整合验收期间更换资格使结果失效；同资格恢复重发可�
   });
 });
 
-test('消费旧 done 时核对真实来源文件，恢复与收尾均不依赖段巡检', async (t) => {
+test('消费旧 done 时核对真实来源文件，内容变化不失效，缺失仍中止；恢复与收尾均不依赖段巡检', async (t) => {
   const { loadContext, refreshContext } = await import('../project-context.ts');
   const oldRoot = process.env.AUTOREVIEW_PROJECTS_ROOT;
   for (const change of ['same', 'before', 'cleanup']) await t.test(change, async () => {
@@ -538,8 +538,8 @@ test('消费旧 done 时核对真实来源文件，恢复与收尾均不依赖�
         writeFileSync(join(s.root, 'cleanup.cjs'), `require('fs').unlinkSync(${JSON.stringify(source)}); require('fs').writeFileSync(process.env.AUTOREVIEW_RUN_DIR+'/released','yes');`);
         s.plan.e2e!.acceptance.cleanup = 'node cleanup.cjs';
       }
-      assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), change === 'same' ? 0 : 2, s.notes.join('\n'));
-      if (change === 'before') assert.equal(accCalls(s), 0);
+      assert.equal(await runPipeline(s.plan, io(s), { fromE2e: true }), change === 'cleanup' ? 2 : 0, s.notes.join('\n'));
+      if (change === 'before') assert.ok(accCalls(s) > 0, '内容变化不再判段失效，e2e 照常执行');
       if (change === 'cleanup') assert.equal(readFileSync(join(s.plan.dir, 'e2e', 'r1', 'released'), 'utf8'), 'yes');
       assert.equal(JSON.parse(readFileSync(status, 'utf8')).event, 'done', '测试未模拟改写段资格，程序直接核对来源');
     } finally { s.close(); }

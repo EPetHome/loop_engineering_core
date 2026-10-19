@@ -139,6 +139,10 @@ export interface SummaryInput {
   acceptRun?: AcceptRunRecord;
   /** 开发基线之后开发方新增的提交数（只记录，不评判）。 */
   newCommits?: number;
+  /** 开发期间发现变化的来源文件与时间。 */
+  sourceChanges?: { path: string; at: string }[];
+  /** 拿不到文件列表时的说明（如「来源有变化（第 3 版）」）。 */
+  sourceChangeNote?: string;
 }
 
 export interface ReviewInputOptions {
@@ -357,6 +361,12 @@ export function renderSummary(input: SummaryInput): string {
   }
   if (input.newCommits) lines.push(`- 开发方新增提交：${input.newCommits} 个（基线之后，只记录不评判）`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
+  const sourceChanges = input.sourceChanges ?? [];
+  if (sourceChanges.length > 0 || input.sourceChangeNote) {
+    lines.push("## 开发期间来源变化");
+    if (sourceChanges.length > 0) lines.push(...sourceChanges.map((change) => `- ${change.path}（${change.at}）`));
+    else lines.push(input.sourceChangeNote!);
+  }
   if (input.todos && input.todos.length > 0) {
     lines.push("## 需要你做的事");
     lines.push(...input.todos.map((todo, index) => `${index + 1}. ${todo}`));

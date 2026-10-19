@@ -15,7 +15,7 @@ export const ACCEPTANCE_CONVENTION = [
   "- 用户消息里的「同意授权：…」「不授权：…」是给程序的：你不用处理，回一句收到，最后一行写【交付完成】。",
   "- 开发时不要补写或修改验收标准，标准只认用户发来的。",
   "- 交付说明里写清新功能怎么用（命令、地址、参数），验收方按它操作。",
-  "- 收到「自动验收」消息后，逐条写「A2：已修」或「A2：异议：理由」；异议交用户决定。",
+  "- 收到「自动验收」消息后，逐条写「A2：已修」。认为标准本身（预期、范围或授权）不对，写「A2：异议：理由」，交用户决定；认可标准但质疑验收方法、环境或失败归因，写「A2：方法存疑：理由」，程序照常验收，理由随该条交给验收方并写进总结。",
 ].join("\n");
 /** 起草时最多保留的条数；用户自己写的不截断，只在总结里提示。 */
 export const MAX_CRITERIA = 10;
@@ -198,6 +198,8 @@ export interface AcceptanceRecord {
   /** 收尾时清理端口上残留进程的记录。 */
   cleanup?: string[];
   failureKind?: import("./failure.ts").FailureKind;
+  /** 开发方对验收方法的存疑（理由随条目交验收方，并写进总结）；照常判定，不作为通过依据。 */
+  methodDoubts?: { id: string; reason: string }[];
 }
 
 const ITEM_START = /^(?:[-*]\s*)?(?:A\s*)?(\d+)\s*[.、．:：)）]\s*(.*)$/i;
@@ -355,11 +357,26 @@ function normalize(text: string): string {
   return text.trim().replace(/^[`「『"'“]+|[`」』"'”]+$/g, "").replace(/\s+/g, " ").trim();
 }
 
-/** 开发方回复里对验收标准提异议的编号（A2：异议…）。 */
-export function findObjections(text: string): string[] {
-  const ids = new Set<string>();
-  for (const match of unbold(text).matchAll(/^\s*[-*]?\s*([AG]\d+)\s*[：:]\s*异议/gm)) ids.add(match[1].toUpperCase());
-  return [...ids];
+/**
+ * 开发方回复里对验收条目的回应，分两组：
+ * - objections：对标准本身的异议（「A2：异议：理由」），只有这组暂停等用户决定；
+ * - doubts：认可标准、质疑验收方法或失败归因（「G2：方法存疑：理由」），照常验收。
+ * 同一行里同时出现两种写法时按异议处理。
+ */
+export interface ObjectionGroups {
+  objections: string[];
+  doubts: { id: string; reason: string }[];
+}
+export function findObjections(text: string): ObjectionGroups {
+  const objections = new Set<string>();
+  const doubts = new Map<string, string>();
+  for (const raw of unbold(text).split(/\r?\n/)) {
+    const objection = /^\s*[-*]?\s*([AG]\d+)\s*[：:]\s*异议\s*[：:]?\s*(.*)$/.exec(raw);
+    if (objection) { objections.add(objection[1].toUpperCase()); continue; }
+    const doubt = /^\s*[-*]?\s*([AG]\d+)\s*[：:]\s*方法存疑\s*[：:]?\s*(.*)$/.exec(raw);
+    if (doubt) doubts.set(doubt[1].toUpperCase(), doubt[2].trim());
+  }
+  return { objections: [...objections], doubts: [...doubts].map(([id, reason]) => ({ id, reason })) };
 }
 
 export interface JudgeInput {
@@ -595,6 +612,8 @@ export interface AcceptanceInputOptions {
   resetConfigured?: boolean;
   /** 用户已同意授权的 [授权] 条目。 */
   authorized?: string[];
+  /** 开发方的「方法存疑」条目：照常实测，理由只作核对提示。 */
+  methodDoubts?: { id: string; reason: string }[];
 }
 
 /** 拼验收方输入：环境、工具、需求、标准、操作说明、开发方的使用说明。 */
@@ -629,6 +648,11 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
     options.guide?.trim() || "（无）",
     "## 开发方的交付说明（只用来知道怎么操作，不能当作通过的依据）",
     options.deliveryNote.trim() || "（无）",
+    ...(options.methodDoubts?.length ? [
+      "## 开发方对验收方法的存疑（照常实测）",
+      options.methodDoubts.map((item) => `- ${item.id}：${item.reason || "（没写理由）"}`).join("\n")
+      + "\n开发方认可标准、只质疑方法或失败归因：这些条目照常判定，不能因为它的一句说明就记通过；按标准和你自己实测的证据报告。",
+    ] : []),
   ];
   if (options.previousFailed.length > 0) {
     parts.push("## 上一轮", `上一轮没通过：${options.previousFailed.join("、")}。这一轮全部标准都要重新实测，上一轮的证据不算。`);
@@ -659,7 +683,7 @@ export function buildAcceptanceRepairMessage(repairRound: number, record: Accept
     formatFailedItems(record),
     "",
     `完整材料（系统日志、证据）：${record.runDir}`,
-    "请逐条处理：修好的写「A2：已修」；认为标准本身有问题的写「A2：异议：理由」（异议交用户决定）。全部处理完，最后一行写【交付完成】。",
+    "请逐条处理：修好的写「A2：已修」；认为标准本身有问题的写「A2：异议：理由」（异议交用户决定）；认可标准、只质疑验收方法或失败归因的写「A2：方法存疑：理由」（照常验收，理由交给验收方核对）。全部处理完，最后一行写【交付完成】。",
   ].join("\n");
 }
 
@@ -682,6 +706,9 @@ export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   if (record.escalated) lines.push("验收方：第一位没按要求做，已换强模型重验");
   for (const item of record.cleanup ?? []) lines.push(`验收收尾：${item}`);
   if (record.reason) lines.push(`验收说明：${record.reason}`);
+  if (record.methodDoubts?.length) {
+    lines.push(`验收方法存疑（照常验收，不作为通过依据）：${record.methodDoubts.map((item) => `${item.id}：${item.reason || "（没写理由）"}`).join("；")}`);
+  }
   if (record.note) lines.push(`验收提示：${record.note}`);
   for (const item of record.items) {
     lines.push(`- ${item.id}：${item.verdict}${item.verdict === "通过" ? "" : ` —— ${item.detail.split("\n")[0]}`}`);

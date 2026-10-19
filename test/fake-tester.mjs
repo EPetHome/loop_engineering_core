@@ -10,6 +10,7 @@
  *       FAKE_ACC_UNKNOWN=A3（这些条目报「无法验证」，原因是标准含糊）
  *       FAKE_ACC_FAIL=A2,A3（这些条目报「不通过」，证据照样留）
  *       FAKE_ACC_FAIL_ONCE=A2（只在第 1 次调用时报「不通过」，之后通过；需要 FAKE_STATE_DIR 计数）
+ *       FAKE_ACC_TOUCH=<文件绝对路径>（每次调用都往这个文件追加一行，模拟验收期间来源资料变化）
  *       FAKE_ACC_URL=<网址>（每条都用 node fetch 这个网址留证据；不设就 echo）
  *       FAKE_STATE_DIR=<目录>（记录调用次数与参数）
  */
@@ -24,6 +25,7 @@ const unknownIds = (process.env.FAKE_ACC_UNKNOWN ?? "").split(",").map((id) => i
 const failIds = (process.env.FAKE_ACC_FAIL ?? "").split(",").map((id) => id.trim()).filter(Boolean);
 const failOnceIds = (process.env.FAKE_ACC_FAIL_ONCE ?? "").split(",").map((id) => id.trim()).filter(Boolean);
 const stateDir = process.env.FAKE_STATE_DIR;
+if (process.env.FAKE_ACC_TOUCH) appendFileSync(process.env.FAKE_ACC_TOUCH, `touch ${Date.now()}\n`);
 
 let count = 1;
 if (stateDir) {

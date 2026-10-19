@@ -11,7 +11,7 @@ import {
   ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, buildCorrectionInput, classifySystemExit,
   authorizationHint, authorizationStatus, criteriaFromUser, extractCriteria, findObjections, grantsFromUser, isAuthorizationCriterion,
   isManualCriterion, judgeAcceptance, lastEvidenceAt, mergeAcceptanceReports, parseAcceptanceReport, typedByUser,
-  parseCriteriaDraft, renderAcceptanceForReview, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
+  parseCriteriaDraft, renderAcceptanceForReview, renderAcceptanceLines, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
 import { ACCEPTANCE_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
@@ -134,8 +134,10 @@ test("A4 判定：证据核对、不通过、缺条目、G1/G2，按逐条结果
 test("A5 日志扫描、异议识别、返修消息不含「## 验收标准」标题", () => {
   assert.deepEqual(scanLogs("ok\nERROR a\nERROR a\nERROR known noise\nFATAL b", ["ERROR", "FATAL"], ["known noise"]), ["ERROR a", "FATAL b"]);
   assert.deepEqual(scanLogs("ERROR a", [], []), []);
-  assert.deepEqual(findObjections("A1：已修\nA2：异议：标准写错了\n- G2: 异议 日志是故意的"), ["A2", "G2"]);
-  assert.deepEqual(findObjections("第 1 条：异议：评审的"), []);
+  assert.deepEqual(findObjections("A1：已修\nA2：异议：标准写错了\n- G2: 异议 日志是故意的"), { objections: ["A2", "G2"], doubts: [] });
+  assert.deepEqual(findObjections("第 1 条：异议：评审的"), { objections: [], doubts: [] });
+  assert.deepEqual(findObjections("G2：方法存疑：日志是故意的"), { objections: [], doubts: [{ id: "G2", reason: "日志是故意的" }] });
+  assert.deepEqual(findObjections("A2：异议：方法存疑的写法也按异议处理"), { objections: ["A2"], doubts: [] });
   const record: AcceptanceRecord = {
     verdict: "不通过", runDir: "/run/r1", durationMs: 1000, logErrors: [], extra: [],
     items: [
@@ -312,13 +314,40 @@ test("A11 验收方一直乱写：重做一次、再换强模型重验一次，�
   } finally { h.close(); }
 });
 
-test("A12 开发方对标准提异议：直接暂停交给用户，不跑验收", async () => {
+test("A12 开发方对标准提异议：直接暂停交给用户，不跑验收；同一段旧回复不再重复暂停", async () => {
   const h = await harness({});
   try {
-    const stage = await runAcceptanceStage(h.deps({ deliveryNote: "A1：已修\nA2：异议：标准和需求矛盾\n【交付完成】" }));
+    const note = "A1：已修\nA2：异议：标准和需求矛盾\n【交付完成】";
+    const stage = await runAcceptanceStage(h.deps({ deliveryNote: note }));
     assert.equal(stage.kind, "paused");
     if (stage.kind === "paused") assert.equal(stage.reason, "开发方对验收标准有异议（A2）");
     assert.deepEqual(h.calls(), []);
+    // 用户决定后开发方没再提异议：同一条旧回复再次走到验收不重复暂停，照常验收。
+    const again = await runAcceptanceStage(h.deps({ deliveryNote: note, runDir: join(h.root, "acc", "r2") }));
+    assert.equal(again.kind, "judged");
+    assert.ok(h.calls().length > 0);
+    // 换一条新回复再提异议：还没处理过，照旧暂停。
+    const next = await runAcceptanceStage(h.deps({ deliveryNote: "A1：已修\nA2：异议：另一个理由\n【交付完成】", runDir: join(h.root, "acc", "r3") }));
+    assert.equal(next.kind, "paused");
+  } finally { h.close(); }
+});
+
+test("A12b 方法存疑不暂停：照常验收、G2 失败照常判、理由进验收方输入和总结", async () => {
+  const h = await harness(
+    { start: "node server.mjs {port}", readyUrl: "http://127.0.0.1:{port}/health" },
+    { FAKE_ACC_URL: "http://127.0.0.1:{port}/boom" },
+  );
+  try {
+    const note = "A1：已修\nG2：方法存疑：日志是故意的\n【交付完成】";
+    const stage = await runAcceptanceStage(h.deps({ deliveryNote: note }));
+    assert.equal(stage.kind, "judged");
+    if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "不通过", "存疑不等于通过");
+    assert.equal(stage.record.items.find((item) => item.id === "G2")?.verdict, "不通过");
+    assert.deepEqual(stage.record.methodDoubts, [{ id: "G2", reason: "日志是故意的" }]);
+    const input = readFileSync(join(stage.record.runDir, "input.md"), "utf8");
+    assert.match(input, /## 开发方对验收方法的存疑（照常实测）\n\n- G2：日志是故意的/);
+    assert.match(renderAcceptanceLines(stage.record).join("\n"), /验收方法存疑（照常验收，不作为通过依据）：G2：日志是故意的/);
   } finally { h.close(); }
 });
 
@@ -370,7 +399,7 @@ test("A15 弱模型常见写法：粗体编号、粗体字段名、三级标题�
     assert.equal(parsed.report.items[1].fields["证据摘录"], "**[]**", "值里的内容原样保留");
   }
   assert.deepEqual(extractCriteria("## 验收标准\n**A1.** 操作：add\n**2.** 操作：list")?.map((item) => item.text), ["操作：add", "操作：list"]);
-  assert.deepEqual(findObjections("**A2**：异议：标准写错了"), ["A2"]);
+  assert.deepEqual(findObjections("**A2**：异议：标准写错了"), { objections: ["A2"], doubts: [] });
 });
 
 test("A16 无法验证分原因：没配启动时连不上改判、缺工具、个别含糊 → 部分验证、全部含糊 → 无法验收", () => {

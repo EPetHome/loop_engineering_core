@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { checkRoundBudget, parseAcceptanceConfig, parseGateConfig } from "../config.ts";
 import type { Exec, ExecResult } from "../git.ts";
+import { loadContext, refreshContext } from "../project-context.ts";
 import { newReviewState, runReviewRound, type ReviewConfig, type ReviewDeps } from "../review.ts";
 import { classifyFailure } from "../failure.ts";
 import preparationGuard, { mayPrepareWrite } from "../preparation-guard.ts";
@@ -250,6 +251,164 @@ test("门禁改了项目里的文件：暂停并列出文件", async () => {
   } finally { h.close(); }
 });
 
+test("仓库内已登记来源变化不阻断：门禁里改来源照常评审并换用新版本", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    writeFileSync(join(h.repo, "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const run = await gateRound(h, "echo v2 >> need.md");
+    assert.equal(run.outcome.kind, "done", run.outcome.kind === "paused" ? run.outcome.reason : "");
+    assert.deepEqual(run.state.sourceChanges?.map((item) => item.path), ["need.md"]);
+    assert.notEqual(run.state.inputsFingerprint, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("仓库内已登记来源变化不阻断：评审方改了来源照常出结论，代码改动仍暂停", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    writeFileSync(join(h.repo, "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: h.repo, devSessionId: "source-in-repo", round: 1, deliveryNote: "done", state, config: h.config, exec: h.exec,
+      writeInput: (name, text) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(h.repo, "need.md"), "v2"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(outcome.kind, "done");
+    assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["need.md"]);
+    // 非来源的代码改动仍要被拦下。
+    const dirty = newReviewState();
+    const blocked = await runReviewRound({
+      cwd: h.repo, devSessionId: "code-change", round: 1, deliveryNote: "done", state: dirty, config: h.config, exec: h.exec,
+      writeInput: (name, text) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(h.repo, "reviewer-note.txt"), "reviewer changed the worktree"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(blocked.kind, "paused");
+    assert.equal(blocked.reason, "评审改动了工作区");
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("子目录会话：仓库内来源变化不阻断，非来源改动仍暂停", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    mkdirSync(join(h.repo, "sub"));
+    writeFileSync(join(h.repo, "sub", "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "sub/need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const workDir = join(h.repo, "sub");
+    const writeInput = (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; };
+    const sourceState = newReviewState();
+    const done = await runReviewRound({
+      cwd: workDir, devSessionId: "sub-source", round: 1, deliveryNote: "done", state: sourceState, config: h.config, exec: h.exec,
+      writeInput, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(workDir, "need.md"), "v2"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(done.kind, "done", done.kind === "paused" ? done.reason : "");
+    assert.deepEqual(sourceState.sourceChanges?.map((item) => item.path), ["sub/need.md"]);
+    const codeState = newReviewState();
+    const blocked = await runReviewRound({
+      cwd: workDir, devSessionId: "sub-code", round: 1, deliveryNote: "done", state: codeState, config: h.config, exec: h.exec,
+      writeInput, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(workDir, "reviewer-note.txt"), "not a source"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(blocked.kind, "paused");
+    assert.equal(blocked.reason, "评审改动了工作区");
+    assert.deepEqual(blocked.changedFiles, ["reviewer-note.txt"]);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("子目录会话：非来源文件重命名进来源目录仍暂停（重命名两端都参与范围校验）", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    mkdirSync(join(h.repo, "sub", "docs"), { recursive: true });
+    writeFileSync(join(h.repo, "sub", "docs", "guide.md"), "guide");
+    writeFileSync(join(h.repo, "sub", "server.ts"), "export const x = 1;\n");
+    h.git("add", "sub/docs/guide.md", "sub/server.ts"); h.git("commit", "-qm", "add sub files");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "sub/docs", role: "guide" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: join(h.repo, "sub"), devSessionId: "sub-rename", round: 1, deliveryNote: "done", state, config: h.config, exec: h.exec,
+      writeInput: (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => { h.git("mv", "sub/server.ts", "sub/docs/server.ts"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(outcome.kind, "paused", outcome.kind === "done" ? "重命名旧路径被漏掉，误判成纯来源变化" : "");
+    assert.equal(outcome.reason, "评审改动了工作区");
+    assert.ok(outcome.changedFiles?.includes("server.ts"), `必须报出被移走的旧路径：${outcome.changedFiles?.join("、")}`);
+    assert.ok(outcome.changedFiles?.includes("docs/server.ts"));
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("准备方法修复把非允许文件重命名进允许目录：范围校验拒绝", async () => {
+  const h = harness();
+  try {
+    writeFileSync(join(h.repo, "server.ts"), "export const x = 1;\n");
+    h.git("add", "server.ts"); h.git("commit", "-qm", "add server");
+    mkdirSync(join(h.repo, "docs"));
+    const { parsePreparation, runPreparation } = await import("../preparation.ts");
+    const config = parsePreparation({ check: "true", repair: { model: "m", paths: ["docs"] } }, h.repo)!;
+    const exec: Exec = async (command, args, options) => {
+      if (options.role === "准备方法修复") {
+        h.git("mv", "server.ts", "docs/server.ts");
+        return { stdout: "", stderr: "", code: 0, killed: false };
+      }
+      return h.exec(command, args, options);
+    };
+    const result = await runPreparation({
+      cwd: h.repo, config, state: {}, exec, runDir: join(h.root, "prepare-rename"), saveState: () => {}, failure: "method",
+    });
+    assert.equal(result.ok, false, "重命名出去的旧路径不在允许范围内，必须拒绝");
+    assert.match(result.reason!, /准备动作越出修改范围/);
+    assert.match(result.reason!, /server\.ts/);
+  } finally { h.close(); }
+});
+
+test("子目录会话：门禁里改仓库内来源不阻断", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    mkdirSync(join(h.repo, "sub"));
+    writeFileSync(join(h.repo, "sub", "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "sub/need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: join(h.repo, "sub"), devSessionId: "sub-gate", round: 1, deliveryNote: "done", state,
+      config: { ...h.config, gate: { cmd: "echo v2 >> need.md", timeoutMin: 10 } }, exec: h.exec,
+      writeInput: (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(outcome.kind, "done", outcome.kind === "paused" ? outcome.reason : "");
+    assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["sub/need.md"]);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
 test("门禁用掉的时间从一轮总预算里扣，评审只拿剩余时间", async () => {
   const h = harness();
   try {
@@ -353,7 +512,7 @@ test("准备检查不得改稳定规则；准备模型只能修改声明路径",
   } finally { h.close(); }
 });
 
-test("仓库外权威来源变化使当前结果失效，冻结输入且保留业务计数", async () => {
+test("仓库外权威来源变化不阻塞本轮结果，换新版本继续并记录变化", async () => {
   const h = harness();
   const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
   process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
@@ -368,11 +527,12 @@ test("仓库外权威来源变化使当前结果失效，冻结输入且保留�
       callReviewer: async () => { calls++; writeFileSync(join(h.root, "requirement.md"), "new requirement"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
     };
     const first = await runReviewRound(deps);
-    assert.equal(first.kind, "paused"); assert.match(first.reason!, /上游来源已变化/);
+    assert.equal(first.kind, "done");
     assert.equal(state.repairs, 2);
-    const frozen = state.inputsFingerprint;
+    assert.equal(state.inputsFingerprint, refreshContext(loadContext(h.repo)!).snapshot.inputsFingerprint, "版本更新到当前");
+    assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["requirement.md"]);
     const second = await runReviewRound({ ...deps, round: 2 });
-    assert.equal(second.kind, "paused"); assert.equal(calls, 1); assert.equal(state.inputsFingerprint, frozen);
+    assert.equal(second.kind, "done"); assert.equal(calls, 2, "下一轮评审照常进行");
   } finally {
     if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
     h.close();

@@ -30,6 +30,15 @@ export class GitReadError extends Error {
 }
 
 const pathsFromNul = (text: string): string[] => text.split("\0").filter((path) => path !== "");
+
+/**
+ * git diff 输出的是仓库根相对路径，ls-files 的未跟踪文件是当前目录相对路径；
+ * 统一换算成会话工作目录相对路径（用 git 的 --show-prefix 做纯字符串换算，不碰文件系统）。
+ */
+function fromRepoRoot(path: string, prefix: string): string {
+  if (!prefix || path.startsWith(prefix)) return path.slice(prefix.length);
+  return `${"../".repeat(prefix.split("/").filter(Boolean).length)}${path}`;
+}
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const objectId = (text: string, source: string): string => {
   const id = text.trim();
@@ -38,6 +47,8 @@ const objectId = (text: string, source: string): string => {
 };
 
 export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal) {
+  let prefix: string | undefined;
+
   const raw = async (args: string[], timeout = 30_000): Promise<ExecResult> => {
     signal?.throwIfAborted();
     try {
@@ -117,8 +128,11 @@ export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal)
       for (const [path, hash] of afterMap) if (beforeMap.get(path) !== hash) files.add(path);
       for (const path of beforeMap.keys()) if (!afterMap.has(path)) files.add(path);
       if (before.tree !== after.tree) {
-        const diff = await run(["diff", "--name-only", "-z", before.ref, after.ref, "--"]);
-        for (const path of pathsFromNul(diff)) files.add(path);
+        // --no-renames：重命名要报出前后两个路径；否则范围校验会看不到被移走的旧路径，
+        // 可能把「非来源文件重命名进来源目录」误判成纯来源变化（来源豁免与准备修改范围校验都依赖这份列表）。
+        const diff = await run(["diff", "--name-only", "--no-renames", "-z", before.ref, after.ref, "--"]);
+        if (prefix === undefined) prefix = (await run(["rev-parse", "--show-prefix"])).replace(/\r?\n$/, "");
+        for (const path of pathsFromNul(diff)) files.add(fromRepoRoot(path, prefix));
       }
       return [...files].sort();
     },

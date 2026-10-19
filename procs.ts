@@ -17,6 +17,8 @@ export interface ProcEntry {
   ownerPid: number;
   at: string;
   token?: string;
+  /** 这次进程属于哪次运行（资源编号）；旧登记没有，按身份不明继续保护。 */
+  runId?: string;
 }
 
 /** 组长进程的启动时间；进程不存在时为空字符串。 */
@@ -52,10 +54,10 @@ function writeProcs(file: string, entries: ProcEntry[]): void {
   renameSync(tmp, file);
 }
 
-/** 登记一个刚启动、自成进程组的子进程（pid 即组号）。 */
-export function registerProc(file: string, pid: number, role: string, command: string, token?: string): void {
+/** 登记一个刚启动、自成进程组的子进程（pid 即组号）；runId 标记它属于哪次运行。 */
+export function registerProc(file: string, pid: number, role: string, command: string, token?: string, runId?: string): void {
   const entries = readProcs(file).filter((entry) => entry.pgid !== pid);
-  entries.push({ pgid: pid, role, command, started: processStartTime(pid), ownerPid: process.pid, token, at: new Date().toISOString() });
+  entries.push({ pgid: pid, role, command, started: processStartTime(pid), ownerPid: process.pid, token, ...(runId ? { runId } : {}), at: new Date().toISOString() });
   writeProcs(file, entries);
 }
 

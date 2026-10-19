@@ -22,7 +22,7 @@ import { blockerHint, manualHint } from "./onboarding.ts";
 import { classifyFailure, failureLabel, type FailureKind } from "./failure.ts";
 import { runPreparation, type PreparationConfig, type PreparationState } from "./preparation.ts";
 import { createRunResource, managedShell, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
-import { loadContext, refreshContext } from "./project-context.ts";
+import { isRegisteredSource, loadContext, recordSourceChange, refreshContext, type SourceChangeMark } from "./project-context.ts";
 
 export { PI_BIN, PERMISSION_EXT };
 export const REVIEW_PROMPT_PATH = join(EXT_DIR, "review-prompt.md");
@@ -40,10 +40,12 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   baseline?: string;
   baselineUntracked?: string[];
   baselineFingerprint?: string;
-  /** 下列三个字段只在成功评审后更新，不受失败调用影响。 */
+  /** 下列字段只在成功评审后更新，不受失败调用影响。 */
   lastSnapshot?: string;
   lastUntracked?: string[];
   lastFingerprint?: string;
+  /** 最后一个成功评审用的完整快照：判断后续指纹变化是否只来自已登记来源文件。 */
+  lastSnapshotDetails?: Snapshot;
   /** 最近一次对代码给出结论（门禁或验收不通过、评审成功）时的指纹，用来判断「返修后没有任何改动」。 */
   lastCheckedFingerprint?: string;
   reviewerSessionId?: string;
@@ -59,6 +61,10 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   /** 最近一次验收没通过的条目（暂停时写进总结）。 */
   unresolvedAcceptance?: string;
   awaitingRepair?: boolean;
+  /** 开发期间发现变化的来源文件与时间（总结「开发期间来源变化」一节）。 */
+  sourceChanges?: SourceChangeMark[];
+  /** 拿不到文件列表时的说明（如「来源有变化（第 3 版）」）。 */
+  sourceChangeNote?: string;
 }
 
 export interface ReviewConfig {
@@ -97,6 +103,8 @@ export interface ReviewDeps {
   onCleanup?: (work: Promise<void>, recordPath: string) => void;
   projectContext?: string;
   checkInputs?: () => ReviewOutcome | undefined;
+  /** 只有已登记来源文件能命中的路径判定：命中的工作区变化不算候选改动。 */
+  sourceCover?: (path: string) => boolean;
   cwd: string;
   devSessionId: string;
   round: number;
@@ -193,6 +201,18 @@ function pushUnreviewedRound(
 const SHELL_CANNOT_RUN = new Set([126, 127]);
 
 /**
+ * 工作区指纹变化里是不是只有已登记来源文件的内容变化。
+ * 没有来源信息、一个文件都没变、或混有其他候选改动时都返回 false（照旧阻断）。
+ */
+export async function sourcesOnlyWorkspaceChange(
+  git: ReturnType<typeof createGitEvidence>, before: Snapshot, after: Snapshot, covers?: (path: string) => boolean,
+): Promise<boolean> {
+  if (!covers) return false;
+  const changed = await git.changedFiles(before, after);
+  return changed.length > 0 && changed.every(covers);
+}
+
+/**
  * 门禁这一步：在开发目录用 /bin/sh -c 执行 gate.cmd，退出码 0 才往下走。
  * 命令跑完且退出码非 0 → 打回开发方（这一轮不验收、不评审）；超时、命令找不到、起不来 → 暂停；
  * 门禁改了项目里的文件 → 暂停。通过返回记录，接着验收或评审。
@@ -247,7 +267,8 @@ async function gateStep(
   }
   const middle = await git.snapshot();
   live();
-  if (middle.fingerprint !== before.fingerprint) {
+  // 已登记来源文件的内容变化不作废门禁结果；其他工作区改动照旧暂停。
+  if (middle.fingerprint !== before.fingerprint && !await sourcesOnlyWorkspaceChange(git, before, middle, deps.sourceCover)) {
     pushUnreviewedRound(deps, clock, "未评审（门禁期间工作区变了）", { gate: record });
     const changed = await git.changedFiles(before, middle);
     live();
@@ -317,7 +338,8 @@ async function acceptanceStep(
   };
   const middle = await git.snapshot();
   live();
-  if (middle.fingerprint !== before.fingerprint) {
+  // 已登记来源文件的内容变化不作废验收结果；其他工作区改动照旧暂停。
+  if (middle.fingerprint !== before.fingerprint && !await sourcesOnlyWorkspaceChange(git, before, middle, deps.sourceCover)) {
     pushRound("未评审（验收期间工作区变了）");
     const changed = await git.changedFiles(before, middle);
     live();
@@ -458,7 +480,8 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   state.rounds.push(record);
   const after = await git.snapshot();
   live();
-  if (before.fingerprint !== after.fingerprint) {
+  // 已登记来源文件的内容变化不作废评审结果；其他工作区改动照旧暂停。
+  if (before.fingerprint !== after.fingerprint && !await sourcesOnlyWorkspaceChange(git, before, after, deps.sourceCover)) {
     const changed = await git.changedFiles(before, after);
     live();
     return {
@@ -473,6 +496,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   if (changedBeforeAcceptance) return changedBeforeAcceptance;
   state.lastSnapshot = before.ref;
   state.lastUntracked = before.untracked.map(({ path }) => path);
+  state.lastSnapshotDetails = before;
   state.lastFingerprint = before.fingerprint;
   state.lastCheckedFingerprint = before.fingerprint;
   state.unresolvedMustFix = parsed.mustFix.length > 0 ? parsed.mustFixRaw : undefined;
@@ -517,17 +541,27 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   if (contextConfig) {
     const context = refreshContext(contextConfig, `${deps.state.requirement ?? ""}\n${deps.deliveryNote}`);
     if (context.snapshot.missing.length) return { kind: "paused", reason: `上游来源缺失：${context.snapshot.missing.join("、")}` };
-    deps.state.inputsFingerprint ??= context.snapshot.inputsFingerprint;
+    if (deps.state.inputsFingerprint === undefined) deps.state.inputsFingerprint = context.snapshot.inputsFingerprint;
+    else if (deps.state.inputsFingerprint !== context.snapshot.inputsFingerprint) {
+      // 来源内容变化换用新版本继续，只记录；版本由调用方随后落盘。
+      recordSourceChange(deps.state, context.changes, context.snapshot.revision);
+      deps.state.inputsFingerprint = context.snapshot.inputsFingerprint;
+    }
     const checkInputs = (): ReviewOutcome | undefined => {
       const changed = executionInputs(); if (changed) return changed;
-      const current = refreshContext(contextConfig).snapshot;
-      return current.inputsFingerprint !== deps.state.inputsFingerprint
-        ? { kind: "paused", reason: "上游来源已变化，原任务输入保持冻结", hint: "查看项目 changes.jsonl；确认新来源后使用 /review-inputs accept。验收标准和授权仍须由用户消息明确提供。" }
-        : undefined;
+      const current = refreshContext(contextConfig);
+      if (current.snapshot.missing.length) return { kind: "paused", reason: `上游来源缺失：${current.snapshot.missing.join("、")}`, hint: "补齐 context.sources 登记的文件后继续。" };
+      if (deps.state.inputsFingerprint !== current.snapshot.inputsFingerprint) {
+        recordSourceChange(deps.state, current.changes, current.snapshot.revision);
+        deps.state.inputsFingerprint = current.snapshot.inputsFingerprint;
+      }
+      return undefined;
     };
     const blocked = checkInputs();
     if (blocked) return blocked;
-    deps = { ...deps, projectContext: context.text, checkInputs };
+    // 命中已登记来源文件的路径变化（含目录）不算候选改动。
+    const sourceCover = (path: string): boolean => isRegisteredSource(contextConfig, deps.cwd, path);
+    deps = { ...deps, projectContext: context.text, checkInputs, sourceCover };
     await deps.saveState();
   }
   const preparation = deps.config.preparation;
@@ -554,9 +588,14 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     const repairs = deps.state.repairs;
     const outcome = await runOneReviewRound({ ...deps, round });
     if (outcome.kind === "done") {
-      const current = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
+      const git = createGitEvidence(deps.exec, deps.cwd, deps.signal);
+      const current = await git.snapshot();
       deps.checkLive?.();
-      if (current.fingerprint !== deps.state.lastFingerprint) return { kind: "paused", reason: "发布前候选变化，原检查结果已失效" };
+      if (current.fingerprint !== deps.state.lastFingerprint) {
+        const candidate = deps.state.lastSnapshotDetails;
+        const sourcesOnly = candidate ? await sourcesOnlyWorkspaceChange(git, candidate, current, deps.sourceCover) : false;
+        if (!sourcesOnly) return { kind: "paused", reason: "发布前候选变化，原检查结果已失效" };
+      }
     }
     const changedInputs = deps.checkInputs?.();
     if (changedInputs) { deps.state.repairs = repairs; await deps.saveState(); return changedInputs; }

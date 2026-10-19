@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findProjectRoot, readMarker } from "./config.ts";
 import { readJson, writeJsonAtomic } from "./pipeline-core.ts";
@@ -59,14 +59,57 @@ export function loadContext(cwd: string): ContextConfig | undefined {
   return root ? parseContext(readMarker(root).context, root) : undefined;
 }
 
-/** 消费完成资格时重新读取实际来源；删除配置也不能让旧来源身份变成有效。 */
+/**
+ * 消费完成资格时重新读取实际来源。只有缺失或配置被移除才阻塞（配置错误）；
+ * 内容变化换用新版本继续，由调用方更新记录并写进总结。
+ */
 export function sourceInputsProblem(cwd: string, expected?: string): string | undefined {
   const config = loadContext(cwd);
   if (!config) return expected ? "上游来源配置已移除，需要重新确认输入" : undefined;
   const current = refreshContext(config).snapshot;
   if (current.missing.length) return `上游来源缺失：${current.missing.join("、")}`;
-  if (current.inputsFingerprint !== expected) return "上游来源版本已变化，原任务输入保持冻结";
   return undefined;
+}
+
+/** 总结里一条来源变化记录。 */
+export interface SourceChangeMark { path: string; at: string }
+
+/**
+ * cwd 下的相对路径是否落在某条已登记来源（文件或它所在的目录）里。
+ * 用来把「来源资料内容变化」与「代码/候选改动」分开：前者不阻断，后者照旧。
+ */
+export function isRegisteredSource(config: ContextConfig, cwd: string, path: string): boolean {
+  const target = resolve(cwd, path), workDir = resolve(cwd);
+  return config.sources.some((source) => {
+    // code 来源本身就是候选；包住整个开发目录的来源会把所有改动都当资料，两者都不能放行。
+    if (source.role === "code") return false;
+    const root = resolve(config.root, source.path);
+    if (workDir === root || workDir.startsWith(`${root}${sep}`)) return false;
+    return target === root || target.startsWith(`${root}${sep}`);
+  });
+}
+
+/**
+ * 把本次发现的变化并进记录：同一文件只保留最新时间；指纹变了但拿不到文件列表时，
+ * 记一条「来源有变化（第 N 版）」。返回是否发生了新变化。
+ */
+export function recordSourceChange(
+  target: { sourceChanges?: SourceChangeMark[]; sourceChangeNote?: string },
+  changes: ContextChange[], revision: number, at = new Date().toISOString(),
+): boolean {
+  if (changes.length > 0) {
+    const marks = [...(target.sourceChanges ?? [])];
+    for (const change of changes) {
+      const index = marks.findIndex((mark) => mark.path === change.path);
+      if (index >= 0) marks[index] = { path: change.path, at };
+      else marks.push({ path: change.path, at });
+    }
+    target.sourceChanges = marks;
+  } else {
+    // 指纹变了但拿不到文件列表（例如只改了来源声明）：仍要写一节。
+    target.sourceChangeNote = `来源有变化（第 ${revision} 版）`;
+  }
+  return true;
 }
 
 export const contextDir = (config: ContextConfig): string => join(
@@ -102,8 +145,10 @@ function refreshUnlocked(config: ContextConfig, query = ""): ContextResult {
   const contents = new Map<string, Buffer>();
   let totalBytes = 0;
   for (const source of config.sources) {
-    const paths = sourceFiles(config.root, source.path);
-    if (!paths.length && !source.optional) missing.push(source.path);
+    // 目录型来源：登记的路径本身还在就不算缺失；里面个别文件增删按资料变化处理（进 changes 与总结）。
+    const present = existsSync(resolve(config.root, source.path));
+    if (!present && !source.optional) { missing.push(source.path); continue; }
+    const paths = present ? sourceFiles(config.root, source.path) : [];
     for (const path of paths) {
       if (files.length >= 2000) throw new Error("上下文来源超过 2000 个文件，请缩小登记范围");
       const bytes = readFileSync(resolve(config.root, path));
@@ -202,16 +247,20 @@ function renderContext(config: ContextConfig, snapshot: ContextSnapshot, query =
   return `${lines.join("\n")}\n`;
 }
 
-/** 固定格式交付索引：引用原总结，不复制多份事实；同一输入与结果重复调用不追加。 */
-export function recordProjectOutcome(config: ContextConfig, session: string, status: string, summary: string, expectedInputs?: string): void {
+/**
+ * 固定格式交付索引：引用原总结，不复制多份事实；同一输入与结果重复调用不追加。
+ * 只放宽内容变化：发布 done 前仍必须没有缺失来源，否则返回问题、不写交付。
+ */
+export function recordProjectOutcome(config: ContextConfig, session: string, status: string, summary: string): string | undefined {
   const { snapshot } = refreshContext(config);
-  if (status === "done" && expectedInputs && snapshot.inputsFingerprint !== expectedInputs) throw new Error("发布结果前上游来源变化，未记录为当前版本完成");
+  if (status === "done" && snapshot.missing.length) return `上游来源缺失：${snapshot.missing.join("、")}`;
   const dir = contextDir(config), id = digest(session).slice(0, 24);
-  const record = { session, status, summary, revision: snapshot.revision, inputsFingerprint: expectedInputs ?? snapshot.inputsFingerprint };
+  const record = { session, status, summary, revision: snapshot.revision, inputsFingerprint: snapshot.inputsFingerprint };
   const path = join(dir, "deliveries", `${id}.json`);
-  if (JSON.stringify(readJson(path)) === JSON.stringify(record)) return;
+  if (JSON.stringify(readJson(path)) === JSON.stringify(record)) return undefined;
   writeJsonAtomic(path, record);
   appendFileSync(join(dir, "changes.jsonl"), `${JSON.stringify({ type: "outcome", at: new Date().toISOString(), ...record })}\n`);
+  return undefined;
 }
 
 async function main(): Promise<void> {

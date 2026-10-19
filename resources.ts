@@ -49,6 +49,16 @@ export function createRunResource(label: string, minFreeMiB = Number(process.env
   return resource;
 }
 
+/**
+ * 这次运行还有没有自己的消费者在登记：只看 runId 等于本资源编号的登记。
+ * 没有 runId 的旧登记身份不明，继续保护；别的运行的登记不属于本次释放范围。
+ */
+function hasOwnConsumer(resource: RunResource): boolean {
+  if (!resource.procsFile) return false;
+  return [resource.procsFile, `${resource.procsFile}.cleanup`]
+    .some((file) => readProcs(file).some((entry) => entry.runId === undefined || entry.runId === resource.id));
+}
+
 export function releaseRunResource(resource: RunResource, retain = false): RunResource {
   if (!validId(resource.id) || resolve(resource.root) !== resolve(rootPath())
     || resolve(resource.dir) !== resolve(resource.root, resource.id)) {
@@ -59,7 +69,7 @@ export function releaseRunResource(resource: RunResource, retain = false): RunRe
   catch { return Object.assign(resource, { status: "cleanup-failed" as const, detail: "缺少资源身份记录，未删除" }); }
   if (registered.id !== resource.id || registered.dir !== resource.dir || registered.ownerPid !== resource.ownerPid
     || registered.ownerStarted !== resource.ownerStarted) return Object.assign(resource, { status: "cleanup-failed" as const, detail: "资源身份不匹配，未删除" });
-  if (!retain && resource.procsFile && [resource.procsFile, `${resource.procsFile}.cleanup`].some((file) => readProcs(file).length)) {
+  if (!retain && hasOwnConsumer(resource)) {
     resource.status = "cleanup-failed"; resource.detail = "消费者释放未确认，缓存与证据均保留";
     persist(resource); return resource;
   }
@@ -98,11 +108,11 @@ export function reapRunResources(): RunResource[] {
       try { process.kill(resource.ownerPid, 0); continue; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue; }
     }
-    // 宿主死亡不等于使用它的 detached 子进程已结束；先按登记回收，仍有消费者就保留。
+    // 宿主死亡不等于使用它的 detached 子进程已结束；先按登记回收，仍有自己的消费者就保留。
     if (resource.procsFile) {
       const registries = [resource.procsFile, `${resource.procsFile}.cleanup`];
       for (const file of registries) reapProcs(file);
-      if (registries.some((file) => readProcs(file).length)) continue;
+      if (hasOwnConsumer(resource)) continue;
     }
     results.push(releaseRunResource(resource));
   }

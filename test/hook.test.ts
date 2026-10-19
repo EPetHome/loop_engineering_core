@@ -800,7 +800,7 @@ test("H11 自动验收：先静态评审再验收，失败按证据打回，标�
     } finally { h.close(); }
   });
 
-  await t.test("开发方对标准提异议 → 暂停；你再发消息就恢复，标准不变", () => {
+  await t.test("开发方对标准提异议 → 暂停；你再发消息就恢复，标准不变；同一段旧回复不再重复暂停", () => {
     const h = fixture({ marker });
     try {
       h.run(h.event("SessionStart"), { env: ACC_ENV });
@@ -808,9 +808,57 @@ test("H11 自动验收：先静态评审再验收，失败按证据打回，标�
       h.write("file.txt", "base\nTODO\n");
       h.run(h.event("Stop", { last_assistant_message: "A2：异议：需求没说要列表\n【交付完成】" }), { env: ACC_ENV });
       assert.equal(h.readState().pauseReason, "开发方对验收标准有异议（A2）");
+      assert.ok(!existsSync(join(h.root, "fake", "acc-calls.log")), "异议时不跑验收方");
       h.run(h.event("UserPromptSubmit", { prompt: "按原标准做" }), { env: ACC_ENV });
       assert.equal(h.readState().phase, "idle");
       assert.equal(h.readState().criteria.version, 1);
+      // 旧回复再次交付：Loop 已处理过，不再暂停，验收照常执行。
+      h.write("file.txt", "base\nTODO 2\n");
+      assert.equal(h.run(h.event("Stop", { last_assistant_message: "A2：异议：需求没说要列表\n【交付完成】" }), { env: ACC_ENV }).stdout, "");
+      assert.equal(h.readState().phase, "done");
+      assert.ok(existsSync(join(h.root, "fake", "acc-calls.log")), "验收照常执行");
+    } finally { h.close(); }
+  });
+
+  await t.test("方法存疑：不暂停、照常验收，理由写进总结", () => {
+    const h = fixture({ marker });
+    try {
+      h.run(h.event("SessionStart"), { env: ACC_ENV });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+      h.write("file.txt", "base\nTODO\n");
+      assert.equal(h.run(h.event("Stop", { last_assistant_message: "A2：方法存疑：需求里没写这条的验收方法\n【交付完成】" }), { env: ACC_ENV }).stdout, "");
+      assert.equal(h.readState().phase, "done", "方法存疑不暂停");
+      assert.match(h.summary(), /验收方法存疑（照常验收，不作为通过依据）：A2：需求里没写这条的验收方法/);
+      const input = readFileSync(join(h.home, ".pi-autoreview", basename(h.repo), "acceptance", "claude-s1", "r1", "input.md"), "utf8");
+      assert.match(input, /## 开发方对验收方法的存疑（照常实测）\n\n- A2：需求里没写这条的验收方法/);
+    } finally { h.close(); }
+  });
+
+  await t.test("开发中途来源变化：不暂停、不判失效，变化写进总结", () => {
+    const sourceMarker = JSON.stringify({ acceptance: {}, context: { sources: ["need.md"] } });
+    const h = fixture({ marker: sourceMarker, files: { "need.md": "原始需求" } });
+    try {
+      h.run(h.event("SessionStart"), { env: ACC_ENV });
+      h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+      h.write("file.txt", "base\nTODO\n");
+      h.run(h.delivered(), { env: ACC_ENV });
+      assert.equal(h.readState().phase, "done");
+      h.write("file.txt", "base\nTODO 2\n");
+      writeFileSync(join(h.repo, "need.md"), "改过的需求");
+      const res = h.run(h.event("Stop", { last_assistant_message: "改完了\n【交付完成】" }), { env: ACC_ENV });
+      assert.equal(h.readState().phase, "done", res.stderr);
+      assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+    } finally { h.close(); }
+  });
+  await t.test("提交时来源缺失：暂停原因写明缺哪个文件", () => {
+    const sourceMarker = JSON.stringify({ acceptance: {}, context: { sources: ["need.md"] } });
+    const h = fixture({ marker: sourceMarker, files: { "need.md": "原始需求" } });
+    try {
+      h.run(h.event("SessionStart"), { env: ACC_ENV });
+      rmSync(join(h.repo, "need.md"));
+      const res = h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
+      assert.equal(h.readState().phase, "paused", res.stderr);
+      assert.match(h.readState().pauseReason ?? "", /^上游来源缺失：need\.md$/);
     } finally { h.close(); }
   });
 });

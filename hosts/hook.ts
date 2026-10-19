@@ -25,7 +25,7 @@ import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { reapProcs, registerProc, releaseProc } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { parsePreparation } from "../preparation.ts";
-import { loadContext, recordProjectOutcome, refreshContext } from "../project-context.ts";
+import { loadContext, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
   checkedFingerprint, errorText, lastAcceptance, newReviewState, runReviewRound, tail,
@@ -454,6 +454,7 @@ async function writeSummary(
     criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
     unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
+    sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
   });
   mkdirSync(dirname(ctx.paths.summary), { recursive: true });
   writeFileSync(ctx.paths.summary, text);
@@ -598,16 +599,31 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   }
   const contextConfig = loadContext(ctx.workDir);
   const context = contextConfig ? refreshContext(contextConfig, prompt) : undefined;
-  if (context?.snapshot.missing.length) throw new Error(`上游来源缺失：${context.snapshot.missing.join("、")}`);
-  if (context) withStateWriteLock(ctx.paths.state, () => {
-    const current = loadStateFile(ctx.paths.state);
-    if ((event.prompt === "/review-inputs accept" || !current.inputsFingerprint) && current.inputsFingerprint !== context.snapshot.inputsFingerprint) {
-      current.inputsFingerprint = context.snapshot.inputsFingerprint; current.userInputVersion = randomUUID();
-      if (current.rounds.length > 0 || lockAlive(ctx.paths.lock)) current.resumeAfterInputChange = true;
-      if (current.phase === "done") { current.phase = "idle"; invalidatedDone = true; }
-      writeStateFile(ctx.paths.state, current);
+  if (context?.snapshot.missing.length) {
+    // 缺失是配置错误，照旧暂停并写明缺哪个文件。
+    await pause(ctx, state, `上游来源缺失：${context.snapshot.missing.join("、")}`, undefined, undefined, "补齐 context.sources 登记的文件后再提交。");
+    return userOutput(ctx, notice);
+  }
+  if (context) {
+    let sourceChanged = false;
+    withStateWriteLock(ctx.paths.state, () => {
+      const current = loadStateFile(ctx.paths.state);
+      if (current.inputsFingerprint === undefined) {
+        current.inputsFingerprint = context.snapshot.inputsFingerprint;
+        writeStateFile(ctx.paths.state, current);
+      } else if (current.inputsFingerprint !== context.snapshot.inputsFingerprint) {
+        // 来源内容变化不再撤销完成资格：更新版本、记一笔，由总结呈现。
+        recordSourceChange(current, context.changes, context.snapshot.revision);
+        current.inputsFingerprint = context.snapshot.inputsFingerprint;
+        writeStateFile(ctx.paths.state, current);
+        sourceChanged = true;
+      }
+    });
+    if (sourceChanged) {
+      state = loadStateFile(ctx.paths.state);
+      if (state.phase === "done") await writeSummary(ctx, state, "完成");
     }
-  });
+  }
   if (invalidatedDone) { state = loadStateFile(ctx.paths.state); await writeSummary(ctx, state, "进行中", undefined, undefined, "用户输入已更新，旧完成资格已撤销。"); }
   return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
 }
@@ -734,11 +750,16 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     const outcome = await work;
     controller.signal.throwIfAborted();
     if (outcome.kind === "done") {
+      // 发布前核对来源：内容变化不阻塞，缺失就不写交付、不发完成。
+      const context = loadContext(ctx.workDir);
+      const sourceProblem = context ? recordProjectOutcome(context, `${ctx.host}-${ctx.sessionId}`, "done", ctx.paths.summary) : undefined;
+      if (sourceProblem) {
+        await pause(ctx, state, sourceProblem, undefined, undefined, "补齐 context.sources 登记的文件后再接力。");
+        return userOutput(ctx, sourceProblem);
+      }
       state.phase = "done";
       state.awaitingRepair = false;
       saveStateFile(ctx.paths.state, state);
-      const context = loadContext(ctx.workDir);
-      if (context) recordProjectOutcome(context, `${ctx.host}-${ctx.sessionId}`, "done", ctx.paths.summary, state.inputsFingerprint);
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
       await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
       checkUserInputs();

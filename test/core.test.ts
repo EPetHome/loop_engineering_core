@@ -267,6 +267,17 @@ test("T13 评审规则仅静态读取，提示词与解析格式保持一致；�
   assert.doesNotMatch(renderSummary(summaryInput({ status: "完成", newCommits: 0 })), /开发方新增提交/);
 });
 
+test("T14 总结的来源变化一节：列出文件和发现时间或版本兜底，无变化不出现", () => {
+  assert.doesNotMatch(renderSummary(summaryInput({ status: "完成" })), /开发期间来源变化/);
+  const listed = renderSummary(summaryInput({
+    status: "完成",
+    sourceChanges: [{ path: "need.md", at: "2026-10-19T10:00:00.000Z" }, { path: "guide.md", at: "2026-10-19T10:01:00.000Z" }],
+  }));
+  assert.match(listed, /## 开发期间来源变化\n- need\.md（2026-10-19T10:00:00\.000Z）\n- guide\.md（2026-10-19T10:01:00\.000Z）/);
+  const fallback = renderSummary(summaryInput({ status: "完成", sourceChangeNote: "来源有变化（第 3 版）" }));
+  assert.match(fallback, /## 开发期间来源变化\n来源有变化（第 3 版）/);
+});
+
 test("T12 总结渲染验收命令：状态行下多一行，详情一节带命令、触发、输出尾部", () => {
   const plain = renderSummary(summaryInput({ status: "完成" }));
   assert.ok(!plain.includes("验收命令"), "没有验收命令记录时总结不变");

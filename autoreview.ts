@@ -24,10 +24,10 @@ import { classifyFailure, failureLabel } from "./failure.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
 import { createChildExec, expandFileRefs } from "./hosts/hook.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
-import { loadContext, recordProjectOutcome, refreshContext, sourceInputsProblem } from "./project-context.ts";
+import { isRegisteredSource, loadContext, recordProjectOutcome, recordSourceChange, refreshContext, type ContextConfig, type ContextResult } from "./project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, INTERRUPTED,
-  checkedFingerprint, errorText, lastAcceptance, newReviewState, nowStamp, runReviewRound, tail,
+  checkedFingerprint, errorText, lastAcceptance, newReviewState, nowStamp, runReviewRound, sourcesOnlyWorkspaceChange, tail,
   type ReviewConfig, type ReviewState,
 } from "./review.ts";
 
@@ -105,10 +105,6 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     createGitEvidence(wrappedExec(ctx, life, signal), ctx.cwd, signal);
   const dataDir = (ctx: ExtensionContext): string => join(homedir(), ".pi-autoreview", basename(ctx.cwd));
   const summaryPath = (ctx: ExtensionContext): string => join(dataDir(ctx), `${ctx.sessionManager.getSessionId()}.md`);
-  const recordOutcome = (ctx: ExtensionContext): void => {
-    const config = loadContext(ctx.cwd);
-    if (config) recordProjectOutcome(config, ctx.sessionManager.getSessionId(), state.phase, summaryPath(ctx), state.inputsFingerprint);
-  };
   const procsPath = (ctx: ExtensionContext): string => join(dataDir(ctx), `${ctx.sessionManager.getSessionId()}.procs.json`);
   /** .autoreview.json 的 acceptance 一节；配置非法时抛错（评审路径里会变成暂停）。 */
   const acceptanceConfig = (ctx: ExtensionContext): AcceptanceConfig | undefined => loadAcceptanceConfig(ctx.cwd);
@@ -192,6 +188,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
       criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
+      sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
     });
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
@@ -272,8 +269,9 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   };
   const acceptTimeoutMs = (): number => Math.max(60_000,
     positiveInt(flagString(pi, "autoreview-accept-timeout-min", String(DEFAULT_ACCEPT_TIMEOUT_MIN)), DEFAULT_ACCEPT_TIMEOUT_MIN) * 60_000);
+  // 来源内容变化不再让验收结果作废；这里绑定用户输入、标准、授权、配置和命令。
   const acceptanceInputs = (ctx: ExtensionContext, config = currentConfig(ctx)): string => createHash("sha256").update(JSON.stringify({
-    sources: state.inputsFingerprint, requirement: state.requirement, criteria: state.criteria, grants: state.grants,
+    requirement: state.requirement, criteria: state.criteria, grants: state.grants,
     config, command: acceptCommand(), mode: acceptMode(),
   })).digest("hex");
   const newAcceptRun = (trigger: AcceptRunRecord["trigger"]): AcceptRunRecord => ({
@@ -281,14 +279,63 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     mode: acceptMode(), candidate: state.pendingAcceptanceCandidate, inputsFingerprint: state.pendingAcceptanceInputs, readyEpoch: state.readyEpoch,
   });
 
+  /**
+   * 来源内容变化不再暂停：把记录的版本更新为当前版本，变化写进总结；
+   * 返回要阻塞的说明（缺失是配置错误，照旧暂停）。
+   */
+  const absorbSourceChanges = (context: ContextResult): { problem?: string; changed: boolean } => {
+    if (context.snapshot.missing.length) return { problem: `上游来源缺失：${context.snapshot.missing.join("、")}`, changed: false };
+    if (state.inputsFingerprint === undefined) { state.inputsFingerprint = context.snapshot.inputsFingerprint; return { changed: false }; }
+    if (state.inputsFingerprint === context.snapshot.inputsFingerprint) return { changed: false };
+    recordSourceChange(state, context.changes, context.snapshot.revision);
+    state.inputsFingerprint = context.snapshot.inputsFingerprint;
+    return { changed: true };
+  };
+
+  /**
+   * 发布完成前核对来源：内容变化只记录，缺失/配置移除返回问题。
+   * 需要写交付索引的调用方用返回的 config，避免重复读盘。
+   */
+  const checkPublishSources = (ctx: ExtensionContext, life: Lifecycle): { problem?: string; config?: ContextConfig } => {
+    const config = loadContext(ctx.cwd);
+    if (!config) return { problem: state.inputsFingerprint ? "上游来源配置已移除，需要重新确认输入" : undefined };
+    const absorbed = absorbSourceChanges(refreshContext(config));
+    if (absorbed.changed) saveState(life);
+    return { problem: absorbed.problem, config };
+  };
+
+  /** 写交付索引；发布 done 前仍核对来源缺失，有问题就不写、交给调用方暂停。 */
+  const recordOutcome = (ctx: ExtensionContext, life: Lifecycle): string | undefined => {
+    const { problem, config } = checkPublishSources(ctx, life);
+    if (problem || !config) return problem;
+    return recordProjectOutcome(config, ctx.sessionManager.getSessionId(), state.phase, summaryPath(ctx));
+  };
+
   /** 所有完成发布入口共用：恢复也不能把旧记录当成当前候选的资格。 */
   const completionProblem = async (ctx: ExtensionContext, life: Lifecycle, signal?: AbortSignal, requireCommandResult = true): Promise<string | undefined> => {
     if (!state.pendingAcceptanceCandidate || !state.pendingAcceptanceInputs || !state.readyEpoch) return "完成记录缺少候选或输入依据，需要重新评审";
-    const candidate = await evidence(ctx, life, signal).snapshot();
+    const git = evidence(ctx, life, signal);
+    const candidate = await git.snapshot();
     checkLive(life, signal);
-    if (candidate.fingerprint !== state.pendingAcceptanceCandidate || state.pendingAcceptanceInputs !== acceptanceInputs(ctx)) return "候选或输入版本变化，原评审结果不能放行当前候选";
-    const sourceProblem = sourceInputsProblem(ctx.cwd, state.inputsFingerprint);
-    if (sourceProblem) return sourceProblem;
+    if (state.pendingAcceptanceInputs !== acceptanceInputs(ctx)) return "候选或输入版本变化，原评审结果不能放行当前候选";
+    // 工作区指纹变了：有来源信息时只有已登记来源文件的内容变化才放行；代码等候选改动照旧。
+    // 没有来源配置时保持原有严格比较。
+    const contextConfig = loadContext(ctx.cwd);
+    if (candidate.fingerprint !== state.pendingAcceptanceCandidate) {
+      const before = state.lastSnapshotDetails;
+      const sourcesOnly = contextConfig && before
+        ? await sourcesOnlyWorkspaceChange(git, before, candidate, (path) => isRegisteredSource(contextConfig, ctx.cwd, path))
+        : false;
+      if (!sourcesOnly) return "候选或输入版本变化，原评审结果不能放行当前候选";
+    }
+    // 取证完成后再核对来源：内容变化只记录；缺失/配置移除照旧阻塞，也能接住取证窗口里的删除。
+    if (!contextConfig) {
+      if (state.inputsFingerprint) return "上游来源配置已移除，需要重新确认输入";
+    } else {
+      const absorbed = absorbSourceChanges(refreshContext(contextConfig));
+      if (absorbed.problem) return absorbed.problem;
+      if (absorbed.changed) saveState(life);
+    }
     if (requireCommandResult && acceptCommand() && acceptMode() === "required") {
       const result = state.acceptRun;
       if (result?.mode !== "required" || result.result !== "通过" || result.command !== acceptCommand()
@@ -328,9 +375,9 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   /** 先结束本轮检查再让开发方接手，避免新一轮停下时仍被 reviewRunning 拦住。 */
   const deliverRepair = (ctx: ExtensionContext, message: string, life: Lifecycle): void => {
     const task = activeTask;
-    const input = JSON.stringify([state.requirement, state.criteria, state.grants, state.inputsFingerprint]);
+    const input = JSON.stringify([state.requirement, state.criteria, state.grants]);
     void (task?.finished ?? Promise.resolve()).then(() => {
-      if (!live(life, task?.controller.signal) || input !== JSON.stringify([state.requirement, state.criteria, state.grants, state.inputsFingerprint])) return;
+      if (!live(life, task?.controller.signal) || input !== JSON.stringify([state.requirement, state.criteria, state.grants])) return;
       if (ctx.isIdle()) pi.sendUserMessage(message);
       else pi.sendUserMessage(message, { deliverAs: "followUp" });
     }).catch((error) => { if (live(life)) void pauseForError(ctx, error, life); });
@@ -353,7 +400,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         state.pauseHint = undefined;
         saveState(life);
         await writeSummary(ctx, "完成", life, undefined, undefined, undefined, undefined, signal);
-        recordOutcome(ctx);
+        // 写总结是异步的：发布前再核对一次来源，缺失就不写交付、不发 done。
+        const sourceProblem = recordOutcome(ctx, life);
+        if (sourceProblem) {
+          await pause(ctx, sourceProblem, life, undefined, undefined, undefined, signal, "补齐 context.sources 登记的文件后再继续接力。");
+          return;
+        }
         reportStage(ctx, "done");
       } else if (record.failureKind === "product" && state.repairs < currentConfig(ctx).maxRepairs) {
         state.pendingAcceptanceCandidate = undefined;
@@ -450,12 +502,26 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           failure: record.failureKind, evidence: record.outputTail ?? record.detail });
         checkLive(life, signal);
         if (prepared.ok && Date.now() < deadline) {
-          const candidate = await evidence(ctx, life, signal).snapshot();
-          if (candidate.fingerprint === record.candidate) {
-            record.result = "进行中"; saveState(life);
-            return runAcceptCommand(ctx, task, record, deadline, attempt + 1);
+          // 恢复后用同一套来源豁免判定：只有已登记来源文件变化不拦重试；代码变化、缺失照旧。
+          const git = evidence(ctx, life, signal);
+          const candidate = await git.snapshot();
+          checkLive(life, signal);
+          const contextConfig = loadContext(ctx.cwd);
+          const absorbed = contextConfig ? absorbSourceChanges(refreshContext(contextConfig)) : undefined;
+          if (absorbed?.changed) saveState(life);
+          if (absorbed?.problem) {
+            record.result = "无法执行"; record.failureKind = "environment"; record.detail = absorbed.problem;
+          } else {
+            const before = state.lastSnapshotDetails;
+            const sourcesOnly = contextConfig && candidate.fingerprint !== record.candidate && before
+              ? await sourcesOnlyWorkspaceChange(git, before, candidate, (path) => isRegisteredSource(contextConfig!, ctx.cwd, path))
+              : false;
+            if (candidate.fingerprint === record.candidate || sourcesOnly) {
+              record.result = "进行中"; saveState(life);
+              return runAcceptCommand(ctx, task, record, deadline, attempt + 1);
+            }
+            record.detail = "恢复后候选发生变化，需要重新评审";
           }
-          record.detail = "恢复后候选发生变化，需要重新评审";
         } else record.detail = prepared.reason ?? "验收恢复时间预算用完";
       }
     }
@@ -551,7 +617,13 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       }
       saveState(life);
       updateStatus(ctx, life);
-      if (state.phase === "done") recordOutcome(ctx);
+      if (state.phase === "done") {
+        const sourceProblem = recordOutcome(ctx, life);
+        if (sourceProblem) {
+          await pause(ctx, sourceProblem, life, undefined, undefined, undefined, signal, "补齐 context.sources 登记的文件后再继续接力。");
+          return;
+        }
+      }
       reportStage(ctx, state.phase === "done" ? "done" : "started");
       await notifyUser(
         ctx, `${basename(cwd)}：${state.phase === "accepting" ? "评审通过，等待本段必需验收" : `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`}${acceptRun ? "，开始执行验收命令" : ""}`,
@@ -669,22 +741,25 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       const config = loadContext(ctx.cwd);
       if (!config) { ctx.ui.notify("没有配置 context.sources", "info"); return; }
       const result = refreshContext(config);
+      const absorbed = absorbSourceChanges(result);
       if (args.trim() === "accept") {
         if (result.snapshot.missing.length) { ctx.ui.notify(`缺少来源：${result.snapshot.missing.join("、")}`, "warning"); return; }
-        const changed = state.inputsFingerprint !== result.snapshot.inputsFingerprint;
-        state.inputsFingerprint = result.snapshot.inputsFingerprint;
-        if (changed) await invalidateCompletion(ctx, lifecycle);
-        if (state.pauseReason?.startsWith("上游来源")) {
+        const resumed = Boolean(state.pauseReason?.startsWith("上游来源"));
+        if (resumed) {
           state.phase = "idle"; state.pauseReason = undefined; state.pauseHint = undefined;
         }
         saveState(lifecycle);
+        if (absorbed.changed || resumed) await rewriteSummary(ctx, lifecycle);
         ctx.ui.notify("已接收当前资料版本，业务返修计数保持不变；验收标准和授权仍以用户明确消息为准。输入 /review 继续检查。", "info");
       } else {
-        if (state.phase === "done") {
-          const problem = sourceInputsProblem(ctx.cwd, state.inputsFingerprint);
-          if (problem) await invalidateSources(ctx, lifecycle, problem);
+        // 已完成的会话之后来源变化：保持完成，只补记；缺失和配置移除照旧暂停。
+        if (state.phase === "done" && absorbed.problem) await invalidateSources(ctx, lifecycle, absorbed.problem);
+        else {
+          if (absorbed.changed) saveState(lifecycle);
+          // 变化可能已被会话恢复等路径吸收，只要记录里有变化就重写总结（幂等）。
+          if (state.phase === "done" && (absorbed.changed || state.sourceChanges?.length || state.sourceChangeNote)) await rewriteSummary(ctx, lifecycle);
         }
-        ctx.ui.notify(`${result.path}\n来源第 ${result.snapshot.revision} 版；任务输入${state.inputsFingerprint === result.snapshot.inputsFingerprint ? "一致" : "尚未接收或已变化"}`, "info");
+        ctx.ui.notify(`${result.path}\n来源第 ${result.snapshot.revision} 版；${result.snapshot.missing.length ? `缺少来源：${result.snapshot.missing.join("、")}` : "内容变化自动采用新版本，开发与评审照常继续"}`, "info");
       }
     },
   });
@@ -782,8 +857,21 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           checking = true;
           void (async () => {
             let problem: string | undefined;
-            try { problem = sourceInputsProblem(ctx.cwd, state.inputsFingerprint); reapRunResources(); }
-            catch (error) { problem = `上游来源无法核对：${errorText(error)}`; }
+            try {
+              // 配置被移除也是配置错误，照旧暂停；只有内容变化自动换版本。
+              const latest = loadContext(ctx.cwd);
+              if (!latest) problem = state.inputsFingerprint ? "上游来源配置已移除，需要重新确认输入" : undefined;
+              else {
+                const absorbed = absorbSourceChanges(refreshContext(latest));
+                problem = absorbed.problem;
+                if (absorbed.changed) {
+                  saveState(life);
+                  // 已完成的会话保持完成，只把变化补进总结；进行中的评审会随本轮总结一起写。
+                  if (state.phase === "done") await rewriteSummary(ctx, life);
+                }
+              }
+              reapRunResources();
+            } catch (error) { problem = `上游来源无法核对：${errorText(error)}`; }
             if (problem && (state.phase === "done" || reviewRunning)) await invalidateSources(ctx, life, problem);
           })().catch((error) => { if (life.active) ctx.ui.notify(`来源巡检：${errorText(error)}`, "warning"); }).finally(() => { checking = false; });
         }, contextConfig.intervalSec * 1000);
@@ -807,8 +895,16 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       else if (state.acceptRun?.result === "中断") ctx.ui.notify("自动评审：上次验收命令被中断，输入 /accept 重新执行", "info");
       checkLive(life);
       if (state.phase === "done" && state.awaitingInbox === undefined) {
+        const beforeSources = state.inputsFingerprint;
         const problem = await completionProblem(ctx, life);
         if (problem) await pause(ctx, `恢复完成依据失效：${problem}`, life, undefined, undefined, undefined, undefined, "保留计数和成果，重新评审后再继续接力。");
+        else {
+          // 完成的会话之后来源变化：保持完成，只把变化补进总结。
+          if (beforeSources !== state.inputsFingerprint) await writeSummary(ctx, "完成", life);
+          // 总结处理结束后、发布 done 前再核对一次：这段异步窗口里来源可能被删。
+          const finalProblem = checkPublishSources(ctx, life).problem;
+          if (finalProblem) await pause(ctx, `恢复完成依据失效：${finalProblem}`, life, undefined, undefined, undefined, undefined, "补齐 context.sources 登记的文件后再继续接力。");
+        }
       }
       // 流水线里的段：报一次当前状态（重开的会话如果已经完成或暂停，就照实报；e2e 返修还没处理完时只报 started，
       // 免得编排程序误以为已经修好），开始看收件箱。
@@ -900,7 +996,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     if (!life.active) return;
     // Pi 1.2 的插件消息没有 prompt，不能当成用户接管、需求或授权。
     const prompt = event.messageType === "custom" || isLoopMessage(event.prompt ?? "") ? undefined : event.prompt;
-    const previousInputs = JSON.stringify([state.requirement, state.criteria, state.grants, state.inputsFingerprint]);
+    // 来源内容变化不再撤销完成资格，这里只比较用户输入（需求、标准、授权）。
+    const previousInputs = JSON.stringify([state.requirement, state.criteria, state.grants]);
     const hadReview = state.rounds.length > 0 || state.phase === "done" || reviewRunning;
     try {
       checkLive(life);
@@ -910,8 +1007,13 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       const contextConfig = loadContext(ctx.cwd);
       if (state.enabled && contextConfig) {
         const context = refreshContext(contextConfig, prompt ?? `${state.requirement ?? ""} ${state.unresolvedMustFix ?? ""}`);
-        if (context.snapshot.missing.length) throw new Error(`上游来源缺失：${context.snapshot.missing.join("、")}`);
-        if (!state.inputsFingerprint) { state.inputsFingerprint = context.snapshot.inputsFingerprint; saveState(life); }
+        const absorbed = absorbSourceChanges(context);
+        if (absorbed.problem) {
+          await pause(ctx, absorbed.problem, life);
+          ctx.abort();
+          return;
+        }
+        if (absorbed.changed) saveState(life);
         event.systemPromptOptions.sections ??= {};
         event.systemPromptOptions.sections.autoreview_context = context.text;
       }
@@ -928,10 +1030,15 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
             return;
           }
         }
-        if (contextConfig && state.inputsFingerprint !== refreshContext(contextConfig).snapshot.inputsFingerprint) {
-          await pause(ctx, "上游来源已变化，使用 /review-inputs 查看，再明确接受新版本", life);
-          ctx.abort();
-          return;
+        if (contextConfig) {
+          // 准备期间来源变化同样不暂停：更新记录的版本，下一轮用新来源。
+          const latest = absorbSourceChanges(refreshContext(contextConfig));
+          if (latest.problem) {
+            await pause(ctx, latest.problem, life);
+            ctx.abort();
+            return;
+          }
+          if (latest.changed) saveState(life);
         }
       }
       if (state.baseline === undefined) {
@@ -942,7 +1049,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         state.baselineFingerprint = snap.fingerprint;
         saveState(life);
       }
-      if (prompt !== undefined && hadReview && !state.needsInputReview && previousInputs !== JSON.stringify([state.requirement, state.criteria, state.grants, state.inputsFingerprint])) await invalidateCompletion(ctx, life);
+      if (prompt !== undefined && hadReview && !state.needsInputReview && previousInputs !== JSON.stringify([state.requirement, state.criteria, state.grants])) await invalidateCompletion(ctx, life);
       const acceptance = acceptanceEnabled(ctx);
       if (state.enabled) {
         const convention = conventionText({ acceptance, gate: gateCommand(ctx) });

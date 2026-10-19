@@ -1,7 +1,7 @@
 /** 无模型入口回归 G1–G15；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import autoreview from "../autoreview.ts";
 import { CONVENTION, conventionText } from "../core.ts";
+import { contextDir, loadContext } from "../project-context.ts";
 
 type Result = { stdout: string; stderr: string; code: number; killed: boolean };
 type Call = { command: string; args: string[]; options: { cwd?: string; signal?: AbortSignal; timeout?: number; role?: string } };
@@ -1183,7 +1184,7 @@ test("必需验收环境恢复有界，机器重试保留业务计数", async ()
 });
 
 
-test("接受新来源、标准或授权后 /accept 不沿用旧评审资格", async (t) => {
+test("接受新来源不撤销本段验收资格，标准或授权变化后 /accept 不沿用旧资格", async (t) => {
   for (const change of ["sources", "criteria", "grants"]) await t.test(change, async () => {
     const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" } });
     try {
@@ -1206,8 +1207,15 @@ test("接受新来源、标准或授权后 /accept 不沿用旧评审资格", as
         await h.event("session_start");
       }
       h.acceptor = () => result("pass"); await h.command("accept");
-      assert.equal(h.accepts.length, count);
-      assert.notEqual(h.state().phase, "done");
+      if (change === "sources") {
+        // 来源内容变化不作废验收结果：本段验收可以照常续跑。
+        await until(() => h.state().phase === "done", "来源变化后 /accept 照常续跑");
+        assert.equal(h.accepts.length, count + 1);
+        assert.equal(h.state().acceptRun?.result, "通过");
+      } else {
+        assert.equal(h.accepts.length, count);
+        assert.notEqual(h.state().phase, "done");
+      }
     } finally { await h.close(); }
   });
 });
@@ -1295,8 +1303,17 @@ test("恢复完成状态必须重新验证依据，旧状态与变化后的配�
         h.entries.push({ type: "custom", customType: "autoreview-state", data: restored });
       }
       await h.event("session_start");
-      assert.equal(h.state().phase, change === "same" ? "done" : "paused");
-      assert.equal(stageStatus(h, "甲")?.event, change === "same" ? "done" : "paused");
+      const completed = change === "same" || change === "source";
+      assert.equal(h.state().phase, completed ? "done" : "paused");
+      assert.equal(stageStatus(h, "甲")?.event, completed ? "done" : "paused");
+      if (change === "source") {
+        // 已完成的会话之后来源变化：保持完成，/review-inputs 只补记。
+        await h.command("review-inputs");
+        assert.equal(h.state().phase, "done");
+        assert.equal(stageStatus(h, "甲")?.event, "done");
+        assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+        assert.match(h.summary(), /^- 状态：完成$/m);
+      }
     } finally { await h.close(); }
   });
   const h = harness({ stage: "甲", restored: { enabled: true, phase: "done", repairs: 2, rounds: [] } });
@@ -1348,7 +1365,7 @@ test("必需命令返修日志不能更新标准和授权；真实用户文件�
   } finally { await h.close(); if (old === undefined) delete process.env.AUTOREVIEW_ACCEPTANCE_CMD; else process.env.AUTOREVIEW_ACCEPTANCE_CMD = old; }
 });
 
-test("done 接受新来源、标准或授权立即撤销接力资格，源码不变也能重评", async (t) => {
+test("done 接受新来源保持完成并补记，标准或授权变化仍撤销接力资格", async (t) => {
   for (const change of ['source', 'criteria', 'grants']) await t.test(change, async () => {
     const h = harness({ stage: '甲' });
     try {
@@ -1358,8 +1375,15 @@ test("done 接受新来源、标准或授权立即撤销接力资格，源码不
       h.write('file.txt', 'base\nchange\n'); await h.command(); await h.terminal();
       assert.equal(stageStatus(h, '甲')?.event, 'done');
       await h.event('session_shutdown'); h.entries.push({ type: 'custom', customType: 'autoreview-state', data: { ...structuredClone(h.state()), repairs: 2 } }); await h.event('session_start');
-      if (change === 'source') { writeFileSync(join(h.root, 'need.md'), 'new source'); await h.command('review-inputs', 'accept'); }
-      else if (change === 'criteria') await h.begin('## 验收标准\n1. [人工] 操作：新的标准\n预期：新目标');
+      if (change === 'source') {
+        writeFileSync(join(h.root, 'need.md'), 'new source');
+        await h.command('review-inputs', 'accept');
+        assert.equal(h.state().phase, 'done'); assert.equal(stageStatus(h, '甲')?.event, 'done');
+        assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/); assert.match(h.summary(), /^- 状态：完成$/m);
+        assert.equal(h.state().repairs, 2);
+        return;
+      }
+      if (change === 'criteria') await h.begin('## 验收标准\n1. [人工] 操作：新的标准\n预期：新目标');
       else await h.begin('同意授权：A1');
       assert.equal(h.state().phase, 'idle'); assert.equal(stageStatus(h, '甲')?.event, 'started');
       assert.match(h.summary(), /^- 状态：进行中$/m); assert.equal(h.state().repairs, 2);
@@ -1372,6 +1396,235 @@ test("done 接受新来源、标准或授权立即撤销接力资格，源码不
       if (change === 'grants') assert.match(h.inputs.at(-1)!, /你已同意/);
     } finally { await h.close(); }
   });
+});
+
+test("旧回复里的标准异议处理过一次后 /review 不再重复暂停", async () => {
+  const h = harness();
+  const oldTester = process.env.AUTOREVIEW_ACCEPTANCE_CMD;
+  process.env.AUTOREVIEW_ACCEPTANCE_CMD = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
+  try {
+    h.write(".autoreview.json", JSON.stringify({ acceptance: {} }));
+    await h.event("session_start");
+    await h.begin("requirement\n## 验收标准\n1. 操作：检查\n预期：ok");
+    h.write("file.txt", "base\nchange\n");
+    // 开发方提异议；用户让它按原标准继续，开发方没再说话，/review 再跑时回复原文仍是这条。
+    h.assistant("A1：已修\nA1：异议：标准写错了\n【交付完成】");
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "paused");
+    assert.match(h.state().pauseReason!, /开发方对验收标准有异议（A1）/);
+    await h.begin("按原标准继续");
+    assert.equal(h.state().phase, "idle");
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done", `旧异议不再重复拦截，照常验收完成（暂停原因：${h.state().pauseReason ?? "无"}）`);
+  } finally {
+    await h.close();
+    if (oldTester === undefined) delete process.env.AUTOREVIEW_ACCEPTANCE_CMD; else process.env.AUTOREVIEW_ACCEPTANCE_CMD = oldTester;
+  }
+});
+
+test("开发中 requirement 与 guide 来源变化：不暂停，下一轮评审拿新版本，总结列出两个文件", async () => {
+  const h = harness();
+  try {
+    writeFileSync(join(h.root, "need.md"), "v1 need");
+    writeFileSync(join(h.root, "guide.md"), "v1 guide");
+    h.write(".autoreview.json", JSON.stringify({ context: { root: "..", sources: [{ path: "need.md", role: "requirement" }, { path: "guide.md", role: "guide" }] } }));
+    await h.event("session_start");
+    await h.begin("requirement");
+    // 来源未变：总结不出现变化一节。
+    h.write("file.txt", "base\nchange\n");
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    assert.doesNotMatch(h.summary(), /## 开发期间来源变化/);
+    // 开发进行中依次改两份来源，再交付：不暂停，重评时用新版本。
+    writeFileSync(join(h.root, "need.md"), "v2 need");
+    writeFileSync(join(h.root, "guide.md"), "v2 guide");
+    h.write("file.txt", "base\nchange 2\n");
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    assert.match(h.inputs.at(-1)!, /## 项目来源与代码定位[\s\S]*当前来源与定位（第 2 版）/);
+    const section = /## 开发期间来源变化\n([\s\S]*?)\n## /.exec(h.summary())?.[1] ?? "";
+    assert.match(section, /- need\.md（/); assert.match(section, /- guide\.md（/);
+  } finally { await h.close(); }
+});
+
+test("仓库内 requirement 来源变化不作废必需验收结果，完成后补记", async () => {
+  const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" } });
+  try {
+    h.write("need.md", "v1");
+    h.write(".autoreview.json", JSON.stringify({ context: { sources: [{ path: "need.md", role: "requirement" }] } }));
+    await h.event("session_start");
+    await h.begin("requirement");
+    h.write("file.txt", "base\nchange\n");
+    h.acceptor = () => { writeFileSync(join(h.repo, "need.md"), "v2"); return result("ACCEPT_OUTPUT_SENTINEL\n验收结论：通过\n"); };
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done", h.state().pauseReason);
+    assert.equal(h.state().acceptRun?.result, "通过");
+    assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+  } finally { await h.close(); }
+});
+
+test("目录型来源内部文件被删：不暂停，总结补记", async () => {
+  const h = harness({ stage: "甲" });
+  try {
+    mkdirSync(join(h.repo, "docs"));
+    writeFileSync(join(h.repo, "docs", "a.md"), "v1");
+    writeFileSync(join(h.repo, "docs", "b.md"), "v1");
+    h.write(".autoreview.json", JSON.stringify({ context: { sources: [{ path: "docs", role: "guide" }] } }));
+    await h.event("session_start"); await h.begin("requirement");
+    h.write("file.txt", "base\nchange\n");
+    rmSync(join(h.repo, "docs", "a.md"));
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done", h.state().pauseReason);
+    assert.equal(stageStatus(h, "甲")?.event, "done");
+    assert.match(h.summary(), /## 开发期间来源变化\n- docs\/a\.md（/);
+  } finally { await h.close(); }
+});
+
+test("仓库内来源变化不作废自动验收结果，照常完成并补记", async () => {
+  const h = harness();
+  const oldTester = process.env.AUTOREVIEW_ACCEPTANCE_CMD;
+  process.env.AUTOREVIEW_ACCEPTANCE_CMD = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
+  process.env.FAKE_ACC_TOUCH = join(h.repo, "need.md");
+  try {
+    writeFileSync(join(h.repo, "need.md"), "v1");
+    h.write(".autoreview.json", JSON.stringify({ acceptance: {}, context: { sources: [{ path: "need.md", role: "requirement" }] } }));
+    await h.event("session_start");
+    await h.begin("requirement\n## 验收标准\n1. 操作：检查\n预期：ok");
+    h.write("file.txt", "base\nchange\n");
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done", h.state().pauseReason);
+    assert.equal((h.state().rounds.at(-1) as any)?.acceptance?.verdict, "通过");
+    assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+  } finally {
+    delete process.env.FAKE_ACC_TOUCH;
+    await h.close();
+    if (oldTester === undefined) delete process.env.AUTOREVIEW_ACCEPTANCE_CMD; else process.env.AUTOREVIEW_ACCEPTANCE_CMD = oldTester;
+  }
+});
+
+test("完成检查后、发布前删除来源：暂停且不写交付", async () => {
+  const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" } });
+  const previousStore = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    const source = join(h.root, "need.md");
+    writeFileSync(source, "need v1");
+    h.write(".autoreview.json", JSON.stringify({ context: { root: "..", sources: [{ path: "need.md", role: "requirement" }] } }));
+    await h.event("session_start");
+    await h.begin("requirement");
+    h.write("file.txt", "base\nchange\n");
+    // 必需验收命令跑完后的第一次 git status 属于“完成”总结阶段；这里删除来源，模拟
+    // completionProblem 已过、发布前才被删的窗口。
+    let acceptanceDone = false, removed = false;
+    h.acceptor = () => { acceptanceDone = true; return result("ACCEPT_OUTPUT_SENTINEL\n验收结论：通过\n"); };
+    h.inject = (plain) => {
+      if (acceptanceDone && !removed && plain[0] === "status" && plain[1] === "--short") { removed = true; rmSync(source); }
+      return undefined;
+    };
+    await h.command(); await h.terminal();
+    assert.ok(removed, "测试确实在发布前删除了来源");
+    assert.equal(h.state().phase, "paused", h.state().pauseReason);
+    assert.match(h.state().pauseReason!, /上游来源缺失：need\.md/);
+    const deliveries = join(contextDir(loadContext(h.repo)!), "deliveries");
+    assert.equal(existsSync(deliveries) ? readdirSync(deliveries).length : 0, 0, "缺失时不写交付记录");
+  } finally {
+    if (previousStore === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previousStore;
+    await h.close();
+  }
+});
+
+test("恢复完成态时取证窗口删除来源：暂停不发 done；内容变化保持完成", async (t) => {
+  for (const mode of ["delete", "modify"]) await t.test(mode, async () => {
+    const h = harness({ stage: "甲" });
+    try {
+      const source = join(h.root, "need.md");
+      writeFileSync(source, "v1");
+      h.write(".autoreview.json", JSON.stringify({ context: { root: "..", sources: [{ path: "need.md", role: "requirement" }] } }));
+      await h.event("session_start"); await h.begin("requirement");
+      h.write("file.txt", "base\nchange\n");
+      await h.command(); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      assert.equal(stageStatus(h, "甲")?.event, "done");
+      await h.event("session_shutdown");
+      // 下一次会话的完成恢复里，在 git 取证窗口（snapshot 的 ls-files 调用）动来源。
+      let armed = false, touched = false;
+      h.inject = (plain) => {
+        if (armed && !touched && plain[0] === "ls-files") {
+          touched = true;
+          if (mode === "delete") rmSync(source); else writeFileSync(source, "v2");
+        }
+        return undefined;
+      };
+      armed = true;
+      await h.event("session_start");
+      assert.ok(touched, "测试确实在取证窗口里动了来源");
+      if (mode === "delete") {
+        assert.equal(h.state().phase, "paused");
+        assert.match(h.state().pauseReason!, /上游来源缺失：need\.md/);
+        assert.equal(stageStatus(h, "甲")?.event, "paused");
+      } else {
+        assert.equal(h.state().phase, "done");
+        assert.equal(stageStatus(h, "甲")?.event, "done");
+        assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+      }
+    } finally { await h.close(); }
+  });
+});
+
+test("必需验收恢复后：只来源变化照常重试，代码变化与缺失来源不重试", async (t) => {
+  for (const mode of ["source", "code", "missing"]) await t.test(mode, async () => {
+    const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" } });
+    try {
+      const source = join(h.repo, "need.md");
+      writeFileSync(source, "v1");
+      h.write(".autoreview.json", JSON.stringify({
+        context: { sources: [{ path: "need.md", role: "requirement" }] },
+        preparation: { check: "ready", recover: "recover", maxRecoveries: 1 },
+      }));
+      await h.event("session_start"); await h.begin("requirement");
+      h.write("file.txt", "base\nchange\n");
+      let attempts = 0;
+      h.acceptor = (call) => {
+        if (call.options.role !== "验收命令") return result("ready");
+        attempts += 1;
+        if (attempts > 1) return result("ACCEPT_OUTPUT_SENTINEL\n验收结论：通过\n");
+        if (mode === "source") writeFileSync(source, "v2");
+        if (mode === "code") writeFileSync(join(h.repo, "recovered-note.txt"), "not a source");
+        if (mode === "missing") rmSync(source);
+        return result("ENOSPC No space left on device", 75);
+      };
+      await h.command(); await h.terminal();
+      if (mode === "source") {
+        assert.equal(h.state().phase, "done", h.state().pauseReason);
+        assert.equal(attempts, 2);
+        assert.equal(h.state().acceptRun?.result, "通过");
+        assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+      } else {
+        assert.equal(h.state().phase, "paused");
+        assert.equal(attempts, 1, "不重试");
+        if (mode === "code") assert.match(h.summary(), /恢复后候选发生变化，需要重新评审/);
+        else assert.match(h.summary(), /上游来源缺失：need\.md/);
+      }
+    } finally { await h.close(); }
+  });
+});
+
+test("必需验收期间来源变化不作废结果，完成后补记", async () => {
+  const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" } });
+  try {
+    const source = join(h.root, "need.md");
+    writeFileSync(source, "need v1");
+    h.write(".autoreview.json", JSON.stringify({ context: { root: "..", sources: [{ path: "need.md", role: "requirement" }] } }));
+    await h.event("session_start");
+    await h.begin("requirement");
+    h.write("file.txt", "base\nchange\n");
+    // 必需验收命令执行中来源变化：结果照常，只补记。
+    h.acceptor = () => { writeFileSync(source, "need v2"); return result("ACCEPT_OUTPUT_SENTINEL\n验收结论：通过\n"); };
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done", h.state().pauseReason);
+    assert.equal(h.state().acceptRun?.result, "通过");
+    assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+  } finally { await h.close(); }
 });
 
 test("新授权在项目准备失败前保存，并取消正在使用旧授权的验收", async () => {
@@ -1413,7 +1666,7 @@ test("返修交接等本轮释放执行锁，开发方立刻完成也不会丢�
   } finally { release?.(); await h.close(); }
 });
 
-test('来源巡检撤销完成资格，不接受新来源或清零计数', async (t) => {
+test('来源巡检：内容变化保持完成并补记，缺失与配置移除照旧暂停', async (t) => {
   const interval = globalThis.setInterval;
   t.mock.method(globalThis, 'setInterval', (callback: () => void, ms: number, ...args: unknown[]) =>
     interval(callback, ms === 30_000 ? 20 : ms, ...args));
@@ -1428,10 +1681,20 @@ test('来源巡检撤销完成资格，不接受新来源或清零计数', async
       assert.equal(h.state().phase, 'done'); assert.equal(h.state().repairs, 2);
       const before = h.state() as State & { inputsFingerprint: string; readyEpoch: string };
       assert.equal(stageStatus(h, '甲')?.sourceInputs, before.inputsFingerprint);
-      if (change === 'modify') writeFileSync(source, 'changed requirement');
+      if (change === 'modify') {
+        writeFileSync(source, 'changed requirement');
+        await until(() => h.summary().includes('## 开发期间来源变化'), '总结补记来源变化');
+        const after = h.state() as State & { inputsFingerprint: string; readyEpoch?: string };
+        assert.equal(after.phase, 'done'); assert.equal(stageStatus(h, '甲')?.event, 'done');
+        assert.notEqual(after.inputsFingerprint, before.inputsFingerprint);
+        assert.equal(after.readyEpoch, before.readyEpoch); assert.equal(after.repairs, 2);
+        assert.match(h.summary(), /## 开发期间来源变化\n- need\.md（/);
+        assert.match(h.summary(), /^- 状态：完成$/m);
+        return;
+      }
       if (change === 'delete') rmSync(source);
       if (change === 'config') rmSync(marker);
-      await until(() => h.state().phase === 'paused', '来源变化撤销完成');
+      await until(() => h.state().phase === 'paused', '缺失来源暂停完成');
       const after = h.state() as State & { inputsFingerprint: string; readyEpoch?: string };
       assert.equal(after.inputsFingerprint, before.inputsFingerprint);
       assert.equal(after.readyEpoch, undefined); assert.equal(after.repairs, 2);

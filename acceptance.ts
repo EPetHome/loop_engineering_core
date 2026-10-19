@@ -1,14 +1,14 @@
 /**
  * acceptance.ts — 自动验收一轮的流程，经 review.ts 由 pi 扩展与宿主 Hook 共用。
  *
- * 负责：异议检查 → 取或起草验收标准（冻结）→ [授权] 条目等你答复 → 查端口、启动被测系统、等就绪、记系统日志
+ * 负责：异议检查（标准异议暂停等用户；方法存疑照常验收）→ 取或起草验收标准（冻结）→ [授权] 条目等你答复 → 查端口、启动被测系统、等就绪、记系统日志
  * → 每次调验收方前按配置重置数据 → 调验收方（证据有问题在同一会话重做 1 次，还不行换强模型重验 1 次）
  * → 关停系统、清理端口上的残留进程、截取日志、扫错误 → 程序逐条判定。
  * 被测系统自成进程组并登记，任何退出路径都会关停；验收途中系统退出就立即停掉验收方，
  * 按退出方式分「被关掉」（不怪开发方）和「崩溃」；判定交给 acceptance-core.ts 的纯函数。
  */
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { cpSync, lstatSync, readdirSync, appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { basename, dirname, join } from "node:path";
@@ -39,6 +39,8 @@ export interface AcceptanceState {
   criteria?: Criteria;
   /** 用户对 [授权] 条目的答复（只认用户亲手写的「同意授权：…」「不授权：…」）。 */
   grants?: Grants;
+  /** 已经处理过的开发方回复（按回复原文的哈希）：同一条旧回复里的异议不再重复触发暂停。 */
+  objectionsHandled?: string;
 }
 
 export interface AcceptanceDeps {
@@ -190,7 +192,7 @@ function startSystem(deps: AcceptanceDeps, logPath: string): RunningSystem {
   const child = spawn("/bin/sh", ["-c", config.start!], { cwd: deps.workDir, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
   const pid = child.pid;
   if (pid && deps.procsFile) {
-    try { registerProc(deps.procsFile, pid, "被测系统", config.start!, processToken); } catch { /* 登记失败不影响验收 */ }
+    try { registerProc(deps.procsFile, pid, "被测系统", config.start!, processToken, deps.resource?.id); } catch { /* 登记失败不影响验收 */ }
   }
   const pending: Record<"out" | "err", string> = { out: "", err: "" };
   const flush = (stream: "out" | "err", final: boolean): void => {
@@ -585,11 +587,16 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
  * paused 只用于不是开发方造成的情况（异议、标准缺失、端口被占用）。
  */
 export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<AcceptanceStage> {
-  const objections = findObjections(deps.deliveryNote);
-  if (objections.length > 0) {
-    const hint = `开发方对 ${objections.join("、")} 有异议（理由见它的回复）。验收标准只有你能改：同意就发一条带「## 验收标准」的新消息替换；不同意就发消息让它按原标准继续`;
-    return { kind: "paused", reason: `开发方对验收标准有异议（${objections.join("、")}）`, notes: hint, hint };
+  const groups = findObjections(deps.deliveryNote);
+  // 同一条旧回复只处理一次：记下回复指纹，用户回复后重复验收不再因它暂停。
+  const replyKey = createHash("sha256").update(deps.deliveryNote).digest("hex");
+  if (groups.objections.length > 0 && deps.state.objectionsHandled !== replyKey) {
+    deps.state.objectionsHandled = replyKey;
+    await deps.saveState();
+    const hint = `开发方对 ${groups.objections.join("、")} 有异议（理由见它的回复）。验收标准只有你能改：同意就发一条带「## 验收标准」的新消息替换；不同意就发消息让它按原标准继续`;
+    return { kind: "paused", reason: `开发方对验收标准有异议（${groups.objections.join("、")}）`, notes: hint, hint };
   }
+  const methodDoubts = groups.doubts;
   const frozen = await ensureCriteria(deps);
   deps.checkLive?.();
   if (!("items" in frozen)) return { kind: "paused", reason: frozen.reason, notes: frozen.notes, hint: frozen.hint };
@@ -613,6 +620,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
     const record: AcceptanceRecord = {
       ...judgeAcceptance({ criteria: criteria.items, evidence: () => undefined, logErrors: [], runDir, hasService: Boolean(config.start) }),
       durationMs: 0,
+      ...(methodDoubts.length ? { methodDoubts } : {}),
     };
     writeFileSync(join(runDir, "result.json"), JSON.stringify(record, null, 2));
     return { kind: "judged", record };
@@ -680,7 +688,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
         systemLog: config.start ? logPath : undefined, logFiles: config.logs,
         guide: config.guide ? readIfExists(config.guide) ?? `（操作说明文件读不到：${config.guide}）` : undefined,
         deliveryNote: deps.deliveryNote, previousFailed: deps.previousFailed, resetConfigured: Boolean(config.reset),
-        authorized: auth.approved,
+        authorized: auth.approved, methodDoubts,
       }) + (config.actions ? "\n## 复用项目动作\n当前目录 actions/ 是项目提供的固定操作脚本，只按指南调用并通过 ./ev 留证据；不要重写已有步骤，不沿用旧验收结论。\n" : ""));
       // 系统一退出就停掉验收方和重置命令；外层取消也一并传下去。
       const testerAbort = new AbortController();
@@ -754,7 +762,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
     evidence: (id) => readIfExists(join(runDir, "evidence", `${id}.txt`)),
     systemFailure, systemStopped, logErrors, runDir, hasService: Boolean(config.start),
   });
-  const record: AcceptanceRecord = { ...judged, durationMs: deps.now() - startedAt };
+  const record: AcceptanceRecord = { ...judged, durationMs: deps.now() - startedAt, ...(methodDoubts.length ? { methodDoubts } : {}) };
   if (tester.executionFailure && !exitDuringTest) {
     record.verdict = "无法验收"; record.failureKind = tester.executionFailure.kind;
     record.reason = `验收执行未正常结束：${tester.executionFailure.reason}；逐项结果保留，不能发布完成`;
