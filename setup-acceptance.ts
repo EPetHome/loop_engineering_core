@@ -5,9 +5,9 @@
  *
  * 用法：node /Users/Admin/Desktop/loop/setup-acceptance.ts <项目目录> [--yes] [--host claude|codex|pi]
  */
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { checkRoundBudget, MARKER_FILE, parseAcceptanceConfig, parseGateConfig } from "./config.ts";
@@ -192,14 +192,8 @@ export async function planSetup(root: string, host?: string): Promise<Plan> {
 
   const block = readBlock(1);
   const tips: string[] = [];
-  const targets = new Set<string>();
-  if (host) targets.add(conventionTarget(root, host));
-  else {
-    targets.add(conventionTarget(root, "codex"));
-    const claude = conventionTarget(root, "claude");
-    if (existsSync(claude) || claude === join(root, "AGENTS.md")) targets.add(claude);
-    else tips.push("用 Claude Code 头脑风暴的话：Claude Code 不读 AGENTS.md，在项目里建 CLAUDE.md 写一行 @AGENTS.md（或用 --host claude 重跑）");
-  }
+  const targets = new Set([conventionTarget(root, host ?? "pi")]);
+  tips.push("常驻 AGENTS.md / CLAUDE.md 保持不变；可变流程只在 .autoreview/CONVENTIONS.md 维护，稳定规则按需引用该入口。");
   const files = [...targets].map((file) => ({ file, ...upsertBlock(readText(file), block) }));
   if (detection.needsBrowser && !detection.hasPlaywright) tips.push(copyNotice(3, root));
   return { root, detection, config, configAction, files, tips };
@@ -226,6 +220,7 @@ export function applyPlan(plan: Plan): string[] {
   }
   for (const entry of plan.files) {
     if (entry.action === "已是最新") continue;
+    mkdirSync(dirname(entry.file), { recursive: true });
     writeFileSync(entry.file, entry.text);
     written.push(entry.file);
   }

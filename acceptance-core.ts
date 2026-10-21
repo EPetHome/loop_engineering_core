@@ -15,7 +15,7 @@ export const ACCEPTANCE_CONVENTION = [
   "- 用户消息里的「同意授权：…」「不授权：…」是给程序的：你不用处理，回一句收到，最后一行写【交付完成】。",
   "- 开发时不要补写或修改验收标准，标准只认用户发来的。",
   "- 交付说明里写清新功能怎么用（命令、地址、参数），验收方按它操作。",
-  "- 收到「自动验收」消息后，逐条写「A2：已修」或「A2：异议：理由」；异议交用户决定。",
+  "- 收到「自动验收」消息后，逐条写「A2：已修」。认为标准本身（预期、范围或授权）不对，写「A2：异议：理由」，交用户决定；认可标准但质疑验收方法、环境或失败归因，写「A2：方法存疑：理由」，程序照常验收，理由随该条交给验收方并写进总结。",
 ].join("\n");
 /** 起草时最多保留的条数；用户自己写的不截断，只在总结里提示。 */
 export const MAX_CRITERIA = 10;
@@ -95,7 +95,8 @@ export function grantsFromUser(text: string, criteria: Criteria | undefined, pre
 }
 
 /** 程序自己发给开发方的消息（返修、门禁、流水线 e2e 返修）：不是用户打的字。 */
-const LOOP_MESSAGE = /^\s*【(?:自动评审|自动验收|门禁|流水线 e2e 返修) · /;
+const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|流水线 e2e 返修) · |流程等待】|流程准备】)/;
+export const isLoopMessage = (prompt: string): boolean => LOOP_MESSAGE.test(prompt);
 
 /** 用户亲手打的字：程序自己发的消息不算，pi 展开的 <file> 块去掉（宿主 Hook 直接传没展开的原文）。 */
 export function typedByUser(prompt: string): string {
@@ -145,6 +146,8 @@ export function authorizationHint(criteria: Criteria, pending: string[]): string
 }
 
 export interface ReportItem {
+  /** 程序合并时发现同次调用的明确结论冲突，不能当成部分验证放行。 */
+  conflict?: string;
   id: string;
   verdict: ItemVerdict;
   /** 「- 键：值」字段：复现、预期、实际、证据摘录、相关日志、原因。 */
@@ -178,7 +181,7 @@ export interface AcceptanceItemResult {
 }
 
 export interface AcceptanceRecord {
-  /** 部分验证：其余全部通过，只有个别条目没法自动验证或标了 [人工]（留给你人工验收），照常进入评审。 */
+  /** 部分验证：其余全部通过，只有个别条目没法自动验证或标了 [人工]（留给你人工验收），已完成静态评审后继续检查其余完成条件。 */
   verdict: "通过" | "部分验证" | "不通过" | "无法验收";
   items: AcceptanceItemResult[];
   logErrors: string[];
@@ -194,6 +197,9 @@ export interface AcceptanceRecord {
   note?: string;
   /** 收尾时清理端口上残留进程的记录。 */
   cleanup?: string[];
+  failureKind?: import("./failure.ts").FailureKind;
+  /** 开发方对验收方法的存疑（理由随条目交验收方，并写进总结）；照常判定，不作为通过依据。 */
+  methodDoubts?: { id: string; reason: string }[];
 }
 
 const ITEM_START = /^(?:[-*]\s*)?(?:A\s*)?(\d+)\s*[.、．:：)）]\s*(.*)$/i;
@@ -235,6 +241,7 @@ export function stripCriteriaSection(text: string): string {
 
 /** 用户消息里带「## 验收标准」时生成新一版标准（替换旧的）；没有返回 undefined。只对用户发来的消息调用。 */
 export function criteriaFromUser(prompt: string, previous?: Criteria): Criteria | undefined {
+  if (isLoopMessage(prompt)) return undefined;
   const items = extractCriteria(prompt);
   if (!items) return undefined;
   return { source: "用户", items, version: (previous?.version ?? 0) + 1, updatedAt: new Date().toISOString() };
@@ -313,6 +320,24 @@ export function parseAcceptanceReport(output: string): { ok: true; report: Parse
   return { ok: true, report: { conclusion: inline?.[1].trim() ?? "", items, extra } };
 }
 
+/** 更正只覆盖自己本次提交的条目；历史结果不能覆盖新检查点，同次冲突须重验。 */
+export function mergeAcceptanceReports(previous?: ParsedAcceptance, current?: ParsedAcceptance, checkpoints?: ParsedAcceptance): ParsedAcceptance | undefined {
+  if (!previous && !current && !checkpoints) return undefined;
+  const merged = new Map((previous?.items ?? []).map((item) => [item.id, item]));
+  const saved = new Map((checkpoints?.items ?? []).map((item) => [item.id, item]));
+  for (const item of saved.values()) merged.set(item.id, item);
+  const reported = new Map<string, ReportItem>();
+  for (const item of current?.items ?? []) {
+    const other = saved.get(item.id), duplicate = reported.get(item.id);
+    const conflict = duplicate?.conflict || ((other && other.verdict !== item.verdict) || (duplicate && duplicate.verdict !== item.verdict)
+      ? "本次报告与检查点或重复条目的结论冲突，请重新实测并提交一致结果" : undefined);
+    const value = { ...item, ...(conflict ? { conflict } : {}) };
+    reported.set(item.id, value); merged.set(item.id, value);
+  }
+  return { conclusion: current?.conclusion ?? checkpoints?.conclusion ?? previous!.conclusion,
+    items: [...merged.values()], extra: current?.extra ?? previous?.extra ?? checkpoints?.extra ?? [] };
+}
+
 /** 扫日志里含错误关键字、且不含忽略关键字的行；去重，最多 max 行。 */
 export function scanLogs(text: string, patterns: string[], ignore: string[], max = 20): string[] {
   if (patterns.length === 0) return [];
@@ -332,11 +357,26 @@ function normalize(text: string): string {
   return text.trim().replace(/^[`「『"'“]+|[`」』"'”]+$/g, "").replace(/\s+/g, " ").trim();
 }
 
-/** 开发方回复里对验收标准提异议的编号（A2：异议…）。 */
-export function findObjections(text: string): string[] {
-  const ids = new Set<string>();
-  for (const match of unbold(text).matchAll(/^\s*[-*]?\s*([AG]\d+)\s*[：:]\s*异议/gm)) ids.add(match[1].toUpperCase());
-  return [...ids];
+/**
+ * 开发方回复里对验收条目的回应，分两组：
+ * - objections：对标准本身的异议（「A2：异议：理由」），只有这组暂停等用户决定；
+ * - doubts：认可标准、质疑验收方法或失败归因（「G2：方法存疑：理由」），照常验收。
+ * 同一行里同时出现两种写法时按异议处理。
+ */
+export interface ObjectionGroups {
+  objections: string[];
+  doubts: { id: string; reason: string }[];
+}
+export function findObjections(text: string): ObjectionGroups {
+  const objections = new Set<string>();
+  const doubts = new Map<string, string>();
+  for (const raw of unbold(text).split(/\r?\n/)) {
+    const objection = /^\s*[-*]?\s*([AG]\d+)\s*[：:]\s*异议\s*[：:]?\s*(.*)$/.exec(raw);
+    if (objection) { objections.add(objection[1].toUpperCase()); continue; }
+    const doubt = /^\s*[-*]?\s*([AG]\d+)\s*[：:]\s*方法存疑\s*[：:]?\s*(.*)$/.exec(raw);
+    if (doubt) doubts.set(doubt[1].toUpperCase(), doubt[2].trim());
+  }
+  return { objections: [...objections], doubts: [...doubts].map(([id, reason]) => ({ id, reason })) };
 }
 
 export interface JudgeInput {
@@ -456,6 +496,7 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
       if (!reported) {
         return { ...criterion, verdict: "无法验证", detail: "验收方没有报告这一条", evidenceProblem: true, cause: "验收方" };
       }
+      if (reported.conflict) return { ...criterion, verdict: "无法验证", detail: reported.conflict, evidenceProblem: true, cause: "验收方" };
       if (reported.verdict === "无法验证") {
         const reason = reported.fields["原因"] || "验收方没写原因";
         return {
@@ -533,7 +574,7 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
 /** 数据状态说明：配了重置时程序每次验收前都重置；没配时提醒验收方不要自己清数据。 */
 export function dataStateNote(resetConfigured: boolean): string {
   return resetConfigured
-    ? "程序在每次验收前都已把数据重置到初始状态。"
+    ? "程序在首次验收和换强模型重验前已把数据重置到初始状态；同一次格式更正保留数据。"
     : "程序没有配置数据重置：数据可能还留着之前操作的结果。依赖初始状态、现在做不了的条目报「无法验证」，原因写「数据不是初始状态」；不要自己清数据、重启或关闭系统。";
 }
 
@@ -549,7 +590,7 @@ export function buildCorrectionInput(record: Omit<AcceptanceRecord, "durationMs"
     "",
     resetDone
       ? "程序已把数据重置到初始状态，之前操作留下的数据已经不在了：请按标准顺序从 A1 起全部重新实测。"
-      : `用 ./ev 或 ./browser 重新实测这些条目。${dataStateNote(false)}`,
+      : `已经留对的证据不用重跑。用 ./ev 或 ./browser 重新实测这些条目。同一次更正未重置数据，不要自己清数据、重启或关闭系统。`,
     "证据摘录必须从 evidence/<条目>.txt 里原样复制。不要启动、停止、重启被测系统。",
     "然后按系统提示里的格式，重新输出全部条目的结果。",
   ].join("\n") + "\n";
@@ -571,6 +612,8 @@ export interface AcceptanceInputOptions {
   resetConfigured?: boolean;
   /** 用户已同意授权的 [授权] 条目。 */
   authorized?: string[];
+  /** 开发方的「方法存疑」条目：照常实测，理由只作核对提示。 */
+  methodDoubts?: { id: string; reason: string }[];
 }
 
 /** 拼验收方输入：环境、工具、需求、标准、操作说明、开发方的使用说明。 */
@@ -605,6 +648,11 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
     options.guide?.trim() || "（无）",
     "## 开发方的交付说明（只用来知道怎么操作，不能当作通过的依据）",
     options.deliveryNote.trim() || "（无）",
+    ...(options.methodDoubts?.length ? [
+      "## 开发方对验收方法的存疑（照常实测）",
+      options.methodDoubts.map((item) => `- ${item.id}：${item.reason || "（没写理由）"}`).join("\n")
+      + "\n开发方认可标准、只质疑方法或失败归因：这些条目照常判定，不能因为它的一句说明就记通过；按标准和你自己实测的证据报告。",
+    ] : []),
   ];
   if (options.previousFailed.length > 0) {
     parts.push("## 上一轮", `上一轮没通过：${options.previousFailed.join("、")}。这一轮全部标准都要重新实测，上一轮的证据不算。`);
@@ -635,7 +683,7 @@ export function buildAcceptanceRepairMessage(repairRound: number, record: Accept
     formatFailedItems(record),
     "",
     `完整材料（系统日志、证据）：${record.runDir}`,
-    "请逐条处理：修好的写「A2：已修」；认为标准本身有问题的写「A2：异议：理由」（异议交用户决定）。全部处理完，最后一行写【交付完成】。",
+    "请逐条处理：修好的写「A2：已修」；认为标准本身有问题的写「A2：异议：理由」（异议交用户决定）；认可标准、只质疑验收方法或失败归因的写「A2：方法存疑：理由」（照常验收，理由交给验收方核对）。全部处理完，最后一行写【交付完成】。",
   ].join("\n");
 }
 
@@ -643,10 +691,8 @@ export function buildAcceptanceRepairMessage(repairRound: number, record: Accept
 export function renderAcceptanceForReview(record: AcceptanceRecord): string {
   const allManual = record.items.length > 0 && record.items.every((item) => item.verdict === "需人工");
   const summary = allManual
-    ? `验收标准全部标了 [人工]，程序没有启动系统实测，由用户人工验收；你照常评审，不需要启动系统或跑端到端测试。`
-    : record.verdict === "部分验证"
-      ? `程序已经启动系统、按验收标准黑盒实测：其余全部通过，${record.reason}；验收期间系统日志没有错误。你不需要再启动系统或跑端到端测试。`
-      : "程序已经启动系统、按验收标准黑盒实测，全部通过，验收期间系统日志没有错误。你不需要再启动系统或跑端到端测试。";
+    ? "此前验收标准全部交给用户，程序没有启动系统实测。"
+    : `此前验收记录：${record.verdict}。${record.reason ?? ""}这不是当前候选已通过的依据；本轮静态评审不要启动系统或重跑 E2E。`;
   return [
     "## 验收结果",
     summary,
@@ -660,6 +706,9 @@ export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   if (record.escalated) lines.push("验收方：第一位没按要求做，已换强模型重验");
   for (const item of record.cleanup ?? []) lines.push(`验收收尾：${item}`);
   if (record.reason) lines.push(`验收说明：${record.reason}`);
+  if (record.methodDoubts?.length) {
+    lines.push(`验收方法存疑（照常验收，不作为通过依据）：${record.methodDoubts.map((item) => `${item.id}：${item.reason || "（没写理由）"}`).join("；")}`);
+  }
   if (record.note) lines.push(`验收提示：${record.note}`);
   for (const item of record.items) {
     lines.push(`- ${item.id}：${item.verdict}${item.verdict === "通过" ? "" : ` —— ${item.detail.split("\n")[0]}`}`);

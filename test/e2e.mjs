@@ -72,7 +72,7 @@ export const countsOf = (summary) => {
 
 export function hasParsedLatestRound(state) {
   const round = state?.rounds?.at(-1);
-  return Boolean(round && !round.failed && ["通过", "需返修"].includes(round.conclusion));
+  return Boolean(round && !round.failed && ["通过", "需返修"].includes(round.reviewConclusion ?? round.conclusion));
 }
 
 /** 总结到达终态：暂停，或完成且（需要时）验收命令已出结果。 */
@@ -352,11 +352,11 @@ export const SCENARIOS = {
       const calls = existsSync(join(ctx.fakeDir, "acc-calls.log")) ? readFileSync(join(ctx.fakeDir, "acc-calls.log"), "utf8").trim().split("\n").length : 0;
       check.expect("A8-3 系统没了就不再重做、不换强模型（验收方只被调用 1 次）", calls === 1, `实际 ${calls} 次`);
       check.expect("A8-4 被测系统的端口已经释放", !await portOpen(ctx.port), `端口 ${ctx.port} 还有程序在监听`);
-      check.expect("A8-5 没有进入评审", ctx.fakeCalls.length === 0, `评审被调用 ${ctx.fakeCalls.length} 次`);
+      check.expect("A8-5 已先完成一次静态评审", ctx.fakeCalls.length === 1, `评审被调用 ${ctx.fakeCalls.length} 次`);
     },
   },
   A9: {
-    name: "自动验收：重做前程序重置数据",
+    name: "自动验收：首次重置，报告更正复用数据",
     env: { FAKE_MODE: "pass", AUTOREVIEW_ACCEPTANCE_CMD: FAKE_TESTER, FAKE_ACC_MODE: "lazy" },
     flags: () => FAKE,
     prompt: PROMPT_WITH_CRITERIA,
@@ -367,10 +367,34 @@ export const SCENARIOS = {
     expect: "完成",
     checks(ctx, check) {
       const resets = existsSync(join(ctx.scene, "reset-count")) ? readFileSync(join(ctx.scene, "reset-count"), "utf8").trim().split("\n").length : 0;
-      check.expect("A9-1 第 1 次验收和重做前各重置一次数据", resets === 2, `重置 ${resets} 次`);
-      check.expect("A9-2 重做后验收通过、进入评审", /^验收：通过/m.test(ctx.summary) && ctx.fakeCalls.length === 1,
+      check.expect("A9-1 首次重置一次，格式更正不重复重置", resets === 1, `重置 ${resets} 次`);
+      check.expect("A9-2 静态评审后经更正验收通过", /^验收：通过/m.test(ctx.summary) && ctx.fakeCalls.length === 1,
         `评审被调用 ${ctx.fakeCalls.length} 次`);
       check.expect("A9-3 没有打回开发方", ctx.state?.repairs === 0, `返修 ${ctx.state?.repairs ?? "（无状态）"} 次`);
+    },
+  },
+  A10: {
+    name: "真实自动验收 + 真实评审",
+    env: {},
+    flags: () => ["--autoreview-reviewer-model", MODEL, "--autoreview-reviewer-thinking", THINKING],
+    prompt: PROMPT_WITH_CRITERIA,
+    acceptance: ({ port }) => ({
+      start: `node server.mjs ${port}`, readyUrl: `http://127.0.0.1:${port}/health`, model: MODEL, thinking: THINKING,
+    }),
+    expect: "完成",
+    async checks(ctx, check) {
+      const round = ctx.state?.rounds?.at(-1);
+      check.expect("A10-1 真实评审后完成真实验收", round?.acceptance?.verdict === "通过" && hasParsedLatestRound(ctx.state),
+        JSON.stringify(round ?? null));
+      const item = round?.acceptance?.items?.find((entry) => entry.id === "A1");
+      const evidencePath = round?.acceptance?.runDir && join(round.acceptance.runDir, "evidence", "A1.txt");
+      const evidence = evidencePath && existsSync(evidencePath) ? readFileSync(evidencePath, "utf8") : "";
+      check.expect("A10-2 操作条目有通过结论和实际证据", item?.verdict === "通过" && evidence.includes("=== A1 ") && /\n5\r?\n/.test(evidence),
+        JSON.stringify(item ?? null));
+      const probe = spawnSync("python3", ["-c", "from calc import add; assert add(2, 3) == 5 and add(-1, 1) == 0"],
+        { cwd: ctx.repo, encoding: "utf8", timeout: 60_000 });
+      check.expect("A10-3 独立检查开发成果正确", probe.status === 0, tail(probe.stderr));
+      check.expect("A10-4 验收结束后被测系统端口释放", !await portOpen(ctx.port), `端口 ${ctx.port} 仍在监听`);
     },
   },
 };
@@ -629,6 +653,7 @@ async function main() {
   writeFileSync(reportPath, report);
   writeFileSync(join(runDir, "results.json"), JSON.stringify(results, null, 2));
   const overall = overallOf(results);
+  if (overall.exitCode || interrupted) console.log(`AUTOREVIEW_FAILURE=${overall.exitCode === 1 ? "product" : "unknown"} 详见 ${reportPath}`);
   console.log(`\n验收结论：${overall.text}${interrupted ? "（被中断）" : ""}`);
   console.log(`验收报告：${reportPath}`);
   process.exitCode = interrupted && overall.exitCode === 0 ? 2 : overall.exitCode;
@@ -637,6 +662,7 @@ async function main() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     console.error(error);
-    process.exitCode = 1;
+    console.error("AUTOREVIEW_FAILURE=unknown E2E 驱动未完成，保留现场诊断");
+    process.exitCode = 2;
   });
 }

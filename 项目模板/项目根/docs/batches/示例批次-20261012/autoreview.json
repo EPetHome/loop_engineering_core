@@ -7,9 +7,42 @@
   "acceptance": {
     "start": "sh deploy/acceptance/start.sh",
     "readyUrl": "http://127.0.0.1:38081/actuator/health",
-    "env": { "PORT": "38081" },
+    "env": {
+      "PORT": "38081"
+    },
     "reset": "sh deploy/acceptance/reset-data.sh",
     "guide": "deploy/acceptance/GUIDE.md",
-    "timeoutMin": 30
+    "timeoutMin": 30,
+    "cleanup": "sh deploy/acceptance/release.sh"
+  },
+  "preparation": {
+    "check": "sh deploy/acceptance/prepare.sh check",
+    "timeoutMin": 5,
+    "maxRecoveries": 1,
+    "maxRepairs": 1
+  },
+  "context": {
+    "root": "..",
+    "sources": [
+      {
+        "id": "rules",
+        "path": "AGENTS.md",
+        "role": "rules"
+      },
+      {
+        "id": "need",
+        "path": "docs/requirements/需求-示例.md",
+        "role": "requirement"
+      },
+      {
+        "id": "design",
+        "path": "docs/prompt/方案-示例.md",
+        "role": "design",
+        "dependsOn": [
+          "need"
+        ]
+      }
+    ],
+    "intervalSec": 0
   }
 }

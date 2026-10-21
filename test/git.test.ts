@@ -1,7 +1,7 @@
 /** git 取证补充回归；临时目录内布置仓库，不调用模型。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -70,5 +70,79 @@ test("G2 补充：tree、stat、变化列表、status 失败及 exec rejection �
     const changed = await clean.changedFiles(before, after);
     assert.deepEqual(changed, ["tracked.txt"]);
     assert.ok(r.calls.filter((args) => args.includes("--name-only") || args.includes("status")).every((args) => args.includes("-z")));
+  } finally { r.close(); }
+});
+
+
+test("G4 补充：子目录会话下 changedFiles 统一为工作目录相对路径（已跟踪与未跟踪一致）", async () => {
+  const r = repository();
+  try {
+    mkdirSync(join(r.cwd, "sub"));
+    writeFileSync(join(r.cwd, "sub", "need.md"), "v1\n");
+    r.git("add", "sub/need.md"); r.git("commit", "-qm", "add sub source");
+    const git = createGitEvidence(r.exec, join(r.cwd, "sub"));
+    const before = await git.snapshot();
+    writeFileSync(join(r.cwd, "sub", "need.md"), "v2\n");   // 已跟踪，git diff 输出仓库根相对
+    writeFileSync(join(r.cwd, "sub", "new.md"), "new\n");   // 未跟踪，ls-files 输出工作目录相对
+    writeFileSync(join(r.cwd, "tracked.txt"), "changed\n"); // 会话目录之外
+    const after = await git.snapshot();
+    assert.deepEqual(await git.changedFiles(before, after), ["../tracked.txt", "need.md", "new.md"]);
+    // 仓库根会话输出保持原样，现有调用方的消息不变。
+    const rootGit = createGitEvidence(r.exec, r.cwd);
+    const rootBefore = await rootGit.snapshot();
+    writeFileSync(join(r.cwd, "sub", "need.md"), "v3\n");
+    const rootAfter = await rootGit.snapshot();
+    assert.deepEqual(await rootGit.changedFiles(rootBefore, rootAfter), ["sub/need.md"]);
+  } finally { r.close(); }
+});
+
+test("G5 补充：暂存的重命名报出前后两端，范围校验不会漏掉旧路径", async () => {
+  const r = repository();
+  try {
+    mkdirSync(join(r.cwd, "sub"));
+    writeFileSync(join(r.cwd, "sub", "server.ts"), "export const x = 1;\n");
+    r.git("add", "sub/server.ts"); r.git("commit", "-qm", "add server");
+    mkdirSync(join(r.cwd, "sub", "docs"));
+    const git = createGitEvidence(r.exec, join(r.cwd, "sub"));
+    const rootGit = createGitEvidence(r.exec, r.cwd);
+    const before = await git.snapshot();
+    const rootBefore = await rootGit.snapshot();
+    r.git("mv", "sub/server.ts", "sub/docs/server.ts");   // git mv 已暂存重命名
+    const after = await git.snapshot();
+    const rootAfter = await rootGit.snapshot();
+    assert.deepEqual(await git.changedFiles(before, after), ["docs/server.ts", "server.ts"], "重命名前后两个路径都要在列表里");
+    assert.deepEqual(await rootGit.changedFiles(rootBefore, rootAfter), ["sub/docs/server.ts", "sub/server.ts"]);
+  } finally { r.close(); }
+});
+
+test("G3：干净仓库直接复用 HEAD，未跟踪文件仍参与指纹，dirty 取证失败不吞掉", async () => {
+  const r = repository();
+  try {
+    const exec: Exec = async (command, args, options) => args.includes("stash")
+      ? { stdout: "", stderr: "", code: 1, killed: false } : r.exec(command, args, options);
+    const git = createGitEvidence(exec, r.cwd);
+    const clean = await git.snapshot();
+    assert.equal(clean.ref, r.git("rev-parse", "HEAD"));
+    assert.ok(!r.calls.some((args) => args.includes("stash")));
+    writeFileSync(join(r.cwd, "new.txt"), "A");
+    const added = await git.snapshot();
+    assert.equal(added.ref, clean.ref);
+    assert.notEqual(added.fingerprint, clean.fingerprint);
+    writeFileSync(join(r.cwd, "new.txt"), "B");
+    assert.notEqual((await git.snapshot()).fingerprint, added.fingerprint);
+    for (const staged of [false, true]) {
+      writeFileSync(join(r.cwd, "tracked.txt"), staged ? "staged\n" : "working\n");
+      if (staged) r.git("add", "tracked.txt");
+      await assert.rejects(git.snapshot(), /stash create.*退出码 1/);
+    }
+    r.git("reset", "--hard", "HEAD");
+    for (const failure of [
+      { stdout: "", stderr: "READ_FAIL", code: 128, killed: false },
+      { stdout: "", stderr: "READ_FAIL", code: 1, killed: false },
+      { stdout: "", stderr: "", code: 0, killed: true },
+    ]) {
+      const failed = createGitEvidence(async (cmd, args, opts) => args.includes("--quiet") ? failure : r.exec(cmd, args, opts), r.cwd);
+      await assert.rejects(failed.snapshot(), GitReadError);
+    }
   } finally { r.close(); }
 });

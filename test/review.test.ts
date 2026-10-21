@@ -7,12 +7,26 @@ import { join } from "node:path";
 import test from "node:test";
 import { checkRoundBudget, parseAcceptanceConfig, parseGateConfig } from "../config.ts";
 import type { Exec, ExecResult } from "../git.ts";
+import { loadContext, refreshContext } from "../project-context.ts";
 import { newReviewState, runReviewRound, type ReviewConfig, type ReviewDeps } from "../review.ts";
+import { classifyFailure } from "../failure.ts";
+import preparationGuard, { mayPrepareWrite } from "../preparation-guard.ts";
 
 const PASS = "## 结论：通过\n## 必修\n无\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n";
 
+test("失败归因：资源错误不因连带断言变成产品缺陷，未知不猜，脚本可明确声明", () => {
+  assert.equal(classifyFailure(1, "AssertionError\nOSError: [Errno 28] No space left on device").kind, "environment");
+  assert.equal(classifyFailure(1, "mc: Storage backend has reached its minimum free drive threshold").kind, "environment");
+  assert.equal(classifyFailure(78, "准备脚本失效").kind, "method");
+  assert.equal(classifyFailure(1, "not ok 1 - add").kind, "product");
+  assert.equal(classifyFailure(1, "opaque error").kind, "unknown");
+  assert.equal(classifyFailure(1, "AUTOREVIEW_FAILURE=product missing business file").kind, "product");
+});
+
 function harness() {
   const root = mkdtempSync(join(tmpdir(), "autoreview-budget-"));
+  const previousResources = process.env.AUTOREVIEW_RESOURCE_ROOT;
+  process.env.AUTOREVIEW_RESOURCE_ROOT = join(root, "resources");
   const repo = join(root, "repo");
   mkdirSync(repo);
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
@@ -31,7 +45,11 @@ function harness() {
   const config: ReviewConfig = {
     maxRepairs: 3, reviewerModel: "m", reviewerThinking: "xhigh", reviewTimeoutMin: 60, reviewerCmd: "",
   };
-  return { root, repo, git, exec, config, close: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, repo, git, exec, config, close: () => {
+    if (previousResources === undefined) delete process.env.AUTOREVIEW_RESOURCE_ROOT;
+    else process.env.AUTOREVIEW_RESOURCE_ROOT = previousResources;
+    rmSync(root, { recursive: true, force: true });
+  } };
 }
 
 test("评审预算：首次用掉 59.5 分钟后不再重试，暂停原因「评审超时」", async () => {
@@ -150,7 +168,12 @@ test("门禁通过：先跑门禁再评审，评审输入写明门禁已通过�
     writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
     const run = await gateRound(h, "echo GATE_OK");
     assert.equal(run.outcome.kind, "done");
-    assert.deepEqual(run.gateCalls, [{ args: ["-c", "exec 2>&1\necho GATE_OK"], cwd: h.repo, timeout: 10 * 60_000, role: "门禁" }]);
+    assert.equal(run.gateCalls.length, 1);
+    assert.ok(run.gateCalls[0].args[1].endsWith("exec 2>&1\necho GATE_OK"));
+    assert.match(run.gateCalls[0].args[1], /AUTOREVIEW_TEMP_DIR=/);
+    assert.equal(run.gateCalls[0].cwd, h.repo);
+    assert.equal(run.gateCalls[0].timeout, 10 * 60_000);
+    assert.equal(run.gateCalls[0].role, "门禁");
     assert.equal(run.reviewInputs.length, 1);
     assert.ok(run.reviewInputs[0].includes("## 门禁\n程序已在项目目录执行门禁命令 echo GATE_OK，退出码 0（通过）。"));
     const gate = run.state.rounds[0].gate!;
@@ -228,6 +251,164 @@ test("门禁改了项目里的文件：暂停并列出文件", async () => {
   } finally { h.close(); }
 });
 
+test("仓库内已登记来源变化不阻断：门禁里改来源照常评审并换用新版本", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    writeFileSync(join(h.repo, "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const run = await gateRound(h, "echo v2 >> need.md");
+    assert.equal(run.outcome.kind, "done", run.outcome.kind === "paused" ? run.outcome.reason : "");
+    assert.deepEqual(run.state.sourceChanges?.map((item) => item.path), ["need.md"]);
+    assert.notEqual(run.state.inputsFingerprint, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("仓库内已登记来源变化不阻断：评审方改了来源照常出结论，代码改动仍暂停", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    writeFileSync(join(h.repo, "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: h.repo, devSessionId: "source-in-repo", round: 1, deliveryNote: "done", state, config: h.config, exec: h.exec,
+      writeInput: (name, text) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(h.repo, "need.md"), "v2"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(outcome.kind, "done");
+    assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["need.md"]);
+    // 非来源的代码改动仍要被拦下。
+    const dirty = newReviewState();
+    const blocked = await runReviewRound({
+      cwd: h.repo, devSessionId: "code-change", round: 1, deliveryNote: "done", state: dirty, config: h.config, exec: h.exec,
+      writeInput: (name, text) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(h.repo, "reviewer-note.txt"), "reviewer changed the worktree"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(blocked.kind, "paused");
+    assert.equal(blocked.reason, "评审改动了工作区");
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("子目录会话：仓库内来源变化不阻断，非来源改动仍暂停", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    mkdirSync(join(h.repo, "sub"));
+    writeFileSync(join(h.repo, "sub", "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "sub/need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const workDir = join(h.repo, "sub");
+    const writeInput = (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; };
+    const sourceState = newReviewState();
+    const done = await runReviewRound({
+      cwd: workDir, devSessionId: "sub-source", round: 1, deliveryNote: "done", state: sourceState, config: h.config, exec: h.exec,
+      writeInput, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(workDir, "need.md"), "v2"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(done.kind, "done", done.kind === "paused" ? done.reason : "");
+    assert.deepEqual(sourceState.sourceChanges?.map((item) => item.path), ["sub/need.md"]);
+    const codeState = newReviewState();
+    const blocked = await runReviewRound({
+      cwd: workDir, devSessionId: "sub-code", round: 1, deliveryNote: "done", state: codeState, config: h.config, exec: h.exec,
+      writeInput, saveState: () => {},
+      callReviewer: async () => { writeFileSync(join(workDir, "reviewer-note.txt"), "not a source"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(blocked.kind, "paused");
+    assert.equal(blocked.reason, "评审改动了工作区");
+    assert.deepEqual(blocked.changedFiles, ["reviewer-note.txt"]);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("子目录会话：非来源文件重命名进来源目录仍暂停（重命名两端都参与范围校验）", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    mkdirSync(join(h.repo, "sub", "docs"), { recursive: true });
+    writeFileSync(join(h.repo, "sub", "docs", "guide.md"), "guide");
+    writeFileSync(join(h.repo, "sub", "server.ts"), "export const x = 1;\n");
+    h.git("add", "sub/docs/guide.md", "sub/server.ts"); h.git("commit", "-qm", "add sub files");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "sub/docs", role: "guide" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: join(h.repo, "sub"), devSessionId: "sub-rename", round: 1, deliveryNote: "done", state, config: h.config, exec: h.exec,
+      writeInput: (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => { h.git("mv", "sub/server.ts", "sub/docs/server.ts"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    });
+    assert.equal(outcome.kind, "paused", outcome.kind === "done" ? "重命名旧路径被漏掉，误判成纯来源变化" : "");
+    assert.equal(outcome.reason, "评审改动了工作区");
+    assert.ok(outcome.changedFiles?.includes("server.ts"), `必须报出被移走的旧路径：${outcome.changedFiles?.join("、")}`);
+    assert.ok(outcome.changedFiles?.includes("docs/server.ts"));
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+test("准备方法修复把非允许文件重命名进允许目录：范围校验拒绝", async () => {
+  const h = harness();
+  try {
+    writeFileSync(join(h.repo, "server.ts"), "export const x = 1;\n");
+    h.git("add", "server.ts"); h.git("commit", "-qm", "add server");
+    mkdirSync(join(h.repo, "docs"));
+    const { parsePreparation, runPreparation } = await import("../preparation.ts");
+    const config = parsePreparation({ check: "true", repair: { model: "m", paths: ["docs"] } }, h.repo)!;
+    const exec: Exec = async (command, args, options) => {
+      if (options.role === "准备方法修复") {
+        h.git("mv", "server.ts", "docs/server.ts");
+        return { stdout: "", stderr: "", code: 0, killed: false };
+      }
+      return h.exec(command, args, options);
+    };
+    const result = await runPreparation({
+      cwd: h.repo, config, state: {}, exec, runDir: join(h.root, "prepare-rename"), saveState: () => {}, failure: "method",
+    });
+    assert.equal(result.ok, false, "重命名出去的旧路径不在允许范围内，必须拒绝");
+    assert.match(result.reason!, /准备动作越出修改范围/);
+    assert.match(result.reason!, /server\.ts/);
+  } finally { h.close(); }
+});
+
+test("子目录会话：门禁里改仓库内来源不阻断", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    mkdirSync(join(h.repo, "sub"));
+    writeFileSync(join(h.repo, "sub", "need.md"), "v1");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { sources: [{ path: "sub/need.md", role: "requirement" }] } }));
+    writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: join(h.repo, "sub"), devSessionId: "sub-gate", round: 1, deliveryNote: "done", state,
+      config: { ...h.config, gate: { cmd: "echo v2 >> need.md", timeoutMin: 10 } }, exec: h.exec,
+      writeInput: (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
+      callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(outcome.kind, "done", outcome.kind === "paused" ? outcome.reason : "");
+    assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["sub/need.md"]);
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
 test("门禁用掉的时间从一轮总预算里扣，评审只拿剩余时间", async () => {
   const h = harness();
   try {
@@ -249,4 +430,133 @@ test("门禁用掉的时间从一轮总预算里扣，评审只拿剩余时间",
     assert.deepEqual(reviewerTimeouts, [55 * 60_000]);
     assert.equal(run.state.rounds[0].gate!.durationMs, 5 * 60_000);
   } finally { h.close(); }
+});
+
+test("环境与方法故障不消耗已使用的业务返修次数", async () => {
+  const h = harness();
+  try {
+    const state = newReviewState(); state.repairs = 2;
+    const run = await gateRound(h, "echo 'OSError: [Errno 28] No space left on device'; exit 1", { state });
+    assert.equal(run.outcome.kind, "paused");
+    assert.equal(run.outcome.failureKind, "environment");
+    assert.equal(state.repairs, 2);
+    assert.equal(run.reviewInputs.length, 0);
+    const method = await gateRound(h, "exit 78", { state });
+    assert.equal(method.outcome.failureKind, "method");
+    assert.equal(state.repairs, 2);
+  } finally { h.close(); }
+});
+
+test("静态评审有必修时不启动后置验收", async () => {
+  const h = harness();
+  try {
+    const state = newReviewState();
+    state.criteria = { source: "用户", version: 1, updatedAt: "x", items: [{ id: "A1", text: "操作：检查\n预期：通过" }] };
+    const run = await runReviewRound({
+      cwd: h.repo, devSessionId: "order", round: 1, deliveryNote: "完成", state,
+      config: { ...h.config, acceptance: parseAcceptanceConfig({}, h.repo, {}) }, exec: h.exec,
+      writeInput: (name, text) => { const p = join(h.root, name); writeFileSync(p, text); return p; },
+      acceptanceDir: join(h.root, "acceptance"), saveState: () => {},
+      callReviewer: async () => ({ stdout: PASS.replace("## 必修\n无", "## 必修\n1. 位置：file.txt:1 问题：不正确").replace("结论：通过", "结论：需返修"), stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(run.kind, "repair");
+    assert.equal(state.rounds.length, 1);
+    assert.equal(state.rounds[0].acceptance, undefined);
+    assert.equal(existsSync(join(h.root, "acceptance")), false);
+  } finally { h.close(); }
+});
+
+test("已有准备方法和自动恢复沿用原候选，保留业务计数并限制环境次数", async () => {
+  const h = harness();
+  try {
+    const { parsePreparation } = await import('../preparation.ts');
+    const flag = join(h.root, 'environment-ready');
+    const state = newReviewState(); state.repairs = 2;
+    const config = {
+      ...h.config,
+      preparation: parsePreparation({ check: 'true', recover: `touch '${flag}'`, maxRecoveries: 1 }, h.repo),
+      gate: { cmd: `test -f '${flag}' || exit 75`, timeoutMin: 1 },
+    };
+    const run = () => runReviewRound({
+      cwd: h.repo, devSessionId: 'recovery', round: state.rounds.length + 1, deliveryNote: '完成', state, config, exec: h.exec,
+      writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+      saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: '', code: 0, killed: false }),
+    });
+    const first = await run();
+    assert.equal(first.kind, 'done', JSON.stringify(first));
+    assert.equal(state.repairs, 2);
+    assert.equal(state.preparationAttempts?.environment, 1);
+    assert.equal(state.rounds.length, 2);
+    rmSync(flag);
+    assert.equal((await run()).kind, 'paused');
+    assert.equal(state.repairs, 2);
+    assert.equal(state.preparationAttempts?.environment, 1);
+  } finally { h.close(); }
+});
+
+test("准备检查不得改稳定规则；准备模型只能修改声明路径", async () => {
+  const h = harness();
+  try {
+    const { parsePreparation, runPreparation } = await import('../preparation.ts');
+    assert.throws(() => parsePreparation({ check: 'true', repair: { model: 'm', paths: ['.'] } }, h.repo), /不能/);
+    assert.throws(() => parsePreparation({ check: 'true', repair: { model: 'm', paths: ['AGENTS.md'] } }, h.repo), /不能/);
+    assert.equal(mayPrepareWrite(h.repo, ['scripts'], 'scripts/check.sh'), true);
+    assert.equal(mayPrepareWrite(h.repo, ['scripts'], 'AGENTS.md'), false);
+    assert.equal(mayPrepareWrite(h.repo, ['scripts'], '../outside'), false);
+    const result = await runPreparation({
+      cwd: h.repo, config: parsePreparation({ check: 'echo changed > AGENTS.md' }, h.repo)!,
+      state: {}, exec: h.exec, runDir: join(h.root, 'prepare'), saveState: () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason!, /稳定规则/);
+  } finally { h.close(); }
+});
+
+test("仓库外权威来源变化不阻塞本轮结果，换新版本继续并记录变化", async () => {
+  const h = harness();
+  const previous = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(h.root, "context-store");
+  try {
+    writeFileSync(join(h.root, "requirement.md"), "original");
+    writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ context: { root: "..", sources: [{ id: "need", path: "requirement.md", role: "requirement" }] } }));
+    const state = newReviewState(); state.repairs = 2;
+    let calls = 0;
+    const deps: ReviewDeps = {
+      cwd: h.repo, devSessionId: "frozen", round: 1, deliveryNote: "done", state, config: h.config, exec: h.exec,
+      writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; }, saveState: () => {},
+      callReviewer: async () => { calls++; writeFileSync(join(h.root, "requirement.md"), "new requirement"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
+    };
+    const first = await runReviewRound(deps);
+    assert.equal(first.kind, "done");
+    assert.equal(state.repairs, 2);
+    assert.equal(state.inputsFingerprint, refreshContext(loadContext(h.repo)!).snapshot.inputsFingerprint, "版本更新到当前");
+    assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["requirement.md"]);
+    const second = await runReviewRound({ ...deps, round: 2 });
+    assert.equal(second.kind, "done"); assert.equal(calls, 2, "下一轮评审照常进行");
+  } finally {
+    if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
+    h.close();
+  }
+});
+
+
+test("准备工具按实际工作目录检查路径，不跟随悬空链接", async () => {
+  const h = harness();
+  const oldRoot = process.env.AUTOREVIEW_PREP_ROOT, oldPaths = process.env.AUTOREVIEW_PREP_PATHS;
+  try {
+    const { symlinkSync } = await import("node:fs");
+    mkdirSync(join(h.repo, "sub")); mkdirSync(join(h.repo, "deploy"));
+    symlinkSync(join(h.root, "missing.txt"), join(h.repo, "deploy", "dangling.sh"));
+    assert.equal(mayPrepareWrite(h.repo, ["deploy"], "deploy/dangling.sh"), false);
+    process.env.AUTOREVIEW_PREP_ROOT = h.repo; process.env.AUTOREVIEW_PREP_PATHS = JSON.stringify(["deploy"]);
+    let guard: any;
+    preparationGuard({ on: (_event: string, handler: any) => { guard = handler; } } as any);
+    const blocked = await guard({ toolName: "write", input: { path: "deploy/prepare.sh" } }, { cwd: join(h.repo, "sub") });
+    assert.equal(blocked.block, true);
+    assert.equal(await guard({ toolName: "write", input: { path: "../deploy/prepare.sh" } }, { cwd: join(h.repo, "sub") }), undefined);
+  } finally {
+    if (oldRoot === undefined) delete process.env.AUTOREVIEW_PREP_ROOT; else process.env.AUTOREVIEW_PREP_ROOT = oldRoot;
+    if (oldPaths === undefined) delete process.env.AUTOREVIEW_PREP_PATHS; else process.env.AUTOREVIEW_PREP_PATHS = oldPaths;
+    h.close();
+  }
 });

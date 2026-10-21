@@ -8,6 +8,9 @@ set -uo pipefail
 B=$(cd "$(dirname "$0")" && pwd)   # 本批目录
 W=/path/to/项目根/dev分支           # 换成 dev分支 的绝对路径
 [ "${1:-}" = check ] || { echo "用法：$0 check"; exit 2; }
+# 模板不可空跑成功；实施者配置真实检查后移除此拒绝段。
+echo 'AUTOREVIEW_FAILURE=method 请配置真实门禁命令及已知失败基线' >&2
+exit 78
 s=$(date +%Y%m%dT%H%M%S); rc=0
 
 # 1. 后端单测（示例：固定 JDK、Maven 离线、只测本批相关模块）

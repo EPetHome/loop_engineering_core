@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Loop 开发会话的唯一启动入口。固定部分写死，只留按任务变化的参数。
+# 规则见 项目文档/运行与维护.md「Ponytail 与 Skill」；本脚本不替代那里的说明。
+#
+# 用法：bin/pi-dev [选项] <提示词路径> [-- 追加给 pi 的参数…]
+#   --cwd <目录>        开发目录（默认当前目录）
+#   --model <模型>      默认 openai-codex/gpt-6.1-sol
+#   --thinking <档位>   默认 max
+#   --tools <工具>      默认 read,edit,write,bash
+#   --session <会话>    精确恢复开发会话（不要用 pi -c）
+#   --name <名称>       会话显示名
+#   --dry-run           只打印将执行的命令，不启动
+# 环境变量：
+#   LOOP_DIR            加载哪份 autoreview.ts（默认本脚本所在仓库）
+#   PONYTAIL_EXTENSION  Ponytail 原生扩展路径（默认下面的固定版本）
+#   PI_BIN / PI_NODE_BIN  pi 入口与 node 目录
+# 提示词以外的 pi 参数（如 --autoreview-accept-cmd）放在 -- 之后原样传给 pi。
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOOP_DIR="${LOOP_DIR:-$here}"
+PI_BIN="${PI_BIN:-/Users/Admin/.local/bin/pi}"
+PI_NODE_BIN="${PI_NODE_BIN:-/Users/Admin/.hermes/node/bin}"
+PERMISSION_EXT="/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts"
+PONYTAIL_EXTENSION="${PONYTAIL_EXTENSION:-/Users/Admin/.codex/plugins/cache/ponytail/ponytail/4.13.0/pi-extension/index.js}"
+
+cwd="$PWD" model="openai-codex/gpt-6.1-sol" thinking="max" tools="read,edit,write,bash"
+session="" name="" prompt="" dry=0 extra=()
+
+die() { echo "pi-dev: $*" >&2; exit 2; }
+need() { [[ $# -ge 2 && -n "$2" ]] || die "$1 需要一个值"; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cwd) need "$@"; cwd="$2"; shift 2 ;;
+    --model) need "$@"; model="$2"; shift 2 ;;
+    --thinking) need "$@"; thinking="$2"; shift 2 ;;
+    --tools) need "$@"; tools="$2"; shift 2 ;;
+    --session) need "$@"; session="$2"; shift 2 ;;
+    --name) need "$@"; name="$2"; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --) shift; extra=("$@"); break ;;
+    -*) die "未知选项 $1（追加给 pi 的参数放在 -- 之后）" ;;
+    *) [[ -z "${prompt}" ]] || die "只能给一个提示词：$1"; prompt="$1"; shift ;;
+  esac
+done
+
+[[ -n "${prompt}" || -n "$session" ]] || die "缺提示词路径（恢复会话时可只给 --session）"
+[[ -d "${cwd}" ]] || die "开发目录不存在：${cwd}"
+cwd="$(cd "${cwd}" && pwd)"
+if [[ -n "${prompt}" ]]; then
+  prompt="${prompt#@}"
+  [[ "${prompt}" = /* ]] || prompt="$PWD/${prompt}"
+  [[ -f "${prompt}" ]] || die "提示词不存在：${prompt}"
+fi
+[[ -x "${PI_BIN}" ]] || die "找不到 pi：${PI_BIN}"
+[[ -f "${PERMISSION_EXT}" ]] || die "找不到权限扩展：${PERMISSION_EXT}"
+[[ -f "${LOOP_DIR}/autoreview.ts" ]] || die "找不到 Loop 扩展：${LOOP_DIR}/autoreview.ts"
+[[ -f "${PONYTAIL_EXTENSION}" ]] || die "找不到 Ponytail：${PONYTAIL_EXTENSION}（开发角色必须加载；不自动安装，核对路径后用 PONYTAIL_EXTENSION 指定）"
+
+args=(--offline --model "$model" --thinking "$thinking"
+  --no-extensions --no-skills --no-prompt-templates --no-themes
+  --tools "$tools"
+  -e "${PERMISSION_EXT}" -e "${LOOP_DIR}/autoreview.ts" -e "${PONYTAIL_EXTENSION}")
+[[ -z "$session" ]] || args+=(--session "$session")
+[[ -z "$name" ]] || args+=(--name "$name")
+args+=(${extra[@]+"${extra[@]}"})
+[[ -z "${prompt}" ]] || args+=("@${prompt}")
+
+if [[ $dry -eq 1 ]]; then
+  sq="'" esc="'\\''"
+  q() { printf "'%s'" "${1//$sq/$esc}"; }
+  printf 'cd %s\nPONYTAIL_DEFAULT_MODE=full %s' "$(q "${cwd}")" "$(q "${PI_BIN}")"
+  for a in "${args[@]}"; do printf ' %s' "$(q "$a")"; done; echo
+  exit 0
+fi
+cd "${cwd}"
+export PATH="$PI_NODE_BIN:$PATH" PONYTAIL_DEFAULT_MODE=full
+exec "${PI_BIN}" "${args[@]}"
