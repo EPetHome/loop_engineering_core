@@ -25,6 +25,8 @@ interface RunOptions {
   cwd?: string;
   input?: string;
   session?: string;
+  /** 默认按 bin/loop-dev 的开发会话运行；null 模拟直接打开的普通会话。 */
+  devRoot?: string | null;
 }
 
 function fixture(options: { marker?: string | null; maxRepairs?: number; files?: Record<string, string> } = {}) {
@@ -66,7 +68,8 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
 
   const run = (event: Record<string, unknown> | string, runOptions: RunOptions = {}) => {
     const baseEnv = { ...env };
-    for (const key of ["CLAUDECODE", "CLAUDE_PLUGIN_ROOT", "CLAUDE_CODE_ENTRYPOINT", "AUTOREVIEW_HOST"]) delete baseEnv[key];
+    for (const key of ["CLAUDECODE", "CLAUDE_PLUGIN_ROOT", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID", "PLUGIN_ROOT", "AUTOREVIEW_HOST", "AUTOREVIEW_DEV_ROOT"]) delete baseEnv[key];
+    const devRoot = runOptions.devRoot === undefined ? repo : runOptions.devRoot;
     const res = spawnSync(process.execPath, [HOOK], {
       input: typeof event === "string" ? event : JSON.stringify(event),
       cwd: runOptions.cwd ?? repo,
@@ -78,6 +81,7 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
         FAKE_MODE: runOptions.mode ?? "pass",
         FAKE_STATE_DIR: join(root, "fake"),
         FAKE_OSASCRIPT_LOG: osLog,
+        ...(devRoot ? { AUTOREVIEW_DEV_ROOT: devRoot } : {}),
         ...runOptions.env,
       },
       encoding: "utf8",
@@ -100,16 +104,182 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
   };
 }
 
-test("H1 找不到 .autoreview.json：退出 0，stdout 为空，不写状态", () => {
+test("H1 直接打开的会话找不到 .autoreview.json：退出 0，stdout 为空，不写状态", () => {
   const h = fixture({ marker: null });
   try {
     for (const ev of [h.event("SessionStart"), h.event("UserPromptSubmit", { prompt: "hi" }), h.delivered()]) {
-      const res = h.run(ev);
+      const res = h.run(ev, { devRoot: null });
       assert.equal(res.code, 0);
       assert.equal(res.stdout, "");
     }
     assert.ok(!existsSync(join(h.home, ".pi-autoreview")));
   } finally { h.close(); }
+});
+
+test("A1/A2 直接打开的 Claude 会话：不注入、不评审、不暂停、不通知、不写状态", () => {
+  const h = fixture();
+  try {
+    const start = h.run(h.event("SessionStart"), { devRoot: null });
+    assert.equal(start.code, 0);
+    assert.equal(start.stdout, "", "没有开发约定或待回写提醒");
+
+    const prompt = h.run(h.event("UserPromptSubmit", { prompt: "普通聊天" }), { devRoot: null });
+    assert.equal(prompt.code, 0);
+    assert.equal(prompt.stdout, "");
+
+    const decision = h.run(h.event("Stop", { last_assistant_message: "我建议这样\n【需要你决定】" }), { devRoot: null });
+    assert.equal(decision.code, 0);
+    assert.equal(decision.stdout, "", "不暂停、不阻止宿主停下");
+
+    h.write("file.txt", "base\nUNCOMMITTED\n");
+    const done = h.run(h.delivered(), { devRoot: null, mode: "always-fix" });
+    assert.equal(done.code, 0);
+    assert.equal(done.stdout, "", "交付完成也不启动评审");
+    assert.equal(h.notifications(), "", "不发任何通知");
+    assert.ok(!existsSync(join(h.root, "fake", "calls.log")), "没有调用评审模型");
+    assert.ok(!existsSync(join(h.home, ".pi-autoreview")), "没有状态文件或总结");
+  } finally { h.close(); }
+});
+
+test("A3 直接打开的会话：SessionStart 只注入交付总表待回写提醒", () => {
+  const h = fixture();
+  try {
+    mkdirSync(dirname(h.ledger), { recursive: true });
+    writeFileSync(h.ledger, renderLedgerRecord({
+      project: projectRootOf(h.repo), session: "old-session", task: "旧任务",
+      result: "完成；评审 1 次，返修 0 次", summary: "/old.md", pending: [],
+    }));
+    const res = h.run(h.event("SessionStart"), { devRoot: null });
+    assert.equal(res.code, 0);
+    const out = JSON.parse(res.stdout);
+    assert.match(out.hookSpecificOutput.additionalContext, /^交付总表里本项目有 1 段待回写原单：.*按 \.autoreview\/CONVENTIONS\.md「收尾回写」处理。$/);
+    assert.ok(!out.hookSpecificOutput.additionalContext.includes(CONVENTION), "不带开发约定");
+    assert.match(out.systemMessage, /待回写原单/);
+    assert.equal(h.notifications(), "");
+    assert.ok(!existsSync(join(h.home, ".pi-autoreview", basename(h.repo))), "不写会话状态或总结");
+  } finally { h.close(); }
+});
+
+test("A4 开发会话：交付完成照常评审返修，需要你决定时照常暂停并通知", () => {
+  const h = fixture();
+  try {
+    h.run(h.event("SessionStart"));
+    h.run(h.event("UserPromptSubmit", { prompt: "需求" }));
+    h.write("file.txt", "base\nCHANGE\n");
+    const review = h.run(h.delivered(), { mode: "always-fix" });
+    assert.equal(review.code, 0);
+    assert.match(JSON.parse(review.stdout).reason, /【自动评审 · 第 1 次返修】/);
+    assert.equal(h.readState().repairs, 1);
+    assert.ok(existsSync(join(h.root, "fake", "calls.log")), "调用了评审");
+    const pause = h.run(h.event("Stop", { last_assistant_message: "需要取舍\n【需要你决定】" }));
+    assert.equal(pause.code, 0);
+    assert.equal(h.readState().pauseReason, "开发方需要你决定");
+    assert.match(h.notifications(), /暂停（开发方需要你决定）/);
+  } finally { h.close(); }
+});
+
+test("A5 项目根按启动变量固定：Stop 在带自己 marker 的非 Git 子目录也不改根", () => {
+  const h = fixture();
+  try {
+    const sub = join(h.repo, "dev分支");
+    mkdirSync(sub);
+    writeFileSync(join(sub, ".autoreview.json"), "{}");
+    h.run(h.event("SessionStart"));
+    h.run(h.event("UserPromptSubmit", { prompt: "需求" }));
+    h.write("file.txt", "base\nCHANGE\n");
+    const res = h.run(h.delivered({ cwd: sub }), { cwd: sub });
+    assert.equal(res.code, 0);
+    assert.doesNotMatch(res.stderr, /内部错误/);
+    assert.equal(h.readState().phase, "done", "仍按启动项目根评审");
+    assert.ok(existsSync(join(h.root, "fake", "calls.log")));
+    assert.ok(!existsSync(join(h.home, ".pi-autoreview", basename(sub))), "没有在子目录另建状态");
+  } finally { h.close(); }
+});
+
+test("A5 补充：固定评审根不改变相对 @文件的宿主当前目录", async (t) => {
+  const prepare = () => {
+    const h = fixture();
+    const sub = join(h.repo, "子目录");
+    mkdirSync(sub);
+    h.write("需求.md", "根目录需求\n");
+    writeFileSync(join(sub, "需求.md"), "子目录需求\n");
+    return { h, sub };
+  };
+  await t.test("从子目录启动：@需求.md 读子目录文件，不读根目录同名文件", () => {
+    const { h, sub } = prepare();
+    try {
+      h.run(h.event("SessionStart", { cwd: sub }), { cwd: sub });
+      h.run(h.event("UserPromptSubmit", { prompt: "@需求.md 按这个做", cwd: sub }), { cwd: sub });
+      const requirement = h.readState().requirement;
+      assert.match(requirement, /子目录需求/);
+      assert.doesNotMatch(requirement, /根目录需求/);
+    } finally { h.close(); }
+  });
+  await t.test("从根目录启动后切到子目录：后续 @需求.md 仍按当前目录解析", () => {
+    const { h, sub } = prepare();
+    try {
+      h.run(h.event("SessionStart"));
+      h.run(h.event("UserPromptSubmit", { prompt: "@需求.md 按这个做", cwd: sub }), { cwd: sub });
+      const requirement = h.readState().requirement;
+      assert.match(requirement, /子目录需求/);
+      assert.doesNotMatch(requirement, /根目录需求/);
+      assert.equal(h.readState().baseline !== undefined, true, "项目根仍用于 Git 基线");
+    } finally { h.close(); }
+  });
+});
+
+test("A6 AUTOREVIEW_DEV_ROOT 不可用：按项目配置不可用处理并写出变量值", async (t) => {
+  await t.test("目录不存在", () => {
+    const h = fixture();
+    try {
+      const missing = join(h.root, "missing-project");
+      const res = h.run(h.event("SessionStart"), { devRoot: missing });
+      assert.equal(res.code, 0);
+      assert.match(JSON.parse(res.stdout).systemMessage, new RegExp(`AUTOREVIEW_DEV_ROOT=${missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      const state = JSON.parse(readFileSync(join(h.home, ".pi-autoreview", basename(missing), "claude-s1.state.json"), "utf8"));
+      assert.equal(state.phase, "paused");
+      assert.equal(state.pauseReason, "项目配置不可用");
+      assert.ok(!existsSync(join(h.root, "fake", "calls.log")));
+    } finally { h.close(); }
+  });
+  await t.test("目录存在但没有 .autoreview.json", () => {
+    const h = fixture();
+    try {
+      const res = h.run(h.event("UserPromptSubmit", { prompt: "需求" }), { devRoot: h.root });
+      assert.equal(res.code, 0);
+      assert.match(JSON.parse(res.stdout).systemMessage, /AUTOREVIEW_DEV_ROOT=/);
+      const state = JSON.parse(readFileSync(join(h.home, ".pi-autoreview", basename(h.root), "claude-s1.state.json"), "utf8"));
+      assert.equal(state.phase, "paused");
+      assert.equal(state.requirement, "需求");
+      assert.equal(state.pauseReason, "项目配置不可用，用户输入已保存");
+    } finally { h.close(); }
+  });
+});
+
+test("A7 Codex 事件格式（turn_id）重复 A1 和 A4", () => {
+  const off = fixture();
+  try {
+    const codex = { transcript_path: "/Users/a/.codex/sessions/2026/rollout-s1.jsonl" };
+    assert.equal(off.run(off.event("SessionStart", codex), { devRoot: null }).stdout, "");
+    assert.equal(off.run(off.event("UserPromptSubmit", { prompt: "聊天", turn_id: "t1" }), { devRoot: null }).stdout, "");
+    assert.equal(off.run(off.event("Stop", { last_assistant_message: "需要你决定\n【需要你决定】", turn_id: "t1" }), { devRoot: null }).stdout, "");
+    off.write("file.txt", "base\nUNCOMMITTED\n");
+    assert.equal(off.run(off.delivered({ turn_id: "t1" }), { devRoot: null, mode: "always-fix" }).stdout, "");
+    assert.equal(off.notifications(), "");
+    assert.ok(!existsSync(off.statePath("codex")), "没有 Codex 状态文件");
+    assert.ok(!existsSync(join(off.root, "fake", "calls.log")));
+  } finally { off.close(); }
+
+  const on = fixture();
+  try {
+    on.run(on.event("SessionStart", { transcript_path: "/Users/a/.codex/sessions/2026/rollout-s1.jsonl" }));
+    on.run(on.event("UserPromptSubmit", { prompt: "需求", turn_id: "t1" }));
+    on.write("file.txt", "base\nCHANGE\n");
+    const res = on.run(on.delivered({ turn_id: "t1" }), { mode: "always-fix" });
+    assert.equal(JSON.parse(res.stdout).decision, "block");
+    assert.equal(on.readState("codex").repairs, 1);
+    assert.ok(existsSync(join(on.root, "fake", "calls.log")));
+  } finally { on.close(); }
 });
 
 test("H2 SessionStart / UserPromptSubmit 注入约定，第一次提交记需求和基线", () => {
@@ -274,7 +444,11 @@ test("H8 宿主识别：turn_id / 环境变量 / transcript / AUTOREVIEW_HOST �
   assert.equal(detectHost({ turn_id: "t" }, {}), "codex");
   assert.equal(detectHost({}, { CLAUDECODE: "1" }), "claude");
   assert.equal(detectHost({}, { CLAUDE_CODE_ENTRYPOINT: "cli" }), "claude");
-  assert.equal(detectHost({}, { CLAUDE_PLUGIN_ROOT: "/x" }), "codex");
+  assert.equal(detectHost({}, { CLAUDE_PLUGIN_ROOT: "/x" }), "claude");
+  assert.equal(detectHost({}, { PLUGIN_ROOT: "/x", CLAUDE_PLUGIN_ROOT: "/x" }), "codex");
+  assert.equal(detectHost({}, { CODEX_THREAD_ID: "parent-thread" }), "claude", "父进程的 Codex 会话变量不能替代当前宿主身份");
+  assert.equal(detectHost({ transcript_path: "/Users/a/.claude/projects/x.jsonl" }, { CLAUDE_PLUGIN_ROOT: "/x" }), "claude");
+  assert.equal(detectHost({ transcript_path: "/Users/a/.codex/sessions/x.jsonl" }, { CLAUDECODE: "1" }), "codex", "当前 transcript 优先于父进程环境");
   assert.equal(detectHost({ transcript_path: "/Users/a/.codex/sessions/2026/rollout-x.jsonl" }, {}), "codex");
   assert.equal(detectHost({ transcript_path: "/Users/a/.claude/projects/x.jsonl" }, {}), "claude");
   assert.equal(detectHost({ turn_id: "t" }, { AUTOREVIEW_HOST: "x" }), "x");
@@ -288,6 +462,33 @@ test("H8 补充：Codex SessionStart 没有 turn_id 也写 codex 状态", () => 
     assert.ok(existsSync(h.statePath("codex")), "应有 codex 状态文件");
     assert.ok(!existsSync(h.statePath("claude")), "不应有 claude 状态文件");
   } finally { h.close(); }
+});
+
+test("两种宿主的原生事件：同一开发会话返修，机器续跑不替换需求或重置计数", () => {
+  for (const host of ["claude", "codex"]) {
+    const h = fixture();
+    const env = host === "codex" ? { PLUGIN_ROOT: "/plugin" } : { CLAUDE_PLUGIN_ROOT: "/plugin" };
+    const extra = host === "codex" ? { turn_id: "turn-1" } : {};
+    try {
+      h.run(h.event("SessionStart"), { env });
+      h.run(h.event("UserPromptSubmit", { prompt: "原始开发任务", ...extra }), { env });
+      h.write("file.txt", "first change\n");
+      const repair = JSON.parse(h.run(h.delivered(extra), { env, mode: "pass-after-1" }).stdout);
+      assert.equal(repair.decision, "block");
+      assert.equal(h.readState(host).repairs, 1);
+      // Codex 将 Stop 的 reason 作为新用户输入送回；不能当作用户接管。
+      if (host === "codex") h.run(h.event("UserPromptSubmit", { prompt: repair.reason, turn_id: "turn-2" }), { env });
+      assert.equal(h.readState(host).requirement, "原始开发任务");
+      assert.equal(h.readState(host).repairs, 1);
+      h.write("file.txt", "repaired\n");
+      h.run(h.delivered({ ...extra, stop_hook_active: true }), { env, mode: "pass-after-1" });
+      const state = h.readState(host);
+      assert.equal(state.phase, "done");
+      assert.equal(state.repairs, 1);
+      assert.equal(state.rounds.length, 2);
+      assert.equal(state.reviewerSessionId, `autoreview-rev-${host}-s1`);
+    } finally { h.close(); }
+  }
 });
 
 test("H8 宿主识别：turn_id / 无 / AUTOREVIEW_HOST 强制（端到端）", () => {
@@ -440,17 +641,18 @@ test("H 补充：detectHost / findProjectRoot / loadConfig", () => {
 
 // —— 返修（第 1–5 条）回归 ——
 
-test("H 返修 1：.autoreview.json 在上级时，以宿主 cwd 为开发目录", () => {
-  const h = fixture({ marker: null });
+test("H 返修 1：启动器给的项目根固定生效，状态按该根存放", () => {
+  const h = fixture();
   try {
-    writeFileSync(join(h.root, ".autoreview.json"), "{}");
-    const start = h.run(h.event("SessionStart"));
+    // event.cwd 是外层目录（无 marker、不是 Git 仓库），项目根只认启动器变量。
+    const start = h.run(h.event("SessionStart", { cwd: h.root }), { devRoot: h.repo });
     assert.equal(start.code, 0);
     assert.equal(JSON.parse(start.stdout).hookSpecificOutput.additionalContext, CONVENTION);
-    assert.ok(existsSync(h.statePath("claude", "s1")), "状态按 cwd 的项目名存放");
+    assert.ok(existsSync(h.statePath("claude", "s1")), "状态按启动项目根存放");
     h.write("file.txt", "base\nCHANGE\n");
-    const stop = h.run(h.delivered(), { mode: "always-fix" });
-    assert.equal(JSON.parse(stop.stdout).decision, "block");
+    const stop = h.run(h.delivered({ cwd: h.root }), { mode: "always-fix", devRoot: h.repo });
+    const out = JSON.parse(stop.stdout);
+    assert.equal(out.decision, "block");
     assert.equal(h.readState().phase, "idle");
   } finally { h.close(); }
 });
@@ -632,6 +834,7 @@ test("H10 Stop Hook 被宿主杀掉：评审子进程不留孤儿", async (t) =>
       cwd: h.repo, stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...env, HOME: h.home, PATH: `${join(h.root, "bin")}:${process.env.PATH}`,
+        AUTOREVIEW_DEV_ROOT: h.repo,
         AUTOREVIEW_REVIEWER_CMD: FAKE, FAKE_MODE: "pass", FAKE_SLEEP_SECONDS: "30",
         FAKE_STATE_DIR: join(h.root, "fake"),
       },
@@ -1141,6 +1344,7 @@ test("Hook 验收中收到可捕获信号，等待外部资源 cleanup 后再退
       h.write("file.txt", "base\nchange\n");
       child = spawn(process.execPath, [HOOK], { cwd: h.repo, stdio: ["pipe", "pipe", "pipe"], env: {
         ...process.env, HOME: h.home, AUTOREVIEW_HOST: "claude", PATH: `${join(h.root, "bin")}:${process.env.PATH}`,
+        AUTOREVIEW_DEV_ROOT: h.repo,
         AUTOREVIEW_REVIEWER_CMD: FAKE, FAKE_MODE: "pass", FAKE_STATE_DIR: join(h.root, "fake"), AUTOREVIEW_ACCEPTANCE_CMD: tester,
       } });
       let stderr = ""; child.stderr!.on("data", (chunk) => { stderr += chunk; });
@@ -1177,6 +1381,7 @@ test("评审等待时的新授权或标准跨 Hook 进程生效，旧进程不�
       writeFileSync(reviewer, `#!${process.execPath}\nimport {writeFileSync,existsSync} from 'node:fs';writeFileSync(${JSON.stringify(ready)},'ready');const t=setInterval(()=>{if(existsSync(${JSON.stringify(release)})){clearInterval(t);process.stdout.write(${JSON.stringify(pass)});}},20);\n`); chmodSync(reviewer, 0o755);
       child = spawn(process.execPath, [HOOK], { cwd: h.repo, stdio: ["pipe", "pipe", "pipe"], env: {
         ...process.env, HOME: h.home, AUTOREVIEW_HOST: "claude", PATH: `${join(h.root, "bin")}:${process.env.PATH}`,
+        AUTOREVIEW_DEV_ROOT: h.repo,
         AUTOREVIEW_REVIEWER_CMD: reviewer, AUTOREVIEW_ACCEPTANCE_CMD: ACC_ENV.AUTOREVIEW_ACCEPTANCE_CMD, FAKE_STATE_DIR: join(h.root, "fake"),
       } });
       let stderr = ""; child.stderr!.on("data", (chunk) => { stderr += chunk; });
@@ -1215,6 +1420,7 @@ test("来源、配置或 Git 不可用也不能吞掉正在验收时的撤权", 
       writeFileSync(tester, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(ready)},'ready');setTimeout(()=>{},30000);\n`); chmodSync(tester, 0o755);
       child = spawn(process.execPath, [HOOK], { cwd: h.repo, stdio: ['pipe','pipe','pipe'], env: {
         ...process.env, HOME: h.home, AUTOREVIEW_HOST: 'claude', PATH: `${join(h.root,'bin')}:${process.env.PATH}`,
+        AUTOREVIEW_DEV_ROOT: h.repo,
         AUTOREVIEW_REVIEWER_CMD: FAKE, FAKE_MODE: 'pass', FAKE_STATE_DIR: join(h.root,'fake'), AUTOREVIEW_ACCEPTANCE_CMD: tester,
       } });
       let stderr = ''; child.stderr!.on('data', b => { stderr += b; });
@@ -1288,9 +1494,9 @@ test("H18 交付总表：Hook 完成追加一段，SessionStart 按项目提醒�
       spawnSync("git", ["init", "-q"], { cwd: other, env: gitEnv });
       spawnSync("git", ["add", "file.txt"], { cwd: other, env: gitEnv });
       spawnSync("git", ["-c", "user.email=e@e", "-c", "user.name=e", "commit", "-qm", "b"], { cwd: other, env: gitEnv });
-      const clean = JSON.parse(h.run(h.event("SessionStart", { cwd: other }, "other-session"), { env: ACC_ENV, cwd: other }).stdout);
-      assert.doesNotMatch(clean.hookSpecificOutput.additionalContext, /待回写原单/, "别的项目不提醒");
-      assert.doesNotMatch(String(clean.systemMessage ?? ""), /待回写原单/);
+      // 直接打开的会话只按当前目录提醒；别的项目没有待回写段就不输出，也不带开发约定。
+      const clean = h.run(h.event("SessionStart", { cwd: other }, "other-session"), { env: ACC_ENV, cwd: other, devRoot: null });
+      assert.equal(clean.stdout, "", "别的项目不提醒");
 
       // A5：同一会话的最后一段已勾 → 不再提醒。
       writeFileSync(h.ledger, `${segment("claude-s1", false, projectRootOf(h.repo))}${segment("claude-s1", true, projectRootOf(h.repo))}`);
