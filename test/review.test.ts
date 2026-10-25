@@ -27,6 +27,8 @@ function harness() {
   const root = mkdtempSync(join(tmpdir(), "autoreview-budget-"));
   const previousResources = process.env.AUTOREVIEW_RESOURCE_ROOT;
   process.env.AUTOREVIEW_RESOURCE_ROOT = join(root, "resources");
+  const previousProjects = process.env.AUTOREVIEW_PROJECTS_ROOT;
+  process.env.AUTOREVIEW_PROJECTS_ROOT = join(root, "projects");
   const repo = join(root, "repo");
   mkdirSync(repo);
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
@@ -39,7 +41,7 @@ function harness() {
   writeFileSync(join(repo, "file.txt"), "base\n");
   git("add", "file.txt"); git("commit", "-qm", "baseline");
   const exec: Exec = async (command, args, options): Promise<ExecResult> => {
-    const res = spawnSync(command, args, { cwd: options.cwd, env, encoding: "utf8" });
+    const res = spawnSync(command, args, { cwd: options.cwd, env: { ...env, ...(options.env ?? {}) }, encoding: "utf8" });
     return { stdout: res.stdout || "", stderr: res.stderr || "", code: res.status ?? 1, killed: Boolean(res.signal) };
   };
   const config: ReviewConfig = {
@@ -48,6 +50,8 @@ function harness() {
   return { root, repo, git, exec, config, close: () => {
     if (previousResources === undefined) delete process.env.AUTOREVIEW_RESOURCE_ROOT;
     else process.env.AUTOREVIEW_RESOURCE_ROOT = previousResources;
+    if (previousProjects === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT;
+    else process.env.AUTOREVIEW_PROJECTS_ROOT = previousProjects;
     rmSync(root, { recursive: true, force: true });
   } };
 }
@@ -559,4 +563,194 @@ test("准备工具按实际工作目录检查路径，不跟随悬空链接", as
     if (oldPaths === undefined) delete process.env.AUTOREVIEW_PREP_PATHS; else process.env.AUTOREVIEW_PREP_PATHS = oldPaths;
     h.close();
   }
+});
+
+test("项目方法三个环境变量：准备检查和门禁都拿到本段开工依据、批次文件和段名", async () => {
+  const h = harness();
+  try {
+    const base = h.git("rev-parse", "HEAD");
+    const batch = join(h.root, "批次.json");
+    writeFileSync(batch, JSON.stringify({ name: "环境变量", stages: { 甲: { start: "true" } }, steps: [["甲"]] }));
+    const seen = join(h.root, "method-env.log");
+    const env = { AUTOREVIEW_BATCH_FILE: batch, AUTOREVIEW_STAGE: "甲", AUTOREVIEW_BASE_REV: "stale-value" };
+    const state = newReviewState();
+    state.baseline = base;
+    const outcome = await runReviewRound({
+      cwd: h.repo, devSessionId: "method-env", round: 1, deliveryNote: "done", state, env,
+      config: {
+        ...h.config,
+        preparation: { root: h.repo, check: `printf '%s|%s|%s\n' "$AUTOREVIEW_BASE_REV" "$AUTOREVIEW_BATCH_FILE" "$AUTOREVIEW_STAGE" >> ${JSON.stringify(seen)}`,
+          timeoutMin: 1, maxRecoveries: 0, maxRepairs: 0 },
+        gate: { cmd: `printf '%s|%s|%s\n' "$AUTOREVIEW_BASE_REV" "$AUTOREVIEW_BATCH_FILE" "$AUTOREVIEW_STAGE" >> ${JSON.stringify(seen)}`, timeoutMin: 1 },
+      },
+      exec: h.exec, writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+      saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(outcome.kind, "done", JSON.stringify(outcome));
+    const lines = readFileSync(seen, "utf8").trim().split("\n");
+    assert.deepEqual(lines, [`${base}|${batch}|甲`, `${base}|${batch}|甲`], "准备检查和门禁拿到同一份变量");
+  } finally { h.close(); }
+});
+
+function scopeRound(h: ReturnType<typeof harness>, scope: unknown | undefined, change: () => void) {
+  const base = h.git("rev-parse", "HEAD");
+  const batch = join(h.root, `batch-${Math.random().toString(16).slice(2)}.json`);
+  writeFileSync(batch, JSON.stringify({ name: "越界", stages: { 甲: { start: "true", ...(scope === undefined ? {} : { scope }) } }, steps: [["甲"]] }));
+  change();
+  const state = newReviewState();
+  state.baseline = base;
+  state.baselineUntracked = [];
+  const gateLog = join(h.root, `gate-${Math.random().toString(16).slice(2)}.log`);
+  let gateCalls = 0;
+  const exec: Exec = async (command, args, options) => {
+    if (command === "/bin/sh" && /printf/.test(args[1] ?? "")) gateCalls += 1;
+    return h.exec(command, args, options);
+  };
+  return runReviewRound({
+    cwd: h.repo, devSessionId: "scope", round: 1, deliveryNote: "done", state, exec,
+    env: { AUTOREVIEW_BATCH_FILE: batch, AUTOREVIEW_STAGE: "甲" },
+    config: { ...h.config, gate: { cmd: `printf gate >> ${JSON.stringify(gateLog)}`, timeoutMin: 1 } },
+    writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+    saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+  }).then((outcome) => ({ outcome, state, gateCalls, gateLog }));
+}
+
+test("A3/A4 越界检查：allow 外的新文件打回、deny 命中打回，没写 scope 不检查", async () => {
+  const h = harness();
+  try {
+    const allowed = await scopeRound(h, { allow: ["src/"] }, () => {
+      mkdirSync(join(h.repo, "src"), { recursive: true });
+      writeFileSync(join(h.repo, "src", "a.ts"), "ok\n");
+      writeFileSync(join(h.repo, "docs-x.md"), "outside\n");
+    });
+    assert.equal(allowed.outcome.kind, "repair", JSON.stringify(allowed.outcome));
+    assert.match(allowed.outcome.message!, /docs-x\.md/);
+    assert.equal(allowed.gateCalls, 0, "越界时门禁不执行");
+    assert.equal(allowed.state.repairs, 1);
+    assert.equal(allowed.state.awaitingRepair, true);
+    assert.equal(allowed.state.phase, "idle", "没有新增暂停");
+
+    const denied = await scopeRound(h, { deny: ["src/secret/"] }, () => {
+      mkdirSync(join(h.repo, "src", "secret"), { recursive: true });
+      writeFileSync(join(h.repo, "src", "secret", "k.ts"), "secret\n");
+    });
+    assert.equal(denied.outcome.kind, "repair");
+    assert.match(denied.outcome.message!, /src\/secret\/k\.ts/);
+    assert.equal(denied.gateCalls, 0);
+
+    const noScope = await scopeRound(h, undefined, () => {
+      writeFileSync(join(h.repo, "anywhere.md"), "outside\n");
+    });
+    assert.equal(noScope.outcome.kind, "done", JSON.stringify(noScope.outcome));
+    assert.equal(noScope.gateCalls, 1, "没写 scope 时门禁照常执行");
+  } finally { h.close(); }
+});
+
+test("A3 重命名：源路径和目标路径都参与越界检查", async () => {
+  const h = harness();
+  try {
+    mkdirSync(join(h.repo, "docs"), { recursive: true });
+    writeFileSync(join(h.repo, "docs", "x.md"), "x\n");
+    h.git("add", "docs/x.md"); h.git("commit", "-qm", "docs");
+    const run = await scopeRound(h, { allow: ["src/"] }, () => {
+      mkdirSync(join(h.repo, "src"), { recursive: true });
+      h.git("mv", "docs/x.md", "src/x.md");
+    });
+    assert.equal(run.outcome.kind, "repair", JSON.stringify(run.outcome));
+    assert.match(run.outcome.message!, /docs\/x\.md/, "被移走的源路径也要列出");
+  } finally { h.close(); }
+});
+
+test("A4 开工时已有未跟踪文件：内容或模式变了仍越界，没变才豁免", async () => {
+  const h = harness();
+  try {
+    const base = h.git("rev-parse", "HEAD");
+    mkdirSync(join(h.repo, "src", "secret"), { recursive: true });
+    const changed = join(h.repo, "src", "secret", "k.ts");
+    const same = join(h.repo, "src", "secret", "keep.ts");
+    writeFileSync(changed, "v1\n"); writeFileSync(same, "same\n");
+    const details = [changed, same].map((path) => ({
+      path: path.slice(h.repo.length + 1),
+      hash: h.git("hash-object", "--", path.slice(h.repo.length + 1)),
+      mode: "100644",
+    }));
+    const batch = join(h.root, "untracked-batch.json");
+    writeFileSync(batch, JSON.stringify({ name: "未跟踪", stages: { 甲: { start: "true", scope: { deny: ["src/secret/"] } } }, steps: [["甲"]] }));
+    const state = newReviewState();
+    state.baseline = base; state.baselineUntracked = details.map((item) => item.path); state.baselineUntrackedDetails = details;
+    let gateCalls = 0;
+    const exec: Exec = async (command, args, options) => {
+      if (command === "/bin/sh") gateCalls += 1;
+      return h.exec(command, args, options);
+    };
+    writeFileSync(changed, "v2\n");
+    const outcome = await runReviewRound({
+      cwd: h.repo, devSessionId: "untracked", round: 1, deliveryNote: "done", state, exec,
+      env: { AUTOREVIEW_BATCH_FILE: batch, AUTOREVIEW_STAGE: "甲" },
+      config: { ...h.config, gate: { cmd: "true", timeoutMin: 1 } },
+      writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+      saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(outcome.kind, "repair", JSON.stringify(outcome));
+    assert.match(outcome.message!, /src\/secret\/k\.ts/);
+    assert.doesNotMatch(outcome.message!, /src\/secret\/keep\.ts/);
+    assert.equal(gateCalls, 0);
+  } finally { h.close(); }
+});
+
+test("整合返修从收到返修时的快照检查，不把别的段已交付成果算成本段越界", async () => {
+  const h = harness();
+  try {
+    const original = h.git("rev-parse", "HEAD");
+    mkdirSync(join(h.repo, "src", "b"), { recursive: true });
+    writeFileSync(join(h.repo, "src", "b", "other.ts"), "other\n");
+    h.git("add", "src/b/other.ts"); h.git("commit", "-qm", "other stage");
+    const scopeBase = h.git("rev-parse", "HEAD");
+    const batch = join(h.root, "integration-batch.json");
+    writeFileSync(batch, JSON.stringify({ name: "整合", stages: { 甲: { start: "true", scope: { allow: ["src/a/"] } } }, steps: [["甲"]] }));
+    const state = newReviewState();
+    state.baseline = original; state.scopeBaseline = scopeBase;
+    state.baselineUntracked = []; state.baselineUntrackedDetails = []; state.scopeBaselineUntrackedDetails = [];
+    mkdirSync(join(h.repo, "src", "a"), { recursive: true });
+    writeFileSync(join(h.repo, "src", "a", "fix.ts"), "fix\n");
+    let gateCalls = 0;
+    const exec: Exec = async (command, args, options) => {
+      if (command === "/bin/sh") gateCalls += 1;
+      return h.exec(command, args, options);
+    };
+    const outcome = await runReviewRound({
+      cwd: h.repo, devSessionId: "integration", round: 1, deliveryNote: "返修", state, exec,
+      env: { AUTOREVIEW_BATCH_FILE: batch, AUTOREVIEW_STAGE: "甲" },
+      config: { ...h.config, gate: { cmd: "true", timeoutMin: 1 } },
+      writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+      saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(outcome.kind, "done", JSON.stringify(outcome));
+    assert.equal(gateCalls, 1, "别的段已交付的 src/b 不算越界");
+  } finally { h.close(); }
+});
+
+test("首次准备与门禁使用同一个开工依据：只取一次快照", async () => {
+  const h = harness();
+  try {
+    writeFileSync(join(h.repo, "file.txt"), "base\ndirty before prepare\n");
+    const seen = join(h.root, "baseline-env.log");
+    const state = newReviewState();
+    const outcome = await runReviewRound({
+      cwd: h.repo, devSessionId: "baseline-order", round: 1, deliveryNote: "done", state,
+      config: {
+        ...h.config,
+        preparation: { root: h.repo, check: `printf '%s\n' "$AUTOREVIEW_BASE_REV" >> ${JSON.stringify(seen)}`, timeoutMin: 1, maxRecoveries: 0, maxRepairs: 0 },
+        gate: { cmd: `printf '%s\n' "$AUTOREVIEW_BASE_REV" >> ${JSON.stringify(seen)}`, timeoutMin: 1 },
+      },
+      exec: h.exec, writeInput: (name, text) => { const path = join(h.root, name); writeFileSync(path, text); return path; },
+      saveState: () => {}, callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }),
+    });
+    assert.equal(outcome.kind, "done", JSON.stringify(outcome));
+    const lines = readFileSync(seen, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0], state.baseline, "准备拿到保存后的开工依据");
+    assert.equal(lines[1], state.baseline, "门禁拿到同一份开工依据");
+    assert.equal(state.baseline, h.git("rev-parse", "HEAD"), "手动 /review 以 HEAD 为基线，启动前的未提交改动仍进入评审");
+  } finally { h.close(); }
 });

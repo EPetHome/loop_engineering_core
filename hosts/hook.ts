@@ -86,7 +86,8 @@ interface HookContext {
  */
 export const createChildExec = (procsFile?: string): Exec => (command, args, options) => new Promise<ExecResult>((resolvePromise) => {
   const token = randomUUID();
-  const env = { ...process.env, AUTOREVIEW_PROCESS_OWNER: token, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}` };
+  // 项目方法要求的环境变量只覆盖指定项；进程登记和 PATH 仍由程序控制。
+  const env = { ...process.env, ...(options.env ?? {}), AUTOREVIEW_PROCESS_OWNER: token, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}` };
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let killed = false;

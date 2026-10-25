@@ -112,8 +112,17 @@ export function recordSourceChange(
   return true;
 }
 
-export const contextDir = (config: ContextConfig): string => join(
-  process.env.AUTOREVIEW_PROJECTS_ROOT ?? join(homedir(), ".pi-autoreview", "projects"), digest(realpathSync(config.root)).slice(0, 16));
+/** 项目数据目录的根：和来源索引共用同一个项目根哈希。 */
+export const projectsRoot = (env: NodeJS.ProcessEnv = process.env): string =>
+  env.AUTOREVIEW_PROJECTS_ROOT ?? join(homedir(), ".pi-autoreview", "projects");
+
+/** 项目根哈希：realpath 的 SHA-256 前 16 位；worktree 各自一份。 */
+export const projectRootHash = (root: string): string => digest(realpathSync(root)).slice(0, 16);
+
+export const projectDataDir = (root: string, env: NodeJS.ProcessEnv = process.env): string =>
+  join(projectsRoot(env), projectRootHash(root));
+
+export const contextDir = (config: ContextConfig): string => projectDataDir(config.root);
 
 function sourceFiles(root: string, path: string): string[] {
   const file = resolve(root, path);

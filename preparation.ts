@@ -80,6 +80,8 @@ export interface PreparationDeps {
   cwd: string;
   state: PreparationState;
   exec: Exec;
+  /** 交给项目方法的环境变量（AUTOREVIEW_BASE_REV 等）；只覆盖指定项。 */
+  env?: NodeJS.ProcessEnv;
   runDir: string;
   signal?: AbortSignal;
   saveState: () => void | Promise<void>;
@@ -114,7 +116,7 @@ async function prepare(deps: PreparationDeps): Promise<PreparationResult> {
   const git = createGitEvidence(exec, deps.cwd, signal);
   const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
   const shell = (cmd: string) => `export AUTOREVIEW_RUN_DIR=${quote(deps.runDir)}; ${cmd}`;
-  const options = (role: string) => ({ cwd: deps.cwd, timeout: Math.max(1, deadline - Date.now()), signal, role });
+  const options = (role: string) => ({ cwd: deps.cwd, timeout: Math.max(1, deadline - Date.now()), signal, role, ...(deps.env ? { env: deps.env } : {}) });
   let failure = deps.failure;
   for (;;) {
     signal?.throwIfAborted();

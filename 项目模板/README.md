@@ -1,21 +1,35 @@
 # 项目模板：接入 loop 的项目长什么样
 
-本目录是一个「接入 loop 的项目」的样板，开发 loop 时用来对照上下游：代码放在哪、开发分支在哪、文档放在哪、规则怎么写、每批的材料放在哪、loop 从哪一步接手、做完交给谁。
+本目录是「接入 loop 的项目」的样板，开发 loop 时用来对照上下游：代码放在哪、开发空间在哪、文档放在哪、项目方法怎么写、每批只准备什么、loop 从哪一步接手、做完交给谁。
 
-样板取自 Promate（`/Users/Admin/Desktop/Promate`），它是 loop 的第一个真实使用方，2026-10-12 核对。
+新做法是 git worktree + 项目方法只写一份 + 每批一份 `批次.json`。`项目根/` 是一个 git 仓库的骨架（模板本身不是仓库），`<尖括号>` 里是要替换的内容。Promate 仍用旧的非 git `dev分支/` 结构（兼容做法见文末），按用户决定不迁移；本模板不表示它已经迁移。
 
-- `项目根/` 下按真实项目的位置摆好了每类文件的骨架，`<尖括号>` 里是要替换的内容。
-- 每个骨架文件开头有一段「模板说明」：这个文件做什么、谁写谁读、Promate 里对应哪个文件。
-- 会变的写法规则（提示词怎么写、验收标准怎么写、`.autoreview.json` 有哪些字段）不在这里重复，只指向 [README-验收标准.md](../README-验收标准.md) 和 [README.md](../README.md)。
+- `项目根/` 下按真实位置摆好每类文件的骨架。
+- 会变的写法规则（提示词怎么写、验收标准怎么写、`.autoreview.json` 有哪些字段）不在这里重复，指向 [README-验收标准.md](../README-验收标准.md)、[工具清单.md](../工具清单.md) 和 [README.md](../README.md)。
+- 每个骨架文件开头有「模板说明」：这个文件做什么、谁写谁读。Promate 实例只作历史对照，不当成已迁移。
 
 ## 目录
 
 ```
 项目模板/
 ├── README.md                          本页
-└── 项目根/                             一个接入 loop 的项目（本身不是 git 仓库）
+└── 项目根/                             一个接入 loop 的 git 仓库骨架
     ├── AGENTS.md                      协调方规则（只放稳定内容）
     ├── CLAUDE.md                      只有一行 @AGENTS.md
+    ├── .autoreview.json.示例          复制成 .autoreview.json，替换占位符；进仓库
+    ├── .autoreview/
+    │   ├── methods/                   项目固定方法，只写一份，进仓库
+    │   │   ├── README.md              方法说明
+    │   │   ├── self-check.sh          方法自测；占位符没替换就报方法错误
+    │   │   ├── gate.sh                门禁命令（替换示例）
+    │   │   └── prepare.sh             准备检查与恢复（替换示例）
+    │   └── CONVENTIONS.md             接入后由 setup-acceptance.ts 写入【块 1】
+    ├── .gitignore.示例                本机忽略规则示例；复制到 .git/info/exclude，不提交验收环境
+    ├── deploy/acceptance/             分支专属、只在本机：隔离验收环境（localFiles 声明）
+    │   ├── start.sh
+    │   ├── reset-data.sh
+    │   ├── release.sh
+    │   └── GUIDE.md
     ├── docs/
     │   ├── baseline/                  基线四页：项目现在在哪
     │   │   ├── 当前基线与入口.md
@@ -30,45 +44,41 @@
     │   │   └── 启动说明.md
     │   └── batches/                   每批一个批次目录
     │       └── 示例批次-20261012/
-    │           ├── 示例批次-工具.sh    门禁命令（check）
-    │           ├── 示例批次-启动Pi.sh  用户执行
-    │           ├── autoreview.json    开发分支配置的副本
+    │           ├── 批次.json          本批参数；prompt 字段引用提示词
     │           └── 结果.md            本批唯一的结果
-    ├── 线上/                           线上代码，相当于 master，写进去就是上线
+    ├── 线上/                           运行版代码所在位置（示例；可以换成 src/ 或其他目录）
     │   └── 说明.md
-    └── dev分支/                        开发分支 = 线上副本 + 分支专属文件（不是 git 仓库）
-        ├── 说明.md
-        ├── .autoreview.json.示例      分支专属，真实项目里叫 .autoreview.json（这里加后缀，免得 loop 插件在模板目录生效）
-        └── deploy/acceptance/         分支专属：隔离验收环境
-            ├── start.sh
-            ├── reset-data.sh
-            └── GUIDE.md
+    └── dev分支说明.md                  worktree 开发空间与兼容说明
 
 项目外：
-~/.pi-autoreview/git-baselines/<分支>.git    外部基线（开工点）
-~/.pi-autoreview/<分支目录名>/                loop 状态、总结、门禁日志、验收材料
-~/.pi/agent/sessions/--<工作目录>--/          Pi 会话 jsonl
+../<仓库目录名>-dev分支/                git worktree 开发空间（.autoreview.json 的 workspaces 可改）
+~/.pi-autoreview/<项目目录名>/          loop 状态、总结、门禁日志、验收材料
 ```
+
+开发空间不在 `项目根/` 里，也不进模板目录。`loop 开工` 在运行版目录外创建或复用 worktree，并在里面切批次分支。
 
 ## 和 Promate 对照
 
-| 模板 | 作用 | Promate 实际位置 |
+| 模板 | 作用 | Promate 实际位置 / 说明 |
 |---|---|---|
-| `项目根/` | 项目根，不是 git 仓库；文档另有版本库 | `/Users/Admin/Desktop/Promate`；文档仓 `~/.promate-docs.git` |
+| `项目根/` | 一个 git 仓库骨架 | `/Users/Admin/Desktop/Promate` 仍是旧结构：项目根不是 git 仓库，代码在 `线上/`，开发在手工同步的 `dev分支/` |
 | `AGENTS.md`、`CLAUDE.md` | 协调方规则 | 同名 |
+| `.autoreview.json` | 项目配置：发布分支、工作区、本机文件、方法、门禁、验收 | 旧版在 `dev分支/.autoreview.json` |
+| `.autoreview/methods/` | 项目固定方法 | Promate 旧版把门禁等放在批次目录，尚未迁移 |
 | `docs/baseline/` | 基线四页 | `重新出发/00-基线/`（07、06、02、03） |
 | `docs/requirements/` | 需求书 | `新需求/<线>/`，做完的在 `新需求/xxx/` |
-| `docs/prompt/` | 方案、提示词、启动说明 | `coding/prompt/`（启动说明叫 `pi启动方式.md`），执行完的在 `coding/prompt/xx/` |
-| `docs/batches/<批次>/` | 批次目录 | `coding/docs/<批次>-<日期>/` |
-| `线上/` | 线上代码 | `Promate产品中台/`（后端）和 `promate-frontend/`（前端），各有团队 .git |
-| `dev分支/` | 开发分支 | `dev分支/`（根目录对应后端，`promate-frontend/` 对应前端）；用户授权并行时还有 `dev分支2/` |
+| `docs/prompt/` | 方案、提示词、启动说明 | `coding/prompt/`（启动说明叫 `pi启动方式.md`） |
+| `docs/batches/<批次>/` | 批次参数和结果 | `coding/docs/<批次>-<日期>/`；新模板只放 `批次.json` 和 `结果.md` |
+| `线上/` | 运行版代码所在位置 | `Promate产品中台/` 和 `promate-frontend/`，各有团队 .git；旧流程仍由协调方合入 |
+| 开发空间 | worktree + 批次分支 | 旧 `dev分支/`；并行时 `dev分支2/` |
 | 模板没放 | 产品依据、问题清单 | `文档/`、`iusses/` |
 
 ## 谁在干活
 
-- 用户：拍板，做业务验收。唯一亲手做的操作是在终端执行启动脚本，不打开文件夹，也不跑别的命令。
-- 协调方：Claude Code，工作目录在项目根。负责写需求、方案、提示词；定义开发分支与批次边界、维护项目准备/恢复/释放方法；运行准备交给 Loop；Pi 跑完后核对结果；合入线上；维护基线，归档。本机的 Claude Code 装了 loop 插件。
-- 开发方：Pi，工作目录在开发分支，加载权限扩展和 `autoreview.ts`。权限扩展的全局配置开了 yoloMode，所以边界只靠提示词约束。
+- 用户：拍板，做业务验收，授权合入和推送。需要时在终端执行协调方给出的同一条命令，不打开文件夹。
+- 协调方（Claude Code，工作目录在运行版项目根）：写需求、方案、提示词和 `批次.json`；执行 `bin/loop 开工` / `启动`，核对状态和结果；维护项目方法与基线；用户授权后执行 `bin/loop 合入`。
+- 项目维护者：维护 `.autoreview/methods/`（门禁、准备、棘轮、自测）和验收环境；方法只写一份。
+- 开发方（Pi）：在 worktree 的批次分支里改代码；不提交。段完成后由程序提交。
 - 评审方、验收方：由 loop 启动，评审方只读。
 
 ## 一批从需求到上线
@@ -78,60 +88,68 @@
 ② 需求书 docs/requirements/          用户在聊天里拍板，当轮写回需求书
 ③ 方案 docs/prompt/方案-*.md          要点先聊，拍板后才写
 ④ 提示词 docs/prompt/提示词-*.md       四节；验收标准先给用户看
-⑤ 开工准备（协调方声明方法，Loop 执行与有限恢复）
-   把线上同步到 dev分支 → 在外部基线提交「开工基线」
-   → 写批次工具、启动脚本、.autoreview.json、验收环境 → 外部基线再单独提交一笔
-⑥ 用户在终端执行 bash <批次>-启动Pi.sh
+⑤ 写 docs/batches/<批次>/批次.json 和提示词
+   → 协调方在运行版执行 bin/loop 开工 <批次.json>
+      建/切 worktree、从发布分支拉批次分支、检查并复制 localFiles、按指纹自测
+   → 执行 bin/loop 启动 <批次.json>
+      单段直接开会话；多段交给流水线
 ─────────────────── loop 管的部分 ───────────────────
-⑦ Loop 准备 → Pi 开发与定向自检 → 门禁 → 静态评审 →（自动验收/必需验收命令） → 返修（最多 4 次）→ 完成 / 暂停
-   产出：~/.pi-autoreview/<分支>/<会话>.md；Pi 另外写 docs/batches/<批次>/结果.md
+⑥ Loop 准备 → Pi 开发与定向自检 → 门禁 → 静态评审 →（自动验收/必需验收命令） → 返修（最多 4 次）→ 完成 / 暂停
+   每段完成时程序按 <类型>: <描述> 提交；串行的下一段以这次提交为开工依据
+   产出：~/.pi-autoreview/<项目目录名>/<会话>.md；Pi 另外写 docs/batches/<批次>/结果.md
 ──────────────────────────────────────────────────────
-⑧ 协调方核对：读 loop 总结、结果.md 和原始日志
-⑨ 合入线上 = 上线：三方对比（开工基线 / 线上现在 / dev分支 改后），只搬本批改的文件
-   避开分支专属文件；数据库先备份；插件还要更新发布清单
-⑩ 用户业务验收（[人工] 条目和 loop 判「需人工」的条目在这一步验）→ 在基线「待你核销」里核销
-⑪ 归档：提示词标题下写「✅ 已执行」，移进 xx/；主线图留一行
+⑦ 协调方核对：bin/loop 状态、loop 总结、结果.md 和原始日志
+⑧ 用户授权合入：协调方在运行版执行 bin/loop 合入 <批次.json>
+   本地 merge --no-ff 批次分支，不推送；先留改前备份；冲突时中止并报告
+⑨ 用户业务验收（[人工] 条目和 loop 判「需人工」的条目）→ 在基线「待你核销」里核销
+⑩ 归档：提示词标题下写「✅ 已执行」，移进 xx/；主线图留一行
 ```
 
-原有入口包括：提示词（作为第一条消息 @ 进来，loop 从里面取验收标准）、`dev分支/.autoreview.json`、外部基线（通过 GIT_DIR）、`~/.pi-autoreview/`。配置 context.sources 后，Loop 可读取已登记的上游来源并写变更/交付索引；不自动修改业务原文，也不接管未授权的上线与人工核销。
+批次目录里不再放门禁、棘轮、启动脚本或 `.autoreview.json` 副本。每批只写 `批次.json` 和结果；提示词在 `docs/prompt/`，由 `批次.json` 的 `stages.<段>.prompt` 引用。门禁和准备来自 `.autoreview/methods/`，启动统一经过 `bin/pi-dev`。模板里的 `deploy/acceptance/` 骨架随仓库交付；接入时把 `.gitignore.示例` 的内容复制到项目的 `.git/info/exclude`（或项目自己的 `.gitignore`），让真实本机文件只在本地存在。
 
 ## 规则分四层
 
 原则：稳定的规则写进常驻文件，会变的只写一个指向。常驻文件只放稳定边界；动态来源、运行状态和可变写法各有位置。
 
-1. 用户全局 `~/.claude/CLAUDE.md`：管输出格式。规定「出 pi 提示词」前，先读 loop 的两份 README 和项目的启动说明。
+1. 用户全局 `~/.claude/CLAUDE.md`：管输出格式。规定「出 pi 提示词」前，先读 loop 的 `工具清单.md`；需要细节时再查 README。
 2. 项目 `AGENTS.md`：分工、流程、分支与合入、评审边界、上线与数据保护、沟通方式。
-3. 外部文档：写法规则看 loop 的 README；项目自己的选择（模型、工具组合、同步命令）看 `docs/prompt/启动说明.md`。Promate 故意没有把【块 1】贴进 AGENTS.md，而是让协调方每次去读 loop 的 README。
-4. 提示词：每批一份。loop 会自动往 Pi 的系统提示里追加开发约定。
+3. 外部文档：写法规则看 loop 的 `README-验收标准.md`，工具和字段看 `工具清单.md`；项目自己的选择（模型、工具组合、批次分支命名）看 `docs/prompt/启动说明.md`。
+4. 提示词和 `批次.json`：每批一份。loop 会自动往 Pi 的系统提示里追加开发约定。
 
 ## 改 loop 时对照哪里
 
 | 改 loop 的哪一块 | 对照模板的哪里 | 相关缺口 |
 |---|---|---|
 | `core.ts` 开发约定、`autoreview.ts` | `提示词-示例.md`；`AGENTS.md`（Pi 也会读到） | 1、7 |
-| `review.ts` 门禁 | `示例批次-工具.sh`；`启动说明.md`「开工」第 4 步 | 2 |
-| `git.ts`、`config.ts` | `dev分支/说明.md` 的外部基线 | 3 |
-| `hosts/hook.ts`（Claude Code 插件） | `dev分支/说明.md` 的已知问题 | 3 |
-| `acceptance.ts`、`setup-acceptance.ts` | `dev分支/.autoreview.json.示例`、`deploy/acceptance/` | 9 |
+| `review.ts` 门禁、`scope.ts` 越界 | `.autoreview/methods/gate.sh`；`批次.json` 的 `scope` | 2 |
+| `git.ts`、`config.ts`、`workspace.ts` | `dev分支说明.md` 的 worktree；`.autoreview.json.示例` 的 `release` / `workspaces` / `localFiles` | 3 |
+| `hosts/hook.ts`（Claude Code 插件） | `AGENTS.md` 的评审边界 | 3 |
+| `acceptance.ts`、`setup-acceptance.ts` | `.autoreview.json.示例`、`deploy/acceptance/` | 9 |
 | `onboarding.ts` 提示文案 | `AGENTS.md`「沟通」 | 10 |
-| `pipeline.ts` | `dev分支/`（不是 git 仓库）、`docs/batches/` | 3、9 |
+| `pipeline.ts`、`loop.ts` | `批次.json`、`docs/batches/` | 3、9 |
 | 总结（`~/.pi-autoreview/`） | `结果.md`、`当前基线与入口.md`「待你核销」 | 5、6、11 |
-| 暂停和恢复 | `示例批次-启动Pi.sh` 的注释 | 8 |
-| 开工、合入（loop 目前没有） | `启动说明.md`「开工」、`线上/说明.md` | 4、5 |
+| 暂停和恢复 | `结果.md` 的当前结论；loop 总结 | 8 |
+| 开工、启动、状态、合入 | `启动说明.md`「开工」、`线上/说明.md`、`工具清单.md` | 4、5 |
 
 ## 接入项目仍需核对
 
-本模板展示职责与目录，不自动迁移 Promate 或其他项目。项目维护者仍需确认实际分支、测试库隔离、准备/恢复/释放脚本和来源范围。机器可读段状态、交付索引和原始证据由 Loop 生成；合入线上、生产数据备份和业务核销继续按各项目授权。
+本模板展示职责与目录，不自动迁移 Promate 或其他项目。项目维护者仍需确认实际发布分支、测试库隔离、准备/恢复/释放脚本和来源范围。机器可读段状态、交付索引和原始证据由 Loop 生成；合入发布分支、生产数据备份和业务核销继续按各项目授权。
 
-本次已处理门禁错误归责、稳定规则文件、准备调度、后置验收与本段完成信号。不能据此声称既有项目已经完成迁移，或用技术通过代替待人工验收。自动归档只写交付索引，业务基线的语义调整仍由维护者依据证据处理。
+自动归档只写交付索引，业务基线的语义调整仍由维护者依据证据处理。模板是结构样板，不是空脚本也能通过的运行成品；占位符未替换时，`bin/loop 开工` 会在方法自测阶段报 `AUTOREVIEW_FAILURE=method` 并列出未替换的占位符，不会空跑通过。
 
 ## 本次迭代的管理入口
 
-- AGENTS.md：稳定职责与来源链接，普通准备、归档和定时刷新不写它。
+- `AGENTS.md`：稳定职责与来源链接，普通准备、归档和定时刷新不写它。
 - `.autoreview/CONVENTIONS.md`：可变任务/验收写法，由接入命令维护。
+- `.autoreview/methods/`：项目固定方法，只写一份；门禁、棘轮、准备、自测都在这里。
+- `批次.json`：每批参数；字段见 [工具清单.md](../工具清单.md) 的「批次.json 字段」。
 - `context.sources`：项目维护者声明需求、方案、方法和源码位置；`changes.jsonl` 记录增删改与受影响依赖，`contents/<SHA>` 留内容版本。
 - `preparation.check/recover/repair.paths`：已有方法优先、已知故障有限恢复、方法失效才调用受限模型。
 - 批次结果只引用 Loop 总结与交付索引，不复制多个“当前结论”；不可改坏的行为和来源版本写在同一任务文件中。
 - `acceptance.actions` 固化重复操作，`cleanup` 释放本轮项目资源；动作可复用，旧通过结论不可盲用。
 
-完整字段、限制和恢复方式见 [运行与维护](../项目文档/运行与维护.md)。模板是结构样板，不是空脚本也能通过的运行成品；占位符未替换时准备/门禁应返回方法错误。
+完整字段、限制和恢复方式见 [工具清单.md](../工具清单.md) 与 [运行与维护](../项目文档/运行与维护.md)。
+
+## 兼容：非 git 项目与外部基线
+
+外部基线（`GIT_DIR` / `GIT_WORK_TREE`）和 rsync 同步只为不是 git 仓库的历史项目保留，不再是模板默认流程。新项目用运行版 + worktree 后，不需要每批同步、不需要把开工点提交到 `~/.pi-autoreview/git-baselines/`。Promate 等已有项目是否迁移，由用户单独决定；未授权迁移时继续按原流程运行。

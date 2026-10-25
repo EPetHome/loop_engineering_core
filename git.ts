@@ -1,5 +1,7 @@
 /** git 取证：不改索引；所有失败都显式上抛，路径只按 NUL 拆分。 */
 import { createHash } from "node:crypto";
+import { lstatSync } from "node:fs";
+import { resolve } from "node:path";
 
 export interface ExecResult {
   stdout: string;
@@ -11,14 +13,14 @@ export type Exec = (
   command: string,
   args: string[],
   /** role：需要登记的长进程角色（评审、验收方），宿主 Hook 被杀后据此清理。 */
-  options: { cwd: string; timeout: number; signal?: AbortSignal; role?: string },
+  options: { cwd: string; timeout: number; signal?: AbortSignal; role?: string; env?: NodeJS.ProcessEnv },
 ) => Promise<ExecResult>;
 
 export interface Snapshot {
   ref: string;
   head: string;
   tree: string;
-  untracked: { path: string; hash: string }[];
+  untracked: { path: string; hash: string; mode: string }[];
   fingerprint: string;
 }
 
@@ -103,12 +105,38 @@ export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal)
       const untracked: Snapshot["untracked"] = [];
       for (const path of paths) {
         const hash = objectId(await run(["hash-object", "--", path]), `hash-object ${path}`);
-        untracked.push({ path, hash });
+        // 冻结当时的模式；后续文件被 chmod 或提交不能改写旧快照的完成依据。
+        const info = lstatSync(resolve(cwd, path));
+        const mode = info.isSymbolicLink() ? "120000" : (info.mode & 0o111) !== 0 ? "100755" : "100644";
+        untracked.push({ path, hash, mode });
       }
       const fingerprint = createHash("sha256")
-        .update(JSON.stringify([head, tree, untracked.map(({ path, hash }) => [path, hash])]))
+        .update(JSON.stringify([head, tree, untracked.map(({ path, hash, mode }) => [path, hash, mode])]))
         .digest("hex");
       return { head, ref, tree, untracked, fingerprint };
+    },
+    /**
+     * 有效内容指纹：树里的文件加上未跟踪文件的内容。自动提交把未跟踪文件转成已跟踪时，
+     * HEAD 和原始指纹会变，但这里保持不变；内容或模式真正改变时仍会变。
+     */
+    async contentFingerprint(snapshot: Snapshot): Promise<string> {
+      if (prefix === undefined) prefix = (await run(["rev-parse", "--show-prefix"])).replace(/\r?\n$/, "");
+      const entries = new Map<string, string>();
+      // --full-tree：子目录会话也取完整候选；输出路径本来就是仓库根相对，不再转换。
+      const tree = await run(["ls-tree", "-r", "--full-tree", "-z", snapshot.tree]);
+      for (const item of tree.split("\0")) {
+        if (!item) continue;
+        const match = /^(\d+) \w+ ([0-9a-f]+)\t([\s\S]*)$/.exec(item);
+        if (!match) continue;
+        entries.set(match[3], `${match[1]} ${match[2]}`);
+      }
+      for (const file of snapshot.untracked) {
+        const path = `${prefix}${file.path}`;
+        entries.set(path, `${file.mode || "100644"} ${file.hash}`);
+      }
+      return createHash("sha256")
+        .update(JSON.stringify([...entries.entries()].sort(([a], [b]) => a.localeCompare(b))))
+        .digest("hex");
     },
     async diff(from: string, to: string): Promise<{ diff: string; stat: string }> {
       objectId(from, "diff 基线"); objectId(to, "diff 当前快照");

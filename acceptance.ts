@@ -62,6 +62,8 @@ export interface AcceptanceDeps {
   reviewerModel: string;
   reviewerThinking: string;
   exec: Exec;
+  /** 交给项目方法的环境变量（AUTOREVIEW_BASE_REV 等）；被测系统、重置、验收命令共用。 */
+  env?: NodeJS.ProcessEnv;
   /** 本轮运行目录（不在项目里）：日志、证据、验收方输入都写这里。 */
   runDir: string;
   /** 进程登记文件；被测系统登记进去，Hook 被杀后可清理。 */
@@ -186,7 +188,7 @@ function startSystem(deps: AcceptanceDeps, logPath: string): RunningSystem {
   const { config } = deps;
   const processToken = randomUUID();
   const env = {
-    ...process.env, AUTOREVIEW_PROCESS_OWNER: processToken, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}`, ...config.env, AUTOREVIEW_RUN_DIR: deps.runDir,
+    ...process.env, AUTOREVIEW_PROCESS_OWNER: processToken, PATH: `${HERMES_BIN}:${process.env.PATH ?? ""}`, ...config.env, ...(deps.env ?? {}), AUTOREVIEW_RUN_DIR: deps.runDir,
     ...(deps.resource ? { AUTOREVIEW_RUN_ID: deps.resource.id, AUTOREVIEW_TEMP_DIR: deps.resource.dir, AUTOREVIEW_EVIDENCE_DIR: deps.resource.evidenceDir, TMPDIR: deps.resource.evidenceDir } : {}),
   };
   const child = spawn("/bin/sh", ["-c", config.start!], { cwd: deps.workDir, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -416,7 +418,7 @@ function writeTools(runDir: string, workDir: string): void {
 async function callTester(deps: AcceptanceDeps, inputPath: string, timeout: number, strong = false): Promise<ExecResult> {
   const { config } = deps;
   const sessionId = deriveSessionId(strong ? "acc-strong" : "acc", deps.devSessionId);
-  const options = { cwd: deps.runDir, timeout, signal: deps.signal, role: "验收方" };
+  const options = { cwd: deps.runDir, timeout, signal: deps.signal, role: "验收方", ...(deps.env ? { env: deps.env } : {}) };
   const execute: Exec = (command, args, opts) => deps.resource
     ? deps.exec("/usr/bin/env", [`AUTOREVIEW_ACCEPTANCE_CALL=${deps.callId ?? ""}`, `AUTOREVIEW_RUN_ID=${deps.resource.id}`, `AUTOREVIEW_TEMP_DIR=${deps.resource.dir}`, `AUTOREVIEW_EVIDENCE_DIR=${deps.resource.evidenceDir}`, `TMPDIR=${deps.resource.evidenceDir}`, command, ...args], opts)
     : deps.exec(command, args, opts);
@@ -457,6 +459,7 @@ async function runReset(deps: AcceptanceDeps, label: string, cleanup = false): P
   const env = [
     `PATH=${HERMES_BIN}:${process.env.PATH ?? ""}`,
     ...Object.entries(config.env).map(([key, value]) => `${key}=${value}`),
+    ...Object.entries(deps.env ?? {}).map(([key, value]) => `${key}=${value}`),
     // 项目环境不能覆盖程序分配的资源身份与证据目录。
     `AUTOREVIEW_RUN_DIR=${deps.runDir}`,
     ...(deps.resource ? [`AUTOREVIEW_RUN_ID=${deps.resource.id}`, `AUTOREVIEW_TEMP_DIR=${deps.resource.dir}`, `AUTOREVIEW_EVIDENCE_DIR=${deps.resource.evidenceDir}`, `TMPDIR=${deps.resource.evidenceDir}`] : []),

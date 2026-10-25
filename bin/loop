@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Loop 开工工具：开工、启动、状态、合入。实现见 ../loop.ts。
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec node "$here/loop.ts" "$@"

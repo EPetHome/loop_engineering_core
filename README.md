@@ -1,6 +1,6 @@
 # pi 自动评审扩展（autoreview）
 
-> 当前执行顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整合 E2E 在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，写法规则见 [接入手册](README-验收标准.md)。接入命令只更新 `.autoreview/CONVENTIONS.md`，保持 AGENTS.md 和 CLAUDE.md 不变。
+> 批次准备：写提示词和 `批次.json` → `bin/loop 开工` → `bin/loop 启动`。开发会话内部顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整合 E2E 在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，工具和字段见 [工具清单](工具清单.md)，写法规则见 [接入手册](README-验收标准.md)。接入命令只更新 `.autoreview/CONVENTIONS.md`，保持 AGENTS.md 和 CLAUDE.md 不变。
 
 给 pi 开发会话加一个 `-e`：开发方写完（写不写【交付完成】都行），扩展自动让独立评审检查改动；有必修就发回**同一个**开发会话返修，最多 4 次；没有必修或到达上限就停下，弹 macOS 通知并写总结。
 
@@ -10,13 +10,13 @@
 
 另外可以配**验收命令**（`--autoreview-accept-cmd`，和自动验收是两回事）：每次评审完成后执行一条命令（例如本仓库的 E2E），默认是必需验收，完成前不发布段 done；产品失败回原会话返修，环境与未知原因暂停。见下面「验收命令」一节。
 
-几段 pi 会话要**并行或串行开发、最后跑整合 e2e** 时，用**流水线**：`node /Users/Admin/Desktop/loop/pipeline.ts <计划.json>` 一条命令开窗口、等各段完成、跑 e2e，没通过的条目按 `[段名]` 退回那一段修，修完自动重跑。见下面「流水线」一节。
+几段 pi 会话要**并行或串行开发、最后跑整合 e2e** 时，用 `bin/loop 启动 <批次.json>`：单段直接开会话，多段交给流水线开窗口、等各段完成、跑 e2e，没通过的条目按 `[段名]` 退回那一段修，修完自动重跑。旧的直接执行 `pipeline.ts <计划.json>` 仍然兼容。见下面「流水线与批次」一节。
 
 同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。安装后只有带 `.autoreview.json` 的项目才生效。
 
 ## Claude Code / Codex 用法
 
-- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。
+- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。开工工具还读 `release`（发布分支，默认 `main`）、`workspaces`（工作区名字到路径）、`localFiles`（只在本机的文件）和 `methods`（项目方法文件 `paths`，可选 `selfCheck`、`probe`）。全部字段、类型和默认值见 [工具清单.md](工具清单.md)。
 - 开发方最后一行写【交付完成】触发评审；有必修时 Hook 把返修消息发回同一会话，最多 `maxRepairs` 次（门禁、验收打回和评审打回共用）。
 - 暂停（包括评审被宿主超时或中断）后，在原会话再发一条消息让开发方继续，自动评审就恢复，返修计数重新算。
 - 消息里的 `@文件` 由 Hook 展开（最多 3 个，每个 200KB 以内），需求原文和验收标准都按展开后的内容算，和 pi 一致。
@@ -160,76 +160,69 @@ Claude Code / Codex 开新会话（SessionStart）时，如果本项目有未勾
 
 回写规则随【块 1】下发到项目的 `.autoreview/CONVENTIONS.md`：协调方 AI 读完总结后逐条更新原单（已合入、部分验证、待人工、未验，不得把未验写成通过），更新完在总表里勾「已回写原单」；没有原单写「无原单」再勾；人工项的勾只在用户明确说「验过了」或之后 Loop 运行验证通过时才打。
 
-## 流水线（几段并行 / 串行 + e2e 收尾）
+## 流水线与批次（几段并行 / 串行 + e2e 收尾）
 
-一条命令跑完：各段开发（每段照常 开发 → 评审 → 返修）→ 全部完成后程序跑整合 e2e → 没通过的条目退回负责的那一段修 → 修完自动重跑 e2e，直到通过。只有需要你决定时才停下通知你。
+正常批次只准备两份材料：提示词和 `docs/batches/<批次>/批次.json`。批次目录不再放门禁、棘轮或启动脚本；项目固定方法写一份在 `.autoreview/methods/`，启动固定经过 `bin/pi-dev`。
 
 ```bash
-PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeline.ts 计划.json
+bin/loop 开工 docs/batches/<批次>/批次.json
+bin/loop 启动 docs/batches/<批次>/批次.json   # 单段直接开；多段交给流水线
 ```
 
-计划文件（相对路径按计划文件所在目录解析）：
+一份最小批次：
 
 ```json
 {
-  "name": "V2首批",
+  "name": "示例批次",
+  "branch": "feat/示例批次",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
   "stages": {
-    "甲": { "prompt": "提示词/方案二.md", "cwd": "worktree" },
-    "乙": { "prompt": "提示词/方案三.md", "cwd": "worktree/promate-frontend" }
+    "甲": { "prompt": "../../prompt/提示词-示例.md", "scope": { "allow": ["src/"] } }
   },
-  "steps": [["甲", "乙"]],
-  "prepare": "bash 联调准备.sh",
-  "e2e": {
-    "workDir": "worktree",
-    "criteria": "e2e验收标准.md",
-    "acceptance": { "start": "bash start.sh", "readyUrl": "http://127.0.0.1:38081/", "reset": "sh reset-data.sh" },
-    "maxRounds": 3
-  }
+  "steps": [["甲"]]
 }
 ```
 
-| 字段 | 作用 |
-|---|---|
-| `stages` | 每段的提示词文件 `prompt` 和启动目录 `cwd`。程序按你日常的配置生成 pi 启动命令（`--offline`、gpt-6.1-sol、max、`read,edit,write,bash`、权限扩展、`autoreview.ts`，`--name 计划名·段名` 方便认窗口），不用再写启动脚本。特殊情况可以改写 `start`（自己的启动命令，里面的 pi 必须加载 `autoreview.ts`），两个只能写一个 |
-| `pi` | 可选：改默认配置，字段 `model`、`thinking`、`tools`、`args`（追加的参数，比如 `["--autoreview-max-repairs", "2"]`）；每段也可以写同名字段单独覆盖 |
-| `maxParallel` | 同时派发上限，默认 2；同一仓库仍串行。并行项目必须声明互不冲突的端口与数据 |
-| `steps` | 先后顺序：每一步里的段并行，步与步之间串行。`[["甲","乙"]]` 并行；`["甲","乙"]` 或 `[["甲"],["乙"]]` 串行；`[["甲","乙"],["丁"]]` 混合。不写就是全部并行 |
-| `prepare` | 可选：各段都完成后、跑 e2e 前执行的联调准备（在 `e2e.workDir` 里 `sh -c`） |
-| `e2e.criteria` | 整合 e2e 的验收标准文件，每条开头标归属：`A3. [乙] 操作：…`。没标的条目没通过时停下找你 |
-| `e2e.acceptance` | 和 `.autoreview.json` 的 `acceptance` 同样的字段（启动、就绪、`reset`、日志、模型等） |
-| `e2e.maxRounds` | e2e 最多跑几轮（默认 3） |
-| `dir` | 可选：流水线目录，默认 `~/.pi-autoreview/pipelines/<name>/`，状态、收件箱、e2e 材料、报告都在这里 |
+流程：
 
-怎么跑：
+- **开工**：`loop 开工` 检查运行版干净且停在 `release`，在 worktree 中从发布分支建/切批次分支，检查并复制 `localFiles`；方法指纹未变时跳过自测，变了才执行一次项目方法自测和基线门禁。
+- **启动**：写 `prompt` 的段统一由 `bin/pi-dev` 启动（默认 gpt-6.1-sol、max、`read,edit,write,bash`、权限扩展、`autoreview.ts`、Ponytail，`--name 批次名·段名` 方便认窗口）。单段直接开会话；多段调用流水线。特殊情况仍可写 `start`（自己的启动命令，必须加载 `autoreview.ts`），与 `prompt` 二选一。
+- **串行/并行**：`steps` 的一步内并行，步与步串行；`maxParallel` 限制同时派发，同一 git 工作区仍自动排开。串行段完成后由程序按 `<类型>: <描述>` 提交，下一段以这次提交为开工依据；开发方不提交。
+- **越界检查**：段可写 `scope.allow` / `scope.deny`，门禁前发现越界文件就按产品失败打回原会话，不新增暂停点；不写不检查。
+- **项目方法变量**：准备、门禁、自动验收的启动/重置/验收命令都拿到 `AUTOREVIEW_BASE_REV`、`AUTOREVIEW_BATCH_FILE`、`AUTOREVIEW_STAGE`，项目方法自己读 `批次.json` 的参数。
+- **e2e**：`e2e.criteria` 的条目按 `[段名]` 归属；没通过的条目退回那一段修，修完自动重跑。`e2e.acceptance` 与 `.autoreview.json` 的 `acceptance` 同字段。
+- **直接跑流水线**：`node /Users/Admin/Desktop/loop/pipeline.ts <计划.json>` 仍兼容；多段 `loop 启动` 实际也是调用它。
 
-- **开跑前检查**：开任何窗口之前，程序先查一遍（不调用模型，几秒钟）：每段的目录在不在、是不是有提交的 git 仓库、提示词文件在不在；pi、权限扩展、`autoreview.ts` 找不找得到；同一步里并行的段是不是在同一个目录；e2e 的地址现在是不是空着；标准里要操作网页时 Playwright 装没装。结果列在终端和报告里，有一项 🔴 就停下（退出码 2），一个窗口都不开。
-- **开窗口**：macOS 上每段开一个终端窗口跑它的启动命令（带上 `AUTOREVIEW_PIPELINE_DIR`、`AUTOREVIEW_STAGE` 两个环境变量），你可以看、可以插话；`--launcher background` 改成后台跑，输出写 `<流水线目录>/<段>.log`。
-- **接力**：扩展把每段的完成、暂停写进 `<段>.status.json`；一步里的段都完成才启动下一步。某段暂停时通知你，你在它的窗口里处理好，流水线接着等。启动 3 分钟还没收到某段的状态，会提醒你检查它是否加载了 `autoreview.ts`。
-- **e2e**：程序自己跑（复用自动验收：启动整合后的系统、重置数据、验收方实测、程序判定），不需要单独的开发会话。
-- **回流**：没通过的条目按 `[段名]` 写进那一段的收件箱，那一段的扩展在开发方空闲时把「【流水线 e2e 返修 · 第 N 轮】」发给它。发之前把那一段的评审起点重定到此刻，下一轮评审只看这次的返修改动；e2e 条目当作「上一轮必修」交给评审复查。同一个 git 仓库里的段一次只派一个，不同仓库的同时派。
-- **停下找你**（退出码 2）：收到返修的一段没改代码（多半回了「A3：不归我：理由」）、有没标归属或 G1/G2 系统级的条目没通过、e2e 无法验收或环境出问题、联调准备失败。处理好后用 `--from e2e` 从 e2e 接着跑（各段窗口别关）。超过 `maxRounds` 仍没通过退出码 1，全部通过退出码 0。报告在 `<流水线目录>/report.md`。
-- 只支持 pi 会话：Claude Code / Codex 的会话空闲时没法从外面唤醒。
+开跑前检查、开窗口、接力、回流、退出码（0 完成、1 超过轮数或启动入口失败、2 暂停、3 计划错误）等行为和以前一致。字段、类型、默认值、JSON 输出和会改哪些文件，统一见 [工具清单.md](工具清单.md) 的「批次.json 字段」「pipeline.ts（流水线）」；这里不重复字段表。
 
-## 启动
+## 开工、启动、状态与合入（bin/loop）
 
-开发会话统一用 `bin/pi-dev` 启动，不要手抄 pi 命令。脚本固定了 `--offline`、关闭其他扩展与技能、权限扩展、`autoreview.ts` 和 Ponytail（`PONYTAIL_DEFAULT_MODE=full`），找不到其中任何一项就报错退出；按任务只需给提示词，其余可选：
+批次开发用 worktree 时，`bin/loop` 负责固定步骤。每个子命令都支持 `--dry-run`（只核对、只打印，不改文件或分支）和 `--json`（标准输出一个可解析的 JSON 对象）。完整参数、JSON 字段、退出码和会改哪些文件见 [工具清单.md](工具清单.md) 的「bin/loop」：
+
+```bash
+bin/loop 开工 docs/batches/<批次>/批次.json   # 建 worktree、切批次分支、复制 localFiles、按指纹自测
+bin/loop 启动 docs/batches/<批次>/批次.json   # 单段直接开会话；多段交给流水线
+bin/loop 状态 [批次.json]                     # 阶段、轮次、暂停原因、总结路径
+bin/loop 合入 docs/batches/<批次>/批次.json   # 本地合入发布分支；不推送
+```
+
+`开工` 要求运行版干净且停在 `release`（默认 `main`），开发空间由 `.autoreview.json` 的 `workspaces` 指定，默认 `../<仓库目录名>-dev分支`；`启动` 把 `AUTOREVIEW_BATCH_FILE`、`AUTOREVIEW_STAGE` 交给会话，门禁、准备和验收再带上本段 `AUTOREVIEW_BASE_REV`；`localFiles` 声明本机文件，运行版和批次分支都必须已忽略，否则开工不复制并报错；程序提交也会排除这些路径。方法自测按指纹跳过，环境变了可以用 `--recheck` 强制重跑。流水线在段完成时由程序在该段分支提交（说明 `<类型>: <描述>`，正文写批次名和段名），开发方不提交。`合入` 只在用户执行时运行，有冲突会中止并恢复原状。
+
+## 启动入口（bin/pi-dev）
+
+正常批次用 `bin/loop 启动 <批次.json>`，不要手抄 pi 命令：单段直接执行该段启动命令，多段交给流水线；写 `prompt` 的段统一经过 `bin/pi-dev`。需要单独启动一个会话时，才直接用它：
 
 ```bash
 /Users/Admin/Desktop/loop/bin/pi-dev --cwd <你的项目> <提示词绝对路径>
 ```
 
-| 选项 | 默认 |
-|---|---|
-| `--model` / `--thinking` | `openai-codex/gpt-6.1-sol` / `max` |
-| `--tools` | `read,edit,write,bash`，按任务选 |
-| `--session <开发会话id>` | 接着用同一个开发会话时精确恢复，不要用 `pi -c`（可能选到评审会话） |
-| `--name` | 会话显示名 |
-| `--dry-run` | 只打印完整命令，不启动 |
-| `-- <参数…>` | 之后的参数原样传给 pi，例如 `-- --autoreview-accept-cmd "node test/e2e.mjs"` |
+脚本固定了 `--offline`、关闭其他扩展与技能、权限扩展、`autoreview.ts` 和 Ponytail（默认 `PONYTAIL_DEFAULT_MODE=full`；`--no-ponytail` 显式关闭），要加载的项找不到就报错退出。启动前还会按方法指纹检查项目的 Pi 权限配置能让开发会话不经询问执行 edit、write、bash；不通过就报错退出，不修改你的配置，指纹不变时跳过检查。检查按实际启动参数（`--approve` / `--no-approve`）、Pi 的项目信任记录和全局 `defaultProjectTrust` 判断项目配置是否生效；未受信任的项目配置不算通过，也不会代你授予信任。流水线段启动失败时会把原因写回编排程序并非零退出，不会一直等一个还没启动的会话。
+
+常用选项：`--model` / `--thinking`、`--tools`、`--session <开发会话id>`（精确恢复，不要用 `pi -c`）、`--name`、`--ponytail <路径>` / `--ponytail-mode <档>`、`--no-ponytail`、`--dry-run`，以及 `-- <参数…>`（原样传给 pi）。完整默认值、环境变量、退出码和会改哪些文件见 [工具清单.md](工具清单.md) 的「bin/pi-dev」。
 
 在本仓库开发时加 `-- --autoreview-accept-cmd "node test/e2e.mjs"`，评审完成后自动跑 E2E 实操验收（见下面「验收命令」）。脚本默认加载它所在仓库的 `autoreview.ts`；在 Loop 的隔离检出里开发 Loop 自身时，用 `LOOP_DIR=/Users/Admin/Desktop/loop` 指向正在运行的那份，不要让开发中的代码评审自己。
 
-哪些角色加载 Ponytail、路径怎么固定，见 [项目文档/运行与维护.md](项目文档/运行与维护.md)「Ponytail 与 Skill」；路径变了用环境变量 `PONYTAIL_EXTENSION` 指定。流水线由程序生成启动命令，见上面「流水线」。
+哪些角色加载 Ponytail、路径怎么固定，见 [项目文档/运行与维护.md](项目文档/运行与维护.md)「Ponytail 与 Skill」；路径变了用环境变量 `PONYTAIL_EXTENSION` 指定。流水线由程序通过 `bin/pi-dev` 启动，见上面「流水线与批次」。
 
 没有标记不代表已经评审过，可以用 `/review-status` 查。
 完成后也可以手动 `/review`。
@@ -320,4 +313,6 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 
 ## 准备、来源索引与维护
 
-项目脚本负责具体依赖、容量、水位、测试数据和恢复办法；Loop 负责调度、计数、证据和收尾。`preparation`、`context`、Ponytail 配置和迁移示例集中在 [运行与维护](项目文档/运行与维护.md)。原子来源快照、SHA 内容副本、增删改日志和交付索引在项目外保存；AGENTS.md 不随运行变化。`context.sources` 里的来源文件只是资料：内容变化不再暂停或撤销完成资格，Loop 换用新版本继续并在总结里记一笔；只有登记的路径本身缺失（或整个来源配置被移除）才暂停，那是配置错误。登记的是目录时，目录内文件的增删算资料变化，目录本身被删才算缺失。
+项目固定方法写一份在 `.autoreview/methods/`，由 `.autoreview.json` 的 `methods.paths` 指向；准备、门禁、验收命令都在这里维护，不再每批复制门禁、棘轮或启动脚本。每批只写 `批次.json` 和提示词，批次参数由 `AUTOREVIEW_BATCH_FILE` 交给项目方法读取。`loop 开工` 按方法指纹决定是否执行 `methods.selfCheck` 和基线门禁，环境变了用 `--recheck` 强制重跑。
+
+项目脚本负责具体依赖、容量、水位、测试数据和恢复办法；Loop 负责调度、计数、证据和收尾。`preparation`、`methods`、`context`、Ponytail 的字段、默认值和限制统一见 [工具清单.md](工具清单.md)，调度与迁移见 [运行与维护](项目文档/运行与维护.md)。原子来源快照、SHA 内容副本、增删改日志和交付索引在项目外保存；AGENTS.md 不随运行变化。`context.sources` 里的来源文件只是资料：内容变化不再暂停或撤销完成资格，Loop 换用新版本继续并在总结里记一笔；只有登记的路径本身缺失（或整个来源配置被移除）才暂停，那是配置错误。登记的是目录时，目录内文件的增删算资料变化，目录本身被删才算缺失。

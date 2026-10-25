@@ -54,7 +54,10 @@ test("P1 计划解析：相对路径、默认步骤与目录、标签去掉后�
     assert.equal(plan.e2e!.acceptance.reset, "sh reset.sh");
     const serial = parsePlan({ name: "s", stages: { 甲: { start: "a" }, 乙: { start: "b" } }, steps: ["甲", ["乙"]] }, root, {});
     assert.deepEqual(serial.steps, [["甲"], ["乙"]], "字符串和数组都能写一步");
-    assert.match(stageScript(serial, serial.stages.get("乙")!), /^cd '.*' && export AUTOREVIEW_PIPELINE_DIR='.*' AUTOREVIEW_STAGE='乙' && b$/);
+    assert.match(stageScript(serial, serial.stages.get("乙")!), /^cd '.*' && export AUTOREVIEW_PIPELINE_DIR='.*' AUTOREVIEW_STAGE='乙' AUTOREVIEW_PIPELINE_LAUNCH=1 AUTOREVIEW_PIPELINE_LAUNCH_TOKEN='[^']+' && b$/);
+    writeFileSync(join(root, "prompt.md"), "做");
+    const prompted = parsePlan({ name: "p", stages: { 甲: { prompt: "prompt.md" } }, steps: [["甲"]] }, root, {});
+    assert.match(stageScript(prompted, prompted.stages.get("甲")!), /AUTOREVIEW_PIPELINE_LAUNCH_TOKEN='[^']+'/);
     assert.deepEqual(parseOwner("[乙] 操作：打开"), { owner: "乙", text: "操作：打开" });
     assert.deepEqual(parseOwner("操作：打开"), { text: "操作：打开" });
     // [人工] 条目不自动验、不退回：不当成段名，原文不动，不要求标归属。
@@ -299,9 +302,10 @@ test("P11 计划里写提示词：程序按日常配置生成 pi 启动命令，
     }, root, {});
     const jia = plan.stages.get("甲")!;
     assert.equal(jia.prompt, join(root, "方案二.md"));
-    assert.equal(jia.start, piCommand("V2", "甲", join(root, "方案二.md"), { ...DEFAULT_PI, thinking: "high", args: ["--autoreview-max-repairs", "2"] }));
-    assert.match(jia.start, /^PATH='.*hermes\/node\/bin':"\$PATH" '.*\/pi' '--offline' '--model' 'openai-codex\/gpt-6\.1-sol' '--thinking' 'high'/);
-    assert.match(jia.start, /'-e' '[^']*pi-permission-system[^']*' '-e' '[^']*\/autoreview\.ts' '--name' 'V2·甲' '--autoreview-max-repairs' '2' '@[^']*\/方案二\.md'$/);
+    assert.equal(jia.start, piCommand("V2", "甲", join(root, "方案二.md"), { ...DEFAULT_PI, thinking: "high", args: ["--autoreview-max-repairs", "2"] }, root));
+    assert.match(jia.start, /bin\/pi-dev/);
+    assert.match(jia.start, /'--model' 'openai-codex\/gpt-6\.1-sol' '--thinking' 'high'/);
+    assert.match(jia.start, /'--name' 'V2·甲' .*'--' '--autoreview-max-repairs' '2'/);
     assert.match(plan.stages.get("乙")!.start, /'--model' 'opencode-go\/deepseek-v4\.1-flash' '--thinking' 'high'/, "每段可以覆盖模型，其余沿用 pi 一节");
     assert.equal(plan.stages.get("丁")!.start, "bash 自己的.sh");
     assert.equal(plan.stages.get("丁")!.prompt, undefined);
@@ -386,9 +390,11 @@ test('Ponytail 只显式加载原生扩展，并记录角色模式；可按段�
     writeFileSync(join(root, '任务.md'), '任务');
     const plan = parsePlan({ name: 'pony', pi: { ponytail: { extension: 'pony/index.js', mode: 'full' } },
       stages: { 开发: { cwd: '.', prompt: '任务.md' }, 其他: { cwd: 'other', prompt: '任务.md', ponytail: false } } }, root);
-    assert.match(plan.stages.get('开发')!.start, /^PONYTAIL_DEFAULT_MODE='full'/);
-    assert.ok(plan.stages.get('开发')!.start.includes(`'-e' '${join(root, 'pony/index.js')}'`));
-    assert.ok(!plan.stages.get('其他')!.start.includes('PONYTAIL_DEFAULT_MODE'));
+    assert.match(plan.stages.get('开发')!.start, /bin\/pi-dev/);
+    assert.ok(plan.stages.get('开发')!.start.includes(`'--ponytail' '${join(root, 'pony/index.js')}'`));
+    assert.match(plan.stages.get('开发')!.start, /'--ponytail-mode' 'full'/);
+    assert.match(plan.stages.get('其他')!.start, /'--no-ponytail'/);
+    assert.ok(!plan.stages.get('其他')!.start.includes('--ponytail '));
     assert.throws(() => parsePlan({ name: 'x', maxParallel: 0, stages: { a: { start: 'true' } } }, root), /maxParallel/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -545,4 +551,92 @@ test('消费旧 done 时核对真实来源文件，内容变化不失效，缺�
     } finally { s.close(); }
   });
   if (oldRoot === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = oldRoot;
+});
+
+test("P 批次文件与 scope：启动脚本带绝对路径，scope 解析并校验字段名", () => {
+  const root = tempDir();
+  try {
+    const batch = join(root, "批次.json");
+    writeFileSync(join(root, "a.md"), "a");
+    writeFileSync(batch, "{}");
+    const plan = parsePlan({
+      name: "环境", stages: { 甲: { prompt: "a.md", scope: { allow: ["src/"], deny: ["src/secret/"] } } }, steps: [["甲"]],
+    }, root, {}, { batchFile: batch });
+    assert.equal(plan.file, batch);
+    assert.deepEqual(plan.stages.get("甲")!.scope, { allow: ["src"], deny: ["src/secret"] });
+    assert.match(stageScript(plan, plan.stages.get("甲")!), new RegExp(`AUTOREVIEW_BATCH_FILE='${batch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`));
+
+    for (const [scope, pattern] of [
+      [{ allow: "src/" }, /stages\.甲\.scope\.allow.*字符串数组/],
+      [{ deny: [""] }, /stages\.甲\.scope\.deny\[0\].*非空字符串/],
+      [{ allow: ["../outside"] }, /不能越出项目根/],
+      ["src/", /stages\.甲\.scope 必须是 JSON 对象/],
+    ] as const) {
+      assert.throws(() => parsePlan({ name: "x", stages: { 甲: { start: "a", scope } }, steps: [["甲"]] }, root, {}),
+        (error: unknown) => error instanceof PlanError && pattern.test((error as Error).message));
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("P 启动入口失败：写回 startup-failed 后编排程序立即非零退出，不等待会话", async () => {
+  const root = gitRepo(tempDir());
+  try {
+    const start = `${process.execPath} -e 'const fs=require("node:fs"),p=require("node:path");const d=process.env.AUTOREVIEW_PIPELINE_DIR,s=process.env.AUTOREVIEW_STAGE;fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,s+".status.json"),JSON.stringify({stage:s,sessionId:"startup",summary:"",event:"startup-failed",seq:1,inbox:0,pauseReason:"权限自动执行检查未通过：bash 会询问"}));'`;
+    const plan = parsePlan({ name: "启动失败", stages: { 甲: { start } }, steps: [["甲"]], dir: join(root, "pipeline") }, root, {});
+    const notes: string[] = [];
+    const started = Date.now();
+    const code = await runPipeline(plan, {
+      launch: (_stage, script) => { spawnSync("/bin/sh", ["-c", `(${script}) >/dev/null 2>&1 &`]); },
+      notify: (message) => notes.push(message), log: () => {}, pollMs: 20, silenceMs: 1000,
+      preflightEnv: { playwright: () => true },
+    });
+    assert.equal(code, 1);
+    assert.ok(Date.now() - started < 5_000, "没有一直等会话状态");
+    assert.match(notes.at(-1)!, /段 甲 启动失败：权限自动执行检查未通过：bash 会询问/);
+    assert.equal(readFileSync(join(plan.dir, "pipeline.finished"), "utf8").trim(), "1");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("P 流水线准备和段会话共用准备前确定的开工依据", async () => {
+  const root = gitRepo(tempDir());
+  const out = mkdtempSync(join(tmpdir(), "autoreview-pipeline-base-"));
+  try {
+    const prepFile = join(out, "prep-base.txt"), startFile = join(out, "start-base.txt");
+    writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ preparation: { check: `printf '%s' "$AUTOREVIEW_BASE_REV" > ${JSON.stringify(prepFile)}` } }));
+    const script = join(root, "stage.mjs");
+    writeFileSync(script, `import { mkdirSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nwriteFileSync(${JSON.stringify(startFile)}, process.env.AUTOREVIEW_BASE_REV ?? "");\nconst dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;\nmkdirSync(dir, { recursive: true });\nwriteFileSync(join(dir, stage + ".status.json"), JSON.stringify({ stage, sessionId: "s", summary: "", event: "done", readyEpoch: "e", seq: 1, inbox: 0 }));\n`);
+    const plan = parsePlan({ name: "开工依据", stages: { 甲: { start: `"${process.execPath}" "${script}"` } }, steps: [["甲"]], dir: join(out, "pipeline") }, root, {});
+    const code = await runPipeline(plan, {
+      launch: (_stage, command) => { spawnSync("/bin/sh", ["-c", `(${command}) >/dev/null 2>&1 &`]); },
+      notify: () => {}, log: () => {}, pollMs: 20, silenceMs: 1000, preflightEnv: { playwright: () => true },
+    });
+    assert.equal(code, 0, readFileSync(join(plan.dir, "report.md"), "utf8"));
+    const prepared = readFileSync(prepFile, "utf8");
+    assert.match(prepared, /^[a-f0-9]{40}$/);
+    assert.equal(readFileSync(startFile, "utf8"), prepared, "启动脚本拿到准备使用的同一份开工依据");
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
+});
+
+test("P 并行段一段启动失败：收束另一段的等待，不杀已启动会话", async () => {
+  const root = tempDir();
+  const out = mkdtempSync(join(tmpdir(), "autoreview-pipeline-cancel-"));
+  try {
+    const a = gitRepo(join(root, "a")), b = gitRepo(join(root, "b"));
+    const status = (event: string, reason = "") => `${process.execPath} -e 'const fs=require("node:fs"),p=require("node:path");const d=process.env.AUTOREVIEW_PIPELINE_DIR,s=process.env.AUTOREVIEW_STAGE;fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,s+".status.json"),JSON.stringify({stage:s,sessionId:"s",summary:"",event:${JSON.stringify(event)},seq:1,inbox:0,pauseReason:${JSON.stringify(reason)}}));'`;
+    const plan = parsePlan({ name: "并行启动失败", maxParallel: 2, stages: {
+      甲: { cwd: a, start: status("startup-failed", "权限自动执行检查未通过：bash 会询问") },
+      乙: { cwd: b, start: status("paused", "等用户决定") },
+    }, steps: [["甲", "乙"]], dir: join(out, "pipeline") }, root, {});
+    const notes: string[] = [];
+    const started = Date.now();
+    const code = await runPipeline(plan, {
+      launch: (_stage, script) => { spawnSync("/bin/sh", ["-c", `(${script}) >/dev/null 2>&1 &`]); },
+      notify: (message) => notes.push(message), log: () => {}, pollMs: 30, silenceMs: 1000,
+      preflightEnv: { playwright: () => true },
+    });
+    assert.equal(code, 1);
+    assert.ok(Date.now() - started < 5_000, "另一段的等待已收束，进程没有一直挂着");
+    assert.match(notes.at(-1)!, /段 甲 启动失败/);
+    assert.equal(JSON.parse(readFileSync(join(plan.dir, "乙.status.json"), "utf8")).event, "paused", "乙的会话状态保留");
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
 });

@@ -1,5 +1,5 @@
 > 模板说明：给验收方的操作说明（`.autoreview.json` 的 `acceptance.guide`），原文交给验收方。写服务地址、测试账号、测试数据 ID 和常用操作。按 loop 现在的规则，数据由程序重置，验收方不自己清。
-> Promate 实例：`dev分支/deploy/acceptance/GUIDE-四a.md` 等，每批一份（Promate 的旧版还写着让验收方自己跑 reset，要改）
+> Promate 实例：`dev分支/deploy/acceptance/GUIDE-四a.md` 等（旧流程，仍用 dev分支 目录），每批一份（Promate 的旧版还写着让验收方自己跑 reset，要改）
 
 # <批次> 隔离验收
 

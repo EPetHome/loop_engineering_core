@@ -1,7 +1,24 @@
 {
+  "release": "main",
+  "workspaces": {
+    "dev分支": "../<仓库目录名>-dev分支"
+  },
+  "localFiles": [
+    "deploy/acceptance/start.sh",
+    "deploy/acceptance/reset-data.sh",
+    "deploy/acceptance/release.sh",
+    "deploy/acceptance/GUIDE.md"
+  ],
+  "methods": {
+    "paths": [
+      ".autoreview/methods"
+    ],
+    "selfCheck": "sh .autoreview/methods/self-check.sh",
+    "probe": "node -v"
+  },
   "reviewTimeoutMin": 90,
   "gate": {
-    "cmd": "bash /path/to/项目根/docs/batches/示例批次-20261012/示例批次-工具.sh check",
+    "cmd": "sh .autoreview/methods/gate.sh check",
     "timeoutMin": 35
   },
   "acceptance": {
@@ -16,13 +33,14 @@
     "cleanup": "sh deploy/acceptance/release.sh"
   },
   "preparation": {
-    "check": "sh deploy/acceptance/prepare.sh check",
+    "check": "sh .autoreview/methods/prepare.sh check",
+    "recover": "sh .autoreview/methods/prepare.sh recover",
     "timeoutMin": 5,
     "maxRecoveries": 1,
     "maxRepairs": 1
   },
   "context": {
-    "root": "..",
+    "root": ".",
     "sources": [
       {
         "id": "rules",
@@ -40,6 +58,14 @@
         "role": "design",
         "dependsOn": [
           "need"
+        ]
+      },
+      {
+        "id": "methods",
+        "path": ".autoreview/methods",
+        "role": "guide",
+        "dependsOn": [
+          "design"
         ]
       }
     ],

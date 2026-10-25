@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** 本仓库根目录：提示词、验收工具、测试命令的相对路径都按它解析。 */
@@ -184,6 +184,85 @@ export function parseAcceptanceConfig(
     testerCmd: env.AUTOREVIEW_ACCEPTANCE_CMD?.trim() ?? "",
     drafterCmd: env.AUTOREVIEW_CRITERIA_CMD?.trim() ?? "",
   };
+}
+
+/** 项目方法：路径相对于 .autoreview.json 所在目录；selfCheck/probe 用 sh -c 执行。 */
+export interface MethodsConfig { paths: string[]; selfCheck?: string; probe?: string }
+
+/** 解析 methods 一节；没写返回 undefined。字段非法时抛错。 */
+export function parseMethodsConfig(raw: unknown, root: string): MethodsConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 methods 必须是 JSON 对象`);
+  const data = raw as Record<string, unknown>;
+  if (!Array.isArray(data.paths) || data.paths.length === 0) throw new Error(`${MARKER_FILE} 的 methods.paths 必须是非空字符串数组`);
+  const paths = data.paths.map((item: unknown, index: number) => {
+    if (typeof item !== "string" || !item.trim()) throw new Error(`${MARKER_FILE} 的 methods.paths[${index}] 必须是非空路径`);
+    const path = item.trim();
+    const resolved = resolve(root, path);
+    const rel = relative(root, resolved);
+    if (isAbsolute(path) || !rel || rel.startsWith("..") || rel === "") throw new Error(`${MARKER_FILE} 的 methods.paths[${index}] 必须是项目内的路径`);
+    return rel.replace(/\\/g, "/");
+  });
+  const command = (key: "selfCheck" | "probe"): string | undefined => {
+    const value = data[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${MARKER_FILE} 的 methods.${key} 必须是非空字符串`);
+    return value.trim();
+  };
+  const selfCheck = command("selfCheck"), probe = command("probe");
+  return { paths, ...(selfCheck ? { selfCheck } : {}), ...(probe ? { probe } : {}) };
+}
+
+/** 发布分支、开发工作区、本机文件和项目方法的位置；没写的用默认值。 */
+export interface ProjectLayout {
+  release: string;
+  workspaces: Record<string, string>;
+  localFiles: string[];
+  methods?: MethodsConfig;
+}
+
+export function parseProjectLayout(raw: Record<string, unknown>, root: string): ProjectLayout {
+  const release = raw.release === undefined ? "main" : nonEmptyString(raw, "release", "main");
+  const workspaces: Record<string, string> = {};
+  if (raw.workspaces !== undefined) {
+    if (raw.workspaces === null || typeof raw.workspaces !== "object" || Array.isArray(raw.workspaces)) {
+      throw new Error(`${MARKER_FILE} 的 workspaces 必须是「名字 → 路径」对象`);
+    }
+    for (const [name, value] of Object.entries(raw.workspaces as Record<string, unknown>)) {
+      if (!name.trim()) throw new Error(`${MARKER_FILE} 的 workspaces 名字不能为空`);
+      if (typeof value !== "string" || !value.trim()) throw new Error(`${MARKER_FILE} 的 workspaces.${name} 必须是非空路径`);
+      workspaces[name.trim()] = resolve(root, value.trim());
+    }
+  }
+  const localFiles: string[] = [];
+  if (raw.localFiles !== undefined) {
+    if (!Array.isArray(raw.localFiles) || raw.localFiles.some((item) => typeof item !== "string" || !item.trim())) {
+      throw new Error(`${MARKER_FILE} 的 localFiles 必须是非空字符串数组`);
+    }
+    for (const item of raw.localFiles as string[]) {
+      const path = item.trim();
+      const rel = relative(root, resolve(root, path));
+      if (isAbsolute(path) || !rel || rel.startsWith("..")) throw new Error(`${MARKER_FILE} 的 localFiles 必须是项目内的相对路径：${path}`);
+      localFiles.push(path);
+    }
+  }
+  const methods = parseMethodsConfig(raw.methods, root);
+  return { release, workspaces, localFiles, ...(methods ? { methods } : {}) };
+}
+
+/** 从 cwd 向上找 .autoreview.json 并解析布局；没有标记文件时用默认布局。 */
+export function loadProjectLayout(cwd: string): { root: string; layout: ProjectLayout } {
+  const root = findProjectRoot(cwd) ?? resolve(cwd);
+  let raw: Record<string, unknown> = {};
+  if (existsSync(join(root, MARKER_FILE))) raw = readMarker(root);
+  return { root, layout: parseProjectLayout(raw, root) };
+}
+
+/** 工作区路径：配置里有就用配置的；没写时默认仓库目录旁的 <仓库名>-<工作区名>。 */
+export function workspacePath(root: string, layout: ProjectLayout, name: string): string {
+  if (layout.workspaces[name]) return layout.workspaces[name];
+  const dirName = name === "dev分支" ? `${basename(root)}-dev分支` : `${basename(root)}-${name}`;
+  return resolve(root, "..", dirName);
 }
 
 /** 解析 gate 一节；没写返回 undefined（不跑门禁）。字段非法时抛错。 */
