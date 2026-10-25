@@ -6,7 +6,9 @@
  *     暂停或评审中断后再提交即恢复自动评审
  *   Stop → 交付标记触发评审；有必修用 {"decision":"block","reason":…} 打回原会话
  *
- * 只有当前目录或某个上级目录存在 .autoreview.json 的项目才生效，普通会话零影响。
+ * 只有用 bin/loop-dev 启动的会话才是开发会话：启动器设置 AUTOREVIEW_DEV_ROOT=<项目根>，
+ * Hook 只认这个变量，项目根也不随会话中途 cd 改变。没有变量的直接会话不注入评审约定、
+ * 不记录状态、不评审或暂停；唯一例外是 SessionStart 的交付总表待回写提醒。
  * 任何异常都只暂停并放行（退出 0），绝不卡宿主、绝不输出非法 JSON。
  */
 import { randomUUID } from "node:crypto";
@@ -17,7 +19,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "../acceptance-core.ts";
 import {
-  checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
+  checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, MARKER_FILE, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
@@ -73,6 +75,8 @@ interface HookContext {
   configRoot: string;
   /** 宿主会话工作目录：git 取证与评审都在这里。 */
   workDir: string;
+  /** 宿主当前目录：只用于解析用户消息里的相对 @文件，不改变固定评审根。 */
+  promptDir: string;
   sessionId: string;
   paths: HookPaths;
   exec: Exec;
@@ -176,16 +180,24 @@ export function detectHost(event: HookEvent, env: NodeJS.ProcessEnv = process.en
   const forced = env.AUTOREVIEW_HOST?.trim();
   if (forced) return forced;
   if (event.turn_id !== undefined && event.turn_id !== null) return "codex";
-  if (env.CLAUDECODE || env.CLAUDE_CODE_ENTRYPOINT) return "claude";
-  // Codex 的 Claude 插件兼容层会设置 CLAUDE_PLUGIN_ROOT，但不设 CLAUDECODE。
-  if (env.CLAUDE_PLUGIN_ROOT) return "codex";
   const transcript = typeof event.transcript_path === "string" ? event.transcript_path : "";
   if (transcript.includes("/.codex/")) return "codex";
   if (transcript.includes("/.claude/")) return "claude";
+  if (env.CLAUDECODE || env.CLAUDE_CODE_ENTRYPOINT) return "claude";
+  // 两个宿主都会提供 CLAUDE_PLUGIN_ROOT，不能单凭兼容变量判为 Codex。
+  if (env.PLUGIN_ROOT) return "codex";
   return "claude";
 }
 
 export { findProjectRoot };
+
+const DEV_ROOT_ENV = "AUTOREVIEW_DEV_ROOT";
+
+/** 启动器写入的项目根；没有或为空表示不是开发会话。 */
+export function devProjectRoot(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[DEV_ROOT_ENV]?.trim();
+  return raw ? resolve(raw) : undefined;
+}
 
 /** 读 .autoreview.json（可以是 {}）；可选字段非法时抛错，由统一收口记暂停。 */
 export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): ReviewConfig {
@@ -616,7 +628,8 @@ export function expandFileRefs(prompt: string, cwd: string): string {
 
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
   if (isLoopMessage(typeof event.prompt === "string" ? event.prompt : "")) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
-  const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.workDir);
+  // 相对引用保持宿主当前目录语义；固定项目根只用于配置、Git 取证、状态和评审。
+  const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.promptDir);
   const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
   let notice: string | undefined, criteriaNotice: string | undefined, invalidatedDone = false;
   // 权限和标准先独立落盘；配置、来源索引、Git 都不得成为吞掉撤权的前置条件。
@@ -643,8 +656,9 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   let state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
   if (ctx.configError) {
-    await pause(ctx, state, "项目配置不可用，用户输入已保存", undefined, ctx.configError);
-    return userOutput(ctx, notice);
+    await pause(ctx, state, "项目配置不可用，用户输入已保存", undefined, ctx.configError,
+      `当前 AUTOREVIEW_DEV_ROOT=${ctx.workDir}；修正它指向的项目根后再提交。`);
+    return userOutput(ctx, [`自动评审暂停（项目配置不可用）。${ctx.configError}`, notice].filter(Boolean).join("\n"));
   }
   if (state.baseline === undefined && state.requirement?.trim() && !lockAlive(ctx.paths.lock)) {
     const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
@@ -788,7 +802,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     const round = state.rounds.length + 1;
     const work = runReviewRound({
       cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, round,
-      deliveryNote: text, state, config: ctx.config, getConfig: () => loadConfig(findProjectRoot(ctx.workDir) ?? ctx.configRoot), exec: ctx.exec,
+      deliveryNote: text, state, config: ctx.config, getConfig: () => loadConfig(ctx.configRoot), exec: ctx.exec,
       signal: controller.signal, checkLive: checkUserInputs,
       cleanupExec: createChildExec(`${ctx.paths.procs}.cleanup`), onCleanup: (_work, path) => { cleanupRecord = path; },
       writeInput: (name, content) => {
@@ -850,39 +864,75 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   }
 }
 
+/** 没有 AUTOREVIEW_DEV_ROOT 的直接会话：只允许 SessionStart 的待回写提醒，其他一律不动作。 */
+function passiveSessionStart(event: HookEvent, host: string, workDir: string): string | undefined {
+  if (event.hook_event_name !== "SessionStart") return undefined;
+  let reminder: string | undefined;
+  try {
+    const text = readLedgerForReminder();
+    reminder = text === undefined ? undefined : writebackReminder(text, projectRootOf(workDir));
+  } catch { reminder = undefined; }
+  if (!reminder) return undefined;
+  const output: Record<string, unknown> = { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: reminder } };
+  if (host === "claude") output.systemMessage = reminder;
+  return JSON.stringify(output);
+}
+
+/** 开发会话的项目根不可用：按项目配置不可用暂停，不留“内部错误”的误导。 */
+async function configUnavailable(ctx: HookContext): Promise<string | undefined> {
+  const detail = ctx.configError ?? "项目配置不可用";
+  const state = loadStateFileForRecovery(ctx.paths.state);
+  await pause(ctx, state, "项目配置不可用", undefined, detail,
+    `当前 AUTOREVIEW_DEV_ROOT=${ctx.workDir}；修正它指向的项目根（须有 .autoreview.json）后再提交。`);
+  return userOutput(ctx, `自动评审暂停（项目配置不可用）。${detail}`);
+}
+
 async function dispatch(event: HookEvent): Promise<string | undefined> {
-  const root = findProjectRoot(event.cwd);
-  const host = detectHost(event), sessionId = sessionIdOf(event), workDir = resolve(event.cwd?.trim() || process.cwd());
-  const paths = hookPaths(workDir, host, sessionId), kind = event.hook_event_name;
-  if (!root && !(kind === "UserPromptSubmit" && existsSync(paths.state))) {
-    process.stderr.write("autoreview hook: 没有 .autoreview.json，跳过\n"); return undefined;
-  }
+  const host = detectHost(event), sessionId = sessionIdOf(event);
+  const eventCwd = resolve(event.cwd?.trim() || process.cwd());
+  const root = devProjectRoot();
+  // 不是 bin/loop-dev 启动的会话：评审相关的事一律不做，只保留总表待回写提醒。
+  if (!root) return passiveSessionStart(event, host, eventCwd);
+  const paths = hookPaths(root, host, sessionId), kind = event.hook_event_name;
+  const marker = join(root, MARKER_FILE);
   let config: ReviewConfig = { maxRepairs: DEFAULT_MAX_REPAIRS, reviewerModel: DEFAULT_MODEL, reviewerThinking: DEFAULT_THINKING, reviewTimeoutMin: DEFAULT_TIMEOUT_MIN, reviewerCmd: "" };
   let configError: string | undefined;
-  try { if (!root) throw new Error("没有 .autoreview.json"); config = loadConfig(root); }
-  catch (error) { if (kind !== "UserPromptSubmit") throw error; configError = errorText(error); }
-  const ctx: HookContext = { host, configRoot: root ?? workDir, workDir, sessionId, paths, exec: createChildExec(paths.procs), config, configError };
-  if (kind === "SessionStart") return sessionStart(ctx);
+  if (!existsSync(marker)) {
+    configError = `项目配置不可用（AUTOREVIEW_DEV_ROOT=${root}）：${marker} 不存在`;
+  } else {
+    try { config = loadConfig(root); }
+    catch (error) {
+      // 与现有行为一致：只有 UserPromptSubmit 把配置错误收成暂停，其他事件仍走内部错误收口。
+      if (kind !== "UserPromptSubmit") throw error;
+      configError = `项目配置不可用（AUTOREVIEW_DEV_ROOT=${root}）：${errorText(error)}`;
+    }
+  }
+  const ctx: HookContext = { host, configRoot: root, workDir: root, promptDir: eventCwd, sessionId, paths, exec: createChildExec(paths.procs), config, configError };
+  if (kind === "SessionStart") return configError ? configUnavailable(ctx) : sessionStart(ctx);
   if (kind === "UserPromptSubmit") return userPromptSubmit(ctx, event);
-  if (kind === "Stop") return stop(ctx, event);
+  if (kind === "Stop") return configError ? configUnavailable(ctx) : stop(ctx, event);
   return undefined;
 }
 
-/** 异常收口：记暂停、写总结、尽力通知，然后放行（退出 0）。 */
+/** 异常收口：开发会话才记暂停、写总结、尽力通知，然后放行（退出 0）。 */
 async function recover(event: HookEvent, error: unknown): Promise<undefined> {
   const detail = errorText(error);
   process.stderr.write(`autoreview hook 内部错误：${detail}\n`);
-  const root = findProjectRoot(event.cwd);
+  const root = devProjectRoot();
   if (!root) return undefined;
   const host = detectHost(event);
   const sessionId = sessionIdOf(event);
-  const workDir = resolve(event.cwd?.trim() || process.cwd());
   const ctx: HookContext = {
-    host, configRoot: root, workDir, sessionId, paths: hookPaths(workDir, host, sessionId), exec: childExec,
+    host, configRoot: root, workDir: root, promptDir: resolve(event.cwd?.trim() || process.cwd()),
+    sessionId, paths: hookPaths(root, host, sessionId), exec: childExec,
     config: { maxRepairs: DEFAULT_MAX_REPAIRS, reviewerModel: DEFAULT_MODEL, reviewerThinking: DEFAULT_THINKING, reviewTimeoutMin: DEFAULT_TIMEOUT_MIN, reviewerCmd: "" },
   };
   const state = loadStateFileForRecovery(ctx.paths.state);
-  await pause(ctx, state, "自动评审内部错误", undefined, `Hook 异常：${tail(detail, 300)}`);
+  if (!existsSync(join(root, MARKER_FILE))) {
+    await pause(ctx, state, "项目配置不可用", undefined, `项目配置不可用（AUTOREVIEW_DEV_ROOT=${root}）：${join(root, MARKER_FILE)} 不存在`);
+  } else {
+    await pause(ctx, state, "自动评审内部错误", undefined, `Hook 异常：${tail(detail, 300)}`);
+  }
   return undefined;
 }
 
