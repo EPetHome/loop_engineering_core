@@ -16,12 +16,13 @@ import {
 import { createGitEvidence, GitReadError, type Exec, type ExecResult } from "./git.ts";
 import { acceptanceTodos, conventionNotice } from "./onboarding.ts";
 import {
-  inboxPath, pollMs, readJson, stageFromEnv, statusPath, writeStageStatus,
+  inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, readJson, stageFromEnv, statusPath, writeStageStatus,
   type InboxMessage, type StageEvent, type StageLink,
 } from "./pipeline-core.ts";
 import { reapProcs } from "./procs.ts";
 import { classifyFailure, failureLabel } from "./failure.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
+import { methodEnv } from "./method-env.ts";
 import { createChildExec, expandFileRefs } from "./hosts/hook.ts";
 import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
@@ -76,6 +77,8 @@ function lastAssistantText(entries: SessionEntry[]): string {
 }
 
 export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exec): void {
+  // 自定义 start 不经过 bin/pi-dev；扩展加载即撤掉一次性启动回报身份，门禁子进程不能改写父段状态。
+  if (process.env[PIPELINE_LAUNCH_TOKEN_ENV]) delete process.env[PIPELINE_LAUNCH_TOKEN_ENV];
   let state: PiState = newReviewState();
   let gitAvailability: "unknown" | "available" | "unsupported" = "unknown";
   let unavailableReason = "不是 git 仓库，自动评审已关闭";
@@ -374,10 +377,17 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const contextConfig = loadContext(ctx.cwd);
     if (candidate.fingerprint !== state.pendingAcceptanceCandidate) {
       const before = state.lastSnapshotDetails;
-      const sourcesOnly = contextConfig && before
+      // 程序提交会把 HEAD 和未跟踪文件状态改掉，但内容没变：按有效内容放行。
+      // 真实内容或文件模式变化仍会得到不同指纹，继续走来源豁免或拒绝。
+      let sameContent = false;
+      if (before) {
+        try { sameContent = await git.contentFingerprint(before) === await git.contentFingerprint(candidate); }
+        catch { sameContent = false; }
+      }
+      const sourcesOnly = !sameContent && contextConfig && before
         ? await sourcesOnlyWorkspaceChange(git, before, candidate, (path) => isRegisteredSource(contextConfig, ctx.cwd, path))
         : false;
-      if (!sourcesOnly) return "候选或输入版本变化，原评审结果不能放行当前候选";
+      if (!sameContent && !sourcesOnly) return "候选或输入版本变化，原评审结果不能放行当前候选";
     }
     // 取证完成后再核对来源：内容变化只记录；缺失/配置移除照旧阻塞，也能接住取证窗口里的删除。
     if (!contextConfig) {
@@ -511,7 +521,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       let resource: RunResource | undefined;
       try {
         resource = createRunResource(`accept:${ctx.sessionManager.getSessionId()}:r${record.round}`, undefined, procsPath(ctx));
-        res = await wrappedExec(ctx, life, signal)("/bin/sh", ["-c", managedShell(record.command, resource)], { cwd: ctx.cwd, timeout: Math.max(1, deadline - Date.now()), signal, role: "验收命令" });
+        res = await wrappedExec(ctx, life, signal)("/bin/sh", ["-c", managedShell(record.command, resource)], {
+          cwd: ctx.cwd, timeout: Math.max(1, deadline - Date.now()), signal, role: "验收命令", env: methodEnv(state.baseline) });
       } catch (error) { failure = errorText(error); }
       finally {
         if (resource) { releaseRunResource(resource); record.cleanup = resourceLine(resource); }
@@ -555,6 +566,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       const config = loadPreparation(ctx.cwd);
       if (config) {
         const prepared = await runPreparation({ config, cwd: ctx.cwd, state, exec: wrappedExec(ctx, life, signal), signal, procsFile: procsPath(ctx),
+          env: methodEnv(state.baseline),
           runDir: join(dataDir(ctx), "preparation", ctx.sessionManager.getSessionId()), saveState: () => saveState(life),
           failure: record.failureKind, evidence: record.outputTail ?? record.detail });
         checkLive(life, signal);
@@ -726,6 +738,9 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       checkLive(life);
       state.lastSnapshot = snap.ref;
       state.lastUntracked = snap.untracked.map(({ path }) => path);
+      // 同一 worktree 串行时，别的段已经交付的改动不算本段越界；只检查本次整合返修。
+      state.scopeBaseline = snap.ref;
+      state.scopeBaselineUntrackedDetails = snap.untracked.map((item) => ({ ...item }));
       state.lastFingerprint = snap.fingerprint;
       state.lastCheckedFingerprint = snap.fingerprint;
       state.unresolvedMustFix = inbox.mustFix;
@@ -1089,10 +1104,22 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         event.systemPromptOptions.sections ??= {};
         event.systemPromptOptions.sections.autoreview_context = context.text;
       }
+      if (state.baseline === undefined) {
+        const snap = await evidence(ctx, life).snapshot();
+        checkLive(life);
+        // 流水线在准备前已经确定开工依据并传进来；会话不能另取一次 stash，否则准备和门禁会不同。
+        const inherited = process.env.AUTOREVIEW_PIPELINE_LAUNCH === "1" ? process.env.AUTOREVIEW_BASE_REV?.trim() : undefined;
+        state.baseline = inherited || snap.ref;
+        state.baselineUntracked = snap.untracked.map(({ path }) => path);
+        state.baselineUntrackedDetails = snap.untracked.map((item) => ({ ...item }));
+        state.baselineFingerprint = snap.fingerprint;
+        saveState(life);
+      }
       if (state.enabled && prompt !== undefined) {
         const preparation = loadPreparation(ctx.cwd);
         if (preparation) {
           const result = await runPreparation({ config: preparation, cwd: ctx.cwd, state,
+            env: methodEnv(state.baseline),
             exec: wrappedExec(ctx, life), procsFile: procsPath(ctx), runDir: join(dataDir(ctx), "preparation", ctx.sessionManager.getSessionId()),
             saveState: () => saveState(life), onProgress: (text) => ctx.ui.notify(text, "info") });
           checkLive(life);
@@ -1112,14 +1139,6 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           }
           if (latest.changed) saveState(life);
         }
-      }
-      if (state.baseline === undefined) {
-        const snap = await evidence(ctx, life).snapshot();
-        checkLive(life);
-        state.baseline = snap.ref;
-        state.baselineUntracked = snap.untracked.map(({ path }) => path);
-        state.baselineFingerprint = snap.fingerprint;
-        saveState(life);
       }
       if (prompt !== undefined && hadReview && !state.needsInputReview && previousInputs !== JSON.stringify([state.requirement, state.criteria, state.grants])) await invalidateCompletion(ctx, life);
       const acceptance = acceptanceEnabled(ctx);

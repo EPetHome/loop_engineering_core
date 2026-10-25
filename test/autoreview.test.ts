@@ -1,7 +1,7 @@
 /** 无模型入口回归 G1–G15；所有运行产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +33,7 @@ async function until(predicate: () => boolean, description: string): Promise<voi
   for (let i = 0; i < 8; i += 1) await nextTurn();
 }
 
-function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string>; stage?: string; commands?: Array<{ name: string; source?: string }> | (() => Array<{ name: string; source?: string }>) } = {}) {
+function harness(options: { empty?: boolean; restored?: Record<string, unknown>; flags?: Record<string, string>; stage?: string; subdir?: string; commands?: Array<{ name: string; source?: string }> | (() => Array<{ name: string; source?: string }>) } = {}) {
   const root = mkdtempSync(join(tmpdir(), "autoreview-unit-"));
   const repo = join(root, "repo");
   const home = join(root, "home");
@@ -59,6 +59,8 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     return res.stdout.trim();
   };
   git("init", "-q"); git("config", "user.email", "unit@example.com"); git("config", "user.name", "unit");
+  const workCwd = options.subdir ? join(repo, options.subdir) : repo;
+  if (options.subdir) mkdirSync(workCwd, { recursive: true });
   const write = (path: string, text: string) => writeFileSync(join(repo, path), text);
   if (!options.empty) { write("file.txt", "base\n"); git("add", "file.txt"); git("commit", "-qm", "baseline"); }
   const entries: Record<string, any>[] = options.restored
@@ -125,7 +127,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   };
   const ctx = {
     abort: () => apiCalls.push("abort"),
-    cwd: repo, isIdle: () => { apiCalls.push("isIdle"); return true; },
+    cwd: workCwd, isIdle: () => { apiCalls.push("isIdle"); return true; },
     ui: {
       notify: (message: string) => { apiCalls.push("notify"); notifications.push(message); },
       setStatus: () => { apiCalls.push("setStatus"); if (failStatus) throw new Error("setStatus 故意失败"); },
@@ -155,6 +157,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   const accepted = async () => until(() => Boolean(state()?.acceptRun && state().acceptRun!.result !== "进行中"), "验收命令结束");
   return {
     root, repo, home, pipelineDir, ledgerFile, git, write, entries, calls, apiCalls, notifications, messages, inputs, accepts, state, event, command, assistant, begin, terminal, accepted,
+    cwd: workCwd,
     setFlag: (name: string, value: string) => { options.flags ??= {}; options.flags[name] = value; },
     setCommands: (commands: NonNullable<typeof options.commands>) => { options.commands = commands; },
     set externalExec(fn: typeof externalExec) { externalExec = fn; },
@@ -1174,6 +1177,49 @@ test("Pi 开发前先准备，未通过就中止该次开发，不消耗业务�
 });
 
 
+test("开发前准备与随后记录共用同一个开工依据：初始脏工作区不重复取快照", async () => {
+  const h = harness();
+  try {
+    const log = join(h.root, "prep-baseline.txt");
+    h.write(".autoreview.json", JSON.stringify({ preparation: { check: "record-baseline" } }));
+    h.externalExec = (call) => {
+      if (call.options.role !== "准备检查") return undefined;
+      writeFileSync(log, call.options.env?.AUTOREVIEW_BASE_REV ?? "");
+      return result("");
+    };
+    h.write("file.txt", "base\ndirty before prepare\n");
+    await h.event("session_start"); await h.begin();
+    const baseline = h.state().baseline;
+    assert.ok(baseline);
+    assert.equal(readFileSync(log, "utf8"), baseline, "准备拿到后来保存的 state.baseline");
+    assert.notEqual(baseline, h.git("rev-parse", "HEAD"), "初始脏工作区用快照，不是 HEAD");
+  } finally { await h.close(); }
+});
+
+test("流水线传入的开工依据优先于会话另取的快照，准备也拿同一份", async () => {
+  const h = harness();
+  const oldLaunch = process.env.AUTOREVIEW_PIPELINE_LAUNCH, oldBase = process.env.AUTOREVIEW_BASE_REV;
+  try {
+    const base = h.git("rev-parse", "HEAD");
+    const log = join(h.root, "pipeline-prep-base.txt");
+    h.write(".autoreview.json", JSON.stringify({ preparation: { check: "record-baseline" } }));
+    h.externalExec = (call) => {
+      if (call.options.role !== "准备检查") return undefined;
+      writeFileSync(log, call.options.env?.AUTOREVIEW_BASE_REV ?? "");
+      return result("");
+    };
+    process.env.AUTOREVIEW_PIPELINE_LAUNCH = "1"; process.env.AUTOREVIEW_BASE_REV = base;
+    h.write("file.txt", "base\ndirty after pipeline snapshot\n");
+    await h.event("session_start"); await h.begin();
+    assert.equal(h.state().baseline, base, "采用流水线准备前确定的开工依据");
+    assert.equal(readFileSync(log, "utf8"), base, "准备拿到同一份开工依据");
+  } finally {
+    if (oldLaunch === undefined) delete process.env.AUTOREVIEW_PIPELINE_LAUNCH; else process.env.AUTOREVIEW_PIPELINE_LAUNCH = oldLaunch;
+    if (oldBase === undefined) delete process.env.AUTOREVIEW_BASE_REV; else process.env.AUTOREVIEW_BASE_REV = oldBase;
+    await h.close();
+  }
+});
+
 test("必需验收环境恢复有界，机器重试保留业务计数", async () => {
   const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" }, restored: { enabled: true, phase: "idle", rounds: [], repairs: 2 } });
   try {
@@ -1189,6 +1235,11 @@ test("必需验收环境恢复有界，机器重试保留业务计数", async ()
     assert.equal(h.state().phase, "paused");
     assert.equal(h.state().repairs, 2);
     assert.equal(attempts, 2); assert.equal(recoveries, 1);
+    const base = h.state().baseline;
+    const byRole = (role: string) => h.calls.find((call) => call.options.role === role)!;
+    assert.equal(byRole("验收命令").options.env?.AUTOREVIEW_BASE_REV, base);
+    assert.equal(byRole("环境恢复").options.env?.AUTOREVIEW_BASE_REV, base);
+    assert.equal(byRole("准备检查").options.env?.AUTOREVIEW_BASE_REV, base);
   } finally { await h.close(); }
 });
 
@@ -1334,6 +1385,68 @@ test("恢复完成状态必须重新验证依据，旧状态与变化后的配�
   } finally { await h.close(); }
 });
 
+
+test("程序自动提交后恢复完成状态不被撤销；真实内容变化仍撤销", async (t) => {
+  for (const mode of ["tracked-and-untracked-commit", "candidate-change"] as const) await t.test(mode, async () => {
+    const h = harness({ stage: "甲" });
+    try {
+      await h.event("session_start"); await h.begin();
+      h.write("file.txt", "base\nchange\n");
+      if (mode !== "candidate-change") h.write("new.txt", "new file\n");
+      await h.command(); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      await h.event("session_shutdown");
+      if (mode === "candidate-change") h.write("file.txt", "different unchecked content\n");
+      else { h.git("add", "-A"); h.git("commit", "-qm", "程序自动提交"); }
+      await h.event("session_start");
+      if (mode === "candidate-change") {
+        assert.equal(h.state().phase, "paused");
+        assert.match(h.state().pauseReason!, /候选或输入版本变化/);
+        assert.equal(stageStatus(h, "甲")?.event, "paused");
+      } else {
+        assert.equal(h.state().phase, "done", h.state().pauseReason);
+        assert.equal(stageStatus(h, "甲")?.event, "done");
+      }
+    } finally { await h.close(); }
+  });
+});
+
+test("子目录会话提交后资格保持，目录外候选改动仍撤销资格", async () => {
+  const h = harness({ subdir: "sub" });
+  try {
+    await h.event("session_start"); await h.begin();
+    h.write("file.txt", "outside candidate\n");
+    writeFileSync(join(h.repo, "sub", "new.txt"), "new\n");
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    await h.event("session_shutdown");
+    h.git("add", "-A"); h.git("commit", "-qm", "程序提交子目录候选");
+    await h.event("session_start");
+    assert.equal(h.state().phase, "done", h.state().pauseReason);
+    await h.event("session_shutdown");
+    h.write("file.txt", "outside real change\n");
+    await h.event("session_start");
+    assert.equal(h.state().phase, "paused");
+    assert.match(h.state().pauseReason!, /候选或输入版本变化/);
+  } finally { await h.close(); }
+});
+
+test("自动提交后发现可执行模式变化仍撤销资格", async () => {
+  const h = harness();
+  try {
+    await h.event("session_start"); await h.begin();
+    h.write("run.sh", "#!/bin/sh\necho ok\n");
+    chmodSync(join(h.repo, "run.sh"), 0o755);
+    await h.command(); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    await h.event("session_shutdown");
+    chmodSync(join(h.repo, "run.sh"), 0o644);
+    h.git("add", "-A"); h.git("commit", "-qm", "程序提交不可执行版本");
+    await h.event("session_start");
+    assert.equal(h.state().phase, "paused");
+    assert.match(h.state().pauseReason!, /候选或输入版本变化/);
+  } finally { await h.close(); }
+});
 
 test("/accept 在昂贵命令前检查候选变化", async () => {
   const h = harness({ flags: { ...ACCEPT, "autoreview-accept-mode": "required" } });
@@ -1865,4 +1978,17 @@ test("G17 Ponytail 未加载只在启动与完成总结提醒，不改变完成�
     assert.ok(!runResult.notifications.some((text) => text.includes("未加载 Ponytail")));
     assert.doesNotMatch(runResult.summary, /未加载 Ponytail/);
   });
+});
+
+test("扩展加载时撤掉一次性启动回报身份，自定义 start 的子进程不能再回报失败", async () => {
+  const key = "AUTOREVIEW_PIPELINE_LAUNCH_TOKEN";
+  const old = process.env[key];
+  process.env[key] = "one-shot";
+  const h = harness();
+  try {
+    assert.equal(process.env[key], undefined);
+  } finally {
+    if (old === undefined) delete process.env[key]; else process.env[key] = old;
+    await h.close();
+  }
 });

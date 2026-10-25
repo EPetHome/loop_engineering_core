@@ -12,7 +12,7 @@ import {
   acceptanceTodos, blockerHint, blockVersion, conventionNotice, conventionStatus, conventionTarget, extractBlock,
   GUIDE_DOC, manualHint, readBlock, SETUP_SCRIPT,
 } from "../onboarding.ts";
-import { applyPlan, detectProject, planSetup, RESET_NOTE, upsertBlock } from "../setup-acceptance.ts";
+import { detectProject, planSetup, RESET_NOTE, upsertBlock } from "../setup-acceptance.ts";
 
 const SETUP = fileURLToPath(new URL("../setup-acceptance.ts", import.meta.url));
 const tempDir = (): string => mkdtempSync(join(tmpdir(), "autoreview-onboard-"));
@@ -24,8 +24,8 @@ const write = (root: string, path: string, text: string): void => {
 test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   const doc = readFileSync(GUIDE_DOC, "utf8");
   const block1 = extractBlock(doc, 1)!;
-  assert.equal(blockVersion(block1), 5);
-  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v5/);
+  assert.equal(blockVersion(block1), 6);
+  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v6/);
   // v2：起草任务提示词只写四节、不做的事、流水线 e2e 标归属。
   assert.match(block1, /## 起草任务提示词（自动评审 v2）[\s\S]*以下四节/);
   assert.match(block1, /不重复全仓阅读或手工抄写/);
@@ -38,8 +38,9 @@ test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   assert.deepEqual(examples.map((item) => item.id), ["A1", "A2", "A3", "A4"], "块 1 里的示例格式能被程序取到");
   assert.deepEqual(examples.map((item) => [isAuthorizationCriterion(item.text), isManualCriterion(item.text)]),
     [[false, false], [false, false], [true, false], [false, true]], "示例里的 [授权]、[人工] 能被程序认出");
-  // v5：收尾回写：更新原单、勾「已回写原单」、不代替用户勾人工项。
+  // v5：收尾回写；v6：批次参数写进 批次.json，不在批次目录里写门禁或启动脚本。
   assert.match(block1, /## 收尾回写（自动评审 v1）[\s\S]*~\/\.pi-autoreview\/交付记录\.md[\s\S]*已回写原单[\s\S]*无原单[\s\S]*不得代替用户勾人工项/);
+  assert.match(block1, /批次参数写进 `批次\.json`，不要在批次目录里写门禁或启动脚本/);
   const block2 = JSON.parse(extractBlock(doc, 2)!);
   const config = parseAcceptanceConfig(block2.acceptance, "/p", {})!;
   assert.ok(config.start && config.readyUrl, "块 2 是一份能直接用的启动配置");
@@ -72,7 +73,7 @@ test("O3 写法段状态与提醒：缺失 → 旧版 → 最新；提醒里写�
     for (const part of [GUIDE_DOC, "【块 1】", conventionTarget(root, "pi"), SETUP_SCRIPT]) assert.ok(missing.includes(part), `缺少：${part}`);
     write(root, ".autoreview/CONVENTIONS.md", "## 起草需求时写验收标准（自动验收）\n旧的\n");
     assert.equal(conventionStatus(root, "codex").status, "旧版");
-    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v5）/);
+    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v6）/);
     write(root, ".autoreview/CONVENTIONS.md", `# 流程说明\n\n${readBlock(1)}\n`);
     assert.equal(conventionStatus(root, "codex").status, "最新");
     assert.equal(conventionNotice(root, "codex"), undefined);
@@ -172,7 +173,7 @@ test("O7 插入或更新【块 1】：追加、按标记替换、已是最新、
   assert.equal(appended.action, "追加");
   assert.equal(appended.text, `# 我的规则\n保留\n\n${block}\n`);
   assert.equal(upsertBlock(appended.text, block).action, "已是最新");
-  const older = appended.text.replace("autoreview:acceptance v5", "autoreview:acceptance v0").replace("旧内容不存在", "");
+  const older = appended.text.replace("autoreview:acceptance v6", "autoreview:acceptance v0").replace("旧内容不存在", "");
   const updated = upsertBlock(`${older}\n## 之后的规则\n也保留\n`, block);
   assert.equal(updated.action, "更新");
   assert.ok(updated.text.includes("# 我的规则\n保留") && updated.text.includes("## 之后的规则\n也保留"));
@@ -202,7 +203,7 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
     const config = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));
     assert.equal(config.maxRepairs, 2);
     assert.equal(config.acceptance.start, "npm run dev");
-    assert.match(readFileSync(conventionTarget(root, "pi"), "utf8"), /autoreview:acceptance v5/);
+    assert.match(readFileSync(conventionTarget(root, "pi"), "utf8"), /autoreview:acceptance v6/);
     assert.equal(readFileSync(join(root, "AGENTS.md"), "utf8"), "# 稳定规则\n用户原文保持不变。\n");
     assert.equal(readFileSync(join(root, "CLAUDE.md"), "utf8"), "# 说明\n");
     const again = await planSetup(root);
@@ -214,28 +215,30 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("O9 A7：已接入旧版【块 1】的项目跑接入命令，整段替换为含「收尾回写」的新版，标记外不变", async () => {
+test("O9 A5：装着 v5【块 1】的项目跑接入命令，整段替换为 v6，标记外不变", async () => {
   const root = tempDir();
   try {
     write(root, "package.json", JSON.stringify({ bin: { todo: "bin/todo.js" } }));
     const current = readBlock(1);
-    // 模拟旧版 v4：正文里没有收尾回写一节。
-    const oldBlock = current.replace("<!-- autoreview:acceptance v5", "<!-- autoreview:acceptance v4")
-      .replace("## 起草需求时写验收标准（自动验收 v5）", "## 起草需求时写验收标准（自动验收 v4）")
-      .replace(/\n\n## 收尾回写（自动评审 v1）[\s\S]*?(?=\n## 起草任务提示词)/, "\n");
+    // 模拟旧版 v5：没有 v6 新增的批次参数说明。
+    const oldBlock = current.replace("<!-- autoreview:acceptance v6", "<!-- autoreview:acceptance v5")
+      .replace("## 起草需求时写验收标准（自动验收 v6）", "## 起草需求时写验收标准（自动验收 v5）")
+      .replace(/\n\n批次参数写进 `批次\.json`[^\n]*/, "");
     write(root, ".autoreview/CONVENTIONS.md", `# 项目自己的流程\n\n${oldBlock}\n\n## 项目自己的补充\n保留我\n`);
-    assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 4);
+    assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 5);
     const plan = await planSetup(root);
     const entry = plan.files.find((file) => file.file === conventionTarget(root, "pi"))!;
     assert.equal(entry.action, "更新");
     assert.ok(entry.text.startsWith("# 项目自己的流程"));
     assert.ok(entry.text.includes("## 项目自己的补充\n保留我"));
     assert.equal(entry.text.match(/autoreview:acceptance v/g)?.length, 1, "只保留一份新版块");
-    assert.match(entry.text, /autoreview:acceptance v5/);
+    assert.match(entry.text, /autoreview:acceptance v6/);
+    assert.match(entry.text, /批次参数写进 `批次\.json`，不要在批次目录里写门禁或启动脚本/);
     assert.match(entry.text, /## 收尾回写（自动评审 v1）/);
-    assert.doesNotMatch(entry.text, /autoreview:acceptance v4/);
-    // applyPlan 后标记外内容仍然不变。
-    applyPlan(plan);
+    assert.doesNotMatch(entry.text, /autoreview:acceptance v5/);
+    // 用实际接入命令写入，标记外内容仍然不变。
+    const run = spawnSync(process.execPath, [SETUP, root, "--yes"], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
     const written = readFileSync(conventionTarget(root, "pi"), "utf8");
     assert.ok(written.startsWith("# 项目自己的流程") && written.includes("## 项目自己的补充\n保留我"));
     assert.match(written, /## 收尾回写（自动评审 v1）/);

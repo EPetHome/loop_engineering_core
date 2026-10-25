@@ -1,7 +1,7 @@
 /** git 取证补充回归；临时目录内布置仓库，不调用模型。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -93,6 +93,37 @@ test("G4 补充：子目录会话下 changedFiles 统一为工作目录相对路
     writeFileSync(join(r.cwd, "sub", "need.md"), "v3\n");
     const rootAfter = await rootGit.snapshot();
     assert.deepEqual(await rootGit.changedFiles(rootBefore, rootAfter), ["sub/need.md"]);
+  } finally { r.close(); }
+});
+
+test("G6 补充：有效内容指纹覆盖子目录会话的完整候选，并冻结未跟踪文件模式", async () => {
+  const r = repository();
+  try {
+    mkdirSync(join(r.cwd, "sub"));
+    const git = createGitEvidence(r.exec, join(r.cwd, "sub"));
+    writeFileSync(join(r.cwd, "sub", "new.txt"), "new\n");
+    writeFileSync(join(r.cwd, "tracked.txt"), "outside change\n");
+    const before = await git.snapshot();
+    r.git("add", "-A"); r.git("commit", "-qm", "commit candidate");
+    const after = await git.snapshot();
+    assert.equal(await git.contentFingerprint(before), await git.contentFingerprint(after), "提交前后有效内容一致");
+    writeFileSync(join(r.cwd, "tracked.txt"), "outside real change\n");
+    const changed = await git.snapshot();
+    assert.notEqual(await git.contentFingerprint(after), await git.contentFingerprint(changed), "目录外候选改动不能被漏掉");
+
+    const modeRepo = repository();
+    try {
+      mkdirSync(join(modeRepo.cwd, "sub"));
+      const modeGit = createGitEvidence(modeRepo.exec, join(modeRepo.cwd, "sub"));
+      writeFileSync(join(modeRepo.cwd, "sub", "run.sh"), "#!/bin/sh\n");
+      chmodSync(join(modeRepo.cwd, "sub", "run.sh"), 0o755);
+      const executable = await modeGit.snapshot();
+      assert.equal(executable.untracked[0].mode, "100755", "快照冻结可执行模式");
+      chmodSync(join(modeRepo.cwd, "sub", "run.sh"), 0o644);
+      modeRepo.git("add", "-A"); modeRepo.git("commit", "-qm", "commit nonexec");
+      const committed = await modeGit.snapshot();
+      assert.notEqual(await modeGit.contentFingerprint(executable), await modeGit.contentFingerprint(committed), "历史模式不能被当前磁盘改写");
+    } finally { modeRepo.close(); }
   } finally { r.close(); }
 });
 

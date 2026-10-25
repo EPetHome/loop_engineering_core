@@ -920,3 +920,26 @@ test("A35 更正的新检查点覆盖旧报告；未重跑条目保留，同次�
     } finally { h.close(); }
   });
 });
+
+test("项目方法三个环境变量：启动、重置、验收命令都拿到同一份", async () => {
+  const envLog = (name: string) => `printf '%s|%s|%s\\n' "$AUTOREVIEW_BASE_REV" "$AUTOREVIEW_BATCH_FILE" "$AUTOREVIEW_STAGE" >> "$AUTOREVIEW_RUN_DIR/../${name}"`;
+  const testerLog = join(tmpdir(), `autoreview-tester-env-${process.pid}-${Date.now()}.log`);
+  const h = await harness({
+    start: `${envLog("start.env")}; exec node server.mjs {port}`,
+    readyUrl: "http://127.0.0.1:{port}/health",
+    reset: envLog("reset.env"),
+  }, { FAKE_ACC_ENV_LOG: testerLog });
+  try {
+    const env = { AUTOREVIEW_BASE_REV: "base-rev", AUTOREVIEW_BATCH_FILE: "/tmp/批次.json", AUTOREVIEW_STAGE: "甲" };
+    const stage = await runAcceptanceStage(h.deps({ env }));
+    assert.equal(stage.kind, "judged", JSON.stringify(stage));
+    const expected = "base-rev|/tmp/批次.json|甲";
+    for (const file of ["start.env", "reset.env"]) {
+      assert.equal(readFileSync(join(h.root, "acc", file), "utf8").trim(), expected, file);
+    }
+    assert.equal(readFileSync(testerLog, "utf8").trim(), expected, "验收命令");
+  } finally {
+    rmSync(testerLog, { force: true });
+    h.close();
+  }
+});

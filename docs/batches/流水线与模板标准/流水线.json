@@ -1,0 +1,17 @@
+{
+  "name": "流水线与模板标准",
+  "pi": {
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "thinking": "max",
+    "tools": "read,edit,write,bash",
+    "args": ["--autoreview-reviewer-model", "openai-codex/gpt-6-astra", "--autoreview-reviewer-thinking", "xhigh", "--autoreview-review-timeout-min", "75"],
+    "ponytail": { "extension": "/Users/Admin/.codex/plugins/cache/ponytail/ponytail/4.13.0/pi-extension/index.js", "mode": "full" }
+  },
+  "stages": {
+    "1工具与分支": { "prompt": "../../prompt/提示词-流水线与模板标准-1工具与分支.md", "cwd": "../../.." },
+    "2项目方法分层": { "prompt": "../../prompt/提示词-流水线与模板标准-2项目方法分层.md", "cwd": "../../.." },
+    "3工具清单与文档": { "prompt": "../../prompt/提示词-流水线与模板标准-3工具清单与文档.md", "cwd": "../../.." }
+  },
+  "steps": [["1工具与分支"], ["2项目方法分层"], ["3工具清单与文档"]],
+  "maxParallel": 1
+}

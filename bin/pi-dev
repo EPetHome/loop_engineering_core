@@ -9,9 +9,15 @@
 #   --tools <工具>      默认 read,edit,write,bash
 #   --session <会话>    精确恢复开发会话（不要用 pi -c）
 #   --name <名称>       会话显示名
-#   --dry-run           只打印将执行的命令，不启动
+#   --ponytail <路径>   Ponytail 原生扩展（默认固定版本）
+#   --ponytail-mode <档> off/lite/full/ultra（默认 full）
+#   --no-ponytail       不加载 Ponytail（显式关闭；完成时照常提醒未加载）
+#   --dry-run           只打印执行的命令，不启动（也可用 PI_DEV_DRY_RUN=1）；不跑权限检查
+# 启动前按方法指纹做一次权限自动执行检查（edit、write、bash 不逐项询问）；
+# 项目或全局配置不允许时直接报错退出，不修改配置。
 # 环境变量：
 #   LOOP_DIR            加载哪份 autoreview.ts（默认本脚本所在仓库）
+#   PERMISSION_EXTENSION 权限扩展路径（默认下面的固定版本）
 #   PONYTAIL_EXTENSION  Ponytail 原生扩展路径（默认下面的固定版本）
 #   PI_BIN / PI_NODE_BIN  pi 入口与 node 目录
 # 提示词以外的 pi 参数（如 --autoreview-accept-cmd）放在 -- 之后原样传给 pi。
@@ -21,11 +27,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOOP_DIR="${LOOP_DIR:-$here}"
 PI_BIN="${PI_BIN:-/Users/Admin/.local/bin/pi}"
 PI_NODE_BIN="${PI_NODE_BIN:-/Users/Admin/.hermes/node/bin}"
-PERMISSION_EXT="/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts"
+PERMISSION_EXT="${PERMISSION_EXTENSION:-/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts}"
 PONYTAIL_EXTENSION="${PONYTAIL_EXTENSION:-/Users/Admin/.codex/plugins/cache/ponytail/ponytail/4.13.0/pi-extension/index.js}"
 
 cwd="$PWD" model="openai-codex/gpt-6.1-sol" thinking="max" tools="read,edit,write,bash"
-session="" name="" prompt="" dry=0 extra=()
+session="" name="" prompt="" dry=0 extra=() ponytail=1 ponytail_mode="full"
 
 die() { echo "pi-dev: $*" >&2; exit 2; }
 need() { [[ $# -ge 2 && -n "$2" ]] || die "$1 需要一个值"; }
@@ -38,8 +44,11 @@ while [[ $# -gt 0 ]]; do
     --tools) need "$@"; tools="$2"; shift 2 ;;
     --session) need "$@"; session="$2"; shift 2 ;;
     --name) need "$@"; name="$2"; shift 2 ;;
+    --ponytail) need "$@"; PONYTAIL_EXTENSION="$2"; ponytail=1; shift 2 ;;
+    --ponytail-mode) need "$@"; ponytail_mode="$2"; shift 2 ;;
+    --no-ponytail) ponytail=0; shift ;;
     --dry-run) dry=1; shift ;;
-    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; extra=("$@"); break ;;
     -*) die "未知选项 $1（追加给 pi 的参数放在 -- 之后）" ;;
     *) [[ -z "${prompt}" ]] || die "只能给一个提示词：$1"; prompt="$1"; shift ;;
@@ -54,15 +63,37 @@ if [[ -n "${prompt}" ]]; then
   [[ "${prompt}" = /* ]] || prompt="$PWD/${prompt}"
   [[ -f "${prompt}" ]] || die "提示词不存在：${prompt}"
 fi
+[[ "${ponytail_mode}" =~ ^(off|lite|full|ultra)$ ]] || die "Ponytail 模式无效：${ponytail_mode}（off/lite/full/ultra）"
 [[ -x "${PI_BIN}" ]] || die "找不到 pi：${PI_BIN}"
 [[ -f "${PERMISSION_EXT}" ]] || die "找不到权限扩展：${PERMISSION_EXT}"
 [[ -f "${LOOP_DIR}/autoreview.ts" ]] || die "找不到 Loop 扩展：${LOOP_DIR}/autoreview.ts"
-[[ -f "${PONYTAIL_EXTENSION}" ]] || die "找不到 Ponytail：${PONYTAIL_EXTENSION}（开发角色必须加载；不自动安装，核对路径后用 PONYTAIL_EXTENSION 指定）"
+if [[ $ponytail -eq 1 ]]; then
+  [[ -f "${PONYTAIL_EXTENSION}" ]] || die "找不到 Ponytail：${PONYTAIL_EXTENSION}（不自动安装，核对路径后用 --ponytail 或 PONYTAIL_EXTENSION 指定；确要关闭写 --no-ponytail）"
+fi
+[[ "${PI_DEV_DRY_RUN:-0}" == "1" ]] && dry=1
+
+# 权限自动执行检查：只读配置并模拟工具调用；指纹不变时跳过。
+if [[ $dry -eq 0 ]]; then
+  trust=auto
+  for arg in ${extra[@]+"${extra[@]}"}; do
+    case "$arg" in
+      --approve|-a) trust=yes ;;
+      --no-approve|-na) trust=no ;;
+    esac
+  done
+  node_bin="${PI_NODE_BIN}/node"
+  [[ -x "${node_bin}" ]] || node_bin="$(command -v node)"
+  "${node_bin}" "${LOOP_DIR}/permission-check.ts" --cwd "${cwd}" --loop-root "${LOOP_DIR}" \
+    --pi "${PI_BIN}" --permission "${PERMISSION_EXT}" --trust "${trust}"
+  # 启动回报身份只属于本次 pi-dev；启动后的子进程不能再改父段状态。
+  unset AUTOREVIEW_PIPELINE_LAUNCH_TOKEN
+fi
 
 args=(--offline --model "$model" --thinking "$thinking"
   --no-extensions --no-skills --no-prompt-templates --no-themes
   --tools "$tools"
-  -e "${PERMISSION_EXT}" -e "${LOOP_DIR}/autoreview.ts" -e "${PONYTAIL_EXTENSION}")
+  -e "${PERMISSION_EXT}" -e "${LOOP_DIR}/autoreview.ts")
+[[ $ponytail -eq 0 ]] || args+=(-e "${PONYTAIL_EXTENSION}")
 [[ -z "$session" ]] || args+=(--session "$session")
 [[ -z "$name" ]] || args+=(--name "$name")
 args+=(${extra[@]+"${extra[@]}"})
@@ -71,10 +102,13 @@ args+=(${extra[@]+"${extra[@]}"})
 if [[ $dry -eq 1 ]]; then
   sq="'" esc="'\\''"
   q() { printf "'%s'" "${1//$sq/$esc}"; }
-  printf 'cd %s\nPONYTAIL_DEFAULT_MODE=full %s' "$(q "${cwd}")" "$(q "${PI_BIN}")"
+  mode=""
+  [[ $ponytail -eq 0 ]] || mode="PONYTAIL_DEFAULT_MODE=${ponytail_mode} "
+  printf 'cd %s\n%s%s' "$(q "${cwd}")" "$mode" "$(q "${PI_BIN}")"
   for a in "${args[@]}"; do printf ' %s' "$(q "$a")"; done; echo
   exit 0
 fi
 cd "${cwd}"
-export PATH="$PI_NODE_BIN:$PATH" PONYTAIL_DEFAULT_MODE=full
+export PATH="$PI_NODE_BIN:$PATH"
+if [[ $ponytail -eq 1 ]]; then export PONYTAIL_DEFAULT_MODE="${ponytail_mode}"; else unset PONYTAIL_DEFAULT_MODE; fi
 exec "${PI_BIN}" "${args[@]}"

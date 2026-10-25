@@ -26,6 +26,10 @@ const failIds = (process.env.FAKE_ACC_FAIL ?? "").split(",").map((id) => id.trim
 const failOnceIds = (process.env.FAKE_ACC_FAIL_ONCE ?? "").split(",").map((id) => id.trim()).filter(Boolean);
 const stateDir = process.env.FAKE_STATE_DIR;
 if (process.env.FAKE_ACC_TOUCH) appendFileSync(process.env.FAKE_ACC_TOUCH, `touch ${Date.now()}\n`);
+if (process.env.FAKE_ACC_ENV_LOG) {
+  appendFileSync(process.env.FAKE_ACC_ENV_LOG,
+    `${process.env.AUTOREVIEW_BASE_REV ?? ""}|${process.env.AUTOREVIEW_BATCH_FILE ?? ""}|${process.env.AUTOREVIEW_STAGE ?? ""}\n`);
+}
 
 let count = 1;
 if (stateDir) {

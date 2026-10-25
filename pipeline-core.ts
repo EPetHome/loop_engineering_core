@@ -10,11 +10,15 @@ import { dirname, join } from "node:path";
 
 export const PIPELINE_DIR_ENV = "AUTOREVIEW_PIPELINE_DIR";
 export const STAGE_ENV = "AUTOREVIEW_STAGE";
+/** 只有 pipeline.ts 真正启动段时才设置：段会话据此采用准备前确定的开工依据。 */
+export const PIPELINE_LAUNCH_ENV = "AUTOREVIEW_PIPELINE_LAUNCH";
+/** 一次性启动回报身份：只有真正启动段的 bin/pi-dev 持有，成功后不再传给子进程。 */
+export const PIPELINE_LAUNCH_TOKEN_ENV = "AUTOREVIEW_PIPELINE_LAUNCH_TOKEN";
 /** 仅测试：扩展轮询收件箱、编排程序轮询状态的间隔（毫秒）。 */
 export const POLL_ENV = "AUTOREVIEW_PIPELINE_POLL_MS";
 
-/** 段的事件：开会话、评审完成、暂停、收到返修后没改代码（多半是认为不归自己）。 */
-export type StageEvent = "started" | "done" | "paused" | "no-change";
+/** 段的事件：开会话、评审完成、暂停、收到返修后没改代码、启动入口失败。 */
+export type StageEvent = "started" | "done" | "paused" | "no-change" | "startup-failed";
 
 export interface StageStatus {
   stage: string;

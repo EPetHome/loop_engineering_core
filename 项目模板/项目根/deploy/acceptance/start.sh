@@ -2,7 +2,7 @@
 # 模板说明：被测系统的启动命令（.autoreview.json 的 acceptance.start）。由程序启动、程序关停，验收方不许自己跑。
 # 规则：读 PORT；拒绝线上端口；端口被占就退出；只连测试库、测试 Redis db、测试账号；日志写到 $AUTOREVIEW_RUN_DIR；
 #       凭据现取现用（从容器或钥匙串），不写进文件、不打印。
-# Promate 实例：dev分支/deploy/acceptance/start.sh（端口 38081，库 promate_v2_accept，Redis db 7）
+# Promate 实例：dev分支/deploy/acceptance/start.sh（旧流程；端口 38081，库 promate_v2_accept，Redis db 7）
 set -eu
 PORT=${PORT:-38081}
 case "$PORT" in 8080|8081|8082|8083|8084) echo 'Production port forbidden' >&2; exit 1;; esac   # 换成本项目的线上端口

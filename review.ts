@@ -7,7 +7,7 @@
  * exec、状态读写、总结、进度等副作用全部通过参数注入；调用方负责把 outcome 变成
  * pi 的返修消息或宿主的 block JSON。
  */
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { acceptanceRunDir, runAcceptanceStage, type AcceptanceState } from "./acceptance.ts";
 import {
   authorizationLine, buildAcceptanceRepairMessage, formatCriteria, formatFailedItems, renderAcceptanceForReview, type AcceptanceRecord,
@@ -16,8 +16,11 @@ import {
   buildGateRepairMessage, buildRepairMessage, buildReviewInput, decideNext, deriveReviewerSessionId, gateOutputTail,
   parseReview, type GateRecord, type ParsedReview, type RoundRecord,
 } from "./core.ts";
-import { EXT_DIR, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
+import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
+import { methodEnv as buildMethodEnv } from "./method-env.ts";
+import { changedSince, outOfScope, stageScopeFromEnv, type StageScope } from "./scope.ts";
+import { recordGateTree } from "./methods.ts";
 import { blockerHint, manualHint } from "./onboarding.ts";
 import { classifyFailure, failureLabel, type FailureKind } from "./failure.ts";
 import { runPreparation, type PreparationConfig, type PreparationState } from "./preparation.ts";
@@ -39,7 +42,12 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   enabled: boolean;
   baseline?: string;
   baselineUntracked?: string[];
+  /** 开工时未跟踪文件的内容哈希和模式；只豁免确实没变的文件。 */
+  baselineUntrackedDetails?: Snapshot["untracked"];
   baselineFingerprint?: string;
+  /** 越界检查起点：整合返修收到时重置到当时快照；普通返修不重置。 */
+  scopeBaseline?: string;
+  scopeBaselineUntrackedDetails?: Snapshot["untracked"];
   /** 下列字段只在成功评审后更新，不受失败调用影响。 */
   lastSnapshot?: string;
   lastUntracked?: string[];
@@ -131,6 +139,10 @@ export interface ReviewDeps {
   acceptanceDir?: string;
   /** 进程登记文件：被测系统登记进去。 */
   procsFile?: string;
+  /** 启动入口交给会话的环境变量；缺省读 process.env。 */
+  env?: NodeJS.ProcessEnv;
+  /** 本段 scope；缺省从 AUTOREVIEW_BATCH_FILE / AUTOREVIEW_STAGE 读。 */
+  scope?: StageScope;
 }
 
 export function newReviewState(): ReviewState {
@@ -213,6 +225,53 @@ export async function sourcesOnlyWorkspaceChange(
 }
 
 /**
+ * 越界检查：门禁之前对比开工依据以来的改动文件（含未跟踪文件）与批次段的 scope。
+ * 有越界就按产品失败走门禁返修路径，不执行门禁、不评审。
+ */
+async function scopeStep(
+  deps: ReviewDeps, before: Snapshot, clock: RoundClock,
+): Promise<{ outcome: ReviewOutcome } | undefined> {
+  const { state } = deps;
+  const scope = deps.scope ?? stageScopeFromEnv(deps.env ?? process.env);
+  if (!scope) return undefined;
+  // 整合返修只检查收到返修之后的改动；普通返修仍用原开工依据。
+  const base = state.scopeBaseline ?? state.baseline;
+  if (!base) return undefined;
+  const projectRoot = findProjectRoot(deps.cwd) ?? deps.cwd;
+  const prefix = relative(projectRoot, deps.cwd).replace(/\\/g, "/");
+  const toProject = (path: string): string => prefix ? `${prefix}/${path}`.replace(/\/{2,}/g, "/") : path;
+  const details = state.scopeBaseline
+    ? state.scopeBaselineUntrackedDetails
+    : state.baselineUntrackedDetails;
+  const baselineUntracked = (details ?? []).map((item) => ({ ...item, path: toProject(item.path) }));
+  const files = await changedSince(deps.exec, projectRoot, base, { signal: deps.signal, baselineUntracked });
+  const outside = outOfScope(files, scope);
+  if (outside.length === 0) return undefined;
+  const record: GateRecord = {
+    command: "越界检查（批次 scope）",
+    result: "不通过",
+    durationMs: clock.now() - clock.startedTs,
+    exitCode: 1,
+    outputTail: outside.join("\n"),
+    detail: `这些文件不在 allow 里或落在 deny 里：${outside.join("、")}`,
+  };
+  try {
+    record.logPath = deps.writeInput(`scope-${deps.devSessionId}-r${deps.round}.log`,
+      [`$ 越界检查`, `检查起点：${base}`, "越界文件：", ...outside.map((path) => `- ${path}`), ""].join("\n"));
+  } catch { /* 日志写失败不改变越界结论 */ }
+  pushUnreviewedRound(deps, clock, "未评审（越界改动）", { gate: record });
+  state.lastCheckedFingerprint = before.fingerprint;
+  if (decideNext(1, state.repairs, deps.config.maxRepairs) === "pause") {
+    return { outcome: { kind: "paused", reason: "达到返修上限" } };
+  }
+  state.repairs += 1;
+  state.awaitingRepair = true;
+  await deps.writeSummary?.("进行中");
+  deps.checkLive?.();
+  return { outcome: { kind: "repair", message: buildGateRepairMessage(state.repairs, record) } };
+}
+
+/**
  * 门禁这一步：在开发目录用 /bin/sh -c 执行 gate.cmd，退出码 0 才往下走。
  * 命令跑完且退出码非 0 → 打回开发方（这一轮不验收、不评审）；超时、命令找不到、起不来 → 暂停；
  * 门禁改了项目里的文件 → 暂停。通过返回记录，接着验收或评审。
@@ -232,7 +291,8 @@ async function gateStep(
   try {
     resource = createRunResource(`gate:${deps.devSessionId}:r${deps.round}`, undefined, deps.procsFile);
     // stderr 并进 stdout：返修消息里的输出和在终端里看到的顺序一致。
-    res = await deps.exec("/bin/sh", ["-c", managedShell(`exec 2>&1\n${gate.cmd}`, resource)], { cwd: deps.cwd, timeout, signal: deps.signal, role: "门禁" });
+    res = await deps.exec("/bin/sh", ["-c", managedShell(`exec 2>&1\n${gate.cmd}`, resource)], {
+      cwd: deps.cwd, timeout, signal: deps.signal, role: "门禁", env: buildMethodEnv(state.baseline, {}, deps.env ?? process.env) });
   } catch (error) { failure = errorText(error); }
   finally { if (resource) releaseRunResource(resource); }
   live();
@@ -279,7 +339,11 @@ async function gateStep(
       },
     };
   }
-  if (record.result === "通过") return { record };
+  if (record.result === "通过") {
+    // 记住这个候选的树；开工识别基线已有失败时不再重跑。
+    recordGateTree(deps.cwd, middle.tree);
+    return { record };
+  }
   if (record.result !== "不通过") {
     pushUnreviewedRound(deps, clock, `未评审（门禁${record.result}）`, { gate: record });
     return {
@@ -321,6 +385,7 @@ async function acceptanceStep(
     state, config: acceptance, reviewerModel: config.reviewerModel, reviewerThinking: config.reviewerThinking,
     cleanupExec: deps.cleanupExec, onCleanup: deps.onCleanup,
     exec: deps.exec, runDir: acceptanceRunDir(deps.acceptanceDir, deps.round), procsFile: deps.procsFile,
+    env: buildMethodEnv(state.baseline, {}, deps.env ?? process.env),
     deadline: Math.min(clock.now() + acceptance.timeoutMin * 60_000, clock.deadline), now: clock.now,
     previousFailed: previous ? previous.items.filter((item) => item.verdict !== "通过" && item.verdict !== "需人工").map((item) => item.id) : [],
     signal: deps.signal, checkLive: deps.checkLive, onProgress: deps.onProgress, saveState: deps.saveState,
@@ -400,10 +465,13 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   if (state.baseline === undefined) {
     state.baseline = before.head;
     state.baselineUntracked = [];
+    state.baselineUntrackedDetails = [];
     state.baselineFingerprint = before.fingerprint;
     await deps.saveState();
   }
   const clock: RoundClock = { startedAt, startedTs, deadline, now };
+  const scope = await scopeStep(deps, before, clock);
+  if (scope) return scope.outcome;
   let gate: GateRecord | undefined;
   if (config.gate) {
     const step = await gateStep(deps, before, git, clock);
@@ -565,11 +633,24 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     await deps.saveState();
   }
   const preparation = deps.config.preparation;
+  // 开工依据必须早于准备：准备、门禁和验收都读同一个 state.baseline，不能让准备改写它。
+  // 没有会话启动时记录的快照（手动 /review）时，以 HEAD 为基线，让启动前的未提交改动进入评审。
+  if (deps.state.baseline === undefined) {
+    const snap = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
+    const inherited = process.env.AUTOREVIEW_PIPELINE_LAUNCH === "1" ? process.env.AUTOREVIEW_BASE_REV?.trim() : undefined;
+    deps.state.baseline = inherited || snap.head;
+    deps.state.baselineUntracked = inherited ? snap.untracked.map(({ path }) => path) : [];
+    deps.state.baselineUntrackedDetails = inherited ? snap.untracked.map((item) => ({ ...item })) : [];
+    deps.state.baselineFingerprint = snap.fingerprint;
+    await deps.saveState();
+  }
+  const preparationBase = deps.state.baseline;
   const prepare = async (outcome?: ReviewOutcome): Promise<ReviewOutcome | undefined> => {
     if (!preparation) return outcome;
     const dir = dirname(deps.writeInput(`preparation-${deps.devSessionId}.md`, "准备记录见同名目录；业务返修计数保持原值。\n"));
     const result = await runPreparation({
       config: preparation, cwd: deps.cwd, state: deps.state, exec: deps.exec, procsFile: deps.procsFile,
+      env: buildMethodEnv(preparationBase, {}, deps.env ?? process.env),
       runDir: join(dir, `preparation-${deps.devSessionId}`), signal: deps.signal,
       saveState: deps.saveState, onProgress: deps.onProgress,
       failure: outcome?.failureKind, evidence: outcome?.notes ?? outcome?.reason,
