@@ -1,4 +1,4 @@
-# pi 自动评审扩展（autoreview）
+# Loop 自动评审与验收（Pi / Claude Code / Codex）
 
 > 批次准备：写提示词和 `批次.json` → `bin/loop 开工` → `bin/loop 启动`。开发会话内部顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整合 E2E 在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，工具和字段见 [工具清单](工具清单.md)，写法规则见 [接入手册](README-验收标准.md)。接入命令只更新 `.autoreview/CONVENTIONS.md`，保持 AGENTS.md 和 CLAUDE.md 不变。
 
@@ -12,17 +12,56 @@
 
 几段 pi 会话要**并行或串行开发、最后跑整合 e2e** 时，用 `bin/loop 启动 <批次.json>`：单段直接开会话，多段交给流水线开窗口、等各段完成、跑 e2e，没通过的条目按 `[段名]` 退回那一段修，修完自动重跑。旧的直接执行 `pipeline.ts <计划.json>` 仍然兼容。见下面「流水线与批次」一节。
 
-同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。安装后只有带 `.autoreview.json` 的项目才生效。
+同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。插件只在用 `bin/loop-dev` 启动的会话里生效；直接打开的会话不评审，只在 SessionStart 收到交付总表待回写提醒。
 
 ## Claude Code / Codex 用法
 
-- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。开工工具还读 `release`（发布分支，默认 `main`）、`workspaces`（工作区名字到路径）、`localFiles`（只在本机的文件）和 `methods`（项目方法文件 `paths`，可选 `selfCheck`、`probe`）。全部字段、类型和默认值见 [工具清单.md](工具清单.md)。
-- 开发方最后一行写【交付完成】触发评审；有必修时 Hook 把返修消息发回同一会话，最多 `maxRepairs` 次（门禁、验收打回和评审打回共用）。
+开发方可换成 Claude Code 或 Codex；准备检查、静态评审、返修和自动验收继续复用现有 Pi 引擎。本机已安装 `autoreview@autoreview-local` 时，使用统一入口：
+
+```bash
+cd /Users/Admin/Desktop/loop
+# 二选一；--init 仅在尚无配置时创建 {}，已有配置保持不变。
+bash bin/loop-dev claude --cwd /你的开发目录 --init /任务文件.md
+bash bin/loop-dev codex --cwd /你的开发目录 --init /任务文件.md
+```
+
+也可以不传任务文件，进入后直接发送需求。任务文件相对路径按执行命令时的目录解析；`--cwd` 是开发目录。文件仍以 `@"绝对路径"` 交给宿主，里面的授权文字不能代替用户亲手授权。
+
+插件按启动方式生效：入口设置 `AUTOREVIEW_DEV_ROOT=<启动时从 --cwd 向上找到的 .autoreview.json 所在目录>`，Hook 只认这个变量。只有这样的会话才会注入开发约定、记录需求和基线、评审/返修/暂停/发通知并写状态与总结；直接打开的宿主会话这些事都不做。项目根在启动时固定，会话中途 `cd` 到别的目录不会改变它，也不会改用子目录里的 `.autoreview.json`。唯一例外是交付总表的「待回写」提醒：没有变量的会话在 SessionStart 仍按当前目录判断项目并注入这一句，不带开发约定。
+
+变量指向的目录不存在或里面没有 `.autoreview.json` 时，按「项目配置不可用」处理，提示和总结里会写出变量的值。旧状态文件不清理、不迁移。Pi 的 `autoreview.ts`、流水线和 `bin/pi-dev` 行为不变。
+
+入口检查可用宿主、已有 Git 提交、Loop 配置、Pi 引擎文件以及实际启用的插件 Hook；失败就停止。Claude 使用 `--permission-mode auto`，Codex 使用 `--approve-for-me`；不修改全局权限、deny 或沙箱配置。可在 `--` 后追加宿主自己的模型、权限等参数。Codex 优先使用 PATH 中可运行的程序；失效时尝试桌面应用自带程序，也可通过 `CODEX_BIN` 指定；Claude 对应 `CLAUDE_BIN`。需要支持直接运行 TypeScript 的 Node（最低 22.18），可用 `LOOP_NODE` 指定。
+
+`--dry-run` 只核对并打印命令和启动时的 `AUTOREVIEW_DEV_ROOT`，不启动模型、不创建配置。`--session <会话ID>` 精确续接开发会话；不选择最近会话。示例：
+
+```bash
+bash /Users/Admin/Desktop/loop/bin/loop-dev codex --cwd /你的开发目录 --init --dry-run /任务文件.md
+bash /Users/Admin/Desktop/loop/bin/loop-dev claude --cwd /你的开发目录 --session <开发会话ID>
+```
+
+首次安装（当前机器已安装，无须重复）：
+
+```bash
+claude plugin marketplace add /Users/Admin/Desktop/loop
+claude plugin install autoreview@autoreview-local
+# 本机 PATH 中旧 codex 已失效，因此下面使用已核对可用的桌面版入口。
+/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin marketplace add /Users/Admin/Desktop/loop
+/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin add autoreview@autoreview-local
+```
+
+然后新开宿主会话。Codex 在会话输入框输入 `/hooks`，核对并信任 autoreview 的 SessionStart、UserPromptSubmit、Stop；安装不等于 Hook 已获信任。原生接口依据：[Claude Code Hooks](https://code.claude.com/docs/en/hooks)、[OpenAI Hooks](https://learn.chatgpt.com/docs/hooks)。这是本机插件；移动仓库或换机器时需先更新 `plugins/autoreview/hooks/hooks.json` 的 Node 和引擎路径，再更新插件并重新检查信任。
+
+- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。仍须通过 `bin/loop-dev` 启动才会进入开发会话。
+- 开工工具还读 `release`（发布分支，默认 `main`）、`workspaces`（工作区名字到路径）、`localFiles`（只在本机的文件）和 `methods`（项目方法文件 `paths`，可选 `selfCheck`、`probe`）。全部字段、类型和默认值见 [工具清单.md](工具清单.md)。
+- 开发方最后一行写【交付完成】触发评审；没有标记但有未评审改动也会触发。有必修时 Hook 把返修消息发回同一会话，最多 `maxRepairs` 次（门禁、验收打回和评审打回共用）；Codex 将返修作为续跑消息送回时，不替换需求、不清零次数。
 - 暂停（包括评审被宿主超时或中断）后，在原会话再发一条消息让开发方继续，自动评审就恢复，返修计数重新算。
 - 消息里的 `@文件` 由 Hook 展开（最多 3 个，每个 200KB 以内），需求原文和验收标准都按展开后的内容算，和 pi 一致。
-- 状态与总结写到 `~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.state.json` 和 `.md`，不写进项目。
+- 开发会话的状态与总结写到 `~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.state.json` 和 `.md`，不写进项目；直接打开的会话不写。
 - Codex 首次安装后需要在 Codex 里用 `/hooks` 确认信任；未经信任时 Hook 不执行。
 - 联调可用假评审：`AUTOREVIEW_REVIEWER_CMD=/Users/Admin/Desktop/loop/test/fake-reviewer.mjs`、`FAKE_MODE=pass|pass-after-1|always-fix|fail|modify`；假验收方 / 假起草方：`AUTOREVIEW_ACCEPTANCE_CMD=…/test/fake-tester.mjs`、`AUTOREVIEW_CRITERIA_CMD=…/test/fake-drafter.mjs`。
+
+**范围**：上述入口支持单个开发会话；多段 `pipeline.ts`、`/review` 等 Pi 命令和后置 `--autoreview-accept-cmd` 仍属于 Pi 入口。Hook 的准备检查在交付后的检查开始前执行；需要开发前准备时先使用项目已有准备方法。`--init` 的 `{}` 只启用静态评审，不代表已配置门禁或自动验收。在 Loop 自身开发时，本仓库真实 E2E 仍是独立必需检查，Hook 总结完成不代表该项已通过。
 
 ## 门禁（可选，建议配）
 
@@ -238,7 +277,7 @@ bin/loop 合入 docs/batches/<批次>/批次.json   # 本地合入发布分支�
 
 无标记时由程序判断：工作区与上次成功评审（没评审过就是开发基线）的指纹相比有变化就直接评审，和写了【交付完成】一样；没有变化且刚发过返修消息时暂停（原因「返修后没有任何改动」）；其他情况什么都不做。暂停后你再给开发方发消息让它继续干活，自动评审就恢复（返修计数重新算）；也可以输入 `/review` 立即评审。
 
-## 命令
+## Pi 会话命令
 
 | 命令 | 作用 |
 |---|---|
