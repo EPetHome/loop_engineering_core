@@ -6,17 +6,19 @@
  * 只做本地操作，不推送；开发方不提交，段完成时由流水线按分支名生成提交说明。
  */
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { remapBatchReferences } from "./batch-refs.ts";
 import { loadProjectLayout, workspacePath, type ProjectLayout } from "./config.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
 import {
-  branchExists, checkBranchName, commitAll, currentBranch, gitResult, gitText, isClean, shellQuote,
+  branchExists, branchType, checkBranchName, commitAll, currentBranch, gitResult, gitText, isClean, shellQuote,
   stageCommitMessage, worktreeForBranch, worktrees, type CommitResult,
 } from "./workspace.ts";
 
@@ -52,10 +54,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
 interface Repo { root: string; projectRoot: string; layout: ProjectLayout }
 
+function mainWorktree(root: string): string {
+  const list = gitResult(root, ["worktree", "list", "--porcelain"]);
+  if (list.status !== 0) return root;
+  const first = list.stdout.split("\n").find((line) => line.startsWith("worktree "));
+  return first ? first.slice("worktree ".length) : root;
+}
+
 export function repoOf(cwd: string): Repo {
   const res = gitResult(cwd, ["rev-parse", "--show-toplevel"]);
   if (res.status !== 0 || !res.stdout.trim()) throw new LoopError(`当前目录不是 git 仓库：${cwd}（${(res.stderr || res.stdout).trim().slice(-300)}）`);
-  const root = res.stdout.trim();
+  const root = mainWorktree(res.stdout.trim());
   const project = loadProjectLayout(root);
   return { root, projectRoot: project.root, layout: project.layout };
 }
@@ -118,7 +127,7 @@ export function loadBatch(repo: Repo, path: string): BatchPlan {
   const raw = readBatch(absolute);
   const planDir = dirname(absolute);
   const normalized = normalizedRaw(repo, raw);
-  const plan = parsePlan(normalized, planDir, process.env, { batchFile: absolute });
+  const plan = parsePlan(normalized, planDir, process.env, { batchFile: absolute, projectRoot: repo.projectRoot });
   const branch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
   const stages = new Map<string, { branch?: string; workspace?: string; cwd: string; prompt?: string }>();
   const byPath = new Map<string, WorkspaceUse>();
@@ -157,8 +166,8 @@ export function loadBatch(repo: Repo, path: string): BatchPlan {
 
 const branchOfStage = (batch: BatchPlan, stage: string): string | undefined => batch.stages.get(stage)?.branch ?? batch.branch;
 
-function startCommand(batch: BatchPlan): string {
-  return `${shellQuote(LOOP_BIN)} 启动 ${shellQuote(batch.path)}`;
+function batchCommand(command: string, path: string): string {
+  return `${shellQuote(LOOP_BIN)} ${command} ${shellQuote(path)}`;
 }
 
 function checkClean(repo: Repo, workspace: WorkspaceUse): void {
@@ -170,16 +179,237 @@ function checkClean(repo: Repo, workspace: WorkspaceUse): void {
   }
 }
 
-function checkRuntime(repo: Repo, dryRun: boolean): void {
+interface WorkingChange { path: string; status: string }
+
+/** 工作区里未提交的文件；改名的两端都算，供输出和合入前的交集检查使用。 */
+function workingChanges(root: string, label: string): WorkingChange[] {
+  const res = gitResult(root, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+  if (res.status !== 0) throw new LoopError(`无法读取${label}状态：${(res.stderr || res.stdout).trim().slice(-300)}`);
+  const tokens = res.stdout.split("\0");
+  const changes: WorkingChange[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const entry = tokens[index];
+    if (!entry) continue;
+    const status = entry.slice(0, 2);
+    const path = entry.slice(3);
+    if (!path) continue;
+    changes.push({ path, status });
+    if (/[RC]/.test(status)) {
+      const original = tokens[index + 1];
+      if (original) { changes.push({ path: original, status }); index += 1; }
+    }
+  }
+  return changes;
+}
+
+/** 批次工作区里会被 commitAll 自动提交的路径；声明的本机文件不参与。 */
+function autoCommitPaths(workspacePath: string): string[] {
+  const changes = workingChanges(workspacePath, "批次工作区");
+  const project = loadProjectLayout(workspacePath);
+  const root = gitText(workspacePath, ["rev-parse", "--show-toplevel"]);
+  const local = project.layout.localFiles
+    .map((path) => relative(root, resolve(project.root, path)).replace(/\\/g, "/"))
+    .filter((path) => path && path !== ".." && !path.startsWith("../"));
+  return changes.map((change) => change.path)
+    .filter((path) => !local.some((rel) => path === rel || path.startsWith(`${rel}/`)));
+}
+
+/** 开工和合入只要求运行版停在发布分支；未提交改动由命令自己列出来。 */
+function checkRuntime(repo: Repo): WorkingChange[] {
   const branch = currentBranch(repo.root);
   if (branch !== repo.layout.release) {
     throw new LoopError(`运行版必须停在发布分支 ${repo.layout.release}，现在是 ${branch ?? "detached"}`, { branch, release: repo.layout.release });
   }
-  const res = gitResult(repo.root, ["status", "--porcelain", "-z"]);
-  if (res.status !== 0) throw new LoopError(`无法读取运行版状态：${(res.stderr || res.stdout).trim().slice(-300)}`);
-  if (res.stdout !== "") {
-    const files = res.stdout.split("\0").filter(Boolean).join("、");
-    throw new LoopError(`运行版有未提交改动，未继续：${repo.root}；${files}`, { files, dryRun });
+  return workingChanges(repo.root, "运行版");
+}
+
+/** 仓库根目录内的相对路径；仓库外和 .git 下的路径返回 undefined。 */
+function insideRepo(repoRoot: string, absolute: string): string | undefined {
+  const rel = relative(repoRoot, absolute);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+  const normalized = rel.split("\\").join("/");
+  if (normalized === ".git" || normalized.startsWith(".git/")) return undefined;
+  return normalized;
+}
+
+function filesUnder(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...filesUnder(path));
+    else files.push(path);
+  }
+  return files;
+}
+
+interface BatchDocs {
+  branch?: string;
+  target?: WorkspaceUse;
+  /** 相对仓库根、相对发布分支 HEAD 有变化的批次文档。 */
+  files: string[];
+  /** 开工输出里的 启动 / 状态 / 合入 该用的批次文件路径。 */
+  batchPath: string;
+}
+
+/** 批次文档：批次目录里的全部文件、各段 prompt、e2e.criteria；只取仓库内且相对 HEAD 有变化的。 */
+function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): BatchDocs {
+  const branch = batch.branch ?? [...batch.stages.values()].find((stage) => stage.branch)?.branch;
+  const target = branch ? [...batch.workspaces, ...batch.checks].find((workspace) => workspace.branch === branch) : undefined;
+  const dir = resolve(dirname(batch.path));
+  const candidates = new Set<string>([resolve(batch.path)]);
+  const dirRel = relative(repo.root, dir);
+  const dirInside = dirRel === "" || (!dirRel.startsWith("..") && !isAbsolute(dirRel));
+  // 批次文件直接放在仓库根或项目根时，不把同目录的无关文件都算成本批文档。
+  if (dirInside && dir !== resolve(repo.root) && dir !== resolve(repo.projectRoot)) {
+    for (const file of filesUnder(dir)) candidates.add(resolve(file));
+  }
+  for (const stage of batch.plan.stages.values()) if (stage.prompt) candidates.add(resolve(stage.prompt));
+  if (batch.plan.e2e) candidates.add(resolve(batch.plan.e2e.criteriaFile));
+
+  const byPath = new Map(changes.map((change) => [change.path, change]));
+  const files: string[] = [];
+  for (const absolute of candidates) {
+    const rel = insideRepo(repo.root, absolute);
+    if (!rel) continue;
+    const change = byPath.get(rel);
+    if (!change || change.status.includes("D") || !existsSync(absolute)) continue;
+    files.push(rel);
+  }
+  const batchRel = insideRepo(repo.root, batch.path);
+  if (target && batchRel) {
+    const mapped = remapBatchReferences(batch.raw, repo.root, target.path, batch.path);
+    if (JSON.stringify(mapped) !== JSON.stringify(batch.raw)) files.push(batchRel);
+  }
+  return {
+    ...(branch ? { branch } : {}), ...(target ? { target } : {}),
+    files: [...new Set(files)].sort(),
+    batchPath: batchRel && target ? resolve(target.path, batchRel) : batch.path,
+  };
+}
+
+interface FileDoc { kind: "file"; content: Buffer }
+interface LinkDoc { kind: "link"; target: string }
+type DocContent = FileDoc | LinkDoc;
+
+function lstatSafe(path: string): ReturnType<typeof lstatSync> | undefined {
+  try { return lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** 目标父路径不能被符号链接带到仓库外；不存在就建普通目录。 */
+function ensureSafeParents(targetRoot: string, rel: string): void {
+  let current = targetRoot;
+  for (const part of rel.split("/").slice(0, -1)) {
+    current = join(current, part);
+    const info = lstatSafe(current);
+    if (!info) { mkdirSync(current); continue; }
+    if (info.isSymbolicLink()) throw new LoopError(`开发空间里的父路径是符号链接，未继续：${rel} → ${current}`);
+    if (!info.isDirectory()) throw new LoopError(`开发空间里的父路径不是目录，未继续：${rel} → ${current}`);
+  }
+}
+
+let tempCounter = 0;
+
+/** 用临时文件替换目标本身，不跟随目标已有的符号链接写入。 */
+function writeDocSafely(targetRoot: string, rel: string, doc: DocContent): void {
+  ensureSafeParents(targetRoot, rel);
+  const destination = resolve(targetRoot, rel);
+  const existing = lstatSafe(destination);
+  if (existing?.isDirectory()) throw new LoopError(`开发空间里的目标路径是目录，未继续：${rel} → ${destination}`);
+  const temp = join(dirname(destination), `.loop-doc-${process.pid}-${tempCounter++}.tmp`);
+  try {
+    rmSync(temp, { force: true });
+    if (doc.kind === "link") symlinkSync(doc.target, temp);
+    else writeFileSync(temp, doc.content);
+    renameSync(temp, destination);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function rewriteBatchDocument(source: string, repoRoot: string, targetRoot: string): string {
+  const original = readFileSync(source, "utf8");
+  let raw: unknown;
+  try { raw = JSON.parse(original); } catch { return original; }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return original;
+  const mapped = remapBatchReferences(raw as Record<string, unknown>, repoRoot, targetRoot, source);
+  return JSON.stringify(mapped) === JSON.stringify(raw) ? original : `${JSON.stringify(mapped, null, 2)}\n`;
+}
+
+function copyBatchDocs(repo: Repo, target: WorkspaceUse, files: string[], batchPath: string): Map<string, DocContent> {
+  const expected = new Map<string, DocContent>();
+  for (const rel of files) {
+    const source = resolve(repo.root, rel);
+    let doc: DocContent;
+    if (resolve(source) === resolve(batchPath)) {
+      doc = { kind: "file", content: Buffer.from(rewriteBatchDocument(source, repo.root, target.path)) };
+    } else {
+      const info = lstatSync(source);
+      doc = info.isSymbolicLink()
+        ? { kind: "link", target: readlinkSync(source) }
+        : { kind: "file", content: readFileSync(source) };
+    }
+    writeDocSafely(target.path, rel, doc);
+    expected.set(rel, doc);
+  }
+  return expected;
+}
+
+/** 恢复项目根之前，确认开发空间里的内容与要保存的一致。 */
+function verifyCopiedDocs(target: WorkspaceUse, expected: Map<string, DocContent>): void {
+  for (const [rel, doc] of expected) {
+    const destination = resolve(target.path, rel);
+    const info = lstatSafe(destination);
+    if (!info) throw new LoopError(`开发空间里没有保存批次文档：${rel}`, { files: [...expected.keys()] });
+    if (doc.kind === "link") {
+      if (!info.isSymbolicLink() || readlinkSync(destination) !== doc.target) {
+        throw new LoopError(`开发空间里的批次文档没有按原样保存：${rel}`, { files: [...expected.keys()] });
+      }
+      continue;
+    }
+    if (info.isSymbolicLink() || info.isDirectory() || !readFileSync(destination).equals(doc.content)) {
+      throw new LoopError(`开发空间里的批次文档内容没有按原样保存：${rel}`, { files: [...expected.keys()] });
+    }
+  }
+}
+
+interface BatchDocsCommit { committed: boolean; commit?: string; files: string[] }
+
+function commitBatchDocs(workspace: WorkspaceUse, branch: string, batchName: string, files: string[]): BatchDocsCommit {
+  const actual = currentBranch(workspace.path);
+  if (actual !== branch) throw new LoopError(`开发空间当前分支是 ${actual ?? "detached"}，不是批次分支 ${branch}；不提交批次文档`);
+  const root = gitText(workspace.path, ["rev-parse", "--show-toplevel"]);
+  const add = gitResult(root, ["add", "-A", "--", ...files]);
+  if (add.status !== 0) throw new LoopError(`git add 批次文档失败：${(add.stderr || add.stdout).trim().slice(-300)}`, { files });
+  const stagedResult = gitResult(root, ["diff", "--cached", "--name-only", "-z"]);
+  if (stagedResult.status !== 0) throw new LoopError(`git diff --cached 失败：${(stagedResult.stderr || stagedResult.stdout).trim().slice(-300)}`, { files });
+  const staged = stagedResult.stdout.split("\0").filter(Boolean);
+  const expected = new Set(files);
+  const extra = staged.filter((path) => !expected.has(path));
+  if (extra.length) throw new LoopError(`批次文档提交出现范围外的改动，未继续：${extra.join("、")}`, { files: extra });
+  if (staged.length === 0) return { committed: false, files };
+  const type = branchType(branch);
+  if (!type) throw new LoopError(`无法从分支名生成批次文档提交说明：${branch}`, { files });
+  const commit = gitResult(root, ["commit", "-m", `${type}: 批次文档\n\n批次：${batchName}`]);
+  if (commit.status !== 0) throw new LoopError(`批次文档提交失败：${(commit.stderr || commit.stdout).trim().slice(-300)}`, { files });
+  return { committed: true, commit: gitText(root, ["rev-parse", "HEAD"]), files: staged };
+}
+
+/** 批次文档提交成功后，把项目根里这些路径恢复成发布分支 HEAD 的状态。 */
+function restoreProjectDocs(repo: Repo, files: string[]): void {
+  for (const rel of files) {
+    const absolute = resolve(repo.root, rel);
+    const tracked = gitResult(repo.root, ["cat-file", "-e", `HEAD:${rel}`]).status === 0;
+    if (tracked) {
+      const restore = gitResult(repo.root, ["checkout", "HEAD", "--", rel]);
+      if (restore.status !== 0) throw new LoopError(`恢复项目根文件失败：${rel}；${(restore.stderr || restore.stdout).trim().slice(-300)}`, { files });
+      continue;
+    }
+    gitResult(repo.root, ["reset", "-q", "--", rel]);
+    rmSync(absolute, { force: true });
   }
 }
 
@@ -302,7 +532,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     branchOwners.set(workspace.branch, workspace.path);
   }
   // 先只核对，任何一项不过都不建 worktree、不切分支。
-  checkRuntime(repo, args.dryRun);
+  const runtimeChanges = checkRuntime(repo);
   checkIgnored(repo, repo.layout);
   for (const workspace of batch.workspaces) {
     const rel = relative(repo.root, workspace.path);
@@ -326,10 +556,16 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
       throw new LoopError(`段 ${check.stages.join("、")} 的目录在分支 ${currentBranch(check.path) ?? "detached"}，批次要求 ${check.branch}；未开工`);
     }
   }
-  const lines = [
-    `运行版：${repo.root}（发布分支 ${repo.layout.release}，工作区干净）`,
-    `批次：${batch.plan.name}${batch.branch ? `，分支 ${batch.branch}` : ""}`,
-  ];
+  const docs = batchDocsPlan(repo, batch, runtimeChanges);
+  if (docs.files.length && !docs.target) {
+    throw new LoopError(`批次文档需要搬进分支 ${docs.branch ?? "（未指定）"} 的开发空间，但没有找到对应的工作区；给该分支写 workspace 或已登记的 cwd`,
+      { files: docs.files, branch: docs.branch });
+  }
+  const docPaths = new Set(docs.files);
+  const uncommitted = [...new Set(runtimeChanges.map((change) => change.path).filter((path) => !docPaths.has(path)))].sort();
+  const lines = [`运行版：${repo.root}（发布分支 ${repo.layout.release}）`];
+  if (uncommitted.length) lines.push(`未提交，不在本批分支上：${uncommitted.join("、")}`);
+  lines.push(`批次：${batch.plan.name}${batch.branch ? `，分支 ${batch.branch}` : ""}`);
   const resultWorkspaces: Record<string, unknown>[] = [];
   let primary: string | undefined = batch.workspaces[0]?.path ?? batch.checks[0]?.path ?? [...batch.stages.values()].find((stage) => existsSync(stage.cwd))?.cwd;
   for (const workspace of batch.workspaces) {
@@ -341,6 +577,22 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     const copied = args.dryRun ? [] : copyLocalFiles(repo, workspace);
     lines.push(`开发空间：${workspace.name} → ${workspace.path}（${action}）；分支 ${workspace.branch}${copied.length ? `；已复制本机文件 ${copied.join("、")}` : ""}`);
     resultWorkspaces.push({ name: workspace.name, path: workspace.path, branch: workspace.branch, action, localFiles: copied });
+  }
+  let docsCommit: BatchDocsCommit = { committed: false, files: [] };
+  if (docs.files.length) {
+    if (args.dryRun) {
+      lines.push(`批次文档：将搬入 ${docs.target!.path}（${docs.files.join("、")}）；项目根将恢复：${docs.files.join("、")}`);
+    } else {
+      const expected = copyBatchDocs(repo, docs.target!, docs.files, batch.path);
+      docsCommit = commitBatchDocs(docs.target!, docs.branch!, batch.plan.name, docs.files);
+      verifyCopiedDocs(docs.target!, expected);
+      restoreProjectDocs(repo, docs.files);
+      lines.push(`批次文档：${docsCommit.committed
+        ? `已提交到 ${docs.target!.path}（${docs.files.join("、")}）`
+        : `分支上已有相同内容，未建空提交（${docs.files.join("、")}）`}；项目根已恢复：${docs.files.join("、")}`);
+    }
+  } else {
+    lines.push("批次文档：没有需要搬的文件");
   }
   let methods: Record<string, unknown>;
   if (!primary) {
@@ -354,10 +606,16 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     methods = methodsSummary(run);
     lines.push(...methodsLines(run));
   }
-  const start = startCommand(batch);
-  lines.push(`启动：${start}`);
+  const start = batchCommand("启动", docs.batchPath);
+  const status = batchCommand("状态", docs.batchPath);
+  const merge = batchCommand("合入", docs.batchPath);
+  lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
   return { ok: true, command: "开工", dryRun: args.dryRun, repo: repo.root, release: repo.layout.release,
-    batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles, methods, startCommand: start, lines };
+    batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
+    uncommitted,
+    batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
+      files: docs.files, restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
+    methods, startCommand: start, statusCommand: status, mergeCommand: merge, lines };
 }
 
 function commandString(argv: string[]): string {
@@ -473,19 +731,124 @@ async function cmdStatus(args: ParsedArgs): Promise<Record<string, unknown>> {
   return { ok: true, command: "状态", dryRun: args.dryRun, stages: entries, lines };
 }
 
+function checkNoExistingMerge(repo: Repo): void {
+  const mergeHead = gitResult(repo.root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+  if (mergeHead.status !== 0) return;
+  const status = gitText(repo.root, ["status", "--porcelain"]);
+  throw new LoopError(`运行版已有未完成的合并（MERGE_HEAD 存在），未继续；先完成或中止那次合并；项目根状态：${status || "（干净）"}`,
+    { mergeInProgress: true, status });
+}
+
+/** 本次临时保存的 stash commit 和私有引用。 */
+interface ProjectStash { ref: string; hash: string }
+
+/** 未跟踪文件挡在 HEAD 要写回的路径上时，清理会覆盖它们；返回这些路径。 */
+function untrackedBlockers(root: string): string[] {
+  const head = gitText(root, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]).split("\0").filter(Boolean);
+  const scan = gitResult(root, ["ls-files", "--others", "-z"]);
+  if (scan.status !== 0) {
+    throw new LoopError(`无法完整扫描运行版未跟踪文件，未合入：${(scan.stderr || scan.stdout).trim().slice(-300) || "git 未返回错误信息"}`);
+  }
+  const others = scan.stdout.split("\0").filter(Boolean);
+  if (!head.length || !others.length) return [];
+  const files = new Set(head);
+  const dirs = new Set<string>();
+  for (const file of head) {
+    const parts = file.split("/");
+    for (let index = 1; index < parts.length; index += 1) dirs.add(parts.slice(0, index).join("/"));
+  }
+  const blocked = new Set<string>();
+  for (const path of others) {
+    if (files.has(path) || dirs.has(path)) { blocked.add(path); continue; }
+    const parts = path.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      if (files.has(parts.slice(0, index).join("/"))) { blocked.add(path); break; }
+    }
+  }
+  return [...blocked].sort();
+}
+
+/**
+ * 用 stash commit + 独立私有 ref 保存项目根的已跟踪未提交改动（含暂存状态）。
+ * 不读写共享的 refs/stash，避免其他 worktree 同时 push 时认错或删错记录。
+ */
+function stashProjectChanges(repo: Repo, changes: WorkingChange[]): ProjectStash | undefined {
+  if (!changes.some((change) => !change.status.startsWith("??"))) return undefined;
+  const blockers = untrackedBlockers(repo.root);
+  if (blockers.length) {
+    throw new LoopError(`运行版有未跟踪文件挡在 HEAD 路径上，清理会覆盖它们，未合入：${blockers.join("、")}`,
+      { files: blockers });
+  }
+  const created = gitResult(repo.root, ["stash", "create", `loop 合入：临时保存运行版未提交改动 ${randomUUID()}`]);
+  if (created.status !== 0) {
+    throw new LoopError(`无法临时保存运行版未提交改动，未合入：${(created.stderr || created.stdout).trim().slice(-300)}`,
+      { files: changes.map((change) => change.path) });
+  }
+  const hash = created.stdout.trim();
+  if (!hash) throw new LoopError("无法临时保存运行版未提交改动，未合入");
+  const ref = `refs/loop/merge-stash/${randomUUID()}`;
+  const pin = gitResult(repo.root, ["update-ref", ref, hash]);
+  if (pin.status !== 0) {
+    throw new LoopError(`无法为临时保存的改动创建独立引用，未合入：${(pin.stderr || pin.stdout).trim().slice(-300)}`,
+      { stash: hash });
+  }
+  // 改动已经钉在独立 ref 上，再把已跟踪的工作区/索引恢复到 HEAD；未跟踪文件保留。
+  const reset = gitResult(repo.root, ["read-tree", "--reset", "-u", "HEAD"]);
+  if (reset.status !== 0) {
+    throw new LoopError(`临时保存的改动已写入 ${ref}，但无法清理运行版已跟踪改动，未合入；${(reset.stderr || reset.stdout).trim().slice(-300)}`,
+      { stash: ref, hash });
+  }
+  return { ref, hash };
+}
+
+/** 恢复临时保存的改动和索引状态，然后删除本次的独立 ref；失败时保留 ref。 */
+function restoreProjectStash(repo: Repo, stash: ProjectStash): void {
+  const apply = gitResult(repo.root, ["stash", "apply", "--index", stash.hash]);
+  if (apply.status !== 0) {
+    const head = gitText(repo.root, ["rev-parse", "HEAD"]);
+    const status = gitText(repo.root, ["status", "--porcelain"]);
+    throw new LoopError(`合入后无法恢复运行版未提交改动；当前提交 ${head}；改动仍在 ${stash.ref}；项目根状态：${status || "（干净）"}`,
+      { stash: stash.ref, hash: stash.hash, head, status, restoreStashFailed: true });
+  }
+  // 只删除本次的独立 ref；万一引用已变化，update-ref 的比较交换会失败并保留记录。
+  gitResult(repo.root, ["update-ref", "-d", stash.ref, stash.hash]);
+}
+
 async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
   if (!args.batch) throw new LoopError("用法：loop 合入 <批次.json> [--dry-run] [--json]");
   const repo = repoOf(process.cwd());
   const batch = loadBatch(repo, args.batch);
   const branches = [...new Set([...batch.stages.keys()].map((stage) => branchOfStage(batch, stage)).filter((branch): branch is string => Boolean(branch)))];
   if (!branches.length) throw new LoopError("批次.json 没有指定分支，无法合入");
-  checkRuntime(repo, args.dryRun);
+  checkNoExistingMerge(repo);
+  const dirty = checkRuntime(repo);
   const stageNames = (branch: string): string[] =>
     [...batch.stages.entries()].filter(([, value]) => value.branch === branch).map(([name]) => name);
-  const staged: CommitResult[] = [];
+
+  // 先算批次分支相对发布分支改了哪些文件，和运行版未提交文件求交集；有交集就不动任何分支。
+  const changed = new Map<string, string[]>();
   for (const branch of branches) {
     checkBranchName(branch);
     if (branch === repo.layout.release) throw new LoopError(`批次分支不能就是发布分支：${branch}`);
+    if (!branchExists(repo.root, branch)) throw new LoopError(`批次分支不存在：${branch}`, { branch });
+    const diff = gitResult(repo.root, ["diff", "--name-only", "-z", "--no-renames", `${repo.layout.release}...${branch}`]);
+    if (diff.status !== 0) {
+      throw new LoopError(`无法读取分支 ${branch} 相对 ${repo.layout.release} 的改动：${(diff.stderr || diff.stdout).trim().slice(-300)}`, { branch });
+    }
+    const paths = diff.stdout.split("\0").filter(Boolean);
+    const holder = worktreeForBranch(repo.root, branch);
+    if (holder && resolve(holder.path) !== resolve(repo.root)) paths.push(...autoCommitPaths(holder.path));
+    changed.set(branch, paths);
+  }
+  const dirtyPaths = new Set(dirty.map((change) => change.path));
+  const overlap = [...new Set([...changed.values()].flat().filter((path) => dirtyPaths.has(path)))].sort();
+  if (overlap.length) {
+    throw new LoopError(`运行版未提交改动与本次合并碰到同一个文件，未合入：${overlap.join("、")}`, { files: overlap, branches });
+  }
+  const uncommitted = [...dirtyPaths].sort();
+
+  const staged: CommitResult[] = [];
+  for (const branch of branches) {
     const holder = worktreeForBranch(repo.root, branch);
     if (!holder || resolve(holder.path) === repo.root) continue;
     if (isClean(holder.path)) continue;
@@ -496,31 +859,56 @@ async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
     staged.push(commitAll(holder.path, branch, batch.plan.name, stageNames(branch).join("、") || "合入前"));
   }
   const original = gitText(repo.root, ["rev-parse", "HEAD"]);
+  const stash = args.dryRun ? undefined : stashProjectChanges(repo, dirty);
   const merges: Record<string, unknown>[] = [];
-  for (const branch of branches) {
-    if (args.dryRun) {
-      merges.push({ branch, action: "将合并", commit: undefined });
-      continue;
-    }
-    const merge = gitResult(repo.root, ["merge", "--no-ff", branch, "-m", stageCommitMessage(branch, batch.plan.name, stageNames(branch).join("、") || "合入发布分支")]);
-    if (merge.status !== 0) {
-      const conflicts = gitText(repo.root, ["diff", "--name-only", "--diff-filter=U", "-z"]).split("\0").filter(Boolean);
-      gitResult(repo.root, ["merge", "--abort"]);
-      if (gitText(repo.root, ["rev-parse", "HEAD"]) !== original) {
-        // 本次命令已经产生的合并结果也退回，保证恢复运行时原状。
-        gitResult(repo.root, ["reset", "--hard", original]);
+  let failure: unknown;
+  try {
+    for (const branch of branches) {
+      if (args.dryRun) {
+        merges.push({ branch, action: "将合并", commit: undefined });
+        continue;
       }
-      throw new LoopError(`合并 ${branch} 有冲突，已中止并恢复原状：${conflicts.join("、") || "（未列出冲突文件）"}`,
-        { branch, conflicts, original });
+      const merge = gitResult(repo.root, ["merge", "--no-ff", branch, "-m", stageCommitMessage(branch, batch.plan.name, stageNames(branch).join("、") || "合入发布分支")]);
+      if (merge.status !== 0) {
+        const conflicts = gitResult(repo.root, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
+        gitResult(repo.root, ["merge", "--abort"]);
+        let head = gitText(repo.root, ["rev-parse", "HEAD"]);
+        let mergeHead = gitResult(repo.root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status === 0;
+        if (head !== original || mergeHead) {
+          // 用 --keep 退回本次命令产生的合并结果；运行版里无关的未提交改动必须在恢复 stash 后原样保留。
+          const reset = gitResult(repo.root, ["reset", "--keep", original]);
+          head = gitText(repo.root, ["rev-parse", "HEAD"]);
+          mergeHead = gitResult(repo.root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status === 0;
+          if (reset.status !== 0 || head !== original || mergeHead) {
+            const status = gitText(repo.root, ["status", "--porcelain"]);
+            throw new LoopError(`合并 ${branch} 有冲突，已中止，但无法在不丢未提交改动的前提下退回 ${original}；当前提交 ${head}；未继续强制重置；项目根状态：${status || "（干净）"}`,
+              { branch, conflicts, original, head, status, rollbackFailed: true });
+          }
+        }
+        throw new LoopError(`合并 ${branch} 有冲突，已中止并恢复原状：${conflicts.join("、") || "（未列出冲突文件）"}`,
+          { branch, conflicts, original });
+      }
+      merges.push({ branch, action: "已合并", commit: gitText(repo.root, ["rev-parse", "HEAD"]) });
     }
-    merges.push({ branch, action: "已合并", commit: branchExists(repo.root, branch) ? gitText(repo.root, ["rev-parse", "HEAD"]) : undefined });
+  } catch (error) {
+    failure = error;
   }
+  if (stash) {
+    try { restoreProjectStash(repo, stash); } catch (error) {
+      const previous = failure instanceof Error ? `；本次合入错误：${failure.message}` : "";
+      throw new LoopError(`${(error as Error).message}${previous}`,
+        { ...(error instanceof LoopError ? error.data : {}), ...(failure instanceof LoopError ? failure.data : {}), rollbackFailed: true });
+    }
+  }
+  if (failure) throw failure;
+  const uncommittedLine = uncommitted.length ? `未提交，不在本批合并范围：${uncommitted.join("、")}` : "运行版没有未提交改动";
   const lines = args.dryRun
     ? [`将提交：${staged.length ? staged.map((item) => item.branch).join("、") : "（没有未提交改动）"}`,
-       `将合入 ${repo.layout.release}：${branches.join("、")}；不推送`]
+       `将合入 ${repo.layout.release}：${branches.join("、")}；不推送`, uncommittedLine]
     : [`已合入 ${repo.layout.release}：${merges.map((item) => item.branch).join("、")}`,
-       `提交：${staged.filter((item) => item.committed).map((item) => item.branch).join("、") || "（没有）"}；未推送`];
-  return { ok: true, command: "合入", dryRun: args.dryRun, release: repo.layout.release, branches, commits: staged, merges, pushed: false, lines };
+       `提交：${staged.filter((item) => item.committed).map((item) => item.branch).join("、") || "（没有）"}；未推送`, uncommittedLine];
+  return { ok: true, command: "合入", dryRun: args.dryRun, release: repo.layout.release, branches,
+    uncommitted, commits: staged, merges, pushed: false, lines };
 }
 
 const USAGE = `用法：

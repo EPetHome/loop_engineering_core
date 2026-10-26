@@ -1,9 +1,9 @@
 /** bin/loop 的开工、启动、状态、合入；测试仓库、worktree 和 methods.json 都建在系统临时目录。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 import { parsePlan, stageScript } from "../pipeline.ts";
@@ -148,15 +148,239 @@ test("A3 方法文件变化会重跑自测；--recheck 在指纹未变时也执�
   assert.equal(count(f.gateLog), beforeGate + 1, "--recheck 也重新空跑门禁");
 });
 
-test("A4 运行版或开发空间有未提交改动就停下，改动原样保留", () => {
+test("A1 开工只要求运行版停在发布分支；批次文档随批次分支提交，无关改动保留", () => {
   const f = fixture();
-  assert.equal(loop(f.repo, ["开工", f.batch]).status, 0);
+  const batch = join(f.repo, "批次-文档.json");
+  const prompt = join(f.repo, "提示词-文档.md");
+  writeFileSync(prompt, "按本批文档实现\n");
+  writeFileSync(batch, JSON.stringify({ name: "文档批次", branch: "feat/文档",
+    stages: { 甲: { prompt: "提示词-文档.md", workspace: "dev分支" } }, steps: [["甲"]] }, null, 2));
+  writeFileSync(join(f.repo, "README.md"), "dirty runtime\n");
+  writeFileSync(join(f.repo, "notes.txt"), "untracked\n");
+  const opened = loop(f.repo, ["开工", batch, "--json"]);
+  assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+  const result = jsonOf(opened);
+  assert.equal(result.ok, true);
+  assert.ok(!existsSync(batch), "批次文件已从项目根移走");
+  assert.ok(!existsSync(prompt), "提示词已从项目根移走");
+  assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "dirty runtime\n", "无关的已跟踪改动保留");
+  assert.equal(readFileSync(join(f.repo, "notes.txt"), "utf8"), "untracked\n", "无关的未跟踪文件保留");
+  assert.deepEqual(result.uncommitted, ["README.md", "notes.txt"].sort());
+  const docs = result.batchDocs as Record<string, unknown>;
+  assert.deepEqual(docs.files, ["批次-文档.json", "提示词-文档.md"].sort());
+  assert.deepEqual(docs.restore, docs.files);
+  assert.equal(docs.committed, true);
+  assert.equal(docs.commit, git(f.worktree, ["rev-parse", "HEAD"]));
+  const log = git(f.worktree, ["show", "-s", "--format=%s%n%b", "HEAD"]);
+  assert.match(log, /^feat: 批次文档/m);
+  assert.match(log, /批次：文档批次/);
+  assert.deepEqual(git(f.worktree, ["show", "--name-only", "--format=", "HEAD"]).split("\n").filter(Boolean).sort(),
+    ["批次-文档.json", "提示词-文档.md"].sort());
+});
+
+test("A2 发布分支上已跟踪的提示词在项目根改过，也搬进批次分支并恢复", () => {
+  const f = fixture();
+  const absolutePrompt = join(f.repo, "prompt.md");
+  const rawBatch = JSON.parse(readFileSync(f.batch, "utf8"));
+  rawBatch.stages.甲.prompt = absolutePrompt;
+  writeFileSync(f.batch, JSON.stringify(rawBatch, null, 2));
+  git(f.repo, ["add", "batch.json"]); git(f.repo, ["commit", "-qm", "batch absolute prompt"]);
+  writeFileSync(absolutePrompt, "修改后的提示词\n");
+  const opened = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+  const result = jsonOf(opened);
+  const docs = result.batchDocs as Record<string, unknown>;
+  assert.deepEqual(docs.files, ["batch.json", "prompt.md"].sort(), "批次文件也因绝对路径改写进入提交");
+  assert.equal(readFileSync(join(f.worktree, "prompt.md"), "utf8"), "修改后的提示词\n", "改过的提示词进了批次分支");
+  assert.equal(readFileSync(join(f.repo, "prompt.md"), "utf8"), "做一件事\n", "项目根恢复成发布分支的内容");
+  assert.deepEqual(result.uncommitted, []);
+  assert.match(git(f.worktree, ["show", "-s", "--format=%s%n%b", "HEAD"]), /feat: 批次文档[\s\S]*批次：测试批次/);
+  // 批次文件已随绝对提示词改写到开发空间；用开发空间里的批次文件启动时不能读回旧提示词。
+  const started = loop(f.repo, ["启动", join(f.worktree, "batch.json"), "--dry-run", "--json"]);
+  assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+  const workspacePrompt = join(f.worktree, "prompt.md").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(String(jsonOf(started).startCommand), new RegExp(workspacePrompt));
+  const workspaceBatch = join(f.worktree, "batch.json");
+  const plan = parsePlan(JSON.parse(readFileSync(workspaceBatch, "utf8")), f.worktree, process.env,
+    { projectRoot: f.repo, batchFile: workspaceBatch });
+  assert.equal(plan.stages.get("甲")!.prompt, join(f.worktree, "prompt.md"), "流水线入口解析开发空间批次文件时也指向新提示词");
+});
+
+test("A3 开工 --dry-run 列出要搬的批次文档和要恢复的项目根文件，不改任何东西", () => {
+  const f = fixture();
+  const batch = join(f.repo, "批次-文档.json");
+  const prompt = join(f.repo, "提示词-文档.md");
+  writeFileSync(prompt, "按本批文档实现\n");
+  writeFileSync(batch, JSON.stringify({ name: "文档批次", branch: "feat/文档",
+    stages: { 甲: { prompt: "提示词-文档.md", workspace: "dev分支" } }, steps: [["甲"]] }, null, 2));
+  writeFileSync(join(f.repo, "README.md"), "dirty runtime\n");
+  const before = git(f.repo, ["rev-parse", "HEAD"]);
+  const dry = loop(f.repo, ["开工", batch, "--dry-run", "--json"]);
+  assert.equal(dry.status, 0, dry.stderr);
+  const result = jsonOf(dry);
+  const docs = result.batchDocs as Record<string, unknown>;
+  assert.deepEqual(docs.files, ["批次-文档.json", "提示词-文档.md"].sort());
+  assert.deepEqual(docs.restore, docs.files);
+  assert.deepEqual(result.uncommitted, ["README.md"]);
+  assert.ok(!existsSync(f.worktree), "dry-run 不建 worktree");
+  assert.equal(git(f.repo, ["branch", "--list", "feat/文档"]), "", "dry-run 不建分支");
+  assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before);
+  assert.ok(existsSync(batch) && existsSync(prompt), "dry-run 不搬文件");
+  assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "dirty runtime\n");
+});
+
+test("A5 开工输出用开发空间里的批次文件路径，loop 启动能取到提示词并经过 bin/pi-dev", () => {
+  const f = fixture();
+  const dir = join(f.repo, "docs", "batches", "文档批次");
+  const batch = join(dir, "批次.json");
+  const prompt = join(f.repo, "docs", "prompt", "提示词-文档.md");
+  const criteria = join(f.repo, "docs", "prompt", "验收-文档.md");
+  mkdirSync(dir, { recursive: true }); mkdirSync(dirname(prompt), { recursive: true });
+  writeFileSync(prompt, "按本批文档实现\n");
+  writeFileSync(criteria, "## 验收标准\n1. 操作：执行本批\n   预期：通过\n");
+  writeFileSync(batch, JSON.stringify({ name: "文档批次", branch: "feat/文档",
+    stages: { 甲: { prompt, workspace: "dev分支" } }, steps: [["甲"]],
+    e2e: { workDir: ".", criteria } }, null, 2));
+  const opened = jsonOf(loop(f.repo, ["开工", batch, "--json"]));
+  const workspaceBatch = join(f.worktree, "docs", "batches", "文档批次", "批次.json");
+  assert.ok(existsSync(workspaceBatch));
+  const moved = JSON.parse(readFileSync(workspaceBatch, "utf8"));
+  assert.equal(moved.stages.甲.prompt, join(f.worktree, "docs", "prompt", "提示词-文档.md"), "批次文件里的绝对提示词路径改到开发空间");
+  assert.equal(moved.e2e.criteria, join(f.worktree, "docs", "prompt", "验收-文档.md"), "批次文件里的绝对验收标准路径改到开发空间");
+  const quoted = workspaceBatch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(String(opened.startCommand), new RegExp(quoted));
+  assert.match(String(opened.statusCommand), new RegExp(quoted));
+  assert.match(String(opened.mergeCommand), new RegExp(quoted));
+  const started = loop(f.repo, ["启动", workspaceBatch, "--dry-run", "--json"]);
+  assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+  const startedJson = jsonOf(started);
+  assert.match(String(startedJson.startCommand), /bin\/pi-dev/);
+  const command = String((startedJson.commands as string[])[0]);
+  assert.match(command, /docs\/prompt\/提示词-文档\.md/);
+  const status = loop(f.repo, ["状态", workspaceBatch, "--json"]);
+  assert.equal(status.status, 0, `${status.stdout}\n${status.stderr}`);
+  assert.deepEqual((jsonOf(status).stages as Array<Record<string, unknown>>).map((entry) => entry.stage), ["甲"]);
+  const mergeDry = loop(f.repo, ["合入", workspaceBatch, "--dry-run", "--json"]);
+  assert.equal(mergeDry.status, 0, `${mergeDry.stdout}\n${mergeDry.stderr}`);
+  const fromWorkspace = loop(f.worktree, ["启动", workspaceBatch, "--dry-run", "--json"]);
+  assert.equal(fromWorkspace.status, 0, `${fromWorkspace.stdout}\n${fromWorkspace.stderr}`);
+});
+
+test("多段流水线使用开发空间批次文件，仓库外相对引用保持原目标", () => {
+  const f = fixture();
+  const workspace = join(f.root, "workspaces", "wt");
+  const marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8"));
+  marker.workspaces = { dev分支: workspace };
+  writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify(marker, null, 2));
+  git(f.repo, ["add", ".autoreview.json"]); git(f.repo, ["commit", "-qm", "custom workspace"]);
+  const batchDir = join(f.repo, "docs", "batches", "多段");
+  const internal = join(f.repo, "docs", "prompt", "内部.md");
+  const external = join(f.root, "external-prompt.md");
+  mkdirSync(batchDir, { recursive: true }); mkdirSync(dirname(internal), { recursive: true });
+  writeFileSync(internal, "内部提示词\n");
+  writeFileSync(external, "外部提示词\n");
+  const batch = join(batchDir, "批次.json");
+  writeFileSync(batch, JSON.stringify({ name: "多段", branch: "feat/多段", stages: {
+    甲: { prompt: relative(batchDir, external), workspace: "dev分支" },
+    乙: { prompt: internal, workspace: "dev分支" },
+  }, steps: [["甲"], ["乙"]] }, null, 2));
+  const opened = loop(f.repo, ["开工", batch, "--json"]);
+  assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+  assert.equal((jsonOf(opened).workspaces as Array<Record<string, unknown>>)[0].path, workspace);
+  const movedBatch = join(workspace, "docs", "batches", "多段", "批次.json");
+  const moved = JSON.parse(readFileSync(movedBatch, "utf8"));
+  assert.equal(moved.stages.甲.prompt, external, "仓库外相对引用改写为原绝对目标");
+  assert.equal(moved.stages.乙.prompt, join(workspace, "docs", "prompt", "内部.md"), "仓库内绝对引用改到开发空间");
+  const plan = parsePlan(moved, dirname(movedBatch), process.env, { projectRoot: f.repo, batchFile: movedBatch });
+  assert.equal(plan.stages.get("甲")!.prompt, external);
+  assert.equal(plan.stages.get("乙")!.prompt, join(workspace, "docs", "prompt", "内部.md"));
+  assert.equal(plan.steps.length, 2);
+});
+
+test("原生开发空间批次保留相对引用解析，不按 worktree 来源重定位", () => {
+  const f = fixture();
+  const wt = join(f.root, "dev", "wt");
+  git(f.repo, ["worktree", "add", "-b", "feat/原生", wt, "main"]);
+  const prompt = join(f.root, "dev", "prompt.md");
+  const criteria = join(f.root, "dev", "criteria.md");
+  mkdirSync(dirname(prompt), { recursive: true });
+  writeFileSync(prompt, "原生提示词\n");
+  writeFileSync(criteria, "## 验收标准\n1. 操作：执行\n   预期：通过\n");
+  const batch = join(wt, "批次.json");
+  writeFileSync(batch, JSON.stringify({ name: "原生", branch: "feat/原生",
+    stages: { 甲: { prompt: "../prompt.md", workspace: "dev分支" } }, steps: [["甲"]],
+    e2e: { workDir: ".", criteria: "../criteria.md" } }, null, 2));
+  const plan = parsePlan(JSON.parse(readFileSync(batch, "utf8")), wt, process.env,
+    { batchFile: batch, projectRoot: f.repo });
+  assert.equal(plan.stages.get("甲")!.prompt, prompt, "相对提示词按批次所在目录解析");
+  assert.equal(plan.e2e!.criteriaFile, criteria, "相对验收标准按批次所在目录解析");
+});
+
+test("A6 运行版不在发布分支时不开工，项目根、分支和 worktree 都不变", () => {
+  const f = fixture();
+  git(f.repo, ["checkout", "-b", "feat/别的分支"]);
+  const before = git(f.repo, ["rev-parse", "HEAD"]);
+  const opened = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.notEqual(opened.status, 0);
+  const result = jsonOf(opened);
+  assert.equal(result.branch, "feat/别的分支");
+  assert.match(String(result.error), /发布分支 main/);
+  assert.equal(git(f.repo, ["branch", "--show-current"]), "feat/别的分支");
+  assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before);
+  assert.ok(!existsSync(f.worktree), "没有建 worktree");
+  assert.equal(git(f.repo, ["branch", "--list", "feat/测试"]), "");
+});
+
+test("批次文档从符号链接改成普通文件时安全搬运，外部文件不被覆盖", () => {
+  const f = fixture();
+  const outside = join(f.root, "outside-prompt.md");
+  writeFileSync(outside, "outside original\n");
+  rmSync(join(f.repo, "prompt.md"));
+  symlinkSync(outside, join(f.repo, "prompt.md"));
+  git(f.repo, ["add", "-A"]); git(f.repo, ["commit", "-qm", "prompt symlink"]);
+  rmSync(join(f.repo, "prompt.md"));
+  writeFileSync(join(f.repo, "prompt.md"), "new prompt\n");
+  const opened = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+  assert.equal(readFileSync(outside, "utf8"), "outside original\n", "没有写穿开发空间里的符号链接");
+  const target = join(f.worktree, "prompt.md");
+  assert.equal(lstatSync(target).isSymbolicLink(), false, "开发空间里保存成普通文件");
+  assert.equal(readFileSync(target, "utf8"), "new prompt\n");
+  assert.equal(lstatSync(join(f.repo, "prompt.md")).isSymbolicLink(), true, "项目根恢复成发布分支的符号链接");
+  assert.equal(readlinkSync(join(f.repo, "prompt.md")), outside);
+  assert.match(git(f.worktree, ["show", "--summary", "--format=", "HEAD"]), /mode change 120000 => 100644 prompt\.md/);
+});
+
+test("开发空间父路径是符号链接时拒绝搬批次文档，不写仓库外", () => {
+  const f = fixture();
+  const outside = join(f.root, "outside-docs");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "prompt.md"), "outside original\n");
+  symlinkSync(outside, join(f.repo, "docs"));
+  git(f.repo, ["add", "docs"]); git(f.repo, ["commit", "-qm", "docs symlink"]);
+  rmSync(join(f.repo, "docs"));
+  mkdirSync(join(f.repo, "docs"));
+  writeFileSync(join(f.repo, "docs", "prompt.md"), "new prompt\n");
+  const rawBatch = JSON.parse(readFileSync(f.batch, "utf8"));
+  rawBatch.stages.甲.prompt = "docs/prompt.md";
+  writeFileSync(f.batch, JSON.stringify(rawBatch, null, 2));
+  git(f.repo, ["add", "batch.json"]); git(f.repo, ["commit", "-qm", "batch under docs"]);
+  const opened = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.notEqual(opened.status, 0);
+  assert.match(String(jsonOf(opened).error), /父路径是符号链接/);
+  assert.equal(readFileSync(join(outside, "prompt.md"), "utf8"), "outside original\n", "没有写到链接目标");
+  assert.equal(readFileSync(join(f.repo, "docs", "prompt.md"), "utf8"), "new prompt\n", "拒绝时项目根文件保留");
+  assert.equal(lstatSync(join(f.worktree, "docs")).isSymbolicLink(), true, "开发空间里的父路径没有被替换");
+});
+
+test("A4 运行版未提交改动不阻断开工；开发空间有未提交改动仍停下，改动原样保留", () => {
+  const f = fixture();
   writeFileSync(join(f.repo, "运行版改动.txt"), "keep\n");
-  const dirtyRuntime = loop(f.repo, ["开工", f.batch, "--json"]);
-  assert.notEqual(dirtyRuntime.status, 0);
-  assert.match(String(jsonOf(dirtyRuntime).error), /运行版有未提交改动/);
+  const opened = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+  assert.match(opened.stdout, /未提交，不在本批分支上：运行版改动\.txt/);
+  assert.deepEqual(jsonOf(opened).uncommitted, ["运行版改动.txt"]);
   assert.equal(readFileSync(join(f.repo, "运行版改动.txt"), "utf8"), "keep\n");
-  rmSync(join(f.repo, "运行版改动.txt"));
 
   writeFileSync(join(f.worktree, "README.md"), "workspace change\n");
   const dirtyWorkspace = loop(f.repo, ["开工", f.batch, "--json"]);
@@ -362,20 +586,39 @@ test("A7 合入没有冲突时本地合并、不推送；有冲突时中止并�
     const remote = join(f.root, "remote.git"); git(f.root, ["init", "--bare", "-q", remote]);
     git(f.repo, ["remote", "add", "origin", remote]);
     git(f.repo, ["push", "-q", "origin", "main"]);
+    writeFileSync(join(f.repo, "README.md"), "user stash\n");
+    git(f.repo, ["stash", "push", "--quiet", "-m", "user stash"]);
+    const userStash = git(f.repo, ["rev-parse", "refs/stash"]);
     const branch = join(f.root, "merge-wt");
     git(f.repo, ["worktree", "add", "-b", "feat/合并", branch, "main"]);
     writeFileSync(join(branch, "merged.txt"), "merged\n");
     git(branch, ["add", "merged.txt"]); git(branch, ["commit", "-qm", "feat: 合并"]);
     writeFileSync(join(branch, "pending.txt"), "pending\n");
+    writeFileSync(join(f.repo, "README.md"), "dirty release\n");
+    writeFileSync(join(f.repo, "prompt.md"), "staged prompt\n");
+    git(f.repo, ["add", "prompt.md"]);
+    writeFileSync(join(f.repo, "prompt.md"), "worktree prompt\n");
+    writeFileSync(join(f.repo, "未提交.txt"), "keep\n");
     const batch = join(f.root, "merge.json");
     writeFileSync(batch, JSON.stringify({ name: "合并批次", branch: "feat/合并", stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
     const merged = loop(f.repo, ["合入", batch, "--json"]);
     assert.equal(merged.status, 0, merged.stderr);
     const result = jsonOf(merged);
     assert.equal(result.pushed, false);
+    assert.deepEqual(result.uncommitted, ["README.md", "prompt.md", "未提交.txt"].sort(), "无关改动保留并列出");
+    assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "dirty release\n");
+    assert.equal(readFileSync(join(f.repo, "未提交.txt"), "utf8"), "keep\n");
+    assert.equal(readFileSync(join(f.repo, "prompt.md"), "utf8"), "worktree prompt\n", "未暂存的修改恢复");
+    assert.equal(git(f.repo, ["show", ":prompt.md"]), "staged prompt", "暂存内容恢复");
+    assert.match(git(f.repo, ["diff", "--cached", "--name-only"]), /prompt\.md/);
+    assert.match(git(f.repo, ["diff", "--name-only"]), /prompt\.md/);
+    assert.doesNotMatch(git(f.repo, ["show", "--name-only", "--format=", "HEAD"]), /prompt\.md/, "暂存改动没有进入合并提交");
     assert.equal(readFileSync(join(f.repo, "pending.txt"), "utf8"), "pending\n", "合入前先提交批次分支上的未提交改动");
     assert.equal(git(f.repo, ["log", "--merges", "--format=%s", "-1"]), "feat: 合并");
     assert.equal(git(f.repo, ["rev-parse", "origin/main"]), git(f.repo, ["rev-parse", "main^1"]), "没有推送");
+    assert.equal(git(f.repo, ["rev-parse", "refs/stash"]), userStash, "用户原有的 stash 还在栈顶");
+    assert.match(git(f.repo, ["stash", "list", "--format=%s"]), /user stash/);
+    assert.equal(git(f.repo, ["for-each-ref", "--format=%(refname)", "refs/loop/merge-stash"]), "", "本次临时引用已清理");
   });
   await t.test("有冲突：中止合并，运行版恢复原状，列出冲突文件", () => {
     const f = fixture();
@@ -395,6 +638,234 @@ test("A7 合入没有冲突时本地合并、不推送；有冲突时中止并�
     assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before);
     assert.equal(git(f.repo, ["status", "--porcelain"]), "");
   });
+  await t.test("未提交文件和批次分支改动重叠：合入前停下，发布分支和项目根都不动", () => {
+    const f = fixture();
+    const branch = join(f.root, "overlap-wt");
+    git(f.repo, ["worktree", "add", "-b", "feat/重叠", branch, "main"]);
+    writeFileSync(join(branch, "README.md"), "branch change\n");
+    git(branch, ["add", "README.md"]); git(branch, ["commit", "-qm", "feat: 重叠"]);
+    writeFileSync(join(f.repo, "README.md"), "runtime dirty\n");
+    const before = git(f.repo, ["rev-parse", "HEAD"]);
+    const batch = join(f.root, "overlap.json");
+    writeFileSync(batch, JSON.stringify({ name: "重叠批次", branch: "feat/重叠", stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
+    const merged = loop(f.repo, ["合入", batch, "--json"]);
+    assert.notEqual(merged.status, 0);
+    const result = jsonOf(merged);
+    assert.deepEqual(result.files, ["README.md"]);
+    assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before);
+    assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "runtime dirty\n");
+    assert.match(git(f.repo, ["status", "--porcelain"]), /README\.md/);
+  });
+  await t.test("第二个分支冲突：两个合并都退回，无关的已跟踪和未跟踪改动保留", () => {
+    const f = fixture();
+    const first = join(f.root, "merge-first"), second = join(f.root, "merge-second");
+    git(f.repo, ["worktree", "add", "-b", "feat/一", first, "main"]);
+    writeFileSync(join(first, "one.txt"), "one\n");
+    git(first, ["add", "one.txt"]); git(first, ["commit", "-qm", "feat: 一"]);
+    git(f.repo, ["worktree", "add", "-b", "feat/二", second, "main"]);
+    writeFileSync(join(second, "README.md"), "second branch\n");
+    git(second, ["add", "README.md"]); git(second, ["commit", "-qm", "feat: 二"]);
+    writeFileSync(join(f.repo, "README.md"), "release newer\n");
+    git(f.repo, ["add", "README.md"]); git(f.repo, ["commit", "-qm", "release: 冲突来源"]);
+    writeFileSync(join(f.repo, "prompt.md"), "staged prompt\n");
+    git(f.repo, ["add", "prompt.md"]);
+    writeFileSync(join(f.repo, "prompt.md"), "dirty prompt\n");
+    writeFileSync(join(f.repo, "保留.txt"), "keep\n");
+    const before = git(f.repo, ["rev-parse", "HEAD"]);
+    const batch = join(f.root, "two-merges.json");
+    writeFileSync(batch, JSON.stringify({ name: "两个合并", stages: {
+      甲: { cwd: first, branch: "feat/一", start: "true" },
+      乙: { cwd: second, branch: "feat/二", start: "true" },
+    }, steps: [["甲"], ["乙"]] }));
+    const merged = loop(f.repo, ["合入", batch, "--json"]);
+    assert.notEqual(merged.status, 0);
+    const result = jsonOf(merged);
+    assert.deepEqual(result.conflicts, ["README.md"]);
+    assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before, "两个合并都退回合入前 HEAD");
+    assert.equal(readFileSync(join(f.repo, "prompt.md"), "utf8"), "dirty prompt\n", "无关的已跟踪改动保留");
+    assert.equal(git(f.repo, ["show", ":prompt.md"]), "staged prompt", "暂存内容在回退后仍保留");
+    assert.match(git(f.repo, ["diff", "--cached", "--name-only"]), /prompt\.md/);
+    assert.match(git(f.repo, ["diff", "--name-only"]), /prompt\.md/);
+    assert.equal(readFileSync(join(f.repo, "保留.txt"), "utf8"), "keep\n", "无关的未跟踪文件保留");
+    assert.equal(git(f.repo, ["log", "--merges", "--format=%s"]).includes("feat: 一"), false);
+  });
+});
+
+test("合入期间 stash 栈变化时只保留本次记录，不按位置删别人的 stash", () => {
+  const f = fixture();
+  const branch = join(f.root, "hook-merge");
+  git(f.repo, ["worktree", "add", "-b", "feat/钩子合入", branch, "main"]);
+  writeFileSync(join(branch, "merged.txt"), "merged\n");
+  git(branch, ["add", "merged.txt"]); git(branch, ["commit", "-qm", "feat: 钩子合入"]);
+  const other = join(f.root, "hook-other");
+  git(f.repo, ["worktree", "add", "-b", "feat/钩子其它", other, "main"]);
+  writeFileSync(join(other, "README.md"), "other dirty\n");
+  const hooks = join(f.repo, ".git", "hooks");
+  mkdirSync(hooks, { recursive: true });
+  const hook = join(hooks, "post-merge");
+  const quoted = other.replace(/'/g, "'\\''");
+  writeFileSync(hook, `#!/bin/sh\ngit -C '${quoted}' stash push --quiet -m 'other worktree stash' >/dev/null 2>&1 || true\n`);
+  chmodSync(hook, 0o755);
+  writeFileSync(join(f.repo, "prompt.md"), "main dirty\n");
+  const batch = join(f.root, "hook-merge.json");
+  writeFileSync(batch, JSON.stringify({ name: "钩子合入", branch: "feat/钩子合入", stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
+  const merged = loop(f.repo, ["合入", batch, "--json"]);
+  assert.equal(merged.status, 0, `${merged.stdout}\n${merged.stderr}`);
+  assert.equal(readFileSync(join(f.repo, "prompt.md"), "utf8"), "main dirty\n", "本次 stash 已恢复");
+  const list = git(f.repo, ["stash", "list", "--format=%s"]);
+  assert.match(list, /other worktree stash/, "合入期间新增的 stash 没有被删除");
+  assert.doesNotMatch(list, /loop 合入：临时保存运行版未提交改动/, "本次改动不写共享 stash 栈");
+  assert.equal(git(f.repo, ["for-each-ref", "--format=%(refname)", "refs/loop/merge-stash"]), "", "本次独立引用已清理");
+});
+
+test("保存 stash 时其他 worktree 同时新增 stash，也不认错或删除", () => {
+  const f = fixture();
+  const branch = join(f.root, "race-merge");
+  git(f.repo, ["worktree", "add", "-b", "feat/并发合入", branch, "main"]);
+  writeFileSync(join(branch, "merged.txt"), "merged\n");
+  git(branch, ["add", "merged.txt"]); git(branch, ["commit", "-qm", "feat: 并发合入"]);
+  const other = join(f.root, "race-other");
+  git(f.repo, ["worktree", "add", "-b", "feat/并发其它", other, "main"]);
+  writeFileSync(join(other, "README.md"), "other dirty\n");
+  const hooks = join(f.repo, ".git", "hooks");
+  mkdirSync(hooks, { recursive: true });
+  const hook = join(hooks, "reference-transaction");
+  const state = join(f.root, "race-hook-done");
+  const quote = (value: string): string => value.replace(/'/g, "'\\''");
+  writeFileSync(hook, `#!/bin/sh\n[ "$1" = "prepared" ] || exit 0\nwhile IFS=' ' read -r old new ref; do\n  case "$ref" in\n    refs/loop/merge-stash/*)\n      if [ ! -f '${quote(state)}' ]; then\n        : > '${quote(state)}'\n        git -C '${quote(other)}' stash push --quiet -m 'concurrent stash' >/dev/null 2>&1 || true\n      fi\n      ;;\n  esac\ndone\n`);
+  chmodSync(hook, 0o755);
+  writeFileSync(join(f.repo, "prompt.md"), "main dirty\n");
+  const batch = join(f.root, "race-merge.json");
+  writeFileSync(batch, JSON.stringify({ name: "并发合入", branch: "feat/并发合入", stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
+  const merged = loop(f.repo, ["合入", batch, "--json"]);
+  assert.equal(merged.status, 0, `${merged.stdout}\n${merged.stderr}`);
+  assert.equal(readFileSync(join(f.repo, "prompt.md"), "utf8"), "main dirty\n", "本次改动已恢复");
+  assert.match(git(f.repo, ["stash", "list", "--format=%s"]), /concurrent stash/, "并发新增的 stash 保留");
+  assert.equal(git(f.repo, ["for-each-ref", "--format=%(refname)", "refs/loop/merge-stash"]), "", "本次独立引用已清理");
+});
+
+test("批次工作区未提交改动和项目根重叠时，合入前停下且不自动提交", () => {
+  const f = fixture();
+  const branch = join(f.root, "both-dirty");
+  git(f.repo, ["worktree", "add", "-b", "feat/双方改动", branch, "main"]);
+  const branchHead = git(branch, ["rev-parse", "HEAD"]);
+  writeFileSync(join(branch, "README.md"), "workspace dirty\n");
+  writeFileSync(join(f.repo, "README.md"), "runtime dirty\n");
+  const mainHead = git(f.repo, ["rev-parse", "HEAD"]);
+  const batch = join(f.root, "both-dirty.json");
+  writeFileSync(batch, JSON.stringify({ name: "双方改动", branch: "feat/双方改动", stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
+  const merged = loop(f.repo, ["合入", batch, "--json"]);
+  assert.notEqual(merged.status, 0);
+  const result = jsonOf(merged);
+  assert.deepEqual(result.files, ["README.md"]);
+  assert.equal(git(f.repo, ["rev-parse", "HEAD"]), mainHead);
+  assert.equal(git(branch, ["rev-parse", "HEAD"]), branchHead, "批次工作区没有自动提交");
+  assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "runtime dirty\n");
+  assert.equal(readFileSync(join(branch, "README.md"), "utf8"), "workspace dirty\n");
+  assert.match(git(branch, ["status", "--porcelain"]), /README\.md/);
+});
+
+test("清理 stash 前发现未跟踪文件挡住 HEAD 路径时，不覆盖它", () => {
+  const f = fixture();
+  mkdirSync(join(f.repo, "dir"));
+  writeFileSync(join(f.repo, "dir", "a.txt"), "tracked\n");
+  git(f.repo, ["add", "dir/a.txt"]); git(f.repo, ["commit", "-qm", "tracked dir"]);
+  const branch = join(f.root, "block-merge");
+  git(f.repo, ["worktree", "add", "-b", "feat/阻挡", branch, "main"]);
+  writeFileSync(join(branch, "merged.txt"), "merged\n");
+  git(branch, ["add", "merged.txt"]); git(branch, ["commit", "-qm", "feat: 阻挡"]);
+  rmSync(join(f.repo, "dir", "a.txt"));
+  rmSync(join(f.repo, "dir"), { recursive: true });
+  writeFileSync(join(f.repo, "dir"), "untracked blocker\n");
+  git(f.repo, ["add", "-A", "--", "dir/a.txt"]);
+  const before = git(f.repo, ["rev-parse", "HEAD"]);
+  const batch = join(f.root, "block-merge.json");
+  writeFileSync(batch, JSON.stringify({ name: "阻挡", branch: "feat/阻挡", stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
+  const merged = loop(f.repo, ["合入", batch, "--json"]);
+  assert.notEqual(merged.status, 0);
+  const result = jsonOf(merged);
+  assert.deepEqual(result.files, ["dir"]);
+  assert.match(String(result.error), /未跟踪文件挡在 HEAD 路径上/);
+  assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before);
+  assert.equal(readFileSync(join(f.repo, "dir"), "utf8"), "untracked blocker\n", "未跟踪文件内容保留");
+  assert.match(git(f.repo, ["status", "--porcelain"]), /D  dir\/a\.txt/);
+  assert.match(git(f.repo, ["status", "--porcelain"]), /\?\? dir/);
+  assert.equal(git(f.repo, ["for-each-ref", "--format=%(refname)", "refs/loop/merge-stash"]), "", "没有创建临时引用");
+  assert.equal(git(f.repo, ["stash", "list"]), "", "没有动共享 stash");
+});
+
+test("未跟踪文件扫描失败时不合入，项目根和索引不变", () => {
+  const realGit = String(spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8", env: process.env }).stdout).trim();
+  assert.ok(realGit, "找不到真实 git");
+  const cases: Array<[string, string]> = [["空白", ""], ["部分", "partial"]];
+  for (const [label, output] of cases) {
+    const f = fixture();
+    const branch = join(f.root, `scan-${label}`);
+    git(f.repo, ["worktree", "add", "-b", `feat/扫描-${label}`, branch, "main"]);
+    writeFileSync(join(branch, "merged.txt"), "merged\n");
+    git(branch, ["add", "merged.txt"]); git(branch, ["commit", "-qm", `feat: 扫描-${label}`]);
+    writeFileSync(join(f.repo, "README.md"), "runtime staged\n");
+    git(f.repo, ["add", "README.md"]);
+    const beforeHead = git(f.repo, ["rev-parse", "HEAD"]);
+    const beforeStatus = git(f.repo, ["status", "--porcelain"]);
+    const beforeIndex = git(f.repo, ["show", ":README.md"]);
+    const fake = join(f.root, "fake-git");
+    mkdirSync(fake, { recursive: true });
+    const wrapper = join(fake, "git");
+    const quote = (value: string): string => value.replace(/'/g, "'\\''");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n  *" ls-files --others -z "*) ${output ? `printf '${output}'` : ":"}; exit 1 ;;\nesac\nexec '${quote(realGit)}' "$@"\n`);
+    chmodSync(wrapper, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fake}:${originalPath ?? ""}`;
+    let merged: { status: number; stdout: string; stderr: string };
+    try {
+      const batch = join(f.root, `scan-${label}.json`);
+      writeFileSync(batch, JSON.stringify({ name: `扫描-${label}`, branch: `feat/扫描-${label}`, stages: { 甲: { cwd: branch, start: "true" } }, steps: [["甲"]] }));
+      merged = loop(f.repo, ["合入", batch, "--json"]);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+    assert.notEqual(merged.status, 0);
+    assert.match(String(jsonOf(merged).error), /无法完整扫描运行版未跟踪文件/, label);
+    assert.equal(git(f.repo, ["rev-parse", "HEAD"]), beforeHead, label);
+    assert.equal(git(f.repo, ["status", "--porcelain"]), beforeStatus, label);
+    assert.equal(git(f.repo, ["show", ":README.md"]), beforeIndex, label);
+    assert.equal(git(f.repo, ["for-each-ref", "--format=%(refname)", "refs/loop/merge-stash"]), "", label);
+    assert.doesNotMatch(git(f.repo, ["log", "--merges", "--format=%s"]), new RegExp(`feat: 扫描-${label}`), label);
+  }
+});
+
+test("合入前发现运行版已有未完成的合并就停下，不中止用户的合并", () => {
+  const f = fixture();
+  const conflict = join(f.root, "user-merge");
+  git(f.repo, ["worktree", "add", "-b", "feat/用户合并", conflict, "main"]);
+  writeFileSync(join(conflict, "README.md"), "user branch\n");
+  git(conflict, ["add", "README.md"]); git(conflict, ["commit", "-qm", "feat: 用户合并"]);
+  const other = join(f.root, "user-other");
+  git(f.repo, ["worktree", "add", "-b", "feat/无关", other, "main"]);
+  writeFileSync(join(other, "other.txt"), "other\n");
+  git(other, ["add", "other.txt"]); git(other, ["commit", "-qm", "feat: 无关"]);
+  writeFileSync(join(f.repo, "README.md"), "main version\n");
+  git(f.repo, ["add", "README.md"]); git(f.repo, ["commit", "-qm", "release change"]);
+  const merge = spawnSync("git", ["-c", "core.quotePath=false", "merge", "--no-ff", "feat/用户合并"], {
+    cwd: f.repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+  });
+  assert.notEqual(merge.status, 0);
+  writeFileSync(join(f.repo, "README.md"), "resolved by user\n");
+  git(f.repo, ["add", "README.md"]);
+  const before = git(f.repo, ["rev-parse", "HEAD"]);
+  const batch = join(f.root, "existing-merge.json");
+  writeFileSync(batch, JSON.stringify({ name: "已有合并", branch: "feat/无关", stages: { 甲: { cwd: other, start: "true" } }, steps: [["甲"]] }));
+  const merged = loop(f.repo, ["合入", batch, "--json"]);
+  assert.notEqual(merged.status, 0);
+  const result = jsonOf(merged);
+  assert.equal(result.mergeInProgress, true);
+  assert.match(String(result.error), /已有未完成的合并/);
+  assert.equal(git(f.repo, ["rev-parse", "HEAD"]), before);
+  assert.ok(git(f.repo, ["rev-parse", "--verify", "MERGE_HEAD"]), "用户的 MERGE_HEAD 还在");
+  assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "resolved by user\n", "手工解决的内容保留");
+  assert.equal(git(f.repo, ["show", ":README.md"]), "resolved by user", "手工解决的内容仍在暂存区");
+  assert.match(git(f.repo, ["status", "--porcelain"]), /M  README\.md/);
 });
 
 test("A8 流水线写 prompt 的段都经过 bin/pi-dev；ponytail:false 和段级模型覆盖照常", () => {
@@ -452,11 +923,10 @@ test("A9 子命令 --json 可解析；--dry-run 不改文件、分支或 worktre
   assert.equal(statSync(record).mtimeMs, recordStat, "其他 dry-run 不重写方法记录");
 
   writeFileSync(join(f.repo, "dirty.txt"), "x");
-  const error = loop(f.repo, ["开工", f.batch, "--json"]);
-  assert.notEqual(error.status, 0);
-  const failure = jsonOf(error);
-  assert.equal(failure.ok, false);
-  assert.match(String(failure.error), /运行版有未提交改动/);
+  const dirtyRuntime = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.equal(dirtyRuntime.status, 0, `${dirtyRuntime.stdout}\n${dirtyRuntime.stderr}`);
+  assert.deepEqual(jsonOf(dirtyRuntime).uncommitted, ["dirty.txt"]);
+  assert.equal(readFileSync(join(f.repo, "dirty.txt"), "utf8"), "x");
 });
 
 test("A5 启动入口检查权限自动执行：失败退出、修好后通过、指纹不变时跳过且不改配置", () => {
