@@ -1,6 +1,6 @@
 /** 自动验收：纯函数（取标准、解析、判定、消息）与一轮验收流程（真起被测系统）；产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,18 +10,22 @@ import test from "node:test";
 import {
   ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, buildCorrectionInput, classifySystemExit,
   authorizationHint, authorizationStatus, criteriaFromUser, extractCriteria, findObjections, grantsFromUser, isAuthorizationCriterion,
-  isManualCriterion, judgeAcceptance, lastEvidenceAt, mergeAcceptanceReports, parseAcceptanceReport, typedByUser,
+  isManualCriterion, judgeAcceptance, lastEvidenceAt, mergeAcceptanceReports, parseAcceptanceReport, typedByUser, evidenceExecution,
   parseCriteriaDraft, renderAcceptanceForReview, renderAcceptanceLines, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT,
   type AcceptanceRecord, type Criteria,
 } from "../acceptance-core.ts";
-import { ACCEPTANCE_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
+import { ACCEPTANCE_EVENTS_PATH, ACCEPTANCE_PROMPT_PATH, RECOVERY_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
 import { checkRoundBudget, DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
 import { blockerHint } from "../onboarding.ts";
 import { createChildExec } from "../hosts/hook.ts";
-import { readProcs } from "../procs.ts";
+import { processStartTime, readProcs, reapProcs } from "../procs.ts";
+import { recordToolActivity } from "../acceptance-events.ts";
+import { renderSummary } from "../core.ts";
 
 const TESTER = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
 const DRAFTER = fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url));
+const STALLED_TESTER = fileURLToPath(new URL("./fake-stalled-tester.mjs", import.meta.url));
+const PARALLEL_TESTER = fileURLToPath(new URL("./fake-parallel-tester.mjs", import.meta.url));
 
 test("A1 取「## 验收标准」：编号、项目符号、续行，遇到下一个二级标题停止", () => {
   const prompt = [
@@ -159,6 +163,9 @@ test("A6 acceptance 配置：默认值、路径解析、非法字段、预算", 
   const config = parseAcceptanceConfig({ start: "npm start", logs: ["logs/app.log"], guide: "docs/use.md" }, "/p", {})!;
   assert.equal(config.model, DEFAULT_ACCEPTANCE_MODEL);
   assert.equal(config.timeoutMin, 20);
+  assert.equal(config.idleTimeoutSec, 300);
+  assert.equal(parseAcceptanceConfig({ idleTimeoutSec: 12 }, "/p")!.idleTimeoutSec, 12);
+  for (const idleTimeoutSec of [0, -1, 1.5, "300", null]) assert.throws(() => parseAcceptanceConfig({ idleTimeoutSec }, "/p"), /idleTimeoutSec/);
   assert.deepEqual(config.logs, ["/p/logs/app.log"]);
   assert.equal(config.guide, "/p/docs/use.md");
   assert.ok(config.errorPatterns.includes("ERROR"));
@@ -553,7 +560,10 @@ test("A21 验收方关掉后用 setsid 重启服务占着端口：收尾时清�
     assert.equal(stage.kind, "judged");
     if (stage.kind !== "judged") return;
     assert.equal(stage.record.blocker, "系统被关掉");
-    assert.match((stage.record.cleanup ?? []).join("\n"), /验收期间起的进程 pid \d+（.*），不是程序启动的被测系统，已发出关闭请求[\s\S]*端口 \d+ 已释放/);
+    const restarted = Number(readFileSync(join(stage.record.runDir, "restarted.pid"), "utf8"));
+    const state = spawnSync("ps", ["-p", String(restarted), "-o", "stat="], { encoding: "utf8" });
+    assert.ok(state.status !== 0 || state.stdout.trim().startsWith("Z"), "独立重启进程已被执行器提前清理，不能只检查端口");
+    assert.match((stage.record.cleanup ?? []).join("\n"), /验收方调用及工具子进程已按归属确认停止（含独立进程组）/);
     assert.equal(await portOpen(h.port), false, "逃出进程组的重启进程也被清掉");
   } finally { h.close(); }
 });
@@ -844,7 +854,7 @@ test("A32 中断保留逐条显式结果，未完成条目不冒充通过；新�
     assert.equal(h.calls().length, 1);
     assert.ok(existsSync(join(outcome.record.runDir, "checkpoints", readFileSync(join(outcome.record.runDir, "call-id"), "utf8"), "A1.json")));
     const next = h.deps(); next.config = { ...next.config, testerCmd: "" };
-    next.exec = async () => ({ stdout: "bad report", stderr: "", code: 0, killed: false });
+    next.exec = async () => ({ stdout: "bad report", stderr: "", code: 0, killed: false, processesReleased: true });
     const retried = await runAcceptanceStage(next);
     assert.equal(retried.kind, "judged");
     if (retried.kind === "judged") {
@@ -942,4 +952,479 @@ test("项目方法三个环境变量：启动、重置、验收命令都拿到�
     rmSync(testerLog, { force: true });
     h.close();
   }
+});
+
+// 本任务 A1–A4：用秒级空闲时限模拟真实断线，不等待分钟级整轮预算。
+function acceptanceSummary(record: AcceptanceRecord): string {
+  return renderSummary({ cwd: "/work", devSessionId: "dev", reviewerSessionId: "rev", status: record.verdict === "无法验收" ? "暂停" : "完成",
+    pauseReason: record.reason, repairs: 0, gitStatusShort: "", rounds: [{ round: 1, startedAt: "", durationMs: record.durationMs,
+      conclusion: "评审通过", mustFix: [], mustFixRaw: "无", minor: [], questions: [], recheck: [], acceptance: record }] });
+}
+
+test("断线 A1/A2/A4：全部/部分证据后挂住，及时结束、只读补判、总结逐条给命令及脚本", async (t) => {
+  for (const mode of ["stall-all", "stall-partial"]) await t.test(mode, async () => {
+    const h = await harness({ idleTimeoutSec: 1, reset: 'echo reset >> "$AUTOREVIEW_RUN_DIR/reset-count"' },
+      { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: mode });
+    try {
+      const start = Date.now();
+      const stage = await runAcceptanceStage(h.deps());
+      assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+      const { record } = stage;
+      assert.ok(Date.now() - start < 5000, "整轮用时远小于 5 分钟预算");
+      const lastAction = Number(readFileSync(join(record.runDir, "last-action"), "utf8"));
+      assert.ok(Date.now() - lastAction < 3000, "末次动作后按 1 秒空闲阈值结束，包含轮询和清理开销");
+      assert.equal(record.recovery?.attempted, true);
+      assert.equal(record.escalated, undefined, "补报告不是从头重验");
+      assert.equal(record.items[0].verdict, "通过");
+      assert.equal(record.items[1].verdict, mode === "stall-all" ? "通过" : "无法验证");
+      assert.equal(record.verdict, mode === "stall-all" ? "通过" : "无法验收");
+      if (mode === "stall-partial") {
+        assert.equal(record.blocker, "验收方模型断线");
+        assert.match(record.items[1].detail, /原因：验收方模型断线；未留下该条的有效实测证据/);
+        assert.match(blockerHint(record, h.work, h.config), /不是被测系统超时或崩溃/);
+      }
+      assert.equal(h.calls().length, 2);
+      assert.match(h.calls()[1], /recovery\.md\tautoreview-acc-report-/);
+      assert.notEqual(h.calls()[0].split("\t")[2], h.calls()[1].split("\t")[2]);
+      assert.equal(readFileSync(join(record.runDir, "reset-count"), "utf8").trim(), "reset", "补报告不 reset");
+      const summary = acceptanceSummary(record);
+      for (const item of record.items.filter((item) => item.verdict === "通过")) {
+        assert.deepEqual(item.execution?.scripts, [join(record.runDir, "checks", `check-${item.id}.mjs`)]);
+        assert.match(summary, new RegExp(`实际命令：\\$ .*check-${item.id}\\.mjs`));
+        const evidence = readFileSync(join(record.runDir, "evidence", `${item.id}.txt`), "utf8");
+        assert.equal((evidence.match(/^=== /gm) ?? []).length, 1, "没有重新实测");
+      }
+      assert.doesNotMatch(summary, /No project session found/);
+      assert.match(summary, /未重新实测/);
+      assert.deepEqual(readProcs(h.procsFile), [], "验收方及子进程已按归属清理");
+      assert.deepEqual(JSON.parse(readFileSync(join(record.runDir, "result.json"), "utf8")), record);
+    } finally { h.close(); }
+  });
+});
+
+test("断线：无证据不空跑强模型，补判胡报/摘录不符不能通过，补报告再挂住也有界", async (t) => {
+  for (const [mode, recoveryMode] of [["stall-empty", ""], ["stall-partial", "invent"], ["stall-all", "bad-excerpt"], ["stall-all", "hang"]]) {
+    await t.test(`${mode}/${recoveryMode}`, async () => {
+      const h = await harness({ idleTimeoutSec: 1 }, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: mode, FAKE_RECOVERY_MODE: recoveryMode });
+      try {
+        const start = Date.now(), stage = await runAcceptanceStage(h.deps());
+        assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+        assert.equal(stage.record.verdict, "无法验收");
+        assert.ok(Date.now() - start < 6000);
+        if (recoveryMode === "invent") {
+          assert.equal(stage.record.items[0].verdict, "通过");
+          assert.equal(stage.record.items[1].verdict, "无法验证", "不能使用补报告期间新写的证据");
+        } else assert.ok(stage.record.items.every((item) => item.verdict === "无法验证"));
+        assert.equal(h.calls().length, mode === "stall-empty" ? 1 : 2);
+        assert.ok(stage.record.items.filter((item) => item.verdict === "无法验证").every((item) => item.detail.trim().length > 15));
+        assert.deepEqual(readProcs(h.procsFile), []);
+      } finally { h.close(); }
+    });
+  }
+});
+
+test("断线：剩余预算不足时不补报告，有效检查点照常按证据判定，其余写明断线和预算原因", async () => {
+  const h = await harness({ idleTimeoutSec: 3 }, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: "stall-checkpoint" });
+  try {
+    const runDir = join(h.root, "acc", "r1");
+    const stage = await runAcceptanceStage(h.deps({ now: () => Date.now() + (existsSync(join(runDir, "last-action")) ? 270_000 : 0) }));
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.items[0].verdict, "通过");
+    assert.equal(stage.record.items[1].verdict, "无法验证");
+    assert.match(stage.record.items[1].detail, /验收方模型断线.*剩余验收预算不足/);
+    assert.equal(stage.record.recovery?.attempted, false);
+    assert.equal(h.calls().length, 1);
+  } finally { h.close(); }
+});
+
+test("断线：模型退出也能补判，已有证据显示产品失败时仍不通过", async () => {
+  const h = await harness({}, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: "disconnect-all", FAKE_ACC_FAIL: "A2" });
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.deepEqual(stage.record.items.map((item) => item.verdict), ["通过", "不通过"]);
+    assert.equal(stage.record.verdict, "不通过");
+    assert.equal(h.calls().length, 2);
+    assert.doesNotMatch(acceptanceSummary(stage.record), /No project session found/);
+  } finally { h.close(); }
+});
+
+test("断线：补报告明确使用 strongModel、独立会话、仅 read，不给实测工具", async () => {
+  const h = await harness({ strongModel: "provider/strong" });
+  try {
+    const calls: string[][] = [];
+    const externalScript = join(h.root, "outside-step.py");
+    let time = Date.now();
+    const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, deadline: time + 120_000, now: () => time, exec: async (_command, args, options) => {
+      calls.push(args);
+      assert.ok(args.includes("--session-dir"));
+      assert.ok(args.includes(ACCEPTANCE_EVENTS_PATH), "普通实测和只读补判都要订阅即时工具生命周期");
+      if (calls.length === 1) {
+        writeFileSync(externalScript, "print('观察到了 A1')");
+        const sessionDir = args[args.indexOf("--session-dir") + 1];
+        writeFileSync(join(sessionDir, "session.jsonl"), [
+          JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "write-1", name: "write", arguments: { path: externalScript } }] } }),
+          JSON.stringify({ type: "message", message: { role: "toolResult", toolCallId: "write-1", toolName: "write", isError: false } }),
+        ].join("\n"));
+        for (const { id } of criteriaItems) writeFileSync(join(options.cwd, "evidence", `${id}.txt`), block(id, `观察到了 ${id}`).replace("$ todo", `$ sh -c 'python3 ${externalScript}'`));
+        time += 10_000;
+        return { stdout: "", stderr: "Connection error", code: 1, killed: false, processesReleased: true };
+      }
+      assert.equal(options.timeout, 110_000, "补判只能使用本轮剩余预算");
+      assert.equal(args[args.indexOf("--model") + 1], "provider/strong");
+      assert.equal(args[args.indexOf("--tools") + 1], "read");
+      assert.ok(args.includes("--no-mcp"));
+      assert.ok(args.includes(RECOVERY_PROMPT_PATH));
+      assert.match(args[args.indexOf("--session-id") + 1], /acc-report/);
+      return { stdout: "## 逐条结果\nA1：通过\n- 证据摘录：观察到了 A1\nA2：通过\n- 证据摘录：观察到了 A2", stderr: "", code: 0, killed: false, processesReleased: true };
+    } }));
+    assert.equal(stage.kind, "judged");
+    if (stage.kind === "judged") {
+      assert.equal(stage.record.verdict, "通过");
+      assert.deepEqual(stage.record.items[0].execution?.scripts, [externalScript], "临时目录外的自写脚本也从本轮成功 write 记录关联，不能漏报");
+    }
+    assert.equal(calls.length, 2);
+    const parsed = parseAcceptanceReport(readFileSync(RECOVERY_PROMPT_PATH, "utf8"));
+    assert.ok(parsed.ok); if (parsed.ok) assert.deepEqual(parsed.report.items.map((item) => item.verdict), ["通过", "不通过", "无法验证"]);
+  } finally { h.close(); }
+});
+
+test("空闲检测：输出、会话记录、证据三种活动分别刷新时限；外部取消不触发补报告", async (t) => {
+  for (const source of ["output", "session", "evidence", "cancel"]) await t.test(source, async () => {
+    const h = await harness({ idleTimeoutSec: 1 });
+    const abort = new AbortController();
+    try {
+      let calls = 0;
+      const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, signal: abort.signal, exec: async (_command, args, options) => {
+        calls += 1;
+        assert.equal(calls, 1, "活跃调用不应被误判挂住，取消也不补判");
+        const sessionDir = args[args.indexOf("--session-dir") + 1];
+        const pulse = (): void => {
+          if (source === "output") options.onOutput?.("tool activity\n");
+          if (source === "session") writeFileSync(join(sessionDir, "session.jsonl"), String(Date.now()));
+          if (source === "evidence") writeFileSync(join(options.cwd, "evidence", "A1.txt"), block("A1", String(Date.now())));
+        };
+        const timer = setInterval(pulse, 200);
+        try {
+          if (source === "cancel") {
+            abort.abort();
+            assert.equal(options.signal?.aborted, true);
+            return { stdout: "", stderr: "", code: 137, killed: true, processesReleased: true };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1800));
+          assert.equal(options.signal?.aborted, false);
+          for (const { id } of criteriaItems) writeFileSync(join(options.cwd, "evidence", `${id}.txt`), block(id, "已完成"));
+          return { stdout: "## 逐条结果\nA1：通过\n- 证据摘录：已完成\nA2：通过\n- 证据摘录：已完成", stderr: "", code: 0, killed: false, processesReleased: true };
+        } finally { clearInterval(timer); }
+      } }));
+      assert.equal(stage.kind, "judged");
+      if (stage.kind === "judged") assert.equal(stage.record.recovery, undefined);
+      assert.equal(calls, 1);
+    } finally { h.close(); }
+  });
+});
+
+test("断线 A3：被测命令真超时仍按实测失败判定，系统未就绪仍是 G1 不通过", async () => {
+  const h = await harness({}, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: "system-timeout" });
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "不通过");
+    assert.ok(stage.record.items.every((item) => item.verdict === "不通过"));
+    assert.equal(stage.record.recovery, undefined);
+    assert.equal(h.calls().length, 1);
+    const notReady = await runAcceptanceStage(h.deps({ config: { ...h.config, start: "sleep 30", readyLog: "never ready", readyTimeoutSec: 1 } }));
+    assert.equal(notReady.kind, "judged"); if (notReady.kind !== "judged") return;
+    assert.equal(notReady.record.items[0].id, "G1");
+    assert.equal(notReady.record.items[0].verdict, "不通过");
+    assert.match(notReady.record.items[0].detail, /秒内没有就绪/);
+    assert.equal(h.calls().length, 1, "系统超时不启动模型补判");
+  } finally { h.close(); }
+});
+
+test("返修1：执行器 reject 取消而未提供释放证明时暂停，不得进入补判", async () => {
+  const h = await harness({ idleTimeoutSec: 1 });
+  try {
+    let calls = 0;
+    const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, exec: async (_command, _args, options) => {
+      calls += 1;
+      assert.equal(calls, 1, "无释放证明时不得调补报告");
+      for (const { id } of criteriaItems) writeFileSync(join(options.cwd, "evidence", `${id}.txt`), block(id, "已完成"));
+      return new Promise((_resolve, reject) => options.signal?.addEventListener("abort", () => reject(new Error("AbortError")), { once: true }));
+    } }));
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(calls, 1);
+    assert.ok(stage.record.items.every((item) => item.verdict === "无法验证"));
+    assert.equal(stage.record.recovery, undefined);
+    assert.equal(stage.record.verdict, "无法验收");
+    assert.equal(stage.record.failureKind, "environment");
+    assert.match(stage.record.reason!, /子进程释放未确认/);
+  } finally { h.close(); }
+});
+
+test("返修1：全部结果和证据通过，但执行器没有释放证明时仍须暂停", async () => {
+  const h = await harness({});
+  try {
+    let calls = 0;
+    const stage = await runAcceptanceStage(h.deps({ exec: async (_command, _args, options) => {
+      calls += 1;
+      for (const { id } of criteriaItems) writeFileSync(join(options.cwd, "evidence", `${id}.txt`), block(id, "已完成"));
+      return { stdout: "## 逐条结果\nA1：通过\n- 证据摘录：已完成\nA2：通过\n- 证据摘录：已完成", stderr: "", code: 0, killed: false };
+    } }));
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.ok(stage.record.items.every((item) => item.verdict === "通过"));
+    assert.equal(stage.record.verdict, "无法验收");
+    assert.match(stage.record.reason!, /子进程释放未确认/);
+    assert.equal(calls, 1);
+    assert.equal(stage.record.recovery, undefined);
+  } finally { h.close(); }
+});
+
+test("返修1：空闲中止后独立进程组的工具子进程必须真实停止，不能仅看登记为空", async () => {
+  const h = await harness({ idleTimeoutSec: 2 }, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: "stall-detached" });
+  let detached: { pid: number; token: string } | undefined;
+  const running = (pid: number): boolean => {
+    const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+    return result.status === 0 && !result.stdout.trim().startsWith("Z");
+  };
+  try {
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    detached = JSON.parse(readFileSync(join(stage.record.runDir, "detached.json"), "utf8"));
+    assert.equal(stage.record.verdict, "通过");
+    assert.equal(running(detached!.pid), false, "原 Pi 进程组外的工具仍在运行时不得发布完成");
+    const writes = join(stage.record.runDir, "detached-writes");
+    const before = readFileSync(writes, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(readFileSync(writes, "utf8"), before, "完成之后脚本不能继续写数据");
+    assert.deepEqual(readProcs(h.procsFile), []);
+  } finally {
+    if (detached && running(detached.pid)) {
+      const env = spawnSync("ps", ["eww", "-p", String(detached.pid), "-o", "command="], { encoding: "utf8" });
+      if (env.stdout.split(/\s+/).includes(`AUTOREVIEW_PROCESS_OWNER=${detached.token}`)) process.kill(detached.pid, "SIGKILL");
+    }
+    h.close();
+  }
+});
+
+test("返修1：跨组进程扫描失败时保留登记并暂停，已有全部通过检查点也不能补判放行", async () => {
+  const h = await harness({ idleTimeoutSec: 2 }, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: "stall-detached", FAKE_FAIL_PROCESS_SCAN: "1" });
+  const path = process.env.PATH;
+  try {
+    const deps = h.deps(), execute = deps.exec;
+    deps.exec = (command, args, options) => execute(command, args, { ...options, onOutput: (text) => {
+      options.onOutput?.(text);
+      if (text.includes("PROCESS_SCAN_READY")) process.env.PATH = join(h.root, "no-ps-here");
+    } });
+    const stage = await runAcceptanceStage(deps);
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.ok(stage.record.items.every((item) => item.verdict === "通过"));
+    assert.equal(stage.record.verdict, "无法验收");
+    assert.equal(stage.record.failureKind, "environment");
+    assert.match(stage.record.reason!, /资源释放|归属/);
+    assert.ok(readProcs(h.procsFile).length > 0, "不能因原组消失就注销，须留待按身份补偿");
+    assert.equal(h.calls().length, 1, "清理失败不能转入强模型补判");
+  } finally {
+    if (path === undefined) delete process.env.PATH; else process.env.PATH = path;
+    reapProcs(h.procsFile, { ownerPid: process.pid });
+    assert.deepEqual(readProcs(h.procsFile), [], "恢复查询后按保留的身份清理独立子进程");
+    h.close();
+  }
+});
+
+test("返修2：1秒空闲阈值不能截断等待3秒超时的实测命令", async () => {
+  const h = await harness({ idleTimeoutSec: 1 }, { AUTOREVIEW_ACCEPTANCE_CMD: STALLED_TESTER, FAKE_ACC_MODE: "system-timeout", FAKE_COMMAND_TIMEOUT: "3" });
+  try {
+    const deps = h.deps(), execute = deps.exec;
+    deps.exec = async (command, args, options) => {
+      // 按 Pi 的真实顺序：先持久化 bash toolCall，再启动执行后端。Node 冷启动本身也是这次工具执行的一部分。
+      const session = join(options.cwd, "tester-sessions", "tester", "session.jsonl");
+      writeFileSync(session, JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant", content: [
+        { type: "toolCall", id: "real-ev-commands", name: "bash", arguments: { command: "run two ./ev --timeout 3 commands", timeout: 30 } },
+      ] } }) + "\n");
+      try { return await execute(command, args, options); }
+      finally { writeFileSync(session, JSON.stringify({ type: "message", message: { role: "toolResult", toolCallId: "real-ev-commands" } }) + "\n", { flag: "a" }); }
+    };
+    const stage = await runAcceptanceStage(deps);
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "不通过", JSON.stringify(stage.record));
+    assert.ok(stage.record.items.every((item) => item.verdict === "不通过" && /ETIMEDOUT|被终止/.test(item.detail)));
+    assert.equal(stage.record.recovery, undefined, "被测命令超时不是模型断线");
+    assert.equal(h.calls().length, 1, "不启动补判，也不重做实测");
+    assert.ok(stage.record.durationMs >= 6000, "两条三秒超时命令均走完自己的超时与证据输出");
+  } finally { h.close(); }
+});
+
+test("返修2：直接 bash 工具等待不算模型空闲；工具结束后真正模型挂住仍及时补判", async () => {
+  const h = await harness({ idleTimeoutSec: 1 });
+  try {
+    let calls = 0, finishedAt = 0;
+    const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, exec: async (_command, args, options) => {
+      calls += 1;
+      if (calls === 1) {
+        const session = join(args[args.indexOf("--session-dir") + 1], "session.jsonl");
+        writeFileSync(session, JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant", content: [
+          { type: "toolCall", id: "bash-in-flight", name: "bash", arguments: { command: "sleep 2", timeout: 3 } },
+        ] } }) + "\n");
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+        assert.equal(options.signal?.aborted, false);
+        writeFileSync(session, JSON.stringify({ type: "message", message: { role: "toolResult", toolCallId: "bash-in-flight" } }) + "\n", { flag: "a" });
+        for (const { id } of criteriaItems) writeFileSync(join(options.cwd, "evidence", `${id}.txt`), block(id, "已完成"));
+        finishedAt = Date.now();
+        return new Promise((resolve) => options.signal?.addEventListener("abort", () => resolve({ stdout: "", stderr: "", code: 137, killed: true, processesReleased: true }), { once: true }));
+      }
+      assert.ok(Date.now() - finishedAt < 2500, "实测完成之后，模型空闲时限重新生效");
+      return { stdout: "## 逐条结果\nA1：通过\n- 证据摘录：已完成\nA2：通过\n- 证据摘录：已完成", stderr: "", code: 0, killed: false, processesReleased: true };
+    } }));
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "通过");
+    assert.equal(calls, 2);
+    assert.equal(stage.record.recovery?.attempted, true);
+  } finally { h.close(); }
+});
+
+test("返修2：等待实测时整轮预算仍生效，中止不归为模型断线且不补判", async () => {
+  const h = await harness({ idleTimeoutSec: 1 });
+  try {
+    let now = Date.now(), calls = 0;
+    const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, now: () => now, deadline: now + 60_000,
+      exec: async (_command, args, options) => {
+        calls += 1;
+        assert.equal(options.timeout, 60_000, "执行器拿到的仍是整轮剩余预算，不因等待动作扩充");
+        const session = join(args[args.indexOf("--session-dir") + 1], "session.jsonl");
+        writeFileSync(session, JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant", content: [
+          { type: "toolCall", id: "waiting-command", name: "bash", arguments: { command: "long command", timeout: 30 } },
+        ] } }) + "\n");
+        await new Promise((resolve) => setTimeout(resolve, 1400));
+        assert.equal(options.signal?.aborted, false, "实测在执行时不能先被 1 秒模型空闲阈值中止");
+        // 用虚拟整轮时钟模拟执行器预算耗尽；不依赖 Node 替身在 CPU 竞争时能否在 1 秒内启动。
+        now += 60_000;
+        return { stdout: "", stderr: "", code: 137, killed: true, processesReleased: true };
+      } }));
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "无法验收");
+    assert.match(stage.record.reason!, /被测命令或验收工具仍在执行.*整轮预算/);
+    assert.equal(stage.record.recovery, undefined);
+    assert.equal(stage.record.durationMs, 60_000);
+    assert.equal(calls, 1);
+    assert.deepEqual(readProcs(h.procsFile), []);
+  } finally { h.close(); }
+});
+
+test("第2次返修：同批快慢工具并行，快工具5秒上限不截断20秒慢工具，延迟落盘后仍完整留证通过", async () => {
+  const h = await harness({ idleTimeoutSec: 1 }, { AUTOREVIEW_ACCEPTANCE_CMD: PARALLEL_TESTER });
+  try {
+    h.state.requirement = "并行验收\n## 验收标准\nA1. 操作：执行快命令\n   预期：输出 A1_OK\nA2. 操作：执行20秒慢命令，时限30秒\n   预期：输出 A2_OK";
+    const stage = await runAcceptanceStage(h.deps());
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "通过", JSON.stringify(stage.record));
+    assert.ok(stage.record.items.every((item) => item.verdict === "通过"));
+    assert.equal(stage.record.recovery, undefined, "并行等待不是模型断线，不得补判或重跑");
+    assert.equal(h.calls().length, 1);
+    assert.ok(stage.record.durationMs >= 20_000 && stage.record.durationMs < 60_000);
+    const ends: string[][] = readFileSync(join(stage.record.runDir, "ends.log"), "utf8").trim().split("\n").map((line: string) => line.split("\t"));
+    assert.deepEqual(ends.map(([id]) => id), ["A1", "A2"]);
+    assert.ok(Number(ends[1][1]) - Number(ends[0][1]) >= 15_000, "快工具已结束，但其 toolResult 仍须等待慢工具结束才能落盘");
+    const messages = readFileSync(join(stage.record.runDir, "tester-sessions", "tester", "parallel.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const fastResult = messages.find((entry) => entry.message?.role === "toolResult" && entry.message.toolCallId === "A1");
+    assert.ok(Date.parse(fastResult.timestamp) >= Number(ends[1][1]), "确实覆盖快工具结果延迟到整批结束才持久化的顺序");
+    for (const id of ["A1", "A2"]) assert.match(readFileSync(join(stage.record.runDir, "evidence", `${id}.txt`), "utf8"), new RegExp(`${id}_OK`));
+    assert.deepEqual(readProcs(h.procsFile), []);
+  } finally { h.close(); }
+});
+
+test("第3次返修：工具刚结束、下一次轮询前模型断线，须按最新生命周期补判", async (t) => {
+  for (const notifyStop of [false, true]) await t.test(notifyStop ? "执行器通知终止边界" : "结果返回边界兜底", async () => {
+    const h = await harness({ idleTimeoutSec: 1 });
+    try {
+      let calls = 0;
+      const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, exec: async (_command, _args, options) => {
+        calls += 1;
+        if (calls === 1) {
+          const call = readFileSync(join(options.cwd, "call-id"), "utf8");
+          recordToolActivity(options.cwd, call, { type: "tool_execution_start", toolCallId: "just-finished", toolName: "bash" });
+          // 空闲阈值为1秒，轮询间隔为250ms：先让一次轮询观察到在途工具。
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          assert.equal(options.signal?.aborted, false);
+          for (const { id } of criteriaItems) writeFileSync(join(options.cwd, "evidence", `${id}.txt`), block(id, "已完成"));
+          recordToolActivity(options.cwd, call, { type: "tool_execution_end", toolCallId: "just-finished", toolName: "bash" });
+          if (notifyStop) options.onBeforeStop?.();
+          // 同一个微任务中立即返回，不给下一次轮询修正旧缓存的机会。
+          return { stdout: "", stderr: "Connection error", code: 1, killed: false, processesReleased: true };
+        }
+        assert.equal(calls, 2, "只补一次报告，不重新实测");
+        assert.ok(_args.includes(RECOVERY_PROMPT_PATH));
+        return { stdout: "## 逐条结果\nA1：通过\n- 证据摘录：已完成\nA2：通过\n- 证据摘录：已完成", stderr: "", code: 0, killed: false, processesReleased: true };
+      } }));
+      assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+      assert.equal(stage.record.verdict, "通过", JSON.stringify(stage.record));
+      assert.equal(stage.record.recovery?.attempted, true);
+      assert.equal(calls, 2);
+      assert.doesNotMatch(acceptanceSummary(stage.record), /不是验收方模型断线|被测命令或验收工具仍在执行/);
+      for (const id of ["A1", "A2"]) assert.equal((readFileSync(join(stage.record.runDir, "evidence", `${id}.txt`), "utf8").match(/^=== /gm) ?? []).length, 1);
+    } finally { h.close(); }
+  });
+});
+
+test("第3次返修：预算中止前工具确实在执行，清理后进程和标记消失也不能改判为模型断线", async () => {
+  const h = await harness({ idleTimeoutSec: 1 });
+  let tool: ReturnType<typeof spawn> | undefined;
+  try {
+    let now = Date.now(), calls = 0;
+    const stage = await runAcceptanceStage(h.deps({ config: { ...h.config, testerCmd: "" }, now: () => now, deadline: now + 60_000,
+      exec: async (_command, _args, options) => {
+        calls += 1;
+        assert.equal(calls, 1, "预算中止不得补判");
+        tool = spawn(process.execPath, ["-e", "setTimeout(()=>{},30000)"], { detached: true, stdio: "ignore" });
+        const call = readFileSync(join(options.cwd, "call-id"), "utf8"), dir = join(options.cwd, "active-actions", call);
+        mkdirSync(dir, { recursive: true });
+        const action = join(dir, "running.json");
+        writeFileSync(action, JSON.stringify({ call, pid: tool.pid, started: processStartTime(tool.pid!) }));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        now += 60_000;
+        options.onBeforeStop?.();
+        const closed = new Promise<void>((resolve) => tool!.once("close", () => resolve())); tool.kill("SIGKILL"); await closed;
+        rmSync(action);
+        // 模拟执行器可能重复通知：第二次已处在清理之后，不能覆盖第一次的中止现场。
+        options.onBeforeStop?.();
+        return { stdout: "", stderr: "", code: 137, killed: true, processesReleased: true };
+      } }));
+    assert.equal(stage.kind, "judged"); if (stage.kind !== "judged") return;
+    assert.equal(stage.record.verdict, "无法验收");
+    assert.match(stage.record.reason!, /被测命令或验收工具仍在执行.*整轮预算/);
+    assert.equal(stage.record.recovery, undefined);
+    assert.equal(calls, 1);
+  } finally {
+    if (tool?.exitCode === null && !tool.signalCode) {
+      const closed = new Promise<void>((resolve) => tool!.once("close", () => resolve())); tool.kill("SIGKILL"); await closed;
+    }
+    h.close();
+  }
+});
+
+test("共享执行器实时上报 stdout/stderr 活动，不等到进程结束", async () => {
+  const root = mkdtempSync(join(tmpdir(), "autoreview-output-"));
+  try {
+    const chunks: string[] = [];
+    const result = await createChildExec()(process.execPath, ["-e", 'console.log("stdout pulse"); console.error("stderr pulse"); setTimeout(() => {}, 50)'],
+      { cwd: root, timeout: 5000, onOutput: (chunk) => chunks.push(chunk) });
+    assert.equal(result.code, 0);
+    assert.match(chunks.join(""), /stdout pulse/);
+    assert.match(chunks.join(""), /stderr pulse/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("无法验证不能空原因或仅写漏报；命令只取块头，最多三条且截长，脚本保留完整路径", () => {
+  const missingReasons: Record<string, string>[] = [{}, { "原因": "   " }, { "原因": "验收方没有报告这一条" }];
+  for (const fields of missingReasons) {
+    const record = judgeAcceptance({ criteria: criteriaItems.slice(0, 1), report: { conclusion: "", extra: [], items: [{ id: "A1", verdict: "无法验证", fields }] },
+      evidence: () => undefined, logErrors: [], hasService: false, runDir: "/run" });
+    assert.match(record.items[0].detail, /未说明无法执行的步骤或具体阻塞条件/);
+    assert.equal(record.items[0].cause, "验收方");
+  }
+  const content = Array.from({ length: 4 }, (_, i) => `=== A1 #${i + 1} 2026-10-27T00:00:00Z\n$ node \"checks/带 空格.mjs\" ${"x".repeat(300)}\n目录：/run\n--- 标准输出\n$ 不是实际命令\n`).join("");
+  const execution = evidenceExecution(content, "/run", ["/run/checks/带 空格.mjs"]);
+  assert.equal(execution.commands.length, 3);
+  assert.ok(execution.commands.every((command) => command.length === 240 && command.endsWith("…")));
+  assert.deepEqual(execution.scripts, ["/run/checks/带 空格.mjs"]);
 });

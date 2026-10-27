@@ -14,9 +14,11 @@ import autoreview from "../autoreview.ts";
 import { CONVENTION, conventionText } from "../core.ts";
 import { projectRootOf } from "../ledger.ts";
 import { contextDir, loadContext } from "../project-context.ts";
+import { createChildExec } from "../hosts/hook.ts";
+import type { Exec, ExecResult } from "../git.ts";
 
-type Result = { stdout: string; stderr: string; code: number; killed: boolean };
-type Call = { command: string; args: string[]; options: { cwd?: string; signal?: AbortSignal; timeout?: number; role?: string } };
+type Result = ExecResult;
+type Call = { command: string; args: string[]; options: Partial<Parameters<Exec>[2]> };
 type State = {
   enabled: boolean; phase: string; baseline?: string; baselineFingerprint?: string;
   lastSnapshot?: string; lastFingerprint?: string; unresolvedMustFix?: string;
@@ -109,14 +111,11 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
       if (basename(command) === "osascript") return notifier(call);
       if (command === "/fake-reviewer") { inputs.push(readFileSync(args[1], "utf8")); return reviewer(call); }
       if (command === "/bin/sh") { accepts.push(call); return acceptor(call); }
-      if (command === "/usr/bin/env") {
-        const res = spawnSync(command, args, { cwd: execOptions.cwd, env: process.env, encoding: "utf8" });
-        return result(res.stdout || "", res.status ?? 1, res.stderr || "", Boolean(res.signal));
-      }
-      if (basename(command).startsWith("fake-")) {
-        // 假验收方 / 假起草方是真脚本：照常执行，验证证据工具和判定的整条链路。
-        const res = spawnSync(command, args, { cwd: execOptions.cwd, env: process.env, encoding: "utf8" });
-        return result(res.stdout || "", res.status ?? 1, res.stderr || "", Boolean(res.signal));
+      if (command === "/usr/bin/env" || basename(command).startsWith("fake-")) {
+        // 真正启动的替身必须复用受管执行器来停止独立工具组并提供释放证明，不能由测试自报已释放。
+        return createChildExec(join(root, "fixture.procs.json"))(command, args, {
+          ...execOptions, cwd: execOptions.cwd ?? workCwd, timeout: execOptions.timeout ?? 30_000,
+        });
       }
       assert.equal(basename(command), "git");
       const plain = args[0] === "-c" ? args.slice(2) : args;
@@ -441,7 +440,7 @@ test("G8 B7 shutdown 取消 exec、存暂停，旧任务不再调用接口；恢
       const call = h.calls.find((item) => item.command === "/fake-reviewer")!;
       assert.ok(call.options.signal instanceof AbortSignal);
       await h.event("session_shutdown", { reason: "reload" });
-      assert.equal(call.options.signal.aborted, true);
+      assert.equal(call.options.signal!.aborted, true);
       assert.equal(h.state().phase, "paused");
       assert.match(h.state().pauseReason!, /评审被中断（会话关闭或重载）/);
       const count = h.apiCalls.length;

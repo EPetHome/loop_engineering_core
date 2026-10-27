@@ -105,6 +105,8 @@ export function blockerHint(record: AcceptanceRecord, workDir: string, acceptanc
       return copyNotice(2, configFile(acceptance), `改好启动命令和端口，${RESUME}`, acceptance.root);
     case "缺工具":
       return copyNotice(3, workDir, RESUME);
+    case "验收方模型断线":
+      return `验收方模型断线或挂住，不是被测系统超时或崩溃；已有证据和补报告结果已保留在 ${record.runDir}。恢复模型连接后${RESUME}，会重新验收`;
     case "验收方":
       return `验收方没按要求留证据或输出格式不对${record.escalated ? "（已换强模型重验，仍然不行）" : ""}，原因见总结；${RESUME}，会重新验收`;
     default:

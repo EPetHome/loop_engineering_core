@@ -2,8 +2,8 @@
  * acceptance.ts — 自动验收一轮的流程，经 review.ts 由 pi 扩展与宿主 Hook 共用。
  *
  * 负责：异议检查（标准异议暂停等用户；方法存疑照常验收）→ 取或起草验收标准（冻结）→ [授权] 条目等你答复 → 查端口、启动被测系统、等就绪、记系统日志
- * → 每次调验收方前按配置重置数据 → 调验收方（证据有问题在同一会话重做 1 次，还不行换强模型重验 1 次）
- * → 关停系统、清理端口上的残留进程、截取日志、扫错误 → 程序逐条判定。
+ * → 首次及强模型重验前按配置重置数据 → 调验收方（证据有问题在同一会话重做 1 次，还不行换强模型重验 1 次）
+ * → 验收方挂住/断线时用强模型只读已有证据补报告 → 关停系统、清理端口上的残留进程、截取日志、扫错误 → 程序逐条判定。
  * 被测系统自成进程组并登记，任何退出路径都会关停；验收途中系统退出就立即停掉验收方，
  * 按退出方式分「被关掉」（不怪开发方）和「崩溃」；判定交给 acceptance-core.ts 的纯函数。
  */
@@ -11,27 +11,32 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { cpSync, lstatSync, readdirSync, appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
-  buildAcceptanceInput, buildCorrectionInput, buildCriteriaDraftInput, classifySystemExit, dataStateNote, extractCriteria,
+  buildAcceptanceInput, buildCorrectionInput, buildCriteriaDraftInput, buildRecoveryInput, classifySystemExit, dataStateNote, extractCriteria, hasEvidence,
   authorizationHint, authorizationStatus, findObjections, mergeAcceptanceReports, forUser, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft,
   scanLogs, type AcceptanceRecord, type Criteria, type Grants, type ParsedAcceptance,
 } from "./acceptance-core.ts";
 import { EXT_DIR, HERMES_BIN, MARKER_FILE, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig } from "./config.ts";
 import { deriveSessionId } from "./core.ts";
+import { createActionObserver } from "./acceptance-activity.ts";
+import { toolEventsPath } from "./acceptance-events.ts";
 import type { Exec, ExecResult } from "./git.ts";
 import { killGroup, reapProcs, registerProc, releaseProc } from "./procs.ts";
-import { classifyFailure, failureLabel } from "./failure.ts";
+import { classifyFailure, classifyTesterFailure, failureLabel, testerDiagnostics } from "./failure.ts";
 import { createRunResource, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
 
 export const ACCEPTANCE_PROMPT_PATH = join(EXT_DIR, "acceptance-prompt.md");
 export const CRITERIA_PROMPT_PATH = join(EXT_DIR, "criteria-prompt.md");
+export const RECOVERY_PROMPT_PATH = join(EXT_DIR, "acceptance-recovery-prompt.md");
+export const ACCEPTANCE_EVENTS_PATH = join(EXT_DIR, "acceptance-events.ts");
 const TOOLS_DIR = join(EXT_DIR, "acceptance-tools");
 /** 系统在验收途中退出后，收尾时盯端口的时长。 */
 const WATCH_PORT_MS = 10_000;
 /** 截取单个日志文件的上限，防止把巨型日志读进内存。 */
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
+const SCRIPT_FILE = /\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|rb|pl|ps1|json)$/i;
 
 /** 验收用到的会话状态；ReviewState 在此基础上扩展。 */
 export interface AcceptanceState {
@@ -414,31 +419,135 @@ function writeTools(runDir: string, workDir: string): void {
   }
 }
 
-/** strong：换强模型（另开会话）重验。 */
-async function callTester(deps: AcceptanceDeps, inputPath: string, timeout: number, strong = false): Promise<ExecResult> {
+/** 只看本次调用的活动文件，不以被测系统的持续日志输出延长验收方空闲时间。 */
+function activityStamp(paths: string[]): string {
+  const entries: string[] = [];
+  const visit = (path: string): void => {
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) return;
+      entries.push(`${path}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`);
+      if (stat.isDirectory()) for (const name of readdirSync(path).sort()) visit(join(path, name));
+    } catch { /* 文件尚未创建或正在替换，下次轮询再看。 */ }
+  };
+  for (const path of paths) visit(path);
+  return entries.join("\n");
+}
+
+/** 用于把实际新建并执行的脚本关联到条目；不扫描依赖、旧代次和程序证据。 */
+function scriptFiles(runDir: string): string[] {
+  const files: string[] = [];
+  const visit = (path: string): void => {
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) return;
+      if (stat.isDirectory()) {
+        for (const name of readdirSync(path)) {
+          if (["evidence", "checkpoints", "tester-sessions", "actions", "node_modules", ".git"].includes(name) || name.startsWith("attempt-")) continue;
+          visit(join(path, name));
+        }
+      } else if (SCRIPT_FILE.test(path)) files.push(path);
+    } catch { /* 验收方可能删除临时脚本，不据此猜路径。 */ }
+  };
+  visit(runDir);
+  // write 工具可能把脚本写到本轮外的临时目录；只从本轮会话的成功写入记录取路径，不扫描用户目录。
+  for (const phase of ["tester", "strong"]) {
+    const dir = join(runDir, "tester-sessions", phase);
+    let names: string[];
+    try { names = readdirSync(dir).filter((name) => name.endsWith(".jsonl")); } catch { continue; }
+    for (const name of names) {
+      const writes = new Map<string, string>();
+      for (const line of (readIfExists(join(dir, name)) ?? "").split("\n")) {
+        try {
+          const entry = JSON.parse(line), message = entry.type === "message" ? entry.message : undefined;
+          if (message?.role === "assistant" && Array.isArray(message.content)) {
+            for (const call of message.content) {
+              const path = call.arguments?.path;
+              if (call.type === "toolCall" && call.name === "write" && typeof call.id === "string" && typeof path === "string") writes.set(call.id, resolve(runDir, path));
+            }
+          } else if (message?.role === "toolResult" && message.toolName === "write" && message.isError === false) {
+            const path = writes.get(message.toolCallId);
+            if (path && SCRIPT_FILE.test(path)) files.push(path);
+          }
+        } catch { /* 忽略未知记录和中断时尚未写完整的一行。 */ }
+      }
+    }
+  }
+  return [...new Set(files)];
+}
+
+type TesterCallResult = ExecResult & { stalled: boolean; actionPending?: boolean };
+
+/** strong 是从头重验；recovery 是独立会话、仅 read 工具、只补报告。两者都使用 strongModel。 */
+async function callTester(deps: AcceptanceDeps, inputPath: string, timeout: number, strong = false, recovery = false): Promise<TesterCallResult> {
   const { config } = deps;
-  const sessionId = deriveSessionId(strong ? "acc-strong" : "acc", deps.devSessionId);
-  const options = { cwd: deps.runDir, timeout, signal: deps.signal, role: "验收方", ...(deps.env ? { env: deps.env } : {}) };
+  const sessionId = deriveSessionId(recovery ? "acc-report" : strong ? "acc-strong" : "acc", deps.devSessionId);
+  const sessionDir = join(deps.runDir, "tester-sessions", recovery ? "report" : strong ? "strong" : "tester");
+  mkdirSync(sessionDir, { recursive: true });
+  const controller = new AbortController();
+  const signal = deps.signal ? AbortSignal.any([deps.signal, controller.signal]) : controller.signal;
+  const idleMs = config.idleTimeoutSec * 1000;
+  const paths = [sessionDir, toolEventsPath(deps.runDir, deps.callId ?? ""), join(deps.runDir, "evidence"), join(deps.runDir, "checkpoints", deps.callId ?? "")];
+  let stamp = activityStamp(paths), lastActivity = Date.now(), stalled = false;
+  let actionAtStop: boolean | undefined;
+  const observeAction = createActionObserver(deps.runDir, sessionDir, deps.callId ?? "", Date.now());
+  const timer = setInterval(() => {
+    if (signal.aborted) return;
+    const action = observeAction();
+    if (action) {
+      lastActivity = Date.now();
+      return;
+    }
+    const current = activityStamp(paths);
+    if (current !== stamp) { stamp = current; lastActivity = Date.now(); }
+    if (Date.now() - lastActivity >= idleMs) {
+      stalled = true;
+      controller.abort();
+    }
+  }, Math.min(1000, Math.max(10, idleMs / 4)));
+  // 归因取终止边界的最新状态：预算/取消先留现场，再由执行器清理；不能用轮询缓存或清理后的进程消失代替。
+  const actionOnReturn = (): boolean => actionAtStop ?? Boolean(observeAction());
+  const options = { cwd: deps.runDir, timeout, signal, role: "验收方", onOutput: () => { lastActivity = Date.now(); },
+    onBeforeStop: () => { if (actionAtStop === undefined) actionAtStop = Boolean(observeAction()); },
+    ...(deps.env ? { env: deps.env } : {}) };
   const execute: Exec = (command, args, opts) => deps.resource
     ? deps.exec("/usr/bin/env", [`AUTOREVIEW_ACCEPTANCE_CALL=${deps.callId ?? ""}`, `AUTOREVIEW_RUN_ID=${deps.resource.id}`, `AUTOREVIEW_TEMP_DIR=${deps.resource.dir}`, `AUTOREVIEW_EVIDENCE_DIR=${deps.resource.evidenceDir}`, `TMPDIR=${deps.resource.evidenceDir}`, command, ...args], opts)
     : deps.exec(command, args, opts);
-  if (config.testerCmd) {
-    return execute(resolveTestCmd(config.testerCmd), [String(deps.round), inputPath, sessionId, deps.runDir], options);
-  }
-  const model = strong ? ["--model", config.strongModel ?? deps.reviewerModel, "--thinking", deps.reviewerThinking]
-    : ["--model", config.model, ...(config.thinking ? ["--thinking", config.thinking] : [])];
-  return execute(PI_BIN, [
-    "--offline", "-p", "--session-id", sessionId, ...model,
-    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
-    "--tools", "read,write,bash,grep,find,ls", "-e", PERMISSION_EXT,
-    "--append-system-prompt", ACCEPTANCE_PROMPT_PATH, `@${inputPath}`,
-  ], options);
+  try {
+    let result: ExecResult;
+    if (config.testerCmd) {
+      result = await execute(resolveTestCmd(config.testerCmd), [String(deps.round), inputPath, sessionId, deps.runDir], options);
+    } else {
+      const model = strong || recovery ? ["--model", config.strongModel ?? deps.reviewerModel, "--thinking", deps.reviewerThinking]
+        : ["--model", config.model, ...(config.thinking ? ["--thinking", config.thinking] : [])];
+      result = await execute(PI_BIN, [
+        "--offline", "-p", "--session-id", sessionId, "--session-dir", sessionDir, ...model,
+        "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-mcp",
+        "--tools", recovery ? "read" : "read,write,bash,grep,find,ls", "-e", PERMISSION_EXT, "-e", ACCEPTANCE_EVENTS_PATH,
+        "--append-system-prompt", recovery ? RECOVERY_PROMPT_PATH : ACCEPTANCE_PROMPT_PATH, `@${inputPath}`,
+      ], options);
+    }
+    if (result.processesReleased !== true) {
+      result = { ...result, code: 75, processesReleased: false, stderr: `${result.stderr}\nAUTOREVIEW_FAILURE=environment 子进程释放未确认，不能补判或发布完成\n` };
+    }
+    // 原始诊断只留运行材料，不把 Pi 的无关启动告警带进暂停原因。
+    writeFileSync(join(deps.runDir, `tester-${deps.callId}.log`), `${result.stdout}\n--- stderr\n${result.stderr}`);
+    return { ...result, stalled, actionPending: actionOnReturn() };
+  } catch (error) {
+    // reject 没有提供进程释放证明；即使已有全部证据，也只能保留结果并暂停，不能擅自补判。
+    return { stdout: "", stderr: `${errorText(error)}\nAUTOREVIEW_FAILURE=environment 子进程释放未确认，执行器取消时未提供释放证明\n`,
+      code: 75, killed: true, stalled, actionPending: actionOnReturn(), processesReleased: false };
+  } finally { clearInterval(timer); }
 }
 
 interface TesterRun {
   report?: ParsedAcceptance;
   error: string;
   escalated: boolean;
+  recovery?: AcceptanceRecord["recovery"];
+  processesReleased?: boolean;
+  /** 断线时冻结已有证据，过期调用或补报告不能凭后来写入的证据补成通过。 */
+  evidence?: Map<string, string | undefined>;
   executionFailure?: { kind: import("./failure.ts").FailureKind; reason: string };
   /** 重置数据失败的说明（环境问题，暂停）。 */
   resetFailure?: string;
@@ -484,10 +593,12 @@ async function runReset(deps: AcceptanceDeps, label: string, cleanup = false): P
 /**
  * 第 1 次按输入实测；输出解析不了、或通过/不通过的证据对不上时，在同一会话里发更正要求重做 1 次；
  * 还是验收方的问题（证据对不上、漏报、没给出报告）就换强模型另开会话从头重验 1 次。共用验收截止时间。
- * 每次调用前按配置重置数据；被测系统一退出就不再继续（再试只是对着空端口白跑）。
+ * 首次和强模型从头重验前按配置重置数据，更正和只读补报告不重置；被测系统一退出就不再继续。
+ * 模型断线/挂住时冻结现有证据，另开一次只读强模型补报告，仍共用本轮截止时间。
  */
 async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: string, systemDown: () => boolean): Promise<TesterRun> {
-  const evidence = (id: string) => readIfExists(join(deps.runDir, "evidence", `${id}.txt`));
+  let savedEvidence: TesterRun["evidence"];
+  const evidence = (id: string) => savedEvidence ? savedEvidence.get(id) : readIfExists(join(deps.runDir, "evidence", `${id}.txt`));
   const hasService = Boolean(deps.config.start);
   const testerFault = (report?: ParsedAcceptance): boolean => !report || judgeAcceptance({
     criteria: criteria.items, report, evidence, logErrors: [], runDir: deps.runDir, hasService,
@@ -495,6 +606,11 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
   let report: ParsedAcceptance | undefined;
   let error = "";
   let executionFailure: TesterRun["executionFailure"];
+  let recovery: TesterRun["recovery"];
+  let processesReleased: boolean | undefined;
+  const noteRelease = (result: ExecResult): void => {
+    if (result.processesReleased !== undefined) processesReleased = processesReleased === false ? false : result.processesReleased;
+  };
   let input = inputPath;
   let escalated = false;
   let attemptId = "", callId = "";
@@ -509,6 +625,39 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
       } catch { return []; }
     });
     return items.length ? { conclusion: "逐条检查点（仍需证据核对）", items, extra: [] } : undefined;
+  };
+  const recover = async (reason: string): Promise<void> => {
+    savedEvidence = new Map(criteria.items.map(({ id }) => [id, evidence(id)]));
+    recovery = { reason, attempted: false };
+    const preview = judgeAcceptance({ criteria: criteria.items, report, evidence, logErrors: [], runDir: deps.runDir, hasService });
+    const ids = criteria.items.filter((item) => !forUser(item) && hasEvidence(evidence(item.id), item.id)
+      && !report?.items.find((entry) => entry.id === item.id)?.conflict
+      && preview.items.find((entry) => entry.id === item.id)?.verdict === "无法验证").map(({ id }) => id);
+    if (!ids.length) { recovery.error = "没有待补判的有效证据；已提交结果仍按证据核对"; return; }
+    const remaining = deps.deadline - deps.now();
+    if (remaining < 60_000) { recovery.error = "剩余验收预算不足 1 分钟，未补写报告；已有报告和检查点照常按证据判定"; return; }
+    if (systemDown() || deps.signal?.aborted) return;
+    const recoveryPath = join(deps.runDir, "recovery.md");
+    writeFileSync(recoveryPath, buildRecoveryInput(criteria, deps.runDir, ids));
+    callId = randomUUID(); writeFileSync(join(deps.runDir, "call-id"), callId);
+    recovery.attempted = true;
+    deps.onProgress?.(`自动验收：验收方模型断线，用强模型只读已有证据补报告（第 ${deps.round} 轮）`);
+    try {
+      const result = await callTester({ ...deps, callId }, recoveryPath, remaining, false, true);
+      noteRelease(result);
+      deps.checkLive?.();
+      if (result.code !== 0 || result.killed || result.stalled) {
+        const failure = classifyTesterFailure(result.code, `${result.stdout}\n${result.stderr}`, result.killed, result.stalled);
+        recovery.error = `补报告未正常结束：${failure.reason}`;
+        if (!failure.disconnected) executionFailure = failure;
+      }
+      const parsed = parseAcceptanceReport(result.stdout);
+      if (parsed.ok) report = mergeAcceptanceReports(report, { ...parsed.report, items: parsed.report.items.filter((item) => ids.includes(item.id)) });
+      else recovery.error ||= `补报告无法解析：${parsed.error}`;
+    } catch (callError) {
+      deps.checkLive?.();
+      recovery.error = `补报告调用失败：${tailText(testerDiagnostics(errorText(callError)), 300) || "没有有效诊断"}`;
+    }
   };
   const resetConfigured = Boolean(deps.config.reset);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -545,31 +694,38 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
       break;
     }
     deps.onProgress?.(`自动验收中（第 ${deps.round} 轮${attempt === 2 ? "，重做" : strong ? "，换强模型重验" : ""}）`);
-    let result: ExecResult | undefined;
+    let result: TesterCallResult | undefined;
+    let disconnected = "";
     let currentReport: ParsedAcceptance | undefined;
     callId = randomUUID(); writeFileSync(join(deps.runDir, "call-id"), callId);
     try {
       result = await callTester({ ...deps, callId }, input, remaining, strong);
     } catch (callError) {
-      error = `第 ${attempt} 次验收调用失败：${tailText(errorText(callError), 300)}`;
-      executionFailure = { kind: "unknown", reason: error };
+      const clean = testerDiagnostics(errorText(callError));
+      error = `第 ${attempt} 次验收调用失败：${tailText(clean, 300) || "没有有效诊断"}`;
+      executionFailure = { kind: "unknown", reason: `${error}；无法确认验收方及工具进程已停止` };
     }
     deps.checkLive?.();
     if (strong) escalated = true;
     if (result) {
-      error = execError(result, `第 ${attempt} 次验收`);
-      if (result.code !== 0 || result.killed) {
-        const failure = classifyFailure(result.code, `${result.stdout}\n${result.stderr}`, result.killed);
-        executionFailure = { kind: failure.kind === "product" ? "unknown" : failure.kind, reason: `${failure.reason}；${tailText(result.stderr, 400)}` };
+      noteRelease(result);
+      error = execError({ ...result, stderr: testerDiagnostics(result.stderr) }, `第 ${attempt} 次验收`);
+      if (result.code !== 0 || result.killed || result.stalled) {
+        const failure = classifyTesterFailure(result.code, `${result.stdout}\n${result.stderr}`, result.killed, result.stalled);
+        if (failure.disconnected && result.actionPending) {
+          executionFailure = { kind: "environment", reason: "被测命令或验收工具仍在执行时调用被终止（整轮预算耗尽或中断）；不是验收方模型断线" };
+        } else if (failure.disconnected) disconnected = result.stalled ? `${failure.reason}，空闲时限 ${deps.config.idleTimeoutSec} 秒` : failure.reason;
+        else executionFailure = failure;
       }
-    }
-    if (result && !error) {
+      // 即使进程后来断线，也保留此前已完整输出的报告和逐条检查点。
       const parsed = parseAcceptanceReport(result.stdout);
       if (parsed.ok) currentReport = parsed.report;
-      else error = `第 ${attempt} 次验收输出无法解析：${parsed.error}`;
+      else if (!error) error = `第 ${attempt} 次验收输出无法解析：${parsed.error}`;
     }
     report = mergeAcceptanceReports(report, currentReport, checkpoints());
-    if (executionFailure || strong || systemDown()) break;
+    if (systemDown() || deps.signal?.aborted) break;
+    if (disconnected) { await recover(disconnected); break; }
+    if (executionFailure || strong) break;
     if (report && !testerFault(report)) { error = ""; break; }
     if (attempt === 2) continue;
     if (report && !error) {
@@ -582,7 +738,7 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
       writeFileSync(input, `## 上次输出无法解析\n${error}\n\n已经留下的证据不用重跑；请按系统提示里的格式，重新输出全部条目的结果。\n`);
     }
   }
-  return { report, error: report ? "" : error, escalated, executionFailure };
+  return { report, error: report ? "" : error, escalated, executionFailure, recovery, evidence: savedEvidence, processesReleased };
 }
 
 /**
@@ -648,6 +804,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   writeFileSync(logPath, "");
   if (deps.procsFile) reapProcs(deps.procsFile);
 
+  const initialScripts = new Set(scriptFiles(runDir));
   const offsets = logOffsets(config.logs);
   let resource: RunResource;
   try { resource = createRunResource(`acceptance:${deps.devSessionId}:r${deps.round}`, undefined, deps.procsFile); }
@@ -703,6 +860,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
       } finally {
         deps.signal?.removeEventListener("abort", stopTester);
       }
+      if (tester.processesReleased === true) cleanup.push("验收方调用及工具子进程已按归属确认停止（含独立进程组）");
       exitDuringTest = system?.exitInfo();
       exitedAt = system?.exitedAt();
     }
@@ -762,10 +920,15 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   }
   const judged = judgeAcceptance({
     criteria: criteria.items, report: tester.report, reportError: tester.error,
-    evidence: (id) => readIfExists(join(runDir, "evidence", `${id}.txt`)),
+    evidence: (id) => tester.evidence ? tester.evidence.get(id) : readIfExists(join(runDir, "evidence", `${id}.txt`)),
+    testerDisconnected: tester.recovery ? [tester.recovery.reason, tester.recovery.error].filter(Boolean).join("；") : undefined,
+    writtenScripts: scriptFiles(runDir).filter((path) => !initialScripts.has(path)),
     systemFailure, systemStopped, logErrors, runDir, hasService: Boolean(config.start),
   });
   const record: AcceptanceRecord = { ...judged, durationMs: deps.now() - startedAt, ...(methodDoubts.length ? { methodDoubts } : {}) };
+  const g1 = record.items.find((item) => item.id === "G1");
+  if (g1 && config.start) g1.execution = { commands: [config.start.length > 240 ? `${config.start.slice(0, 239)}…` : config.start], scripts: [] };
+  if (tester.recovery) record.recovery = tester.recovery;
   if (tester.executionFailure && !exitDuringTest) {
     record.verdict = "无法验收"; record.failureKind = tester.executionFailure.kind;
     record.reason = `验收执行未正常结束：${tester.executionFailure.reason}；逐项结果保留，不能发布完成`;

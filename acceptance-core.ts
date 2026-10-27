@@ -7,6 +7,8 @@
  * 标了「[授权]」的条目等用户亲手写「同意授权：A4」后照常交给验收方，用户不授权就和 [人工] 一样留给用户。
  */
 
+import { resolve } from "node:path";
+
 /** 配了 acceptance 的项目，追加在开发约定后面注入。 */
 export const ACCEPTANCE_CONVENTION = [
   "【自动验收约定】",
@@ -165,7 +167,7 @@ export interface ParsedAcceptance {
  * 系统被关掉、数据不干净 → 暂停交给你（不算开发方的错）；
  * 其他（标准含糊、环境不通）→ 个别条目留给人工，全部都这样才暂停。
  */
-export type UnknownCause = "系统被关掉" | "数据不干净" | "验收方" | "没配启动" | "缺工具" | "其他";
+export type UnknownCause = "系统被关掉" | "数据不干净" | "验收方" | "验收方模型断线" | "没配启动" | "缺工具" | "其他";
 
 export interface AcceptanceItemResult {
   id: string;
@@ -178,6 +180,8 @@ export interface AcceptanceItemResult {
   evidenceProblem?: boolean;
   /** 无法验证时的原因分类。 */
   cause?: UnknownCause;
+  /** 从本次证据的命令行提取，不采信模型自报；脚本必须是本轮实际新建的文件。 */
+  execution?: { commands: string[]; scripts: string[] };
 }
 
 export interface AcceptanceRecord {
@@ -194,6 +198,8 @@ export interface AcceptanceRecord {
   blocker?: UnknownCause;
   /** 验收方没做好，换强模型重验过。 */
   escalated?: boolean;
+  /** 模型断线后的处理记录；补报告不是从头重验。 */
+  recovery?: { reason: string; attempted: boolean; error?: string };
   note?: string;
   /** 收尾时清理端口上残留进程的记录。 */
   cleanup?: string[];
@@ -384,6 +390,10 @@ export interface JudgeInput {
   /** 验收方报告；验收方两次都没给出可解析的报告时为空。 */
   report?: ParsedAcceptance;
   reportError?: string;
+  /** 验收方断线/挂住；没有有效报告和证据的条目据此写明原因。 */
+  testerDisconnected?: string;
+  /** 本轮验收方新建的脚本/浏览器步骤文件（绝对路径）。 */
+  writtenScripts?: string[];
   /** 读 evidence/<id>.txt；不存在返回 undefined。 */
   evidence: (id: string) => string | undefined;
   /** 系统没能启动或中途崩溃的说明（G1 不通过，算开发方的）。 */
@@ -404,6 +414,7 @@ const BLOCKER_TEXT: Record<UnknownCause, string> = {
   系统被关掉: "被测系统在验收途中被关掉了（多半是验收方或重置命令关的，不是开发方的问题）",
   数据不干净: "被测系统的数据不是初始状态，依赖初始状态的标准没法验",
   验收方: "验收方没按要求留证据或输出格式不对",
+  验收方模型断线: "验收方模型断线或挂住，部分条目缺少有效证据或补写报告",
   没配启动: "没有配置怎么启动被测系统",
   缺工具: "缺少浏览器工具 Playwright",
   其他: "全部标准都没能验证",
@@ -419,6 +430,7 @@ function classifyUnknown(
   criterion: CriterionItem, reason: string, evidence: string | undefined, hasService: boolean, systemStopped: boolean,
 ): UnknownCause {
   if (systemStopped && UNREACHABLE.test(reason)) return "系统被关掉";
+  if (/验收方模型断线|验收方.*挂住/.test(reason)) return "验收方模型断线";
   if (evidence?.includes(NO_PLAYWRIGHT) || /playwright|浏览器工具/i.test(reason)) return "缺工具";
   if (DIRTY_DATA.test(reason)) return "数据不干净";
   if (!hasService && (UNREACHABLE.test(reason) || NEEDS_URL.test(reason) || NEEDS_URL.test(criterion.text))) return "没配启动";
@@ -457,6 +469,31 @@ const G2_TEXT = "验收期间系统日志里没有错误";
 const MANUAL_DETAIL = "标了 [人工]：程序不交给验收方，需要你人工验收";
 const DECLINED_DETAIL = "标了 [授权]，你没有授权：程序不执行，需要你人工验收";
 
+/** 和通过/不通过的证据检查使用同一条规则，不因补报告而放宽。 */
+export const hasEvidence = (content: string | undefined, id: string): content is string => Boolean(content?.includes(`=== ${id} `));
+
+/** 只取证据块头紧随的 $ 行，避免把标准输出里打印的命令当成实际执行。 */
+export function evidenceExecution(content: string | undefined, runDir: string, writtenScripts: string[] = []): NonNullable<AcceptanceItemResult["execution"]> {
+  const commands: string[] = [], scripts = new Set<string>(), written = new Set(writtenScripts);
+  const lines = (content ?? "").split(/\r?\n/);
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (!/^=== [AG]\d+ #\d+ /.test(lines[i]) || !lines[i + 1].startsWith("$ ")) continue;
+    const command = lines[i + 1].slice(2).trim();
+    if (commands.length < 3) commands.push(command.length > 240 ? `${command.slice(0, 239)}…` : command);
+    const cwd = lines[i + 2]?.startsWith("目录：") ? lines[i + 2].slice(3) : runDir;
+    const tokenize = (text: string): string[] => text.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|()<>]+/g) ?? [];
+    const tokens = tokenize(command);
+    for (let index = 0; index < tokens.length && index < 1000; index += 1) {
+      const token = tokens[index];
+      let path = token;
+      try { if (token.startsWith('"')) path = JSON.parse(token); else if (token.startsWith("'")) path = token.slice(1, -1); } catch { continue; }
+      if (written.has(resolve(cwd, path))) scripts.add(resolve(cwd, path));
+      if (["-c", "-lc"].includes(tokens[index - 1])) tokens.push(...tokenize(path));
+    }
+  }
+  return { commands, scripts: [...scripts] };
+}
+
 function failDetail(item: ReportItem, evidencePath: string): string {
   const order = ["复现", "预期", "实际", "相关日志"];
   const lines = order.filter((key) => item.fields[key]).map((key) => `${key}：${item.fields[key]}`);
@@ -487,26 +524,35 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   const each = (judge: (criterion: CriterionItem) => AcceptanceItemResult): void => {
     for (const criterion of input.criteria) items.push(forUser(criterion) ? toUser(criterion) : judge(criterion));
   };
-  if (input.report) {
-    const report = input.report;
+  if (input.report || input.testerDisconnected) {
     each((criterion) => {
-      const reported = report.items.find((item) => item.id === criterion.id);
+      const reported = input.report?.items.find((item) => item.id === criterion.id);
       const evidencePath = `${input.runDir}/evidence/${criterion.id}.txt`;
       const content = input.evidence(criterion.id);
+      const disconnected = (): AcceptanceItemResult => ({
+        ...criterion, verdict: "无法验证", cause: "验收方模型断线",
+        detail: `原因：验收方模型断线；${hasEvidence(content, criterion.id) ? "已有证据，但没有可核对的完整报告" : "未留下该条的有效实测证据"}；${input.testerDisconnected}`,
+      });
       if (!reported) {
-        return { ...criterion, verdict: "无法验证", detail: "验收方没有报告这一条", evidenceProblem: true, cause: "验收方" };
+        if (input.testerDisconnected) return disconnected();
+        return { ...criterion, verdict: "无法验证", detail: `原因：验收报告漏项，未提交 ${criterion.id} 的实测结果与证据摘录，程序无法核对该条是否符合预期`, evidenceProblem: true, cause: "验收方" };
       }
       if (reported.conflict) return { ...criterion, verdict: "无法验证", detail: reported.conflict, evidenceProblem: true, cause: "验收方" };
+      if (input.testerDisconnected && !hasEvidence(content, criterion.id)) return disconnected();
       if (reported.verdict === "无法验证") {
-        const reason = reported.fields["原因"] || "验收方没写原因";
+        const reason = reported.fields["原因"]?.trim();
+        if (!reason || /^(?:验收方没有报告这一条|验收方没写原因|无法验证|无法判断|未验证|未知|无|暂无|N\/A|unknown)$/i.test(reason)) {
+          if (input.testerDisconnected) return disconnected();
+          return { ...criterion, verdict: "无法验证", detail: "原因：验收报告未说明无法执行的步骤或具体阻塞条件，无法核实该条的实测结果", evidenceProblem: true, cause: "验收方" };
+        }
         return {
-          ...criterion, verdict: "无法验证", detail: `原因：${reason}`,
-          cause: classifyUnknown(criterion, reason, content, input.hasService, Boolean(stopped)),
+          ...criterion, verdict: "无法验证", detail: `原因：${input.testerDisconnected ? "验收方模型断线；已有证据不足以补判：" : ""}${reason}`,
+          cause: input.testerDisconnected ? "验收方模型断线" : classifyUnknown(criterion, reason, content, input.hasService, Boolean(stopped)),
         };
       }
       const excerpt = normalize(reported.fields["证据摘录"] ?? "");
       let problem = "";
-      if (!content || !content.includes(`=== ${criterion.id} `)) problem = `没有用 ./ev 或 ./browser 留下证据（${evidencePath}）`;
+      if (!hasEvidence(content, criterion.id)) problem = `没有用 ./ev 或 ./browser 留下证据（${evidencePath}）`;
       else if (excerpt.length < 2) problem = "没有写证据摘录";
       else if (!normalize(content).includes(excerpt)) problem = `证据摘录在 ${evidencePath} 里找不到`;
       if (problem) {
@@ -535,7 +581,7 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   } else if (stopped) {
     each((criterion) => ({ ...criterion, verdict: "无法验证", detail: "原因：被测系统被关掉，没有完成实测", cause: "系统被关掉" }));
   } else if (!input.systemFailure) {
-    each((criterion) => ({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方没有给出报告"}`, cause: "验收方" }));
+    each((criterion) => ({ ...criterion, verdict: "无法验证", detail: `原因：${input.reportError || "验收方未返回可解析报告，缺少逐条实测结果与证据摘录，无法核对是否符合预期"}`, cause: "验收方" }));
   } else {
     // 系统没能正常运行：自动的条目没有实测，不逐条列；交给你的条目照样列出来。
     for (const criterion of input.criteria) if (forUser(criterion)) items.push(toUser(criterion));
@@ -546,12 +592,15 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
       ? { id: "G2", text: G2_TEXT, verdict: "无法验证", cause: "系统被关掉", detail: `系统被关掉前后日志里有错误（可能是关停时打的），这一轮不据此打回：\n${input.logErrors.join("\n")}` }
       : { id: "G2", text: G2_TEXT, verdict: "不通过", detail: input.logErrors.join("\n") });
   }
+  for (const item of items) {
+    if (!forUser(item)) item.execution = evidenceExecution(input.evidence(item.id), input.runDir, input.writtenScripts);
+  }
   const failed = items.some((item) => item.verdict === "不通过");
   const unknown = items.filter((item) => item.verdict === "无法验证");
   const manual = items.filter((item) => item.verdict === "需人工");
   const automatic = input.criteria.length - manual.length;
   const ids = unknown.map((item) => item.id).join("、");
-  const blocker = (["系统被关掉", "数据不干净", "没配启动", "缺工具", "验收方"] as const).find((cause) => unknown.some((item) => item.cause === cause))
+  const blocker = (["系统被关掉", "数据不干净", "没配启动", "缺工具", "验收方模型断线", "验收方"] as const).find((cause) => unknown.some((item) => item.cause === cause))
     ?? (unknown.length > 0 && unknown.length === automatic ? "其他" : undefined);
   // 验收方只拿到自动的条目：它自报的结论和这个比；[人工] 条目只把「通过」变成「部分验证」。
   const automaticVerdict = failed ? "不通过" : unknown.length === 0 ? "通过" : blocker ? "无法验收" : "部分验证";
@@ -660,6 +709,20 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
   return `${parts.join("\n\n")}\n`;
 }
 
+/** 只读补判只列已有证据的条目，不提供重测动作或开发方自报的结果。 */
+export function buildRecoveryInput(criteria: Criteria, runDir: string, ids: string[]): string {
+  return [
+    "## 只根据已有证据补写报告",
+    "上一位验收方模型断线或挂住。不要重新实测，不运行命令，不写文件，不启动、停止或重置系统。只读下面的证据，按系统提示格式补写报告。",
+    "证据不足以判断预期时必须报「无法验证」并写明具体缺失；不得从命令退出码或标准文字推定通过。证据摘录必须从证据中原样复制。",
+    `## 验收标准（第 ${criteria.version} 版）`,
+    formatCriteria(criteria.items.filter((item) => !forUser(item) && ids.includes(item.id))),
+    "## 已有证据（只读）",
+    ...ids.map((id) => `- ${id}：${runDir}/evidence/${id}.txt`),
+    "未列出的条目没有可供补判的证据，不得补成通过。",
+  ].join("\n\n") + "\n";
+}
+
 /** 拼起草输入：只给需求原文。 */
 export function buildCriteriaDraftInput(requirement: string): string {
   return `## 需求原文\n\n${requirement.trim()}\n`;
@@ -704,6 +767,7 @@ export function renderAcceptanceForReview(record: AcceptanceRecord): string {
 export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   const lines = [`验收：${record.verdict}（耗时 ${Math.round(record.durationMs / 1000)} 秒；材料：${record.runDir}）`];
   if (record.escalated) lines.push("验收方：第一位没按要求做，已换强模型重验");
+  if (record.recovery) lines.push(`验收方：${record.recovery.reason}；${record.recovery.attempted ? "已用强模型只读已有证据补写报告（未重新实测）" : "未调用补报告"}${record.recovery.error ? `；${record.recovery.error}` : ""}`);
   for (const item of record.cleanup ?? []) lines.push(`验收收尾：${item}`);
   if (record.reason) lines.push(`验收说明：${record.reason}`);
   if (record.methodDoubts?.length) {
@@ -711,7 +775,14 @@ export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   }
   if (record.note) lines.push(`验收提示：${record.note}`);
   for (const item of record.items) {
-    lines.push(`- ${item.id}：${item.verdict}${item.verdict === "通过" ? "" : ` —— ${item.detail.split("\n")[0]}`}`);
+    const detail = item.verdict === "无法验证" ? item.detail.replace(/\s*\n\s*/g, "；") : item.detail.split("\n")[0];
+    lines.push(`- ${item.id}：${item.verdict}${item.verdict === "通过" ? "" : ` —— ${detail}`}`);
+    const execution = item.execution;
+    for (const command of execution?.commands ?? []) lines.push(`  实际命令：$ ${command}`);
+    for (const script of execution?.scripts ?? []) lines.push(`  验收方脚本：${script}`);
+    if (!execution?.commands.length && !execution?.scripts.length) {
+      lines.push(`  实际执行：${item.verdict === "需人工" ? "未执行（交给用户）" : item.id === "G2" ? `程序扫描系统日志（${record.runDir}/system.log、logs/）` : "未留下命令或脚本证据"}`);
+    }
   }
   return lines;
 }

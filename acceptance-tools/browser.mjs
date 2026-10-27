@@ -22,6 +22,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { beginAction } from "./activity.mjs";
 
 const STEP_TIMEOUT = 15_000;
 const [runDir, workDir, id, stepsArg] = process.argv.slice(2);
@@ -35,6 +36,7 @@ if (!runDir || !id || !/^[AG]\d+$/.test(id) || !stepsArg) {
   process.exit(2);
 }
 
+beginAction(runDir);
 const evidenceDir = join(runDir, "evidence");
 mkdirSync(evidenceDir, { recursive: true });
 const file = join(evidenceDir, `${id}.txt`);
