@@ -278,7 +278,7 @@ function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): 
   }
   const batchRel = insideRepo(repo.root, batch.path);
   if (target && batchRel) {
-    const mapped = remapBatchReferences(batch.raw, repo.root, target.path, batch.path);
+    const mapped = remapBatchReferences(batch.raw, repo.root, target.path, batch.path, new Set(files));
     if (JSON.stringify(mapped) !== JSON.stringify(batch.raw)) files.push(batchRel);
   }
   return {
@@ -299,15 +299,33 @@ function lstatSafe(path: string): ReturnType<typeof lstatSync> | undefined {
   }
 }
 
-/** 目标父路径不能被符号链接带到仓库外；不存在就建普通目录。 */
-function ensureSafeParents(targetRoot: string, rel: string): void {
+/** 目标父路径不能被符号链接带到仓库外；create=false 时只核对，不建目录。 */
+function ensureSafeParents(targetRoot: string, rel: string, create = true): void {
   let current = targetRoot;
   for (const part of rel.split("/").slice(0, -1)) {
     current = join(current, part);
     const info = lstatSafe(current);
-    if (!info) { mkdirSync(current); continue; }
+    if (!info) { if (!create) return; mkdirSync(current); continue; }
     if (info.isSymbolicLink()) throw new LoopError(`开发空间里的父路径是符号链接，未继续：${rel} → ${current}`);
     if (!info.isDirectory()) throw new LoopError(`开发空间里的父路径不是目录，未继续：${rel} → ${current}`);
+  }
+}
+
+/** 写入任何批次文档前核对全部目标；忽略规则不能作为覆盖本地内容的许可。 */
+function checkBatchDocTargets(target: WorkspaceUse, files: string[]): void {
+  const listed = gitResult(target.path, ["--literal-pathspecs", "ls-files", "--cached", "-z", "--", ...files]);
+  if (listed.status !== 0) {
+    throw new LoopError(`无法核对开发空间批次文档的跟踪状态：${target.path}（${(listed.stderr || listed.stdout).trim().slice(-300)}）`,
+      { workspace: target.path, files });
+  }
+  const tracked = new Set(listed.stdout.split("\0").filter(Boolean));
+  const blocked = files.filter((rel) => {
+    ensureSafeParents(target.path, rel, false);
+    return !tracked.has(rel) && Boolean(lstatSafe(resolve(target.path, rel)));
+  });
+  if (blocked.length) {
+    throw new LoopError(`开发空间的批次文档目标已有未跟踪内容（含被忽略的），不覆盖：${blocked.join("、")}`,
+      { workspace: target.path, files: blocked });
   }
 }
 
@@ -330,22 +348,24 @@ function writeDocSafely(targetRoot: string, rel: string, doc: DocContent): void 
   }
 }
 
-function rewriteBatchDocument(source: string, repoRoot: string, targetRoot: string): string {
+function rewriteBatchDocument(source: string, repoRoot: string, targetRoot: string, files: readonly string[]): string {
   const original = readFileSync(source, "utf8");
   let raw: unknown;
   try { raw = JSON.parse(original); } catch { return original; }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return original;
-  const mapped = remapBatchReferences(raw as Record<string, unknown>, repoRoot, targetRoot, source);
+  const mapped = remapBatchReferences(raw as Record<string, unknown>, repoRoot, targetRoot, source, new Set(files));
   return JSON.stringify(mapped) === JSON.stringify(raw) ? original : `${JSON.stringify(mapped, null, 2)}\n`;
 }
 
 function copyBatchDocs(repo: Repo, target: WorkspaceUse, files: string[], batchPath: string): Map<string, DocContent> {
+  // 新建/切换 worktree 后再核对一次，冲突时不留下部分写入的批次文档。
+  checkBatchDocTargets(target, files);
   const expected = new Map<string, DocContent>();
   for (const rel of files) {
     const source = resolve(repo.root, rel);
     let doc: DocContent;
     if (resolve(source) === resolve(batchPath)) {
-      doc = { kind: "file", content: Buffer.from(rewriteBatchDocument(source, repo.root, target.path)) };
+      doc = { kind: "file", content: Buffer.from(rewriteBatchDocument(source, repo.root, target.path, files)) };
     } else {
       const info = lstatSync(source);
       doc = info.isSymbolicLink()
@@ -561,6 +581,8 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     throw new LoopError(`批次文档需要搬进分支 ${docs.branch ?? "（未指定）"} 的开发空间，但没有找到对应的工作区；给该分支写 workspace 或已登记的 cwd`,
       { files: docs.files, branch: docs.branch });
   }
+  // 必须早于 checkout：Git 切分支本身也可能覆盖被忽略的同名文件；dry-run 同样报告冲突。
+  if (docs.files.length && docs.target?.registered) checkBatchDocTargets(docs.target, docs.files);
   const docPaths = new Set(docs.files);
   const uncommitted = [...new Set(runtimeChanges.map((change) => change.path).filter((path) => !docPaths.has(path)))].sort();
   const lines = [`运行版：${repo.root}（发布分支 ${repo.layout.release}）`];

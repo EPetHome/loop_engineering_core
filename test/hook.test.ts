@@ -1,4 +1,5 @@
 /** hosts/hook.ts 无模型回归 H1–H17；所有运行产物只写 os.tmpdir()。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

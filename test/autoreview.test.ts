@@ -1,4 +1,5 @@
 /** 无模型入口回归 G1–G15；所有运行产物只写 os.tmpdir()。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
