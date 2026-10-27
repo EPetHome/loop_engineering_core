@@ -145,6 +145,8 @@ export interface SummaryInput {
   sourceChangeNote?: string;
   /** 本次完成已登记的交付总表；只在状态为完成时写进总结开头。 */
   ledger?: { path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
+  /** 完成后的运行材料瘦身结果；删除失败仅提示。 */
+  materialCleanup?: string;
   /** Pi 开发会话启动时确认未注册 Ponytail；只在完成总结开头提醒，不改变结果。 */
   ponytailMissing?: boolean;
 }
@@ -368,6 +370,7 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
+  if (input.status === "完成" && input.materialCleanup) lines.push(`- ${input.materialCleanup}`);
   if (input.acceptRun) {
     lines.push(`- 验收命令：${acceptRunLabel(input.acceptRun)}`);
     lines.push(`- 验收命令用途：${input.acceptRun.mode === "required" ? "本段必需验收" : "附加检查"}`);

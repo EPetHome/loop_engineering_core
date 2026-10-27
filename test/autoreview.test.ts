@@ -13,6 +13,7 @@ import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import autoreview from "../autoreview.ts";
 import { CONVENTION, conventionText } from "../core.ts";
 import { projectRootOf } from "../ledger.ts";
+import { registerAcceptanceMaterials } from "../materials.ts";
 import { contextDir, loadContext } from "../project-context.ts";
 import { createChildExec } from "../hosts/hook.ts";
 import type { Exec, ExecResult } from "../git.ts";
@@ -43,7 +44,9 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   const pipelineDir = join(root, "pipeline");
   mkdirSync(repo); mkdirSync(home);
   const oldHome = process.env.HOME;
+  const oldResources = process.env.AUTOREVIEW_RESOURCE_ROOT;
   process.env.HOME = home;
+  process.env.AUTOREVIEW_RESOURCE_ROOT = join(home, ".pi-autoreview", "resources");
   // 交付总表在 HOME 下；HOME 已固定到夹具目录，测试不会碰真实的 ~/.pi-autoreview/交付记录.md。
   const ledgerFile = join(home, ".pi-autoreview", "交付记录.md");
   // 流水线环境变量：只有指定了段名才设置，测完恢复。
@@ -172,6 +175,7 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
       await event("session_shutdown", { reason: "quit" }).catch(() => {});
       for (let i = 0; i < 12; i += 1) await nextTurn();
       if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      if (oldResources === undefined) delete process.env.AUTOREVIEW_RESOURCE_ROOT; else process.env.AUTOREVIEW_RESOURCE_ROOT = oldResources;
       pipelineEnv.forEach((key, index) => {
         const value = oldPipelineEnv[index];
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -180,6 +184,73 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     },
   };
 }
+
+test("A1 Pi 真正完成边界瘦身全部登记轮次，完成总结写删除统计", async () => {
+  const h = harness();
+  try {
+    await h.event("session_start"); await h.begin();
+    const runs = [1, 2].map((round) => join(h.home, ".pi-autoreview", "repo", "acceptance", "unit-dev", `r${round}`));
+    for (const run of runs) {
+      mkdirSync(join(run, "node_modules"), { recursive: true });
+      registerAcceptanceMaterials("unit-dev", h.cwd, run, join(h.home, ".pi-autoreview", "repo", "unit-dev.procs.json"));
+      writeFileSync(join(run, "data.db"), Buffer.alloc(300_000));
+      writeFileSync(join(run, "node_modules", "tiny.js"), "tiny");
+      for (const name of ["evidence", "logs", "checkpoints"]) {
+        mkdirSync(join(run, name)); writeFileSync(join(run, name, "large.bin"), Buffer.alloc(300_000));
+      }
+      for (const name of ["result.json", "input.md", "screenshot.png", "system.log", "reuse.sh"]) writeFileSync(join(run, name), "keep");
+    }
+    h.write("file.txt", "changed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    await until(() => h.summary().includes("运行材料瘦身：删除 4 个文件"), "完成总结写入瘦身结果");
+    assert.equal(h.state().phase, "done");
+    for (const run of runs) {
+      assert.equal(existsSync(join(run, "data.db")), false); assert.equal(existsSync(join(run, "node_modules")), false);
+      for (const name of ["result.json", "input.md", "screenshot.png", "system.log", "reuse.sh", "evidence/large.bin", "logs/large.bin", "checkpoints/large.bin"]) assert.ok(existsSync(join(run, name)), name);
+    }
+  } finally { await h.close(); }
+});
+
+test("必需验收未结束或暂停时不瘦身，成功后才释放验收命令 TMPDIR 的大文件", async () => {
+  const h = harness({ flags: { "autoreview-accept-cmd": "check", "autoreview-accept-mode": "required" } });
+  try {
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "change\n"); h.assistant();
+    let resume!: (value: Result) => void, evidence = "";
+    h.acceptor = (call) => {
+      evidence = /AUTOREVIEW_EVIDENCE_DIR='([^']+)'/.exec(call.args[1])![1];
+      writeFileSync(join(evidence, "big.bin"), Buffer.alloc(300_000));
+      writeFileSync(join(evidence, "reuse.sh"), "echo reuse");
+      return new Promise((resolve) => { resume = resolve; });
+    };
+    await h.event("agent_settled"); await until(() => Boolean(resume), "必需验收开始");
+    assert.equal(h.state().phase, "accepting"); assert.ok(existsSync(join(evidence, "big.bin")));
+    resume(result("AUTOREVIEW_FAILURE=environment stopped", 75)); await h.terminal();
+    assert.equal(h.state().phase, "paused"); assert.ok(existsSync(join(evidence, "big.bin")));
+    h.acceptor = () => result("pass"); await h.command("accept"); await h.accepted();
+    await until(() => h.summary().includes("运行材料瘦身：删除 1 个文件"), "必需验收通过后的瘦身");
+    assert.equal(h.state().phase, "done"); assert.equal(existsSync(join(evidence, "big.bin")), false);
+    assert.ok(existsSync(join(evidence, "reuse.sh")));
+  } finally { await h.close(); }
+});
+
+test("附加验收结束后才瘦身其 TMPDIR，附加失败也不改变既有完成态", async (t) => {
+  for (const code of [0, 1]) await t.test(`附加退出码 ${code}`, async () => {
+    const h = harness({ flags: { "autoreview-accept-cmd": "check", "autoreview-accept-mode": "advisory" } });
+    try {
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "change\n"); h.assistant();
+      let evidence = "";
+      h.acceptor = (call) => {
+        evidence = /AUTOREVIEW_EVIDENCE_DIR='([^']+)'/.exec(call.args[1])![1];
+        writeFileSync(join(evidence, "big.bin"), Buffer.alloc(300_000));
+        writeFileSync(join(evidence, "reuse.sh"), "echo reuse");
+        return result("advisory output", code);
+      };
+      await h.event("agent_settled"); await h.accepted();
+      await until(() => h.summary().includes("运行材料瘦身：删除 1 个文件"), "附加验收结束后的瘦身");
+      assert.equal(h.state().phase, "done"); assert.equal(existsSync(join(evidence, "big.bin")), false);
+      assert.ok(existsSync(join(evidence, "reuse.sh")));
+    } finally { await h.close(); }
+  });
+});
 
 test("来源索引使用 Pi 合法分段名，并保留已有提示内容", async () => {
   const h = harness();

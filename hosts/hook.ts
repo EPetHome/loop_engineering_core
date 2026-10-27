@@ -27,6 +27,7 @@ import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, re
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
+import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
 import { parsePreparation } from "../preparation.ts";
 import { loadContext, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
 import {
@@ -496,7 +497,10 @@ async function writeSummary(
     acceptance: ctx.config.acceptance, host: ctx.host, phase: state.phase, pauseHint: state.pauseHint,
     criteria: state.criteria, lastAcceptance: lastAcceptance(state),
   });
+  recordMaterialSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
+    state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
   const text = renderSummary({
+    materialCleanup: state.materialCleanup,
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
     criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance,
@@ -825,6 +829,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     state.ledger = undefined;
     state.resumeAfterInputChange = false;
     state.phase = "reviewing";
+    state.materialCleanup = undefined;
     state.pauseReason = undefined;
     state.awaitingRepair = false;
     saveStateFile(ctx.paths.state, state);
@@ -857,12 +862,16 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
         await pause(ctx, state, sourceProblem, undefined, undefined, "补齐 context.sources 登记的文件后再接力。");
         return userOutput(ctx, sourceProblem);
       }
-  state.phase = "done";
+      state.phase = "done";
       state.awaitingRepair = false;
       await recordLedger(ctx, state);
       try { saveStateFile(ctx.paths.state, state); } catch (error) {
         process.stderr.write(`autoreview hook: 状态保存失败：${errorText(error)}\n`);
       }
+      checkUserInputs();
+      state.materialCleanup = slimCompletedSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
+        state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
+      saveStateFile(ctx.paths.state, state);
       // 状态和总表都落盘后再发布完成总结。
       await writeSummary(ctx, state, "完成");
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;

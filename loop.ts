@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * loop.ts — bin/loop 的实现：开工、启动、状态、合入。
+ * loop.ts — bin/loop 的实现：开工、启动、状态、合入、清理。
  *
  * 所有子命令支持 --dry-run（只核对、只打印，不改文件或分支）和 --json（标准输出一个 JSON 对象）。
  * 只做本地操作，不推送；开发方不提交，段完成时由流水线按分支名生成提交说明。
@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { remapBatchReferences } from "./batch-refs.ts";
 import { loadProjectLayout, workspacePath, type ProjectLayout } from "./config.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
+import { cleanupMaterialHistory } from "./materials.ts";
+import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
@@ -31,15 +33,16 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; recheck: boolean; launcher?: string; rest: string[] }
+interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  const result: ParsedArgs = { json: false, dryRun: false, recheck: false, rest: [] };
+  const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--json") result.json = true;
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
+    else if (arg === "--apply") result.apply = true;
     else if (arg === "--launcher") {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new LoopError("--launcher 需要一个值（terminal 或 background）");
@@ -49,6 +52,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.apply && result.command !== "清理") throw new LoopError("--apply 只用于 loop 清理");
+  if (result.command === "清理" && (result.batch || result.rest.length || result.recheck || result.launcher)) throw new LoopError("loop 清理不接受批次文件、--recheck 或 --launcher");
+  if (result.apply && result.dryRun) throw new LoopError("--apply 与 --dry-run 不能同时使用");
   return result;
 }
 
@@ -933,11 +939,21 @@ async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
     uncommitted, commits: staged, merges, pushed: false, lines };
 }
 
+export function cmdCleanup(args: ParsedArgs): Record<string, unknown> {
+  const cleanup = cleanupMaterialHistory({ apply: args.apply });
+  const lines = [args.apply ? "按登记瘦身已完成会话（只处理运行材料）" : "预览：不删除、不改写任何文件；加 --apply 才执行",
+    ...cleanup.paths.map((path) => `${args.apply ? "已删除" : "将删除"}：${path}`),
+    materialCleanupLine(cleanup), ...materialCleanupNotes(cleanup),
+    `完成会话 ${cleanup.sessions.filter((session) => session.phase === "done").length} 个；跳过未完成会话 ${cleanup.sessions.filter((session) => session.phase !== "done").length} 个`];
+  return { ok: cleanup.failures.length === 0, command: "清理", dryRun: !args.apply, ...cleanup, lines };
+}
+
 const USAGE = `用法：
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
-  loop 合入 <批次.json> [--dry-run] [--json]`;
+  loop 合入 <批次.json> [--dry-run] [--json]
+  loop 清理 [--apply | --dry-run] [--json]`;
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
@@ -959,6 +975,7 @@ async function main(): Promise<number> {
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "合入") result = await cmdMerge(args);
+    else if (args.command === "清理") result = cmdCleanup(args);
     else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else {

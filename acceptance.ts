@@ -26,6 +26,7 @@ import type { Exec, ExecResult } from "./git.ts";
 import { killGroup, reapProcs, registerProc, releaseProc } from "./procs.ts";
 import { classifyFailure, classifyTesterFailure, failureLabel, testerDiagnostics } from "./failure.ts";
 import { createRunResource, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
+import { registerAcceptanceMaterials } from "./materials.ts";
 
 export const ACCEPTANCE_PROMPT_PATH = join(EXT_DIR, "acceptance-prompt.md");
 export const CRITERIA_PROMPT_PATH = join(EXT_DIR, "criteria-prompt.md");
@@ -775,6 +776,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   if (criteria.items.every(forUser)) {
     rmSync(runDir, { recursive: true, force: true });
     mkdirSync(runDir, { recursive: true });
+    registerAcceptanceMaterials(deps.devSessionId, deps.workDir, runDir, deps.procsFile);
     if (deps.upstreamEpochs) writeFileSync(join(runDir, "upstream.json"), JSON.stringify(deps.upstreamEpochs, null, 2));
     const record: AcceptanceRecord = {
       ...judgeAcceptance({ criteria: criteria.items, evidence: () => undefined, logErrors: [], runDir, hasService: Boolean(config.start) }),
@@ -789,6 +791,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   const wallStart = Date.now();
   rmSync(runDir, { recursive: true, force: true });
   mkdirSync(join(runDir, "evidence"), { recursive: true });
+  registerAcceptanceMaterials(deps.devSessionId, deps.workDir, runDir, deps.procsFile);
   writeTools(runDir, deps.workDir);
   if (deps.upstreamEpochs) writeFileSync(join(runDir, "upstream.json"), JSON.stringify(deps.upstreamEpochs, null, 2));
   if (config.actions) {
