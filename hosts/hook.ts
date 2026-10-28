@@ -25,8 +25,9 @@ import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary 
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
-import { reapProcs, registerProc, releaseProc } from "../procs.ts";
+import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
+import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
 import { parsePreparation } from "../preparation.ts";
 import { loadContext, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
 import {
@@ -99,29 +100,49 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reapTimer: ReturnType<typeof setTimeout> | undefined;
   let registered: number | undefined;
+  let started = "";
   let onAbort: (() => void) | undefined;
+  let stopNotified = false, stopObservationFailed = false;
+  const beforeStop = (): void => {
+    if (stopNotified) return;
+    stopNotified = true;
+    try { options.onBeforeStop?.(); }
+    catch (error) {
+      stopObservationFailed = true;
+      stderr.push(Buffer.from(`\nAUTOREVIEW_FAILURE=environment 调用终止状态观测失败：${errorText(error)}\n`));
+    }
+  };
   const finish = (code: number, killedFlag: boolean): void => {
     if (done) return;
     done = true;
+    beforeStop();
+    if (stopObservationFailed) code = 75;
     if (timer) clearTimeout(timer);
     if (reapTimer) clearTimeout(reapTimer);
     // 同一个 signal 会给很多次调用用：结束后摘掉监听，免得堆积，也免得事后误杀复用的进程组号。
     if (onAbort) options.signal?.removeEventListener("abort", onAbort);
-    if (registered !== undefined && procsFile) {
+    let processesReleased: boolean | undefined;
+    if (options.role && child?.pid) {
+      let released = false;
       try {
-        if (!releaseProc(procsFile, registered)) {
-          stderr.push(Buffer.from("\nAUTOREVIEW_FAILURE=environment 子进程释放未确认，登记已保留\n"));
-          if (code === 0) code = 75;
-        }
-      } catch { if (code === 0) code = 75; }
+        released = registered !== undefined && procsFile ? releaseProc(procsFile, registered, {
+          pgid: child.pid, role: options.role, command, started, token, ownerPid: process.pid, at: new Date().toISOString(),
+        }) : releaseProcessTree({ pgid: child.pid, started, token });
+      } catch { /* 无法确认时保留登记并阻止完成，不把已退出的原组当成全部释放。 */ }
+      processesReleased = released;
+      if (!released) {
+        stderr.push(Buffer.from("\nAUTOREVIEW_FAILURE=environment 子进程释放未确认，登记已保留\n"));
+        if (code === 0) code = 75;
+      }
     }
     resolvePromise({
       stdout: Buffer.concat(stdout).toString("utf8"),
       stderr: Buffer.concat(stderr).toString("utf8"),
       code, killed: killedFlag,
+      ...(processesReleased !== undefined ? { processesReleased } : {}),
     });
   };
-  let child;
+  let child: ReturnType<typeof spawn> | undefined;
   try {
     // detached 让子进程成为进程组组长，超时或取消时可以连同后代一起杀掉。
     // 取消不交给 spawn 的 signal：它只杀组长，还会抢先结束，让下面的整组清理来不及跑。
@@ -133,25 +154,33 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
     finish(1, false);
     return;
   }
+  if (options.role && child.pid) started = processStartTime(child.pid);
   if (options.role && procsFile && child.pid) {
     try {
       registerProc(procsFile, child.pid, options.role, command, token);
       registered = child.pid;
     } catch (error) {
       stderr.push(Buffer.from(`AUTOREVIEW_FAILURE=environment 进程登记失败：${errorText(error)}\n`));
+      beforeStop();
       killed = true;
       try { process.kill(-child.pid!, "SIGKILL"); } catch { child.kill("SIGKILL"); }
     }
   }
-  child.stdout?.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
-  child.stderr?.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+  const collect = (target: Buffer[]) => (chunk: Buffer): void => {
+    target.push(Buffer.from(chunk));
+    options.onOutput?.(chunk.toString("utf8"));
+  };
+  child.stdout?.on("data", collect(stdout));
+  child.stderr?.on("data", collect(stderr));
   child.on("error", (error) => {
     const aborted = (error as NodeJS.ErrnoException).name === "AbortError";
     finish(1, killed || aborted);
   });
   child.on("close", (code, signal) => finish(code ?? 1, killed || Boolean(signal)));
   const killTree = (): void => {
+    beforeStop();
     killed = true;
+    if (!child) return;
     const pid = child.pid;
     try {
       if (pid) process.kill(-pid, "SIGKILL");
@@ -468,7 +497,10 @@ async function writeSummary(
     acceptance: ctx.config.acceptance, host: ctx.host, phase: state.phase, pauseHint: state.pauseHint,
     criteria: state.criteria, lastAcceptance: lastAcceptance(state),
   });
+  recordMaterialSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
+    state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
   const text = renderSummary({
+    materialCleanup: state.materialCleanup,
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
     criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance,
@@ -797,6 +829,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     state.ledger = undefined;
     state.resumeAfterInputChange = false;
     state.phase = "reviewing";
+    state.materialCleanup = undefined;
     state.pauseReason = undefined;
     state.awaitingRepair = false;
     saveStateFile(ctx.paths.state, state);
@@ -829,12 +862,16 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
         await pause(ctx, state, sourceProblem, undefined, undefined, "补齐 context.sources 登记的文件后再接力。");
         return userOutput(ctx, sourceProblem);
       }
-  state.phase = "done";
+      state.phase = "done";
       state.awaitingRepair = false;
       await recordLedger(ctx, state);
       try { saveStateFile(ctx.paths.state, state); } catch (error) {
         process.stderr.write(`autoreview hook: 状态保存失败：${errorText(error)}\n`);
       }
+      checkUserInputs();
+      state.materialCleanup = slimCompletedSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
+        state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
+      saveStateFile(ctx.paths.state, state);
       // 状态和总表都落盘后再发布完成总结。
       await writeSummary(ctx, state, "完成");
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;

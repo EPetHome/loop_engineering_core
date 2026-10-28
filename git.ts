@@ -8,12 +8,16 @@ export interface ExecResult {
   stderr: string;
   code: number;
   killed: boolean;
+  /** 受管执行器是否已确认原进程组和独立工具组全部停止；缺省表示执行器未提供此证明。 */
+  processesReleased?: boolean;
 }
 export type Exec = (
   command: string,
   args: string[],
   /** role：需要登记的长进程角色（评审、验收方），宿主 Hook 被杀后据此清理。 */
-  options: { cwd: string; timeout: number; signal?: AbortSignal; role?: string; env?: NodeJS.ProcessEnv },
+  options: { cwd: string; timeout: number; signal?: AbortSignal; role?: string; env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void;
+    /** 在首次中止/退出边界、任何进程清理之前调用；用于保留终止现场，而非清理后的状态。 */
+    onBeforeStop?: () => void },
 ) => Promise<ExecResult>;
 
 export interface Snapshot {

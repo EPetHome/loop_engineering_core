@@ -26,6 +26,7 @@ import { methodEnv } from "./method-env.ts";
 import { createChildExec, expandFileRefs } from "./hosts/hook.ts";
 import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
+import { materialSession, recordMaterialSession, slimCompletedSession } from "./materials.ts";
 import { isRegisteredSource, loadContext, recordProjectOutcome, recordSourceChange, refreshContext, type ContextConfig, type ContextResult } from "./project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, INTERRUPTED,
@@ -143,7 +144,17 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   };
   const saveState = (life: Lifecycle): void => {
     checkLive(life);
+    if (state.phase !== "done") state.materialCleanup = undefined;
     pi.appendEntry("autoreview-state", state);
+    if (latestCtx) recordMaterialSession(sessionMaterials(latestCtx));
+  };
+  const sessionMaterials = (ctx: ExtensionContext) => materialSession(ctx.sessionManager.getSessionId(), ctx.cwd, summaryPath(ctx),
+    state.acceptRun?.result === "进行中" ? "accepting" : state.phase,
+    state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : []));
+  const slimMaterials = (ctx: ExtensionContext, life: Lifecycle): void => {
+    if (sessionMaterials(ctx).phase !== "done") return;
+    state.materialCleanup = slimCompletedSession(sessionMaterials(ctx));
+    saveState(life);
   };
   /** 流水线里的段：把完成、暂停、返修后没改动写进状态文件，编排程序据此接力。写失败不影响评审。 */
   const reportStage = (ctx: ExtensionContext, event: StageEvent, extra: { pauseReason?: string; reply?: string } = {}): boolean => {
@@ -212,7 +223,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
       criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
       sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
-      ponytailMissing,
+      ponytailMissing, materialCleanup: state.materialCleanup,
       ledger: state.phase === "done" && state.ledger
         ? { path: state.ledger.path, pending: state.ledger.pending, failed: state.ledger.failed } : undefined,
     });
@@ -471,6 +482,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           return;
         }
         await recordLedger(ctx, life);
+        slimMaterials(ctx, life);
         // 状态和总表都落盘后再发布完成总结；外部只看总结判断终态，不能抢跑。
         await writeSummary(ctx, "完成", life, undefined, undefined, undefined, undefined, signal);
         reportStage(ctx, "done");
@@ -489,7 +501,10 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       }
     }
     const errors: string[] = [];
-    try { saveState(life); } catch (error) { errors.push(`状态保存失败：${errorText(error)}`); }
+    try {
+      saveState(life);
+      if (record.mode === "advisory") slimMaterials(ctx, life);
+    } catch (error) { errors.push(`状态保存失败：${errorText(error)}`); }
     try { updateStatus(ctx, life); } catch (error) { errors.push(`状态栏更新失败：${errorText(error)}`); }
     try { await rewriteSummary(ctx, life, signal); } catch (error) { errors.push(`总结写入失败：${errorText(error)}`); }
     if (!live(life, signal)) return;
@@ -698,6 +713,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           return;
         }
         await recordLedger(ctx, life);
+        slimMaterials(ctx, life);
         await writeSummary(ctx, "完成", life, undefined, undefined, undefined, undefined, signal);
       }
       reportStage(ctx, state.phase === "done" ? "done" : "started");
@@ -988,6 +1004,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           else {
             // 本进程没登记过这个完成态（重启、进程异常退出后的恢复）：核对通过后补写一段。
             if (!state.ledger || state.ledger.session !== ctx.sessionManager.getSessionId()) await recordLedger(ctx, life);
+            if (!state.materialCleanup) slimMaterials(ctx, life);
             // 状态与总表都确认后再发布完成总结。
             await writeSummary(ctx, "完成", life);
           }

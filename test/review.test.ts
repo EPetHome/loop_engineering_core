@@ -1,4 +1,5 @@
 /** review.ts 单测：评审时间预算（首次调用加 1 次重试共用同一份 60 分钟预算）；门禁（gate）一步。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

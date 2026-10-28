@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * loop.ts — bin/loop 的实现：开工、启动、状态、合入。
+ * loop.ts — bin/loop 的实现：开工、启动、状态、合入、清理。
  *
  * 所有子命令支持 --dry-run（只核对、只打印，不改文件或分支）和 --json（标准输出一个 JSON 对象）。
  * 只做本地操作，不推送；开发方不提交，段完成时由流水线按分支名生成提交说明。
@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { remapBatchReferences } from "./batch-refs.ts";
 import { loadProjectLayout, workspacePath, type ProjectLayout } from "./config.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
+import { cleanupMaterialHistory } from "./materials.ts";
+import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
@@ -31,15 +33,16 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; recheck: boolean; launcher?: string; rest: string[] }
+interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  const result: ParsedArgs = { json: false, dryRun: false, recheck: false, rest: [] };
+  const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--json") result.json = true;
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
+    else if (arg === "--apply") result.apply = true;
     else if (arg === "--launcher") {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new LoopError("--launcher 需要一个值（terminal 或 background）");
@@ -49,6 +52,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.apply && result.command !== "清理") throw new LoopError("--apply 只用于 loop 清理");
+  if (result.command === "清理" && (result.batch || result.rest.length || result.recheck || result.launcher)) throw new LoopError("loop 清理不接受批次文件、--recheck 或 --launcher");
+  if (result.apply && result.dryRun) throw new LoopError("--apply 与 --dry-run 不能同时使用");
   return result;
 }
 
@@ -278,7 +284,7 @@ function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): 
   }
   const batchRel = insideRepo(repo.root, batch.path);
   if (target && batchRel) {
-    const mapped = remapBatchReferences(batch.raw, repo.root, target.path, batch.path);
+    const mapped = remapBatchReferences(batch.raw, repo.root, target.path, batch.path, new Set(files));
     if (JSON.stringify(mapped) !== JSON.stringify(batch.raw)) files.push(batchRel);
   }
   return {
@@ -299,15 +305,33 @@ function lstatSafe(path: string): ReturnType<typeof lstatSync> | undefined {
   }
 }
 
-/** 目标父路径不能被符号链接带到仓库外；不存在就建普通目录。 */
-function ensureSafeParents(targetRoot: string, rel: string): void {
+/** 目标父路径不能被符号链接带到仓库外；create=false 时只核对，不建目录。 */
+function ensureSafeParents(targetRoot: string, rel: string, create = true): void {
   let current = targetRoot;
   for (const part of rel.split("/").slice(0, -1)) {
     current = join(current, part);
     const info = lstatSafe(current);
-    if (!info) { mkdirSync(current); continue; }
+    if (!info) { if (!create) return; mkdirSync(current); continue; }
     if (info.isSymbolicLink()) throw new LoopError(`开发空间里的父路径是符号链接，未继续：${rel} → ${current}`);
     if (!info.isDirectory()) throw new LoopError(`开发空间里的父路径不是目录，未继续：${rel} → ${current}`);
+  }
+}
+
+/** 写入任何批次文档前核对全部目标；忽略规则不能作为覆盖本地内容的许可。 */
+function checkBatchDocTargets(target: WorkspaceUse, files: string[]): void {
+  const listed = gitResult(target.path, ["--literal-pathspecs", "ls-files", "--cached", "-z", "--", ...files]);
+  if (listed.status !== 0) {
+    throw new LoopError(`无法核对开发空间批次文档的跟踪状态：${target.path}（${(listed.stderr || listed.stdout).trim().slice(-300)}）`,
+      { workspace: target.path, files });
+  }
+  const tracked = new Set(listed.stdout.split("\0").filter(Boolean));
+  const blocked = files.filter((rel) => {
+    ensureSafeParents(target.path, rel, false);
+    return !tracked.has(rel) && Boolean(lstatSafe(resolve(target.path, rel)));
+  });
+  if (blocked.length) {
+    throw new LoopError(`开发空间的批次文档目标已有未跟踪内容（含被忽略的），不覆盖：${blocked.join("、")}`,
+      { workspace: target.path, files: blocked });
   }
 }
 
@@ -330,22 +354,24 @@ function writeDocSafely(targetRoot: string, rel: string, doc: DocContent): void 
   }
 }
 
-function rewriteBatchDocument(source: string, repoRoot: string, targetRoot: string): string {
+function rewriteBatchDocument(source: string, repoRoot: string, targetRoot: string, files: readonly string[]): string {
   const original = readFileSync(source, "utf8");
   let raw: unknown;
   try { raw = JSON.parse(original); } catch { return original; }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return original;
-  const mapped = remapBatchReferences(raw as Record<string, unknown>, repoRoot, targetRoot, source);
+  const mapped = remapBatchReferences(raw as Record<string, unknown>, repoRoot, targetRoot, source, new Set(files));
   return JSON.stringify(mapped) === JSON.stringify(raw) ? original : `${JSON.stringify(mapped, null, 2)}\n`;
 }
 
 function copyBatchDocs(repo: Repo, target: WorkspaceUse, files: string[], batchPath: string): Map<string, DocContent> {
+  // 新建/切换 worktree 后再核对一次，冲突时不留下部分写入的批次文档。
+  checkBatchDocTargets(target, files);
   const expected = new Map<string, DocContent>();
   for (const rel of files) {
     const source = resolve(repo.root, rel);
     let doc: DocContent;
     if (resolve(source) === resolve(batchPath)) {
-      doc = { kind: "file", content: Buffer.from(rewriteBatchDocument(source, repo.root, target.path)) };
+      doc = { kind: "file", content: Buffer.from(rewriteBatchDocument(source, repo.root, target.path, files)) };
     } else {
       const info = lstatSync(source);
       doc = info.isSymbolicLink()
@@ -561,6 +587,8 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     throw new LoopError(`批次文档需要搬进分支 ${docs.branch ?? "（未指定）"} 的开发空间，但没有找到对应的工作区；给该分支写 workspace 或已登记的 cwd`,
       { files: docs.files, branch: docs.branch });
   }
+  // 必须早于 checkout：Git 切分支本身也可能覆盖被忽略的同名文件；dry-run 同样报告冲突。
+  if (docs.files.length && docs.target?.registered) checkBatchDocTargets(docs.target, docs.files);
   const docPaths = new Set(docs.files);
   const uncommitted = [...new Set(runtimeChanges.map((change) => change.path).filter((path) => !docPaths.has(path)))].sort();
   const lines = [`运行版：${repo.root}（发布分支 ${repo.layout.release}）`];
@@ -911,11 +939,21 @@ async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
     uncommitted, commits: staged, merges, pushed: false, lines };
 }
 
+export function cmdCleanup(args: ParsedArgs): Record<string, unknown> {
+  const cleanup = cleanupMaterialHistory({ apply: args.apply });
+  const lines = [args.apply ? "按登记瘦身已完成会话（只处理运行材料）" : "预览：不删除、不改写任何文件；加 --apply 才执行",
+    ...cleanup.paths.map((path) => `${args.apply ? "已删除" : "将删除"}：${path}`),
+    materialCleanupLine(cleanup), ...materialCleanupNotes(cleanup),
+    `完成会话 ${cleanup.sessions.filter((session) => session.phase === "done").length} 个；跳过未完成会话 ${cleanup.sessions.filter((session) => session.phase !== "done").length} 个`];
+  return { ok: cleanup.failures.length === 0, command: "清理", dryRun: !args.apply, ...cleanup, lines };
+}
+
 const USAGE = `用法：
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
-  loop 合入 <批次.json> [--dry-run] [--json]`;
+  loop 合入 <批次.json> [--dry-run] [--json]
+  loop 清理 [--apply | --dry-run] [--json]`;
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
@@ -937,6 +975,7 @@ async function main(): Promise<number> {
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "合入") result = await cmdMerge(args);
+    else if (args.command === "清理") result = cmdCleanup(args);
     else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else {

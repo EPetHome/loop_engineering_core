@@ -145,6 +145,8 @@ export interface SummaryInput {
   sourceChangeNote?: string;
   /** 本次完成已登记的交付总表；只在状态为完成时写进总结开头。 */
   ledger?: { path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
+  /** 完成后的运行材料瘦身结果；删除失败仅提示。 */
+  materialCleanup?: string;
   /** Pi 开发会话启动时确认未注册 Ponytail；只在完成总结开头提醒，不改变结果。 */
   ponytailMissing?: boolean;
 }
@@ -329,10 +331,10 @@ export function buildReviewInput(options: ReviewInputOptions): string {
 }
 
 /**
- * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、acc-strong 换强模型重验、crit 起草验收标准。
+ * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、acc-strong 重验、acc-report 只读补报告、crit 起草标准。
  * 格式不合法时退化为 sha256 派生的 UUID 形式；评审沿用旧算法，已有评审会话 id 不变。
  */
-export function deriveSessionId(kind: "rev" | "acc" | "acc-strong" | "crit", devSessionId: string): string {
+export function deriveSessionId(kind: "rev" | "acc" | "acc-strong" | "acc-report" | "crit", devSessionId: string): string {
   const candidate = `autoreview-${kind}-${devSessionId}`;
   if (/^[A-Za-z0-9]$/.test(candidate) || /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/.test(candidate)) {
     return candidate;
@@ -368,6 +370,7 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
+  if (input.status === "完成" && input.materialCleanup) lines.push(`- ${input.materialCleanup}`);
   if (input.acceptRun) {
     lines.push(`- 验收命令：${acceptRunLabel(input.acceptRun)}`);
     lines.push(`- 验收命令用途：${input.acceptRun.mode === "required" ? "本段必需验收" : "附加检查"}`);

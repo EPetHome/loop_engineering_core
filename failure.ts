@@ -27,6 +27,26 @@ export function classifyFailure(code: number, output: string, interrupted = fals
   return { kind: "unknown", reason: `退出码 ${code}，缺少足够证据确定责任` };
 }
 
+/** Pi 的会话创建告警不是失败原因；原始输出仍保存在调用日志中。 */
+export function testerDiagnostics(output: string): string {
+  return output.split(/\r?\n/).filter((line) => !/No project session found|^\s*creating a new session with that id\.?\s*$/i.test(line)).join("\n").trim();
+}
+
+/** 验收方调用故障独立于被测命令：不能把模型断线/超时算作产品失败。 */
+export function classifyTesterFailure(code: number, output: string, interrupted = false, stalled = false): Failure & { disconnected?: boolean } {
+  const clean = testerDiagnostics(output);
+  const failure = classifyFailure(code, clean);
+  // 资源释放、入口和依赖故障优先：即使已取得全部证据，也不能掩盖执行器清理失败。
+  if (failure.kind === "environment" || failure.kind === "method") {
+    return { ...failure, reason: `${failure.reason}${clean ? `；${clean.slice(-400)}` : ""}` };
+  }
+  if (stalled || interrupted || [129, 130, 137, 143].includes(code) || /Connection error|Request timed out|ECONNRESET|ETIMEDOUT|rate.?limit|too many requests|(?:HTTP|status)\s*429/i.test(clean)) {
+    return { kind: "environment", disconnected: true, reason: stalled ? "验收方模型断线或挂住（连续无新动作）" : "验收方模型断线（调用超时、连接中断或限流）" };
+  }
+  return { kind: failure.kind === "product" ? "unknown" : failure.kind,
+    reason: `验收方调用异常：${failure.reason}${clean ? `；${clean.slice(-400)}` : ""}` };
+}
+
 export const failureLabel = (kind: FailureKind): string => ({
   product: "产品缺陷", environment: "环境阻塞", method: "检查方法故障", unknown: "原因待诊断",
 })[kind];

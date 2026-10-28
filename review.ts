@@ -60,6 +60,7 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   rounds: RoundRecord[];
   repairs: number;
   phase: "idle" | "reviewing" | "accepting" | "done" | "paused";
+  materialCleanup?: string;
   pauseReason?: string;
   /** 暂停时给你看的下一步（写进总结「需要你做的事」），恢复时清掉。 */
   pauseHint?: string;

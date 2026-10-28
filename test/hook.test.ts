@@ -1,4 +1,5 @@
 /** hosts/hook.ts 无模型回归 H1–H17；所有运行产物只写 os.tmpdir()。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -11,6 +12,7 @@ import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import { CONVENTION, conventionText } from "../core.ts";
 import { childExec, detectHost, findProjectRoot, lastAssistantFromTranscript, loadConfig } from "../hosts/hook.ts";
 import { projectRootOf, renderLedgerRecord } from "../ledger.ts";
+import { registerAcceptanceMaterials } from "../materials.ts";
 
 const HOOK = fileURLToPath(new URL("../hosts/hook.ts", import.meta.url));
 const FAKE = fileURLToPath(new URL("./fake-reviewer.mjs", import.meta.url));
@@ -76,6 +78,7 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
       env: {
         ...baseEnv,
         HOME: home,
+        AUTOREVIEW_RESOURCE_ROOT: join(home, ".pi-autoreview", "resources"),
         PATH: `${bin}:${env.PATH}`,
         AUTOREVIEW_REVIEWER_CMD: FAKE,
         FAKE_MODE: runOptions.mode ?? "pass",
@@ -103,6 +106,49 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
     close: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("A1/A2 Hook 只在真正完成时瘦身登记验收轮次和门禁 TMPDIR，总结保留小证据", async (t) => {
+  for (const paused of [false, true]) await t.test(paused ? "暂停保留" : "完成瘦身", () => {
+    const script = `const fs=require('node:fs'),p=process.env.TMPDIR;fs.writeFileSync(p+'/large.db',Buffer.alloc(300000));fs.writeFileSync(p+'/reuse.sh','echo reuse');fs.writeFileSync(p+'/system.log','keep');`;
+    const h = fixture({ marker: JSON.stringify({ gate: { cmd: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` } }) });
+    try {
+      h.run(h.event("SessionStart")); h.run(h.event("UserPromptSubmit", { prompt: "需求" }));
+      const run = join(h.home, ".pi-autoreview", "repo", "acceptance", "claude-s1", "r0");
+      mkdirSync(join(run, "node_modules"), { recursive: true });
+      registerAcceptanceMaterials("claude-s1", h.repo, run, join(h.home, ".pi-autoreview", "repo", "claude-s1.procs.json"));
+      writeFileSync(join(run, "data.db"), Buffer.alloc(300_000)); writeFileSync(join(run, "node_modules", "tiny.js"), "tiny");
+      for (const name of ["result.json", "input.md", "screenshot.jpg", "system.log", "reuse.sh"]) writeFileSync(join(run, name), "keep");
+      h.write("file.txt", "changed\n");
+      const output = h.run(paused ? h.event("Stop", { last_assistant_message: "【需要你决定】" }) : h.delivered());
+      assert.equal(output.code, 0, output.stderr);
+      assert.equal(h.readState().phase, paused ? "paused" : "done");
+      assert.equal(existsSync(join(run, "data.db")), paused); assert.equal(existsSync(join(run, "node_modules")), paused);
+      for (const name of ["result.json", "input.md", "screenshot.jpg", "system.log", "reuse.sh"]) assert.ok(existsSync(join(run, name)), name);
+      if (paused) assert.ok(!h.summary().includes("运行材料瘦身"));
+      else {
+        assert.match(h.summary(), /运行材料瘦身：删除 3 个文件，释放约 .*；保留/);
+        const root = join(h.home, ".pi-autoreview", "resources");
+        const record = readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(root, name), "utf8"))).find((item) => item.label === "gate:claude-s1:r1");
+        assert.ok(record); assert.equal(existsSync(join(record.evidenceDir, "large.db")), false);
+        assert.ok(existsSync(join(record.evidenceDir, "reuse.sh"))); assert.ok(existsSync(join(record.evidenceDir, "system.log")));
+      }
+    } finally { h.close(); }
+  });
+});
+
+test("运行材料删除失败只在完成总结提示，不把 Hook 完成态改成暂停", () => {
+  const h = fixture();
+  const run = join(h.home, ".pi-autoreview", "repo", "acceptance", "claude-s1", "r0");
+  try {
+    h.run(h.event("SessionStart")); h.run(h.event("UserPromptSubmit", { prompt: "需求" }));
+    mkdirSync(run, { recursive: true });
+    registerAcceptanceMaterials("claude-s1", h.repo, run, join(h.home, ".pi-autoreview", "repo", "claude-s1.procs.json"));
+    writeFileSync(join(run, "large.db"), Buffer.alloc(300_000)); chmodSync(run, 0o500);
+    h.write("file.txt", "changed\n"); const res = h.run(h.delivered());
+    assert.equal(res.code, 0, res.stderr); assert.equal(h.readState().phase, "done");
+    assert.ok(existsSync(join(run, "large.db"))); assert.match(h.summary(), /删除失败，仅提示：.*large\.db/);
+  } finally { if (existsSync(run)) chmodSync(run, 0o700); h.close(); }
+});
 
 test("H1 直接打开的会话找不到 .autoreview.json：退出 0，stdout 为空，不写状态", () => {
   const h = fixture({ marker: null });

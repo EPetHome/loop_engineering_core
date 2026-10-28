@@ -62,7 +62,9 @@ if (mode === "kill" || mode === "kill-restart") {
 const port = Number(process.argv[1]);
 const listen = () => { const server = createServer((q, r) => r.end("orphan")); server.once("error", () => setTimeout(listen, 20)); server.listen(port, "127.0.0.1"); };
 listen(); setTimeout(() => process.exit(0), 60000);`;
-    spawn(process.execPath, ["-e", orphan, port], { detached: true, stdio: "ignore" }).unref();
+    const restarted = spawn(process.execPath, ["-e", orphan, port], { detached: true, stdio: "ignore" });
+    writeFileSync(join(runDir, "restarted.pid"), String(restarted.pid));
+    restarted.unref();
   }
   process.kill(Number(readFileSync(join(runDir, "server.pid"), "utf8")), "SIGTERM");
   // 程序发现系统退出会立刻停掉验收方；没被停掉的话，下面留的证据都在关掉之后。

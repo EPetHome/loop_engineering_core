@@ -12,6 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { beginAction } from "./activity.mjs";
 
 const MAX_STREAM = 200 * 1024;
 const [runDir, id, ...rest] = process.argv.slice(2);
@@ -35,6 +36,7 @@ if (command.length === 0) {
   process.exit(2);
 }
 
+beginAction(runDir);
 const shell = command.length === 1;
 const res = shell
   ? spawnSync("/bin/sh", ["-c", command[0]], { cwd, encoding: "utf8", timeout: timeoutSec * 1000, maxBuffer: 20 * 1024 * 1024 })

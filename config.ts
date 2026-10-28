@@ -25,6 +25,7 @@ export const MARKER_FILE = ".autoreview.json";
 export const configurationHash = (data: unknown): string => createHash("sha256").update(JSON.stringify(data)).digest("hex");
 export const DEFAULT_ACCEPTANCE_MODEL = "opencode-go/deepseek-v4.1-flash";
 export const DEFAULT_ACCEPTANCE_TIMEOUT_MIN = 20;
+export const DEFAULT_ACCEPTANCE_IDLE_TIMEOUT_SEC = 300;
 export const DEFAULT_READY_TIMEOUT_SEC = 60;
 export const DEFAULT_RESET_TIMEOUT_SEC = 120;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
@@ -63,8 +64,10 @@ export interface AcceptanceConfig {
   actions?: string;
   model: string;
   thinking?: string;
-  /** 强模型：起草验收标准、验收方没做好时重验都用它；不写就用评审模型。 */
+  /** 强模型：起草标准、重验、断线后只读补报告都用它；不写就用评审模型。 */
   strongModel?: string;
+  /** 无输出、会话或证据变化且没有实测工具正在执行时，结束本次验收方调用。 */
+  idleTimeoutSec: number;
   /** 一轮里验收最多用多少分钟，从一轮总预算（reviewTimeoutMin）里扣。 */
   timeoutMin: number;
   /** 给被测系统的额外环境变量。 */
@@ -180,6 +183,7 @@ export function parseAcceptanceConfig(
     thinking: optionalString(data, "thinking"),
     strongModel: optionalString(data, "strongModel"),
     timeoutMin: positiveInt(data, "timeoutMin", DEFAULT_ACCEPTANCE_TIMEOUT_MIN),
+    idleTimeoutSec: positiveInt(data, "idleTimeoutSec", DEFAULT_ACCEPTANCE_IDLE_TIMEOUT_SEC),
     env: { ...(envValue as Record<string, string> | undefined) },
     testerCmd: env.AUTOREVIEW_ACCEPTANCE_CMD?.trim() ?? "",
     drafterCmd: env.AUTOREVIEW_CRITERIA_CMD?.trim() ?? "",
