@@ -7,7 +7,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN } from "../config.ts";
-import { endHostExperienceSessions, loadConfig } from "./hook.ts";
+import { endHostExperienceSessions, hookPaths, loadConfig } from "./hook.ts";
+import { launchHookHost } from "./inbox-bridge.ts";
+import { registeredQueueBatch } from "../merge-queue.ts";
+import { readJson } from "../pipeline-core.ts";
+import { processStartTime } from "../procs.ts";
 
 const HELP = `用法：bin/loop-dev <claude|codex> [任务文件] [选项] [-- 宿主参数…]
   --cwd <目录>       开发目录，默认当前目录
@@ -130,13 +134,27 @@ export function main(argv = process.argv.slice(2)): void {
   if (!root) writeFileSync(join(cwd, ".autoreview.json"), "{}\n", { flag: "wx" });
   console.error(`[Loop] ${host} 开发宿主；评审与验收沿用 Pi 引擎。${host === "codex" ? "若提示 Hook 未信任，先在 /hooks 审阅并信任。" : ""}`);
   const runId = randomUUID();
-  const child = spawn(command, args, { cwd, stdio: "inherit", env: { ...hostEnv(cwd, root), AUTOREVIEW_DEV_RUN_ID: runId } });
-  child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
-  child.on("exit", (code, signal) => {
+  const env = { ...hostEnv(cwd, root), AUTOREVIEW_DEV_RUN_ID: runId, AUTOREVIEW_DEV_PID: String(process.pid), AUTOREVIEW_DEV_STARTED: processStartTime(process.pid) };
+  const finished = (code: number | null, signal: NodeJS.Signals | null) => {
     try { endHostExperienceSessions(root ?? cwd, host, runId); }
     catch (error) { console.error(`[Loop] 宿主退出后的经验活动登记未确认，批准保持阻挡：${(error as Error).message}`); }
     process.exitCode = code ?? (signal === "SIGINT" ? 130 : 1);
-  });
+  };
+  const batch = process.env.AUTOREVIEW_BATCH_FILE && process.env.AUTOREVIEW_STAGE
+    ? registeredQueueBatch(cwd, process.env.AUTOREVIEW_BATCH_FILE) : undefined;
+  const stage = batch?.stages.find((item) => item.name === process.env.AUTOREVIEW_STAGE && realpathSync(item.cwd) === cwd);
+  if (batch && stage) {
+    launchHookHost({ command, args, cwd, env, dir: batch.dir, stage: stage.name, host, token: runId, onExit: finished,
+      isIdle: (status) => {
+        const paths = hookPaths(root ?? cwd, host, status.sessionId);
+        const state = readJson<{ phase: string; awaitingRepair?: boolean; resumeAfterInputChange?: boolean }>(paths.state);
+        return state?.phase === "done" && !state.awaitingRepair && !state.resumeAfterInputChange && !existsSync(paths.lock);
+      } });
+  } else {
+    const child = spawn(command, args, { cwd, stdio: "inherit", env });
+    child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
+    child.on("exit", finished);
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

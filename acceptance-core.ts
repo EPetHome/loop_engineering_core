@@ -97,7 +97,7 @@ export function grantsFromUser(text: string, criteria: Criteria | undefined, pre
 }
 
 /** 程序自己发给开发方的消息（返修、门禁、流水线 e2e 返修）：不是用户打的字。 */
-const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|流水线 e2e 返修) · |流程等待】|流程准备】)/;
+const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|流水线 e2e 返修) · |合入队列返修】|流程等待】|流程准备】)/;
 export const isLoopMessage = (prompt: string): boolean => LOOP_MESSAGE.test(prompt);
 
 /** 用户亲手打的字：程序自己发的消息不算，pi 展开的 <file> 块去掉（宿主 Hook 直接传没展开的原文）。 */

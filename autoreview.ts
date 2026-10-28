@@ -21,7 +21,8 @@ import {
   inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, readJson, stageFromEnv, statusPath, writeStageStatus,
   type InboxMessage, type StageEvent, type StageLink,
 } from "./pipeline-core.ts";
-import { reapProcs } from "./procs.ts";
+import { processStartTime, reapProcs } from "./procs.ts";
+import { queueStageEvent } from "./merge-queue.ts";
 import { classifyFailure, failureLabel } from "./failure.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
 import { methodEnv } from "./method-env.ts";
@@ -170,9 +171,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   const reportStage = (ctx: ExtensionContext, event: StageEvent, extra: { pauseReason?: string; reply?: string } = {}): boolean => {
     if (!pipelineLink) return true;
     try {
-      writeStageStatus(pipelineLink, {
-        sessionId: ctx.sessionManager.getSessionId(), summary: summaryPath(ctx), event, ...(event === "done" ? { readyEpoch: state.readyEpoch, sourceInputs: state.inputsFingerprint } : {}), inbox: state.inboxHandled ?? 0, ...extra,
-      });
+      const status = {
+        sessionId: ctx.sessionManager.getSessionId(), host: "pi", pid: process.pid, processStarted: processStartTime(process.pid),
+        summary: summaryPath(ctx), event, ...(event === "done" ? { readyEpoch: state.readyEpoch, sourceInputs: state.inputsFingerprint } : {}), inbox: state.inboxHandled ?? 0, ...extra,
+      };
+      writeStageStatus(pipelineLink, status);
+      queueStageEvent({ cwd: ctx.cwd, file: process.env.AUTOREVIEW_BATCH_FILE, stage: pipelineLink.stage, status });
       return true;
     } catch {
       // 不能写入失效状态时，也不能留下旧的 done 供消费者接力。

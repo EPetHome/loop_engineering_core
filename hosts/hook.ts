@@ -27,6 +27,9 @@ import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, re
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
+import { queueStageEvent } from "../merge-queue.ts";
+import { bindHookInputBridge, bridgeRepairSequence } from "./inbox-bridge.ts";
+import { inboxPath, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
@@ -57,6 +60,7 @@ export interface HookEvent {
 
 export interface HookState extends ReviewState {
   userInputVersion?: string; resumeAfterInputChange?: boolean;
+  queueReadyEpoch?: string; queueInboxHandled?: number; queuePreparedSeq?: number;
   experienceActivity?: HookExperienceActivity;
   /** 本进程最近一次往交付总表写的段：同一完成态不重复追加，总结里的总表路径与它一致。 */
   ledger?: { session: string; path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
@@ -86,6 +90,7 @@ interface HookContext {
   exec: Exec;
   config: ReviewConfig;
   configError?: string;
+  permissionMode?: string;
 }
 
 /**
@@ -704,8 +709,80 @@ export function endHostExperienceSessions(root: string, host: string, runId: str
   }
 }
 
+function reportQueueStage(ctx: HookContext, state: HookState, event: "started" | "done"): void {
+  const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
+    inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
+    event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined, sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0 };
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  if (dir && stage) bindHookInputBridge(dir, stage, status, { socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
+    token: process.env.CLAUDE_CODE_MESSAGING_TOKEN, mode: ctx.permissionMode });
+  queueStageEvent({ cwd: ctx.workDir, file: process.env.AUTOREVIEW_BATCH_FILE, stage, status });
+}
+async function consumeQueueInbox(ctx: HookContext, state: HookState, expectedSeq?: number, stillIdle?: () => boolean, prepareOnly = false): Promise<string | undefined> {
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  if (!dir || !stage) return undefined;
+  const inbox = readJson<InboxMessage>(inboxPath(dir, stage));
+  if (!inbox || !inbox.message.startsWith("【合入队列返修】") || inbox.seq <= (state.queueInboxHandled ?? 0)
+    || (expectedSeq !== undefined && inbox.seq !== expectedSeq)) return undefined;
+  if (lockAlive(ctx.paths.lock)) return undefined;
+  if (state.queuePreparedSeq === inbox.seq) {
+    if (!prepareOnly) {
+      state.queueInboxHandled = inbox.seq; state.queuePreparedSeq = undefined;
+      saveStateFile(ctx.paths.state, state); reportQueueStage(ctx, state, "started");
+    }
+    return inbox.message;
+  }
+  const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
+  if (stillIdle && !stillIdle()) return undefined;
+  state.lastSnapshot = snap.ref; state.lastUntracked = snap.untracked.map(({ path }) => path);
+  state.lastFingerprint = snap.fingerprint; state.lastCheckedFingerprint = snap.fingerprint;
+  state.scopeBaseline = snap.ref; state.scopeBaselineUntrackedDetails = snap.untracked;
+  state.unresolvedMustFix = inbox.mustFix;
+  if (!prepareOnly) state.queueInboxHandled = inbox.seq;
+  state.queuePreparedSeq = prepareOnly ? inbox.seq : undefined; state.queueReadyEpoch = undefined;
+  state.phase = "idle"; state.awaitingRepair = false; state.pauseReason = undefined; state.pauseHint = undefined;
+  state.ledger = undefined; state.resumeAfterInputChange = true;
+  saveStateFile(ctx.paths.state, state);
+  reportQueueStage(ctx, state, "started");
+  return inbox.message;
+}
+/** 原生收件通道发送前先固定返修基线；这不是用户输入，不改授权/标准，也不调用模型。 */
+async function prepareNativeQueueRepair(ctx: HookContext, event: HookEvent): Promise<string> {
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  const token = process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  const seq = dir && stage && token && typeof event.prompt === "string" ? bridgeRepairSequence(dir, stage,
+    { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid), inputBridge: token }, event.prompt) : undefined;
+  const refused = () => JSON.stringify({ ok: false });
+  if (seq === undefined || !dir || !stage || ctx.configError) return refused();
+  const state = loadStateFile(ctx.paths.state), inbox = readJson<InboxMessage>(inboxPath(dir, stage));
+  if (state.enabled === false || !inbox || inbox.seq !== seq || lockAlive(ctx.paths.lock)) return refused();
+  if ((state.queueInboxHandled ?? 0) >= seq || state.queuePreparedSeq === seq) return JSON.stringify({ ok: true, seq }); // 已准备的重试不能重置基线。
+  const expected = readJson<StageStatus>(statusPath(dir, stage));
+  const inputVersion = state.userInputVersion;
+  const stillIdle = () => {
+    const current = readJson<StageStatus>(statusPath(dir, stage));
+    return state.phase === "done" && expected?.event === "done" && current?.event === "done" && current.sessionId === ctx.sessionId
+      && current.inputBridge === token && current.readyEpoch === expected.readyEpoch && !lockAlive(ctx.paths.lock)
+      && loadStateFile(ctx.paths.state).userInputVersion === inputVersion;
+  };
+  if (!stillIdle() || !await consumeQueueInbox(ctx, state, seq, stillIdle, true)) return refused();
+  await writeSummary(ctx, state, "进行中", undefined, undefined, "合入队列返修已准备，等待原生收件通道处理；修复前基线和业务计数保留。");
+  return JSON.stringify({ ok: true, seq });
+}
+
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
-  if (isLoopMessage(typeof event.prompt === "string" ? event.prompt : "")) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx));
+  const raw = typeof event.prompt === "string" ? event.prompt : "";
+  const expanded = expandFileRefs(raw, ctx.promptDir);
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  const dispatched = dir && stage && process.env.AUTOREVIEW_DEV_INPUT_BRIDGE ? bridgeRepairSequence(dir, stage,
+    { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid), inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE }, raw) : undefined;
+  const machine = dispatched !== undefined || isLoopMessage(raw) || /--- @[^\n]+ ---\n【合入队列返修】/.test(expanded);
+  if (machine) {
+    const state = loadStateFile(ctx.paths.state), repair = await consumeQueueInbox(ctx, state, dispatched);
+    return contextOutput(ctx, "UserPromptSubmit", [conventionFor(ctx), repair].filter(Boolean).join("\n\n"));
+  }
   // 相对引用保持宿主当前目录语义；固定项目根只用于配置、Git 取证、状态和评审。
   const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.promptDir);
   const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
@@ -733,6 +810,7 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   if (notice) process.stderr.write(`[autoreview] ${notice}\n`);
   if (notice && ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
   let state = loadStateFile(ctx.paths.state);
+  reportQueueStage(ctx, state, "started");
   // 授权与输入版本已经独立落盘；经验锁、登记读写失败不能吞掉撤权或旧检查的取消信号。
   experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
   if (state.enabled === false) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx), notice);
@@ -816,6 +894,10 @@ function guardSignals(ctx: HookContext, controller: AbortController, finished: (
 async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
   let state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return undefined;
+  const prepared = state.queuePreparedSeq;
+  const queuedRepair = await consumeQueueInbox(ctx, state);
+  if (queuedRepair && prepared === undefined) return JSON.stringify({ decision: "block", reason: queuedRepair });
+  // 原生通道可能不触发 UserPromptSubmit；首次 Stop 仅确认收件，按发送前的基线评审修复。
   const text = lastAssistantMessage(event);
   const marker = classifyMarker(text);
   if (marker === "decision") {
@@ -942,6 +1024,8 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       saveStateFile(ctx.paths.state, state);
       // 状态和总表都落盘后再发布完成总结。
       await writeSummary(ctx, state, "完成");
+      state.queueReadyEpoch = randomUUID(); saveStateFile(ctx.paths.state, state);
+      reportQueueStage(ctx, state, "done");
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
       await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
       checkUserInputs();
@@ -1014,9 +1098,11 @@ async function dispatch(event: HookEvent): Promise<string | undefined> {
       configError = `项目配置不可用（AUTOREVIEW_DEV_ROOT=${root}）：${errorText(error)}`;
     }
   }
-  const ctx: HookContext = { host, configRoot: root, workDir: root, promptDir: eventCwd, sessionId, paths, exec: createChildExec(paths.procs), config, configError };
+  const ctx: HookContext = { host, configRoot: root, workDir: root, promptDir: eventCwd, sessionId, paths, exec: createChildExec(paths.procs), config, configError,
+    permissionMode: typeof event.permission_mode === "string" ? event.permission_mode : undefined };
   if (kind === "SessionStart") return configError ? configUnavailable(ctx) : sessionStart(ctx);
   if (kind === "UserPromptSubmit") return userPromptSubmit(ctx, event);
+  if (kind === "LoopQueueRepair") return prepareNativeQueueRepair(ctx, event);
   if (kind === "Stop") return configError ? configUnavailable(ctx) : stop(ctx, event);
   return undefined;
 }

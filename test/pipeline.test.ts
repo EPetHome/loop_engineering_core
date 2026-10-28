@@ -620,6 +620,7 @@ test("P 流水线准备和段会话共用准备前确定的开工依据", async 
 test("P 并行段一段启动失败：收束另一段的等待，不杀已启动会话", async () => {
   const root = tempDir();
   const out = mkdtempSync(join(tmpdir(), "autoreview-pipeline-cancel-"));
+  const launched: Promise<void>[] = [];
   try {
     const a = gitRepo(join(root, "a")), b = gitRepo(join(root, "b"));
     const status = (event: string, reason = "") => `${process.execPath} -e 'const fs=require("node:fs"),p=require("node:path");const d=process.env.AUTOREVIEW_PIPELINE_DIR,s=process.env.AUTOREVIEW_STAGE;fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,s+".status.json"),JSON.stringify({stage:s,sessionId:"s",summary:"",event:${JSON.stringify(event)},seq:1,inbox:0,pauseReason:${JSON.stringify(reason)}}));'`;
@@ -630,13 +631,18 @@ test("P 并行段一段启动失败：收束另一段的等待，不杀已启动
     const notes: string[] = [];
     const started = Date.now();
     const code = await runPipeline(plan, {
-      launch: (_stage, script) => { spawnSync("/bin/sh", ["-c", `(${script}) >/dev/null 2>&1 &`]); },
+      launch: (_stage, script) => {
+        const child = spawn("/bin/sh", ["-c", script], { stdio: "ignore" });
+        launched.push(new Promise<void>((accept) => { child.once("exit", () => accept()); child.once("error", () => accept()); }));
+      },
       notify: (message) => notes.push(message), log: () => {}, pollMs: 30, silenceMs: 1000,
       preflightEnv: { playwright: () => true },
     });
     assert.equal(code, 1);
     assert.ok(Date.now() - started < 5_000, "另一段的等待已收束，进程没有一直挂着");
     assert.match(notes.at(-1)!, /段 甲 启动失败/);
+    // 编排已及时返回不等于另一个替身已写完文件；按本测试创建的子进程确认退出再读/清理。
+    await Promise.all(launched);
     assert.equal(JSON.parse(readFileSync(join(plan.dir, "乙.status.json"), "utf8")).event, "paused", "乙的会话状态保留");
-  } finally { rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
+  } finally { await Promise.all(launched); rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
 });

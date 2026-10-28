@@ -23,6 +23,12 @@ export type StageEvent = "started" | "done" | "paused" | "no-change" | "startup-
 export interface StageStatus {
   stage: string;
   sessionId: string;
+  /** 原开发宿主及进程身份；队列只恢复同一会话，不能按 PID 猜归属。 */
+  host?: string;
+  pid?: number;
+  processStarted?: string;
+  /** 本启动器持有的原宿主 PTY 输入通道身份；只用于自动返修投递，不属于完成资格。 */
+  inputBridge?: string;
   summary: string;
   event: StageEvent;
   /** 本次完成资格的身份；恢复重发保持，任何重验或输入失效后重新生成。 */

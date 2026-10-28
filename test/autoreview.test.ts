@@ -18,6 +18,7 @@ import { registerAcceptanceMaterials } from "../materials.ts";
 import { contextDir, loadContext } from "../project-context.ts";
 import { createChildExec } from "../hosts/hook.ts";
 import type { Exec, ExecResult } from "../git.ts";
+import { queueDir, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
 
 type Result = ExecResult;
 type Call = { command: string; args: string[]; options: Partial<Parameters<Exec>[2]> };
@@ -2140,6 +2141,27 @@ test("G17 Ponytail 未加载只在启动与完成总结提醒，不改变完成�
     assert.ok(!runResult.notifications.some((text) => text.includes("未加载 Ponytail")));
     assert.doesNotMatch(runResult.summary, /未加载 Ponytail/);
   });
+});
+
+test("合入队列：Pi 真正完成发布边界自动进队；不提交开发空间", async () => {
+  const h = harness({ stage: "甲" });
+  try {
+    h.write(".autoreview.json", JSON.stringify({ gate: { cmd: "true", timeoutMin: 1 } }));
+    h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
+    const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json");
+    writeFileSync(file, JSON.stringify({ stages: { 甲: {} } })); h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+    const original = h.git("rev-parse", "HEAD"), branch = h.git("branch", "--show-current");
+    registerQueueBatch(runtime, { name: "Pi完成", file, dir: h.pipelineDir, project: runtime, release: "release", steps: [["甲"]],
+      stages: [{ name: "甲", cwd: h.repo, branch, start: "true" }] });
+    const old = process.env.AUTOREVIEW_BATCH_FILE; process.env.AUTOREVIEW_BATCH_FILE = file;
+    try {
+      await h.event("session_start"); await h.begin("单段需求"); h.write("file.txt", "reviewed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+      await until(() => readMergeQueue(runtime)?.entries[0]?.status === "ready", "Pi 完成自动进队并通过门禁");
+      await until(() => !existsSync(join(queueDir(runtime), "worker.lock")), "队列释放执行锁");
+      assert.equal(h.git("rev-parse", "HEAD"), original, "队列不提交开发分支");
+      assert.match(h.git("status", "--porcelain"), /file\.txt/);
+    } finally { if (old === undefined) delete process.env.AUTOREVIEW_BATCH_FILE; else process.env.AUTOREVIEW_BATCH_FILE = old; }
+  } finally { await h.close(); }
 });
 
 test("扩展加载时撤掉一次性启动回报身份，自定义 start 的子进程不能再回报失败", async () => {

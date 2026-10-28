@@ -17,6 +17,8 @@ import { approveExperience, candidateCount, compactExperience, experienceFile, i
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
+import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch } from "./merge-queue.ts";
+import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
@@ -635,6 +637,15 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     methods = methodsSummary(run);
     lines.push(...methodsLines(run));
   }
+  if (!args.dryRun) {
+    const opened = loadBatch(repo, docs.batchPath);
+    const stages = [...opened.plan.stages.values()].map((stage) => ({ ...stage, branch: branchOfStage(opened, stage.name) ?? "" }));
+    // 外部/非 git 段沿用原行为，不把它们接入 git 合入队列。
+    if (stages.every((stage) => stage.branch && worktrees(repo.root).some((item) => item.path === gitResult(stage.cwd, ["rev-parse", "--show-toplevel"]).stdout.trim()))) {
+      registerQueueBatch(repo.root, { name: opened.plan.name, file: opened.path, dir: opened.plan.dir, project: repo.projectRoot,
+        release: repo.layout.release, stages, steps: opened.plan.steps });
+    }
+  }
   const start = batchCommand("启动", docs.batchPath);
   const status = batchCommand("状态", docs.batchPath);
   const merge = batchCommand("合入", docs.batchPath);
@@ -752,12 +763,29 @@ function readdirSafe(path: string): string[] {
 
 async function cmdStatus(args: ParsedArgs): Promise<Record<string, unknown>> {
   const entries = args.batch ? statusEntries(loadBatch(repoOf(process.cwd()), args.batch)) : scanStatuses();
+  const detected = gitResult(process.cwd(), ["rev-parse", "--show-toplevel"]);
+  const queue = detected.status === 0 ? readMergeQueue(detected.stdout.trim()) : undefined;
+  if (queue && !args.dryRun) recoverMergeQueue(queue.repo);
   const lines = entries.length ? entries.map((entry) => {
     const reason = entry.pauseReason ? `；暂停原因：${entry.pauseReason}` : "";
     const round = entry.round === undefined || entry.round === null ? "未知" : String(entry.round);
     return `${entry.stage}：${entry.phase}；轮次：${round}（状态序号 ${entry.seq}）${reason}；总结：${entry.summary ?? "（无）"}；目录：${entry.dir}`;
   }) : ["没有找到段状态"];
-  return { ok: true, command: "状态", dryRun: args.dryRun, stages: entries, lines };
+  const fresh = queue ? readMergeQueue(queue.repo)! : undefined;
+  const active = fresh?.entries.filter((entry) => ["pending", "testing", "ready", "returning", "merging"].includes(entry.status)).sort((a, b) => a.order - b.order) ?? [];
+  const queueEntries = fresh?.entries.map((entry) => {
+    const batch = fresh.batches.find((item) => item.id === entry.batch)!;
+    const deliveryWarnings = entry.deliveries?.flatMap((delivery) => {
+      const session = entry.qualification.find((item) => item.stage === delivery.stage)?.session;
+      const warning = session && nativeDeliveryWarning(batch.dir, delivery.stage, session, delivery.seq);
+      return warning ? [warning] : [];
+    }) ?? [];
+    return { ...entry, position: active.findIndex((item) => item.id === entry.id) + 1 || null, deliveryWarnings };
+  }) ?? [];
+  const labels: Record<string, string> = { pending: "排队中", testing: "测试中", ready: "可合入", returning: "正在退回", returned: "已退回开发会话", blocked: "资格失效/等待处理", merging: "合入待恢复", merged: "已合入" };
+  if (fresh) lines.push(`合入队列：${fresh.repo}；固定测试工作区：${fresh.workspace}`, ...queueEntries.map((entry) =>
+    `${entry.name}：${entry.position ? `队列第 ${entry.position} 位；` : ""}${labels[entry.status]}；测试 ${entry.attempt} 次${entry.reason ? `；${entry.reason}` : ""}${entry.deliveryWarnings.length ? `；${entry.deliveryWarnings.join("；")}` : ""}${entry.log ? `；日志：${entry.log}` : ""}`));
+  return { ok: true, command: "状态", dryRun: args.dryRun, stages: entries, queue: queueEntries, queueWorkspace: fresh?.workspace, lines };
 }
 
 function checkNoExistingMerge(repo: Repo): void {
@@ -801,7 +829,7 @@ function untrackedBlockers(root: string): string[] {
  * 用 stash commit + 独立私有 ref 保存项目根的已跟踪未提交改动（含暂存状态）。
  * 不读写共享的 refs/stash，避免其他 worktree 同时 push 时认错或删错记录。
  */
-function stashProjectChanges(repo: Repo, changes: WorkingChange[]): ProjectStash | undefined {
+function stashProjectChanges(repo: Repo, changes: WorkingChange[], onPinned?: (stash: ProjectStash) => void): ProjectStash | undefined {
   if (!changes.some((change) => !change.status.startsWith("??"))) return undefined;
   const blockers = untrackedBlockers(repo.root);
   if (blockers.length) {
@@ -821,6 +849,7 @@ function stashProjectChanges(repo: Repo, changes: WorkingChange[]): ProjectStash
     throw new LoopError(`无法为临时保存的改动创建独立引用，未合入：${(pin.stderr || pin.stdout).trim().slice(-300)}`,
       { stash: hash });
   }
+  onPinned?.({ ref, hash });
   // 改动已经钉在独立 ref 上，再把已跟踪的工作区/索引恢复到 HEAD；未跟踪文件保留。
   const reset = gitResult(repo.root, ["read-tree", "--reset", "-u", "HEAD"]);
   if (reset.status !== 0) {
@@ -843,10 +872,73 @@ function restoreProjectStash(repo: Repo, stash: ProjectStash): void {
   gitResult(repo.root, ["update-ref", "-d", stash.ref, stash.hash]);
 }
 
+async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): Promise<Record<string, unknown>> {
+  const registration = registeredQueueBatch(repo.root, batch.path)!;
+  checkNoExistingMerge(repo);
+  const dirty = checkRuntime(repo);
+  const uncommitted = [...new Set(dirty.map((change) => change.path))].sort();
+  if (args.dryRun) {
+    const entry = readMergeQueue(repo.root)!.entries.filter((item) => item.batch === registration.id).at(-1);
+    return { ok: true, command: "合入", dryRun: true, release: repo.layout.release, queue: entry ?? null, uncommitted, pushed: false,
+      lines: [`只核对，不写入；队列状态：${entry?.status ?? "尚未完成进队"}；只允许合入测过且发布基线未变化的提交`] };
+  }
+  const entry = await mergeQueuedBatch(repo.root, registration, false, (candidate, save) => {
+    if (!candidate.result || !candidate.base) throw new LoopError("队列缺少测过的合并结果");
+    const current = gitText(repo.root, ["rev-parse", "HEAD"]);
+    // 合入进程被杀：先按持久化的 stash 身份恢复，不重复合并已发布的结果。
+    const restore = (): void => {
+      if (!candidate.runtimeStash) return;
+      // 私有 ref 只在恢复成功后删除；进程若死在删除与队列落盘之间，不再重复 apply。
+      if (gitResult(repo.root, ["show-ref", "--verify", "--quiet", candidate.runtimeStash.ref]).status === 0) restoreProjectStash(repo, candidate.runtimeStash);
+      save({ runtimeStash: undefined });
+    };
+    if (current === candidate.result) {
+      // ref 的 CAS 已成功而 checkout 尚未完成时，由本次用户命令补齐；后台不碰运行版。
+      if (gitText(repo.root, ["write-tree"]) === gitText(repo.root, ["rev-parse", `${candidate.base}^{tree}`])) {
+        gitText(repo.root, ["read-tree", "-m", "-u", candidate.base, candidate.result]);
+      }
+      restore();
+      if (gitText(repo.root, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree) throw new LoopError("发布树不是测过的结果");
+      return;
+    }
+    if (current !== candidate.base) throw new LoopError("发布分支已经变化；中断合入的记录保留，请先核对运行版状态");
+    if (candidate.runtimeStash) restore();
+    const changes = workingChanges(repo.root, "运行版");
+    const touched = gitText(repo.root, ["diff", "--name-only", "--no-renames", "-z", candidate.base, candidate.result]).split("\0").filter(Boolean);
+    const scan = gitResult(repo.root, ["ls-files", "--others", "-z"]);
+    if (scan.status !== 0) { save({ status: "ready" }); throw new LoopError("无法完整扫描运行版未跟踪文件，未合入"); }
+    const untouched = [...changes.map((change) => change.path), ...scan.stdout.split("\0").filter(Boolean)];
+    const intersects = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    const overlap = [...new Set(untouched.filter((path) => touched.some((target) => intersects(path, target))))];
+    if (overlap.length) { save({ status: "ready" }); throw new LoopError(`运行版未提交改动与测过的合并碰到同一个文件，未合入：${overlap.join("、")}`, { files: overlap }); }
+    const stash = stashProjectChanges(repo, changes, (value) => save({ runtimeStash: value }));
+    let failure: unknown;
+    try {
+      gitText(repo.root, ["read-tree", "-n", "-m", "-u", candidate.base, candidate.result]);
+      // 比较与更新由 Git 原子完成：不能在版本核对和发布之间插入另一个提交。
+      gitText(repo.root, ["-c", "core.hooksPath=/dev/null", "update-ref", `refs/heads/${repo.layout.release}`, candidate.result, candidate.base]);
+      gitText(repo.root, ["read-tree", "-m", "-u", candidate.base, candidate.result]);
+      if (gitText(repo.root, ["rev-parse", "HEAD"]) !== candidate.result || gitText(repo.root, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree) throw new LoopError("合入结果与测过的提交不一致");
+    } catch (error) { failure = error; }
+    if (stash) restore();
+    if (failure) {
+      // CAS 尚未成功可重新测试；已发布但 checkout 失败时保留 merging，由用户重试收尾。
+      const head = gitText(repo.root, ["rev-parse", "HEAD"]);
+      if (head !== candidate.result) save({ status: "ready" });
+      if (head !== candidate.base && head !== candidate.result) throw new LoopError("发布分支已经变化，本次不合入，自动重新测试");
+      throw failure;
+    }
+  });
+  return { ok: true, command: "合入", dryRun: false, release: repo.layout.release, commit: entry.result, tree: entry.tree,
+    queue: entry, uncommitted, pushed: false, lines: [`已合入 ${repo.layout.release}：${entry.name}；提交：${entry.result}（就是测过的结果）；未推送`,
+      uncommitted.length ? `运行版原有未提交改动已保留：${uncommitted.join("、")}` : "运行版没有未提交改动"] };
+}
+
 async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
   if (!args.batch) throw new LoopError("用法：loop 合入 <批次.json> [--dry-run] [--json]");
   const repo = repoOf(process.cwd());
   const batch = loadBatch(repo, args.batch);
+  if (registeredQueueBatch(repo.root, batch.path)) return cmdQueuedMerge(repo, batch, args);
   const branches = [...new Set([...batch.stages.keys()].map((stage) => branchOfStage(batch, stage)).filter((branch): branch is string => Boolean(branch)))];
   if (!branches.length) throw new LoopError("批次.json 没有指定分支，无法合入");
   checkNoExistingMerge(repo);
