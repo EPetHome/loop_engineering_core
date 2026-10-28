@@ -118,7 +118,40 @@ export function renderLedgerRecord(record: LedgerRecord): string {
  * 目录创建或写入失败直接抛错，由调用方提示，不影响会话完成。
  */
 export function appendLedgerRecord(record: LedgerRecord, path = deliveryLedgerPath()): string {
-  const text = renderLedgerRecord(record);
+  return appendSegment(renderLedgerRecord(record), path);
+}
+
+export interface MissLedgerRecord {
+  at?: Date;
+  project: string;
+  session: string;
+  round: number;
+  defect: string;
+  discovery: string;
+  summary: string;
+  snapshot: string | null;
+  draft: string;
+}
+
+/** 事后登记另起一段；不覆盖原完成记录，也不改总结。 */
+export function appendMissRecord(record: MissLedgerRecord, path = deliveryLedgerPath()): string {
+  const text = [
+    `## ${ledgerStamp(record.at)} · ${oneLine(record.project, 500)} · 会话 ${oneLine(record.session, 200)}`,
+    "- 类型：漏网（事后登记，未重新评审）",
+    `- 项目：${oneLine(record.project, Infinity)}`,
+    `- 会话：${oneLine(record.session, Infinity)}`,
+    `- 轮次：${record.round}`,
+    `- 问题：${oneLine(record.defect, Infinity)}`,
+    `- 发现方式：${oneLine(record.discovery, Infinity)}`,
+    `- 总结：${oneLine(record.summary, Infinity)}`,
+    `- 快照：${record.snapshot ?? "null（历史轮次缺少可复原快照）"}`,
+    `- 案例草稿：${record.draft}`,
+    "- [ ] 已回写原单", "",
+  ].join("\n");
+  return appendSegment(text, path);
+}
+
+function appendSegment(text: string, path: string): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // 每段自带结尾空行：O_APPEND 单次写入就能保证段间分隔，两个会话同时完成也不会粘在一起。
   appendFileSync(path, `${text}\n`, { mode: 0o600 });

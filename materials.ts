@@ -3,6 +3,8 @@ import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, rm
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { writeJsonAtomic } from "./pipeline-core.ts";
+import { projectRootOf } from "./ledger.ts";
+import { REVIEW_SNAPSHOTS } from "./snapshots.ts";
 import {
   checkedMaterialPath, materialCleanupLine, materialCleanupNotes, newMaterialCleanup, resourceRoot, slimMaterialDirectory,
   type MaterialCleanup, type RunResource,
@@ -215,12 +217,47 @@ function piFiles(root: string): string[] {
 const runsOf = (state: any): string[] => Array.isArray(state?.rounds)
   ? state.rounds.map((round: any) => round?.acceptance?.runDir).filter((path: unknown): path is string => typeof path === "string") : [];
 
+/** 漏网登记只读核对：按总结中的项目/会话身份定位，再读权威原生状态，不沿用材料索引的旧 done。 */
+export function readRecordedSession(project: string, sessionId: string, options: { dataRoot?: string; piSessionsRoot?: string } = {}): { session: MaterialSession; state: any } {
+  if (!sessionId || /[/\\\0]/.test(sessionId)) throw new Error("会话 ID 无效");
+  const root = resolve(options.dataRoot ?? join(homedir(), ".pi-autoreview")), matches: MaterialSession[] = [];
+  const target = projectRootOf(project);
+  for (const name of readdirSync(root)) {
+    const dir = join(root, name);
+    if (lstatSync(dir).isSymbolicLink() || !lstatSync(dir).isDirectory()) continue;
+    const summary = join(dir, `${sessionId}.md`);
+    if (!materialExists(summary)) continue;
+    checkedMaterialPath(root, summary);
+    const header = headerOf(summary);
+    if (!header || header.sessionId !== sessionId || projectRootOf(header.workDir) !== target) continue;
+    if (!header.done) throw new Error("该会话总结不是完成态，不能登记漏网");
+    matches.push(materialSession(sessionId, header.workDir, summary, "done", header.runDirs));
+  }
+  if (matches.length !== 1) throw new Error("找不到唯一匹配项目、会话的完成记录");
+  const session = matches[0], statePath = session.summary.replace(/\.md$/, ".state.json");
+  let state: any;
+  if (materialExists(statePath)) { checkedMaterialPath(root, statePath); state = json(statePath); }
+  else {
+    const nativeRoot = options.piSessionsRoot ?? join(homedir(), ".pi", "agent", "sessions");
+    const states = piFiles(nativeRoot).filter((path) => basename(path).endsWith(`_${sessionId}.jsonl`)).flatMap((path) => {
+      checkedMaterialPath(nativeRoot, path);
+      const state = piState(path, session); return state ? [state] : [];
+    });
+    if (states.length !== 1) throw new Error("缺少唯一匹配的原生会话状态");
+    state = states[0];
+  }
+  if (phaseOf(state) !== "done" || !Array.isArray(state.rounds)) throw new Error("该会话当前尚未完成，不能登记漏网");
+  return { session, state };
+}
+
 export interface HistoryCleanup extends MaterialCleanup {
   sessions: { sessionId: string; summary: string; phase: string }[];
+  /** 明确保留，绝不送入按大小/依赖目录瘦身的扫描。 */
+  retained: { path: string; kind: "评审快照" }[];
 }
 
 export function cleanupMaterialHistory(options: { apply?: boolean; dataRoot?: string; resourcesRoot?: string; piSessionsRoot?: string } = {}): HistoryCleanup {
-  const result: HistoryCleanup = { ...newMaterialCleanup(options.apply === true), sessions: [] };
+  const result: HistoryCleanup = { ...newMaterialCleanup(options.apply === true), sessions: [], retained: [] };
   const root = resolve(options.dataRoot ?? join(homedir(), ".pi-autoreview"));
   const resourcesRoot = resolve(options.resourcesRoot ?? resourceRoot());
   const resources = registeredResources(resourcesRoot, result), sessions: { session: MaterialSession; unchanged: () => boolean }[] = [];
@@ -232,6 +269,8 @@ export function cleanupMaterialHistory(options: { apply?: boolean; dataRoot?: st
     for (const name of readdirSync(root).sort()) {
       const dir = join(root, name);
       if (lstatSync(dir).isSymbolicLink() || !lstatSync(dir).isDirectory() || dir === resourcesRoot) continue;
+      const snapshots = join(dir, REVIEW_SNAPSHOTS);
+      if (materialExists(snapshots)) result.retained.push({ path: snapshots, kind: "评审快照" });
       const acceptance = join(dir, "acceptance");
       if (materialExists(acceptance)) acceptanceRoots.push(acceptance);
       for (const file of readdirSync(dir).filter((name) => name.endsWith(".md")).sort()) {

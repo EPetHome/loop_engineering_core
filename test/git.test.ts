@@ -127,6 +127,44 @@ test("G6 补充：有效内容指纹覆盖子目录会话的完整候选，并�
   } finally { r.close(); }
 });
 
+test("CRLF／过滤转换：提交前后 Git 内容指纹稳定，原始字节和历史比较哈希仍冻结", async (t) => {
+  for (const conversion of ["crlf", "filter"] as const) await t.test(conversion, async () => {
+    const r = repository();
+    try {
+      writeFileSync(join(r.cwd, ".gitattributes"), conversion === "crlf" ? "*.crlf text eol=crlf\n" : "*.filtered filter=snapshot\n");
+      if (conversion === "filter") {
+        const clean = 'let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(s.replace(/(?:WORKSPACE|ALIAS):/g,"CANONICAL:")));';
+        r.git("config", "filter.snapshot.clean", `"${process.execPath}" -e '${clean}'`);
+        r.git("config", "filter.snapshot.smudge", `"${process.execPath}" -e 'process.stdin.pipe(process.stdout)'`);
+      }
+      r.git("add", ".gitattributes"); r.git("commit", "-qm", "conversion config");
+      mkdirSync(join(r.cwd, "sub"));
+      const path = conversion === "crlf" ? "sub/value.crlf" : "sub/value.filtered";
+      const original = conversion === "crlf" ? "value=1\r\n" : "WORKSPACE:value=1\n";
+      writeFileSync(join(r.cwd, path), original);
+      const git = createGitEvidence(r.exec, join(r.cwd, "sub"));
+      const before = JSON.parse(JSON.stringify(await git.snapshot()));
+      const fingerprint = await git.contentFingerprint(before), raw = before.untracked[0].hash;
+      assert.equal(raw, r.git("hash-object", "--no-filters", "--", path));
+      r.git("add", "-A"); r.git("commit", "-qm", "commit candidate without editing");
+      const after = await git.snapshot();
+      assert.notEqual(raw, r.git("rev-parse", `HEAD:${path}`), "Git 存储的是转换后 blob，快照原始字节哈希不能被替换");
+      assert.equal(await git.contentFingerprint(after), fingerprint, "仅提交不应改变 Git 内容比较口径");
+      assert.equal(await git.sameContent(before, after), true);
+      // clean 转换会抹去这个差异，但评审看到的原始字节变了，完成资格仍必须撤销。
+      writeFileSync(join(r.cwd, path), conversion === "crlf" ? "value=1\n" : "ALIAS:value=1\n");
+      const rawOnly = await git.snapshot();
+      assert.equal(await git.contentFingerprint(rawOnly), fingerprint);
+      assert.equal(await git.sameContent(before, rawOnly), false, "规范化相同也不能吞掉原始字节变化");
+      writeFileSync(join(r.cwd, path), conversion === "crlf" ? "value=2\r\n" : "WORKSPACE:value=2\n");
+      const changed = await git.snapshot();
+      assert.notEqual(await git.contentFingerprint(changed), fingerprint);
+      assert.equal(await git.contentFingerprint(before), fingerprint, "不得用当前文件重算历史比较哈希");
+      assert.equal(before.untracked[0].hash, raw, "原始快照证据保持原值");
+    } finally { r.close(); }
+  });
+});
+
 test("G5 补充：暂存的重命名报出前后两端，范围校验不会漏掉旧路径", async () => {
   const r = repository();
   try {

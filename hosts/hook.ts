@@ -980,6 +980,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       // 完成总结等状态和总表落盘后再写，避免外部把“总结已出现”当成终态抢先结束会话。
       writeSummary: (status) => writeSummary(ctx, state, status === "完成" ? "进行中" : status),
       saveState: () => saveStateFile(ctx.paths.state, state),
+      snapshotDir: join(ctx.paths.dir, "review-snapshots"),
       acceptanceDir: join(ctx.paths.dir, "acceptance", basename(ctx.paths.state, ".state.json")),
       procsFile: ctx.paths.procs,
     });

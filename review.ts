@@ -19,6 +19,7 @@ import {
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
 import { methodEnv as buildMethodEnv } from "./method-env.ts";
+import { saveReviewSnapshot } from "./snapshots.ts";
 import { experienceInjection, markExperienceRecurrence } from "./experience.ts";
 import { changedSince, outOfScope, stageScopeFromEnv, type StageScope } from "./scope.ts";
 import { recordGateTree } from "./methods.ts";
@@ -48,6 +49,8 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   /** 开工时未跟踪文件的内容哈希和模式；只豁免确实没变的文件。 */
   baselineUntrackedDetails?: Snapshot["untracked"];
   baselineFingerprint?: string;
+  /** 在调用评审前落盘；中断或失败轮次的材料也保留，不依赖源仓库 Git 对象。 */
+  reviewSnapshots?: { round: number; path: string }[];
   /** 越界检查起点：整合返修收到时重置到当时快照；普通返修不重置。 */
   scopeBaseline?: string;
   scopeBaselineUntrackedDetails?: Snapshot["untracked"];
@@ -131,6 +134,8 @@ export interface ReviewDeps {
   onProgress?: (text: string) => void;
   /** 写评审输入、门禁日志等材料文件，返回绝对路径。 */
   writeInput: (name: string, text: string) => string;
+  /** 本机保留类快照根；默认在输入文件旁的 review-snapshots/。 */
+  snapshotDir?: string;
   /** 成功评审后的总结（完成/进行中）；抛错由调用方处理。 */
   writeSummary?: (status: "进行中" | "完成") => Promise<void>;
   saveState: () => Promise<void> | void;
@@ -464,7 +469,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   // 一轮总预算：门禁、验收（如果有）、评审首次调用和 1 次重试共用；后面的只能用剩余时间。
   const deadline = startedTs + timeoutMs;
 
-  const before = await git.snapshot();
+  let before = await git.snapshot();
   live();
   if (state.baseline === undefined) {
     state.baseline = before.head;
@@ -481,6 +486,13 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     const step = await gateStep(deps, before, git, clock);
     if ("outcome" in step) return step.outcome;
     gate = step.record;
+    // 门禁允许登记来源变化；评审输入与可复原快照须对应门禁后实际看到的版本。
+    const current = await git.snapshot();
+    live();
+    if (current.fingerprint !== before.fingerprint && !await sourcesOnlyWorkspaceChange(git, before, current, deps.sourceCover)) {
+      return { kind: "paused", reason: "门禁期间工作区变了" };
+    }
+    before = current;
   }
   const changedBeforeReview = deps.checkInputs?.();
   if (changedBeforeReview) return changedBeforeReview;
@@ -500,6 +512,11 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     acceptance: previousAcceptance ? `以下为上一轮记录，不能当作当前候选已验收：\n${renderAcceptanceForReview(previousAcceptance)}` : undefined, gate: gate?.command,
   });
   const inputPath = deps.writeInput(`review-input-${deps.devSessionId}-r${deps.round}.md`, inputText);
+  const snapshot = await saveReviewSnapshot({ exec: deps.exec, cwd, session: deps.devSessionId, round: deps.round,
+    baseline: baseRef, candidate: before, input: inputText, inputPath, root: deps.snapshotDir, signal });
+  live();
+  state.reviewSnapshots ??= [];
+  state.reviewSnapshots.push({ round: deps.round, path: snapshot });
   const reviewerSessionId = state.reviewerSessionId ?? deriveReviewerSessionId(deps.devSessionId);
   state.reviewerSessionId = reviewerSessionId;
   await deps.saveState();
@@ -548,7 +565,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     round: deps.round, startedAt, durationMs: now() - startedTs,
     conclusion: parsed?.conclusion ?? "", mustFixRaw: parsed?.mustFixRaw ?? "",
     mustFix: parsed?.mustFix ?? [], minor: parsed?.minor ?? [], questions: parsed?.questions ?? [],
-    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, gate,
+    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, gate, snapshot,
   };
   state.rounds.push(record);
   const after = await git.snapshot();

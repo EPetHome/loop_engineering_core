@@ -2,7 +2,7 @@
 import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,7 @@ import { CONVENTION, conventionText } from "../core.ts";
 import { projectRootOf } from "../ledger.ts";
 import { approveExperience, experienceDataFile, experienceFile, importExperience, readExperienceStore } from "../experience.ts";
 import { registerAcceptanceMaterials } from "../materials.ts";
+import { readReviewSnapshot } from "../snapshots.ts";
 import { contextDir, loadContext } from "../project-context.ts";
 import { createChildExec } from "../hosts/hook.ts";
 import type { Exec, ExecResult } from "../git.ts";
@@ -186,6 +187,21 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     },
   };
 }
+
+test("Pi 实际评审入口保存本机快照，并在原生状态中保留同轮引用", async () => {
+  const h = harness();
+  try {
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "reviewed bytes\n"); h.write("new.txt", "untracked bytes\n");
+    h.assistant(); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    const state: any = h.state(), path = state.rounds[0].snapshot, snapshot = readReviewSnapshot(path);
+    assert.ok(path.startsWith(h.home) || path.startsWith(realpathSync(h.home)));
+    assert.deepEqual(state.reviewSnapshots, [{ round: 1, path }]);
+    assert.equal(snapshot.session, "unit-dev"); assert.equal(snapshot.round, 1);
+    assert.equal(snapshot.files.find((file) => file.path === "new.txt")?.kind, "untracked");
+    assert.equal(h.inputs.length, 1);
+  } finally { await h.close(); }
+});
 
 test("经验 A1/A2 Pi 系统提示与一轮评审注入三条四行正文；删掉后保持原约定与输入结构", async (t) => {
   for (const enabled of [true, false]) await t.test(enabled ? "有清单" : "无清单", async () => {
@@ -1572,6 +1588,45 @@ test("程序自动提交后恢复完成状态不被撤销；真实内容变化�
       }
     } finally { await h.close(); }
   });
+});
+
+test("CRLF／过滤转换文件提交后恢复：仅提交保持完成，内容、原始字节或模式变化仍撤销", async (t) => {
+  for (const conversion of ["crlf", "filter"] as const) for (const change of ["commit-only", "content", "raw-only", "mode"] as const) {
+    await t.test(`${conversion}/${change}`, async () => {
+      const h = harness({ stage: "甲" });
+      try {
+        h.write(".gitattributes", conversion === "crlf" ? "*.crlf text eol=crlf\n" : "*.filtered filter=snapshot\n");
+        if (conversion === "filter") {
+          const clean = 'let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(s.replace(/(?:WORKSPACE|ALIAS):/g,"CANONICAL:")));';
+          h.git("config", "filter.snapshot.clean", `"${process.execPath}" -e '${clean}'`);
+          h.git("config", "filter.snapshot.smudge", `"${process.execPath}" -e 'process.stdin.pipe(process.stdout)'`);
+        }
+        h.git("add", ".gitattributes"); h.git("commit", "-qm", "conversion config");
+        await h.event("session_start"); await h.begin();
+        const path = conversion === "crlf" ? "value.crlf" : "value.filtered";
+        const original = conversion === "crlf" ? "value=1\r\n" : "WORKSPACE:value=1\n";
+        h.write(path, original); await h.command(); await h.terminal();
+        assert.equal(h.state().phase, "done", h.state().pauseReason);
+        const state: any = h.state(), readyEpoch = state.readyEpoch;
+        const raw = state.lastSnapshotDetails.untracked.find((file: any) => file.path === path).hash;
+        const stored = readReviewSnapshot(state.rounds[0].snapshot).files.find((file) => file.path === path)!;
+        assert.equal(stored.hash, raw);
+        await h.event("session_shutdown");
+        if (change === "content") h.write(path, conversion === "crlf" ? "value=2\r\n" : "WORKSPACE:value=2\n");
+        if (change === "raw-only") h.write(path, conversion === "crlf" ? "value=1\n" : "ALIAS:value=1\n");
+        if (change === "mode") chmodSync(join(h.repo, path), 0o755);
+        h.git("add", "-A"); h.git("commit", "-qm", "submit conversion candidate");
+        if (change === "commit-only") assert.equal(readFileSync(join(h.repo, path), "utf8"), original, "正常提交不改变工作区字节");
+        await h.event("session_start");
+        assert.equal(h.state().phase, change === "commit-only" ? "done" : "paused", h.state().pauseReason);
+        assert.equal(stageStatus(h, "甲")?.event, change === "commit-only" ? "done" : "paused");
+        if (change === "commit-only") assert.equal((h.state() as any).readyEpoch, readyEpoch, "沿用原完成资格");
+        else assert.match(h.state().pauseReason!, /候选或输入版本变化/);
+        assert.equal(h.inputs.length, 1, "恢复只核对资格，不偷偷重新评审");
+        assert.equal(readReviewSnapshot(state.rounds[0].snapshot).files.find((file) => file.path === path)!.hash, raw);
+      } finally { await h.close(); }
+    });
+  }
 });
 
 test("子目录会话提交后资格保持，目录外候选改动仍撤销资格", async () => {

@@ -403,11 +403,11 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const contextConfig = loadContext(ctx.cwd);
     if (candidate.fingerprint !== state.pendingAcceptanceCandidate) {
       const before = state.lastSnapshotDetails;
-      // 程序提交会把 HEAD 和未跟踪文件状态改掉，但内容没变：按有效内容放行。
-      // 真实内容或文件模式变化仍会得到不同指纹，继续走来源豁免或拒绝。
+      // 按冻结的 Git 规范化哈希比较，允许仅提交；原未跟踪文件仍核对原始字节和模式，
+      // 不能让 clean/EOL 转换掩盖评审之后的真实改动。
       let sameContent = false;
       if (before) {
-        try { sameContent = await git.contentFingerprint(before) === await git.contentFingerprint(candidate); }
+        try { sameContent = await git.sameContent(before, candidate); }
         catch { sameContent = false; }
       }
       const sourcesOnly = !sameContent && contextConfig && before
@@ -706,6 +706,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       writeSummary: (status) => writeSummary(ctx, status === "完成" ? "进行中" : status, life, undefined, undefined, undefined, undefined, signal),
       saveState: () => saveState(life),
       signal,
+      snapshotDir: join(dataDir(ctx), "review-snapshots"),
       acceptanceDir: join(dataDir(ctx), "acceptance", ctx.sessionManager.getSessionId()),
       procsFile: procsPath(ctx),
       cleanupExec: execOverride ?? createChildExec(`${procsPath(ctx)}.cleanup`),

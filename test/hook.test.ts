@@ -18,6 +18,7 @@ import { CONVENTION, conventionText } from "../core.ts";
 import { childExec, detectHost, findProjectRoot, lastAssistantFromTranscript, loadConfig } from "../hosts/hook.ts";
 import { projectRootOf, renderLedgerRecord } from "../ledger.ts";
 import { registerAcceptanceMaterials } from "../materials.ts";
+import { readReviewSnapshot } from "../snapshots.ts";
 import { projectDataDir, projectRootHash } from "../project-context.ts";
 
 const HOOK = fileURLToPath(new URL("../hosts/hook.ts", import.meta.url));
@@ -112,6 +113,27 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
     close: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("Claude/Codex 实际 Hook 入口保存完整快照，漏网 CLI 不改变原会话状态与总结", async (t) => {
+  for (const host of ["claude", "codex"]) await t.test(host, () => {
+    const h = fixture();
+    try {
+      const env = { AUTOREVIEW_HOST: host };
+      h.run(h.event("UserPromptSubmit", { prompt: "# 快照" }), { env }); h.write("file.txt", "reviewed\n"); h.write("new.txt", "untracked\n");
+      const completed = h.run(h.delivered(), { env }), state = h.readState(host);
+      assert.equal(state.phase, "done", completed.stderr + h.summary(host));
+      const snapshot = readReviewSnapshot(state.rounds[0].snapshot);
+      assert.equal(snapshot.session, `${host}-s1`); assert.equal(snapshot.round, 1); assert.equal(snapshot.complete, true);
+      assert.ok(snapshot.files.find((file) => file.path === "new.txt")?.content);
+      const beforeState = readFileSync(h.statePath(host)), beforeSummary = h.summary(host);
+      const registered = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["漏网", h.repo, `${host}-s1`, "遗漏并发缺陷", "后续测试", "--json"],
+        { cwd: h.root, env: { ...process.env, HOME: h.home }, encoding: "utf8" });
+      assert.equal(registered.status, 0, registered.stderr + registered.stdout);
+      assert.equal(JSON.parse(registered.stdout).draft.snapshot, state.rounds[0].snapshot);
+      assert.deepEqual(readFileSync(h.statePath(host)), beforeState); assert.equal(h.summary(host), beforeSummary);
+    } finally { h.close(); }
+  });
+});
 
 test("合入队列：Hook 完成自动进队；机器返修保留需求、授权与返修次数", async () => {
   const h = fixture({ marker: JSON.stringify({ gate: { cmd: "true", timeoutMin: 1 } }) });

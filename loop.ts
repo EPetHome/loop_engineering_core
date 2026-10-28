@@ -16,6 +16,7 @@ import { findProjectRoot, loadProjectLayout, workspacePath, type ProjectLayout }
 import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
+import { registerMiss } from "./misses.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
 import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch } from "./merge-queue.ts";
 import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
@@ -36,7 +37,7 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; rest: string[] }
+interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
@@ -46,6 +47,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
     else if (arg === "--apply") result.apply = true;
+    else if (arg === "--round") {
+      const value = argv[++i];
+      if (!value || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new LoopError("--round 需要正整数轮次");
+      if (result.round !== undefined) throw new LoopError("--round 不能重复");
+      result.round = Number(value);
+    }
     else if (arg === "--launcher") {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new LoopError("--launcher 需要一个值（terminal 或 background）");
@@ -55,6 +62,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.round !== undefined && result.command !== "漏网") throw new LoopError("--round 只用于 loop 漏网");
   if (result.apply && result.command !== "清理") throw new LoopError("--apply 只用于 loop 清理");
   if (result.command === "清理" && (result.batch || result.rest.length || result.recheck || result.launcher)) throw new LoopError("loop 清理不接受批次文件、--recheck 或 --launcher");
   if (result.apply && result.dryRun) throw new LoopError("--apply 与 --dry-run 不能同时使用");
@@ -1036,9 +1044,21 @@ export function cmdCleanup(args: ParsedArgs): Record<string, unknown> {
   const cleanup = cleanupMaterialHistory({ apply: args.apply });
   const lines = [args.apply ? "按登记瘦身已完成会话（只处理运行材料）" : "预览：不删除、不改写任何文件；加 --apply 才执行",
     ...cleanup.paths.map((path) => `${args.apply ? "已删除" : "将删除"}：${path}`),
+    ...cleanup.retained.map((item) => `保留：${item.path}（${item.kind}，不参与清理）`),
     materialCleanupLine(cleanup), ...materialCleanupNotes(cleanup),
     `完成会话 ${cleanup.sessions.filter((session) => session.phase === "done").length} 个；跳过未完成会话 ${cleanup.sessions.filter((session) => session.phase !== "done").length} 个`];
   return { ok: cleanup.failures.length === 0, command: "清理", dryRun: !args.apply, ...cleanup, lines };
+}
+
+export function cmdMiss(args: ParsedArgs): Record<string, unknown> {
+  if (!args.batch || args.rest.length !== 3 || args.recheck || args.launcher) {
+    throw new LoopError('用法：loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]');
+  }
+  const result = registerMiss({ project: args.batch, session: args.rest[0], defect: args.rest[1], discovery: args.rest[2], round: args.round, dryRun: args.dryRun });
+  return { ok: true, command: "漏网", dryRun: args.dryRun, ...result,
+    lines: [args.dryRun ? `预览（未写入）：${result.ledger}` : `已追加漏网记录：${result.ledger}`,
+      `${args.dryRun ? "将生成" : "已生成"}案例草稿：${result.draftPath}`, `轮次：${result.draft.round}；${result.draft.replayReason}`,
+      "未修改原会话状态和总结；未重新评审；草稿须核对后再收入 eval/cases/"] };
 }
 
 export function cmdExperience(args: ParsedArgs): Record<string, unknown> {
@@ -1065,6 +1085,7 @@ const USAGE = `用法：
   loop 状态 [<批次.json>] [--dry-run] [--json]
   loop 合入 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]
+  loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]
   loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
 
 async function main(): Promise<number> {
@@ -1088,6 +1109,7 @@ async function main(): Promise<number> {
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "合入") result = await cmdMerge(args);
     else if (args.command === "清理") result = cmdCleanup(args);
+    else if (args.command === "漏网") result = cmdMiss(args);
     else if (args.command === "经验") result = cmdExperience(args);
     else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
     if (args.json) console.log(JSON.stringify(result, null, 2));

@@ -64,6 +64,8 @@ export type RoundRecord = ParsedReview & {
   round: number;
   startedAt: string;
   durationMs: number;
+  /** 本轮实际输入与完整工作区字节的本机保留类快照。 */
+  snapshot?: string;
   /** 本轮评审失败时的错误摘要。 */
   failed?: string;
   /** 本轮的验收结果（配了 acceptance 时）。 */

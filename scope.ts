@@ -3,9 +3,9 @@
  *
  * 路径一律相对项目根，按目录前缀匹配；deny 优先。没有写 scope 时不做越界检查。
  */
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import type { Exec } from "./git.ts";
+import { gitBlobHash, type Exec } from "./git.ts";
 
 export interface StageScope {
   /** 只允许这些路径前缀下的改动；没写表示不限制。 */
@@ -109,8 +109,10 @@ export async function changedSince(
   for (const path of untracked) {
     const old = baseline.get(path);
     if (!old) { changedUntracked.push(path); continue; }
-    const hash = (await run(["hash-object", "--", path])).trim();
     const info = lstatSync(resolve(projectRoot, path));
+    // 与开工快照同一口径：原始字节，链接只比较目标字符串；不能把未变文件误判越界。
+    const hash = info.isSymbolicLink() ? gitBlobHash(readlinkSync(resolve(projectRoot, path), { encoding: "buffer" }))
+      : (await run(["hash-object", "--no-filters", "--", path])).trim();
     const mode = info.isSymbolicLink() ? "120000" : (info.mode & 0o111) !== 0 ? "100755" : "100644";
     // 只豁免开工时已经存在、内容与模式都没变的未跟踪文件。
     if (old.hash !== hash || old.mode !== mode) changedUntracked.push(path);
