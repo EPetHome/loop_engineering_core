@@ -12,7 +12,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { remapBatchReferences } from "./batch-refs.ts";
-import { loadProjectLayout, workspacePath, type ProjectLayout } from "./config.ts";
+import { findProjectRoot, loadProjectLayout, workspacePath, type ProjectLayout } from "./config.ts";
+import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
@@ -948,12 +949,31 @@ export function cmdCleanup(args: ParsedArgs): Record<string, unknown> {
   return { ok: cleanup.failures.length === 0, command: "清理", dryRun: !args.apply, ...cleanup, lines };
 }
 
+export function cmdExperience(args: ParsedArgs): Record<string, unknown> {
+  const action = args.batch, project = args.rest[0], value = args.rest[1];
+  if (!action || !["列出", "导入", "批准", "拒绝"].includes(action) || !project || args.rest.length > 2
+    || (action === "列出" ? value !== undefined : !value) || args.recheck || args.launcher) {
+    throw new LoopError("用法：loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]");
+  }
+  const root = findProjectRoot(resolve(project));
+  if (!root) throw new LoopError(`项目目录及上级没有 .autoreview.json：${project}`);
+  const candidates = action === "列出" ? readExperienceStore(root).candidates.filter((item) => item.status === "pending")
+    : action === "导入" ? importExperience(root, resolve(value!), args.dryRun)
+    : action === "批准" ? approveExperience(root, value!, args.dryRun) : rejectExperience(root, value!, args.dryRun);
+  const label = args.dryRun ? `预览${action}（未写入）` : action;
+  const lines = [`${label}：${root}；${candidates.length} 条`, ...candidates.map((item) =>
+    `${compactExperience(item)}\n出现次数：${candidateCount(item)} 个不同开发会话；状态：${item.status}${item.approvedId ? `；写入 ${item.approvedId}` : ""}\n${[...item.metadata, ...item.evidence.map((line) => `证据：${line}`)].join("\n")}`)];
+  if (action === "批准" && !args.dryRun) lines.push(`已写入：${experienceFile(root)}；未提交、未推送`);
+  return { ok: true, command: "经验", action, project: root, dryRun: args.dryRun, candidates, lines };
+}
+
 const USAGE = `用法：
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
   loop 合入 <批次.json> [--dry-run] [--json]
-  loop 清理 [--apply | --dry-run] [--json]`;
+  loop 清理 [--apply | --dry-run] [--json]
+  loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
@@ -976,6 +996,7 @@ async function main(): Promise<number> {
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "合入") result = await cmdMerge(args);
     else if (args.command === "清理") result = cmdCleanup(args);
+    else if (args.command === "经验") result = cmdExperience(args);
     else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else {

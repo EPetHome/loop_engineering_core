@@ -1,12 +1,13 @@
 /** 本机 Claude Code / Codex 开发入口；评审与验收仍由已安装的 Loop Hook 执行。 */
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN } from "../config.ts";
-import { loadConfig } from "./hook.ts";
+import { endHostExperienceSessions, loadConfig } from "./hook.ts";
 
 const HELP = `用法：bin/loop-dev <claude|codex> [任务文件] [选项] [-- 宿主参数…]
   --cwd <目录>       开发目录，默认当前目录
@@ -128,9 +129,14 @@ export function main(argv = process.argv.slice(2)): void {
   }
   if (!root) writeFileSync(join(cwd, ".autoreview.json"), "{}\n", { flag: "wx" });
   console.error(`[Loop] ${host} 开发宿主；评审与验收沿用 Pi 引擎。${host === "codex" ? "若提示 Hook 未信任，先在 /hooks 审阅并信任。" : ""}`);
-  const child = spawn(command, args, { cwd, stdio: "inherit", env: hostEnv(cwd, root) });
+  const runId = randomUUID();
+  const child = spawn(command, args, { cwd, stdio: "inherit", env: { ...hostEnv(cwd, root), AUTOREVIEW_DEV_RUN_ID: runId } });
   child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
-  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === "SIGINT" ? 130 : 1); });
+  child.on("exit", (code, signal) => {
+    try { endHostExperienceSessions(root ?? cwd, host, runId); }
+    catch (error) { console.error(`[Loop] 宿主退出后的经验活动登记未确认，批准保持阻挡：${(error as Error).message}`); }
+    process.exitCode = code ?? (signal === "SIGINT" ? 130 : 1);
+  });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

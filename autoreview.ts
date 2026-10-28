@@ -15,6 +15,8 @@ import {
 } from "./core.ts";
 import { createGitEvidence, GitReadError, type Exec, type ExecResult } from "./git.ts";
 import { acceptanceTodos, conventionNotice } from "./onboarding.ts";
+import { experienceInjection, experienceSession, experienceTodos } from "./experience.ts";
+import { finishExperience } from "./experience-draft.ts";
 import {
   inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, readJson, stageFromEnv, statusPath, writeStageStatus,
   type InboxMessage, type StageEvent, type StageLink,
@@ -81,10 +83,15 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   // 自定义 start 不经过 bin/pi-dev；扩展加载即撤掉一次性启动回报身份，门禁子进程不能改写父段状态。
   if (process.env[PIPELINE_LAUNCH_TOKEN_ENV]) delete process.env[PIPELINE_LAUNCH_TOKEN_ENV];
   let state: PiState = newReviewState();
+  const experienceOwner = randomUUID();
+  const trackExperienceSession = (ctx: ExtensionContext, active: boolean): void =>
+    experienceSession(ctx.cwd, `pi:${ctx.sessionManager.getSessionId()}:${process.pid}:${experienceOwner}`, active);
   let gitAvailability: "unknown" | "available" | "unsupported" = "unknown";
   let unavailableReason = "不是 git 仓库，自动评审已关闭";
   /** 评审或验收命令任务在跑；两者互斥，期间不自动评审。 */
   let reviewRunning = false;
+  /** 当前开发回合独立于上一次评审完成态；普通追加消息也可能继续编辑。 */
+  let developerRunning = false;
   let lifecycle: Lifecycle = { active: true };
   let activeTask: ReviewTask | undefined;
   /** 由流水线启动时：属于哪个流水线目录、哪一段；收件箱轮询用的最近一次上下文。 */
@@ -146,7 +153,10 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     checkLive(life);
     if (state.phase !== "done") state.materialCleanup = undefined;
     pi.appendEntry("autoreview-state", state);
-    if (latestCtx) recordMaterialSession(sessionMaterials(latestCtx));
+    if (latestCtx) {
+      trackExperienceSession(latestCtx, lifecycle.active && (developerRunning || state.phase !== "done"));
+      recordMaterialSession(sessionMaterials(latestCtx));
+    }
   };
   const sessionMaterials = (ctx: ExtensionContext) => materialSession(ctx.sessionManager.getSessionId(), ctx.cwd, summaryPath(ctx),
     state.acceptRun?.result === "进行中" ? "accepting" : state.phase,
@@ -216,6 +226,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       acceptance, host: "pi", phase: state.phase, pauseHint: state.pauseHint,
       criteria: state.criteria, lastAcceptance: lastAcceptance(state),
     });
+    if (status === "完成") todos.push(...experienceTodos(ctx.cwd, state.experienceDraft?.error));
     const text = renderSummary({
       cwd: ctx.cwd, devSessionId,
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
@@ -468,6 +479,9 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         if (problem) { record.result = "不通过"; record.detail = problem; record.failureKind = "unknown"; }
       }
       if (record.result === "通过") {
+        await collectExperience(ctx, life, signal);
+        const latestProblem = await completionProblem(ctx, life, signal);
+        if (latestProblem) { await pause(ctx, latestProblem, life, undefined, undefined, undefined, signal); return; }
         state.phase = "done";
         state.awaitingRepair = false;
         state.pauseReason = undefined;
@@ -659,6 +673,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     }
   };
 
+  const collectExperience = async (ctx: ExtensionContext, life: Lifecycle, signal?: AbortSignal): Promise<void> => {
+    await finishExperience({ cwd: ctx.cwd, session: ctx.sessionManager.getSessionId(), state, config: currentConfig(ctx),
+      exec: wrappedExec(ctx, life, signal), signal, summary: summaryPath(ctx) });
+    checkLive(life, signal);
+  };
+
   const runReview = async (ctx: ExtensionContext, round: number, task: ReviewTask): Promise<void> => {
     const { lifecycle: life, controller } = task;
     const signal = controller.signal;
@@ -699,6 +719,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       state.ledger = undefined;
       const acceptRun = acceptCommand() ? newAcceptRun("auto") : undefined;
       state.acceptRun = acceptRun;
+      if (acceptRun?.mode !== "required") await collectExperience(ctx, life, signal);
       state.phase = acceptRun?.mode === "required" ? "accepting" : "done";
       if (state.phase === "done") {
         const problem = await completionProblem(ctx, life, signal);
@@ -933,10 +954,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     state = newReviewState();
     gitAvailability = "unknown";
     reviewRunning = false;
+    developerRunning = false;
     activeTask = undefined;
     cleanupWork = undefined; cleanupRecordPath = undefined;
     latestCtx = ctx;
     pipelineLink = stageFromEnv(process.env);
+    trackExperienceSession(ctx, true);
     checkPonytail(ctx);
     if (inboxTimer) clearInterval(inboxTimer);
     if (contextTimer) clearInterval(contextTimer);
@@ -1034,6 +1057,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           saveState(life);
         }
       }
+      trackExperienceSession(ctx, developerRunning || state.phase !== "done");
     } catch (error) { await pauseForError(ctx, error, life); }
   });
 
@@ -1045,6 +1069,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const interrupted = state.phase === "reviewing";
     const accepting = state.acceptRun?.result === "进行中";
     lifecycle.active = false;
+    developerRunning = false;
     activeTask?.controller.abort();
     activeTask = undefined;
     reviewRunning = false;
@@ -1052,6 +1077,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     try { reapProcs(procsPath(ctx), { ownerPid: process.pid }); } catch { /* 尽力 */ }
     // 等实际的资源收尾完成；普通评审取消没有此等待。清理命令自身有独立超时。
     if (cleanupWork) await cleanupWork;
+    trackExperienceSession(ctx, false);
     if (!interrupted && !accepting) return;
     // 旧任务已失效；只有 shutdown 本身能在处理函数返回前使用仍有效的上下文。
     const cleanup: Lifecycle = { active: true };
@@ -1071,6 +1097,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const before = JSON.stringify([state.requirement, state.criteria, state.grants]);
     const hadReview = state.rounds.length > 0 || state.phase === "done" || reviewRunning;
     try {
+      developerRunning = true;
       if (state.phase === "paused" && gitAvailability !== "unsupported") {
         const reason = state.pauseReason;
         state.phase = "idle"; state.pauseReason = undefined; state.pauseHint = undefined; state.awaitingRepair = false; state.repairs = 0;
@@ -1105,6 +1132,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const hadReview = state.rounds.length > 0 || state.phase === "done" || reviewRunning;
     try {
       checkLive(life);
+      developerRunning = true;
+      trackExperienceSession(ctx, true);
       if (gitAvailability === "unsupported") return;
       // 上次 git 探测异常（不是明确的非 git）时重新探测；仍失败照旧暂停。
       if (gitAvailability === "unknown" && (reviewRunning || !await probeRepository(ctx, life))) return;
@@ -1160,7 +1189,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       if (prompt !== undefined && hadReview && !state.needsInputReview && previousInputs !== JSON.stringify([state.requirement, state.criteria, state.grants])) await invalidateCompletion(ctx, life);
       const acceptance = acceptanceEnabled(ctx);
       if (state.enabled) {
-        const convention = conventionText({ acceptance, gate: gateCommand(ctx) });
+        const convention = conventionText({ acceptance, gate: gateCommand(ctx), experience: experienceInjection(ctx.cwd) });
         const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
         event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }
@@ -1170,6 +1199,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   pi.on("agent_settled", async (_event, ctx) => {
     latestCtx = ctx;
     const life = lifecycle;
+    developerRunning = false;
     if (!life.active || gitAvailability !== "available" || reviewRunning || state.phase === "reviewing") return;
     try {
       const marker = classifyMarker(lastAssistantText(ctx.sessionManager.getEntries()));
@@ -1201,6 +1231,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         checkLive(life);
         if (current.fingerprint === baseline) {
           if (state.awaitingRepair) await pause(ctx, "返修后没有任何改动", life);
+          else if (state.phase === "done") trackExperienceSession(ctx, false);
           return;
         }
         // 没有交付标记但有未评审改动：直接评审，与写了【交付完成】一样。

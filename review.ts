@@ -19,6 +19,7 @@ import {
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
 import { methodEnv as buildMethodEnv } from "./method-env.ts";
+import { experienceInjection, markExperienceRecurrence } from "./experience.ts";
 import { changedSince, outOfScope, stageScopeFromEnv, type StageScope } from "./scope.ts";
 import { recordGateTree } from "./methods.ts";
 import { blockerHint, manualHint } from "./onboarding.ts";
@@ -38,6 +39,8 @@ export const DEFAULT_TIMEOUT_MIN = 60;
 export const INTERRUPTED = "评审被中断（会话关闭或重载）";
 
 export interface ReviewState extends AcceptanceState, PreparationState {
+  /** 独立经验起草的输入指纹与软失败；不参与完成资格。 */
+  experienceDraft?: { signature: string; error?: string };
   inputsFingerprint?: string;
   enabled: boolean;
   baseline?: string;
@@ -489,6 +492,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   live();
   const inputText = buildReviewInput({
     projectContext: deps.projectContext,
+    experienceChecklist: experienceInjection(cwd, true),
     currentCriteria: state.criteria ? `第 ${state.criteria.version} 版，来源：${state.criteria.source}\n${formatCriteria(state.criteria.items)}\n授权：${authorizationLine(state.criteria, state.grants) ?? "无授权条目"}` : undefined,
     round: deps.round, firstReview, requirement: state.requirement,
     deliveryNote: deps.deliveryNote, previousMustFix: state.unresolvedMustFix,
@@ -563,6 +567,11 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
   const changedBeforeAcceptance = deps.checkInputs?.();
   if (changedBeforeAcceptance) return changedBeforeAcceptance;
+  const experienceRoot = findProjectRoot(cwd);
+  if (experienceRoot && parsed.mustFix.length) {
+    parsed.mustFixRaw = markExperienceRecurrence(experienceRoot, deps.devSessionId, parsed.mustFixRaw);
+    record.mustFixRaw = parsed.mustFixRaw;
+  }
   state.lastSnapshot = before.ref;
   state.lastUntracked = before.untracked.map(({ path }) => path);
   state.lastSnapshotDetails = before;
