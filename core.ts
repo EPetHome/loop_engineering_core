@@ -30,8 +30,8 @@ export function gateConvention(command: string): string {
 }
 
 /** 注入给开发方的约定全文：开发约定，配了验收再追加验收约定，配了门禁再追加门禁约定。 */
-export function conventionText(options: { acceptance?: boolean; gate?: string } = {}): string {
-  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.gate ? gateConvention(options.gate) : ""]
+export function conventionText(options: { acceptance?: boolean; gate?: string; experience?: string } = {}): string {
+  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.gate ? gateConvention(options.gate) : "", options.experience ?? ""]
     .filter(Boolean).join("\n");
 }
 
@@ -64,6 +64,8 @@ export type RoundRecord = ParsedReview & {
   round: number;
   startedAt: string;
   durationMs: number;
+  /** 本轮实际输入与完整工作区字节的本机保留类快照。 */
+  snapshot?: string;
   /** 本轮评审失败时的错误摘要。 */
   failed?: string;
   /** 本轮的验收结果（配了 acceptance 时）。 */
@@ -154,6 +156,7 @@ export interface SummaryInput {
 export interface ReviewInputOptions {
   currentCriteria?: string;
   projectContext?: string;
+  experienceChecklist?: string;
   round: number;
   /** 没有成功检查点时，即使调用轮次大于 1 也重送首轮材料。 */
   firstReview?: boolean;
@@ -305,6 +308,7 @@ export function renderGateLines(record: GateRecord): string[] {
 export function buildReviewInput(options: ReviewInputOptions): string {
   const parts: string[] = [];
   if (options.projectContext) parts.push("## 项目来源与代码定位", options.projectContext);
+  if (options.experienceChecklist) parts.push("## 对照清单", options.experienceChecklist);
   if (options.currentCriteria) parts.push("## 当前验收标准与授权（覆盖历史消息中的旧版本）", options.currentCriteria);
   if (options.firstReview ?? options.round <= 1) {
     parts.push("## 需求原文", options.requirement?.trim() || "本会话没有记录需求原文（手动 /review），请按改动本身和项目文档评审");

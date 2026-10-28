@@ -2,7 +2,7 @@
 import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,10 +13,13 @@ import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import autoreview from "../autoreview.ts";
 import { CONVENTION, conventionText } from "../core.ts";
 import { projectRootOf } from "../ledger.ts";
+import { approveExperience, experienceDataFile, experienceFile, importExperience, readExperienceStore } from "../experience.ts";
 import { registerAcceptanceMaterials } from "../materials.ts";
+import { readReviewSnapshot } from "../snapshots.ts";
 import { contextDir, loadContext } from "../project-context.ts";
 import { createChildExec } from "../hosts/hook.ts";
 import type { Exec, ExecResult } from "../git.ts";
+import { queueDir, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
 
 type Result = ExecResult;
 type Call = { command: string; args: string[]; options: Partial<Parameters<Exec>[2]> };
@@ -184,6 +187,111 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     },
   };
 }
+
+test("Pi 实际评审入口保存本机快照，并在原生状态中保留同轮引用", async () => {
+  const h = harness();
+  try {
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "reviewed bytes\n"); h.write("new.txt", "untracked bytes\n");
+    h.assistant(); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    const state: any = h.state(), path = state.rounds[0].snapshot, snapshot = readReviewSnapshot(path);
+    assert.ok(path.startsWith(h.home) || path.startsWith(realpathSync(h.home)));
+    assert.deepEqual(state.reviewSnapshots, [{ round: 1, path }]);
+    assert.equal(snapshot.session, "unit-dev"); assert.equal(snapshot.round, 1);
+    assert.equal(snapshot.files.find((file) => file.path === "new.txt")?.kind, "untracked");
+    assert.equal(h.inputs.length, 1);
+  } finally { await h.close(); }
+});
+
+test("经验 A1/A2 Pi 系统提示与一轮评审注入三条四行正文；删掉后保持原约定与输入结构", async (t) => {
+  for (const enabled of [true, false]) await t.test(enabled ? "有清单" : "无清单", async () => {
+    const h = harness();
+    try {
+      h.write(".autoreview.json", "{}"); mkdirSync(join(h.repo, ".autoreview"));
+      const checklist = [1, 2, 3].map((i) => `## P0${i} 经验标题${i}\n现象：现象${i}\n根因：根因${i}\n正确做法：做法${i}\n次数：2\n证据：PRIVATE_EVIDENCE\n失效条件：PRIVATE_CONDITION\n`).join("\n");
+      h.write(".autoreview/经验.md", checklist);
+      if (!enabled) rmSync(experienceFile(h.repo));
+      await h.event("session_start");
+      const options: { appendSystemPrompt?: string } = {};
+      await h.event("before_agent_start", { prompt: "修好 file.txt", systemPromptOptions: options });
+      h.write("file.txt", "fixed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+      assert.equal(h.state().phase, "done");
+      for (const text of [options.appendSystemPrompt!, h.inputs[0]]) {
+        if (enabled) {
+          for (const i of [1, 2, 3]) assert.match(text, new RegExp(`P0${i} 经验标题${i}\\n现象：现象${i}\\n根因：根因${i}\\n正确做法：做法${i}`));
+          assert.doesNotMatch(text, /PRIVATE_EVIDENCE|PRIVATE_CONDITION|次数：2/);
+        } else assert.doesNotMatch(text, /项目经验|对照清单|经验标题/);
+      }
+      if (!enabled) assert.equal(options.appendSystemPrompt, conventionText());
+      else assert.match(h.inputs[0], /## 对照清单/);
+    } finally { await h.close(); }
+  });
+});
+
+test("经验 A3/A6 Pi 返修注明经验原次数加一；开发中不允许批准，完成后解除阻塞", async () => {
+  const h = harness();
+  try {
+    h.write(".autoreview.json", "{}"); mkdirSync(join(h.repo, ".autoreview"));
+    h.write(".autoreview/经验.md", "## P02 复核状态\n现象：旧操作提交\n根因：复用旧状态\n正确做法：重读状态\n出现次数：7\n");
+    const source = join(h.root, "candidate.md");
+    writeFileSync(source, "## P03 新候选\n现象：重复事件\n根因：复用事件号\n正确做法：分配新号\n出现次数：2\n");
+    importExperience(h.repo, source);
+    await h.event("session_start"); await h.begin();
+    assert.throws(() => approveExperience(h.repo, "C01"), /进行中.*稍后再批/);
+    h.reviewer = () => result(FIX.replace("必修 X", "经验 P02：旧操作仍提交"));
+    h.write("file.txt", "bad\n"); h.assistant(); await h.event("agent_settled");
+    await until(() => h.messages.length === 1, "第一次返修");
+    assert.match(h.messages[0], /经验 P02，第 8 次出现/);
+    h.reviewer = () => result(PASS); h.write("file.txt", "fixed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "done");
+    assert.equal(readExperienceStore(h.repo).occurrences.P02.count, 8);
+    approveExperience(h.repo, "C01");
+    assert.match(readFileSync(experienceFile(h.repo), "utf8"), /新候选/);
+  } finally { await h.close(); }
+});
+
+test("返修 2：Pi 完成后原会话继续开发，真实输入与插件触发的整个回合都阻挡批准", async () => {
+  const h = harness();
+  try {
+    h.write(".autoreview.json", "{}");
+    const source = join(h.root, "candidate.md");
+    writeFileSync(source, "## P01 复核状态\n现象：旧状态继续提交\n根因：未重读\n正确做法：提交前重读\n出现次数：2\n");
+    importExperience(h.repo, source);
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "fixed\n");
+    h.assistant(); await h.event("agent_settled"); await h.terminal();
+    approveExperience(h.repo, "C01", true);
+    const originalRequirement = (h.state() as any).requirement;
+    await h.event("input", { source: "interactive", text: "继续做后续任务" });
+    assert.equal(h.state().phase, "done", "旧评审完成态无需被普通消息伪造为新检查结果");
+    assert.equal((h.state() as any).requirement, originalRequirement);
+    assert.throws(() => approveExperience(h.repo, "C01"), /进行中.*稍后再批/);
+    await h.event("before_agent_start", { prompt: "继续做后续任务", skipInput: true, systemPromptOptions: {} });
+    assert.throws(() => approveExperience(h.repo, "C01"), /进行中/);
+    h.assistant("这里只需解释，无代码改动"); await h.event("agent_settled");
+    approveExperience(h.repo, "C01", true);
+    await h.event("before_agent_start", { messageType: "custom", message: { customType: "follow-up", content: "继续开发" }, systemPromptOptions: {} });
+    assert.throws(() => approveExperience(h.repo, "C01"), /进行中/);
+    h.assistant("插件回合已结束，没有改动"); await h.event("agent_settled");
+    approveExperience(h.repo, "C01");
+    assert.match(readFileSync(experienceFile(h.repo), "utf8"), /复核状态/);
+  } finally { await h.close(); }
+});
+
+test("经验候选存储读取失败不影响 Pi 完成，也不妨碍解除活动登记", async () => {
+  const h = harness();
+  try {
+    h.write(".autoreview.json", "{}");
+    // 候选路径被目录占用；活动登记是独立文件，起草失败不能把正常交付变成暂停。
+    mkdirSync(experienceDataFile(h.repo), { recursive: true });
+    await h.event("session_start"); await h.begin();
+    h.reviewer = () => result(FIX); h.write("file.txt", "bad\n"); h.assistant(); await h.event("agent_settled");
+    await until(() => h.messages.length === 1, "第一次返修");
+    h.reviewer = () => result(PASS); h.write("file.txt", "fixed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "done"); assert.match(h.summary(), /经验候选起草失败.*不影响会话完成/);
+    const sessions = JSON.parse(readFileSync(join(experienceDataFile(h.repo), "..", "experience-sessions.json"), "utf8"));
+    assert.deepEqual(sessions, {});
+  } finally { await h.close(); }
+});
 
 test("A1 Pi 真正完成边界瘦身全部登记轮次，完成总结写删除统计", async () => {
   const h = harness();
@@ -1482,6 +1590,45 @@ test("程序自动提交后恢复完成状态不被撤销；真实内容变化�
   });
 });
 
+test("CRLF／过滤转换文件提交后恢复：仅提交保持完成，内容、原始字节或模式变化仍撤销", async (t) => {
+  for (const conversion of ["crlf", "filter"] as const) for (const change of ["commit-only", "content", "raw-only", "mode"] as const) {
+    await t.test(`${conversion}/${change}`, async () => {
+      const h = harness({ stage: "甲" });
+      try {
+        h.write(".gitattributes", conversion === "crlf" ? "*.crlf text eol=crlf\n" : "*.filtered filter=snapshot\n");
+        if (conversion === "filter") {
+          const clean = 'let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(s.replace(/(?:WORKSPACE|ALIAS):/g,"CANONICAL:")));';
+          h.git("config", "filter.snapshot.clean", `"${process.execPath}" -e '${clean}'`);
+          h.git("config", "filter.snapshot.smudge", `"${process.execPath}" -e 'process.stdin.pipe(process.stdout)'`);
+        }
+        h.git("add", ".gitattributes"); h.git("commit", "-qm", "conversion config");
+        await h.event("session_start"); await h.begin();
+        const path = conversion === "crlf" ? "value.crlf" : "value.filtered";
+        const original = conversion === "crlf" ? "value=1\r\n" : "WORKSPACE:value=1\n";
+        h.write(path, original); await h.command(); await h.terminal();
+        assert.equal(h.state().phase, "done", h.state().pauseReason);
+        const state: any = h.state(), readyEpoch = state.readyEpoch;
+        const raw = state.lastSnapshotDetails.untracked.find((file: any) => file.path === path).hash;
+        const stored = readReviewSnapshot(state.rounds[0].snapshot).files.find((file) => file.path === path)!;
+        assert.equal(stored.hash, raw);
+        await h.event("session_shutdown");
+        if (change === "content") h.write(path, conversion === "crlf" ? "value=2\r\n" : "WORKSPACE:value=2\n");
+        if (change === "raw-only") h.write(path, conversion === "crlf" ? "value=1\n" : "ALIAS:value=1\n");
+        if (change === "mode") chmodSync(join(h.repo, path), 0o755);
+        h.git("add", "-A"); h.git("commit", "-qm", "submit conversion candidate");
+        if (change === "commit-only") assert.equal(readFileSync(join(h.repo, path), "utf8"), original, "正常提交不改变工作区字节");
+        await h.event("session_start");
+        assert.equal(h.state().phase, change === "commit-only" ? "done" : "paused", h.state().pauseReason);
+        assert.equal(stageStatus(h, "甲")?.event, change === "commit-only" ? "done" : "paused");
+        if (change === "commit-only") assert.equal((h.state() as any).readyEpoch, readyEpoch, "沿用原完成资格");
+        else assert.match(h.state().pauseReason!, /候选或输入版本变化/);
+        assert.equal(h.inputs.length, 1, "恢复只核对资格，不偷偷重新评审");
+        assert.equal(readReviewSnapshot(state.rounds[0].snapshot).files.find((file) => file.path === path)!.hash, raw);
+      } finally { await h.close(); }
+    });
+  }
+});
+
 test("子目录会话提交后资格保持，目录外候选改动仍撤销资格", async () => {
   const h = harness({ subdir: "sub" });
   try {
@@ -2049,6 +2196,27 @@ test("G17 Ponytail 未加载只在启动与完成总结提醒，不改变完成�
     assert.ok(!runResult.notifications.some((text) => text.includes("未加载 Ponytail")));
     assert.doesNotMatch(runResult.summary, /未加载 Ponytail/);
   });
+});
+
+test("合入队列：Pi 真正完成发布边界自动进队；不提交开发空间", async () => {
+  const h = harness({ stage: "甲" });
+  try {
+    h.write(".autoreview.json", JSON.stringify({ gate: { cmd: "true", timeoutMin: 1 } }));
+    h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
+    const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json");
+    writeFileSync(file, JSON.stringify({ stages: { 甲: {} } })); h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+    const original = h.git("rev-parse", "HEAD"), branch = h.git("branch", "--show-current");
+    registerQueueBatch(runtime, { name: "Pi完成", file, dir: h.pipelineDir, project: runtime, release: "release", steps: [["甲"]],
+      stages: [{ name: "甲", cwd: h.repo, branch, start: "true" }] });
+    const old = process.env.AUTOREVIEW_BATCH_FILE; process.env.AUTOREVIEW_BATCH_FILE = file;
+    try {
+      await h.event("session_start"); await h.begin("单段需求"); h.write("file.txt", "reviewed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+      await until(() => readMergeQueue(runtime)?.entries[0]?.status === "ready", "Pi 完成自动进队并通过门禁");
+      await until(() => !existsSync(join(queueDir(runtime), "worker.lock")), "队列释放执行锁");
+      assert.equal(h.git("rev-parse", "HEAD"), original, "队列不提交开发分支");
+      assert.match(h.git("status", "--porcelain"), /file\.txt/);
+    } finally { if (old === undefined) delete process.env.AUTOREVIEW_BATCH_FILE; else process.env.AUTOREVIEW_BATCH_FILE = old; }
+  } finally { await h.close(); }
 });
 
 test("扩展加载时撤掉一次性启动回报身份，自定义 start 的子进程不能再回报失败", async () => {

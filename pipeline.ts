@@ -40,6 +40,7 @@ import { createRunResource, managedShell, reapRunResources, releaseRunResource, 
 import { methodEnv } from "./method-env.ts";
 import { parseStageScope, type StageScope } from "./scope.ts";
 import { commitAll, currentBranch } from "./workspace.ts";
+import { queueBatchComplete } from "./merge-queue.ts";
 
 export const DEFAULT_MAX_ROUNDS = 3;
 /** 每段 pi 的默认配置（你日常的启动配置），计划的 pi 一节和每段自己的同名字段可以覆盖。 */
@@ -409,10 +410,15 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
     return { invalid, token: JSON.stringify(epochs) };
   };
   const report: string[] = [`# 流水线报告：${plan.name}`, "", `- 开始：${new Date().toLocaleString("zh-CN", { hour12: false })}`, `- 目录：${plan.dir}`];
+  let e2ePassed = false;
   const finish = (code: number, line: string): number => {
     if (code === 0) {
       const latest = readiness();
       if (latest.invalid.length || (completionEpochs && latest.token !== completionEpochs)) { code = 2; line = "完成前段资格已变化，本批结果不能用于新的输入；开发会话与计数保留"; }
+    }
+    if (code === 0 && plan.file) {
+      try { queueBatchComplete(plan.stages.values().next().value!.cwd, plan.file, e2ePassed); }
+      catch (error) { code = 2; line = `完成后进合入队列失败：${(error as Error).message}；成果与段资格保留，修复后 --from e2e 重试`; }
     }
     report.push("", `## 结果`, line);
     writeFileSync(resolve(plan.dir, "report.md"), `${report.join("\n")}\n`);
@@ -625,7 +631,7 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
     if (stage.kind === "paused") return finish(2, `e2e 暂停：${stage.reason}。${stage.hint}；处理好后用 --from e2e 接着跑`);
     const { record } = stage;
     report.push(`- e2e 第 ${round} 轮：${record.verdict}（材料：${record.runDir}）`);
-    if (record.verdict === "通过") return finish(0, "e2e 全部通过，流水线完成");
+    if (record.verdict === "通过") { e2ePassed = true; return finish(0, "e2e 全部通过，流水线完成"); }
     if (record.verdict === "部分验证") return finish(0, `e2e 通过，但 ${record.reason}（材料：${record.runDir}）`);
     if (record.verdict === "无法验收") {
       return finish(2, `e2e 无法验收：${record.reason}。${blockerHint(record, e2e.workDir, e2e.acceptance)}；处理好后用 --from e2e 接着跑`);

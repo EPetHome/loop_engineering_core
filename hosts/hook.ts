@@ -13,7 +13,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,14 +25,19 @@ import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary 
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
+import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
+import { finishExperience } from "../experience-draft.ts";
+import { queueStageEvent } from "../merge-queue.ts";
+import { bindHookInputBridge, bridgeRepairSequence } from "./inbox-bridge.ts";
+import { inboxPath, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
 import { parsePreparation } from "../preparation.ts";
-import { loadContext, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
+import { isRegisteredSource, loadContext, projectRootHash, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
-  checkedFingerprint, errorText, lastAcceptance, newReviewState, runReviewRound, tail,
+  checkedFingerprint, errorText, lastAcceptance, newReviewState, runReviewRound, sourcesOnlyWorkspaceChange, tail,
   type ReviewConfig, type ReviewState,
 } from "../review.ts";
 
@@ -55,6 +60,8 @@ export interface HookEvent {
 
 export interface HookState extends ReviewState {
   userInputVersion?: string; resumeAfterInputChange?: boolean;
+  queueReadyEpoch?: string; queueInboxHandled?: number; queuePreparedSeq?: number;
+  experienceActivity?: HookExperienceActivity;
   /** 本进程最近一次往交付总表写的段：同一完成态不重复追加，总结里的总表路径与它一致。 */
   ledger?: { session: string; path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
   /** 本会话已经注入过待回写提醒（同一会话只注入一次）。 */
@@ -83,6 +90,7 @@ interface HookContext {
   exec: Exec;
   config: ReviewConfig;
   configError?: string;
+  permissionMode?: string;
 }
 
 /**
@@ -249,13 +257,13 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
 }
 
 /** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */
-function conventionFor(config: ReviewConfig): string {
-  return conventionText({ acceptance: Boolean(config.acceptance), gate: config.gate?.cmd });
+function conventionFor(ctx: HookContext): string {
+  return conventionText({ acceptance: Boolean(ctx.config.acceptance), gate: ctx.config.gate?.cmd, experience: experienceInjection(ctx.configRoot) });
 }
 
 /** 状态和总结都放在 ~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.*。 */
 export function hookPaths(projectDir: string, host: string, sessionId: string): HookPaths {
-  const dir = join(homedir(), ".pi-autoreview", safeName(basename(projectDir)) || "project");
+  const dir = hookExperienceDir(projectDir);
   const stem = `${safeName(host)}-${safeName(sessionId) || "unknown"}`;
   return {
     dir,
@@ -497,6 +505,7 @@ async function writeSummary(
     acceptance: ctx.config.acceptance, host: ctx.host, phase: state.phase, pauseHint: state.pauseHint,
     criteria: state.criteria, lastAcceptance: lastAcceptance(state),
   });
+  if (status === "完成") todos.push(...experienceTodos(ctx.configRoot, state.experienceDraft?.error));
   recordMaterialSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
     state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
   const text = renderSummary({
@@ -574,6 +583,9 @@ function reapOrphans(ctx: HookContext): void {
 async function sessionStart(ctx: HookContext): Promise<string | undefined> {
   reapOrphans(ctx);
   const state = loadStateFile(ctx.paths.state);
+  state.experienceActivity = newHookActivity(ctx);
+  saveStateFile(ctx.paths.state, state);
+  experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
   if (state.enabled === false) return undefined;
   const git = createGitEvidence(ctx.exec, ctx.workDir);
   const repository = await git.isRepository();
@@ -602,7 +614,7 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
     if (ctx.host !== "claude") await notify(reminder, ctx.exec, 3000);
   }
   saveStateFile(ctx.paths.state, state);
-  return contextOutput(ctx, "SessionStart", reminder ? `${conventionFor(ctx.config)}\n${reminder}` : conventionFor(ctx.config), notice);
+  return contextOutput(ctx, "SessionStart", reminder ? `${conventionFor(ctx)}\n${reminder}` : conventionFor(ctx), notice);
 }
 
 /** SessionStart 的待回写提醒：只看本项目，失败一律当作没有提醒。 */
@@ -659,8 +671,118 @@ export function expandFileRefs(prompt: string, cwd: string): string {
   return `${prompt}${blocks.join("")}`;
 }
 
+type ActivityContext = Pick<HookContext, "configRoot" | "host" | "sessionId" | "paths">;
+function newHookActivity(ctx: ActivityContext): HookExperienceActivity {
+  const activity: HookExperienceActivity = { root: ctx.configRoot, host: ctx.host, session: ctx.sessionId, turn: randomUUID(), active: true,
+    ...(process.env.AUTOREVIEW_DEV_RUN_ID ? { runId: process.env.AUTOREVIEW_DEV_RUN_ID } : {}) };
+  // 身份取证失败只能留下待核对状态，不能成为用户授权/输入版本落盘的前置条件。
+  try { activity.projectId = projectRootHash(ctx.configRoot); } catch { /* 无身份记录按旧版保守核对 */ }
+  return activity;
+}
+/** 只结束当前回合；旧 Stop 或旧启动器不得清掉新输入/另一次启动的活动记录。 */
+function releaseHookExperience(ctx: ActivityContext, turn: string | undefined, ownStop = false): void {
+  withStateWriteLock(ctx.paths.state, () => {
+    const current = loadStateFile(ctx.paths.state);
+    if (current.experienceActivity?.turn !== turn || current.phase !== "done" || current.awaitingRepair || current.resumeAfterInputChange
+      || (!ownStop && lockAlive(ctx.paths.lock))) return;
+    // 登记损坏不等于消费者已结束，不使用容错的 readProcs，也不按 PID 猜测归属。
+    const stopped = [ctx.paths.procs, `${ctx.paths.procs}.cleanup`].every((file) => {
+      try {
+        if (!lstatSync(file).isFile()) return false;
+        const entries = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(entries) && entries.length === 0;
+      }
+      catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+    });
+    if (!stopped) return;
+    current.experienceActivity = { ...(current.experienceActivity ?? newHookActivity(ctx)), active: false };
+    writeStateFile(ctx.paths.state, current);
+    experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, false);
+  });
+}
+/** loop-dev 已观测所启动宿主退出；仅处理该次随机启动身份关联的已完成会话。 */
+export function endHostExperienceSessions(root: string, host: string, runId: string): void {
+  for (const { file, activity } of hookExperienceStates(root)) {
+    if (activity.host !== host || activity.runId !== runId) continue;
+    const paths = hookPaths(root, host, activity.session);
+    if (paths.state !== file) throw new Error(`宿主结束时会话身份无法核对：${file}`);
+    releaseHookExperience({ configRoot: root, host, sessionId: activity.session, paths }, activity.turn);
+  }
+}
+
+function reportQueueStage(ctx: HookContext, state: HookState, event: "started" | "done"): void {
+  const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
+    inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
+    event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined, sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0 };
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  if (dir && stage) bindHookInputBridge(dir, stage, status, { socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
+    token: process.env.CLAUDE_CODE_MESSAGING_TOKEN, mode: ctx.permissionMode });
+  queueStageEvent({ cwd: ctx.workDir, file: process.env.AUTOREVIEW_BATCH_FILE, stage, status });
+}
+async function consumeQueueInbox(ctx: HookContext, state: HookState, expectedSeq?: number, stillIdle?: () => boolean, prepareOnly = false): Promise<string | undefined> {
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  if (!dir || !stage) return undefined;
+  const inbox = readJson<InboxMessage>(inboxPath(dir, stage));
+  if (!inbox || !inbox.message.startsWith("【合入队列返修】") || inbox.seq <= (state.queueInboxHandled ?? 0)
+    || (expectedSeq !== undefined && inbox.seq !== expectedSeq)) return undefined;
+  if (lockAlive(ctx.paths.lock)) return undefined;
+  if (state.queuePreparedSeq === inbox.seq) {
+    if (!prepareOnly) {
+      state.queueInboxHandled = inbox.seq; state.queuePreparedSeq = undefined;
+      saveStateFile(ctx.paths.state, state); reportQueueStage(ctx, state, "started");
+    }
+    return inbox.message;
+  }
+  const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
+  if (stillIdle && !stillIdle()) return undefined;
+  state.lastSnapshot = snap.ref; state.lastUntracked = snap.untracked.map(({ path }) => path);
+  state.lastFingerprint = snap.fingerprint; state.lastCheckedFingerprint = snap.fingerprint;
+  state.scopeBaseline = snap.ref; state.scopeBaselineUntrackedDetails = snap.untracked;
+  state.unresolvedMustFix = inbox.mustFix;
+  if (!prepareOnly) state.queueInboxHandled = inbox.seq;
+  state.queuePreparedSeq = prepareOnly ? inbox.seq : undefined; state.queueReadyEpoch = undefined;
+  state.phase = "idle"; state.awaitingRepair = false; state.pauseReason = undefined; state.pauseHint = undefined;
+  state.ledger = undefined; state.resumeAfterInputChange = true;
+  saveStateFile(ctx.paths.state, state);
+  reportQueueStage(ctx, state, "started");
+  return inbox.message;
+}
+/** 原生收件通道发送前先固定返修基线；这不是用户输入，不改授权/标准，也不调用模型。 */
+async function prepareNativeQueueRepair(ctx: HookContext, event: HookEvent): Promise<string> {
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  const token = process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  const seq = dir && stage && token && typeof event.prompt === "string" ? bridgeRepairSequence(dir, stage,
+    { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid), inputBridge: token }, event.prompt) : undefined;
+  const refused = () => JSON.stringify({ ok: false });
+  if (seq === undefined || !dir || !stage || ctx.configError) return refused();
+  const state = loadStateFile(ctx.paths.state), inbox = readJson<InboxMessage>(inboxPath(dir, stage));
+  if (state.enabled === false || !inbox || inbox.seq !== seq || lockAlive(ctx.paths.lock)) return refused();
+  if ((state.queueInboxHandled ?? 0) >= seq || state.queuePreparedSeq === seq) return JSON.stringify({ ok: true, seq }); // 已准备的重试不能重置基线。
+  const expected = readJson<StageStatus>(statusPath(dir, stage));
+  const inputVersion = state.userInputVersion;
+  const stillIdle = () => {
+    const current = readJson<StageStatus>(statusPath(dir, stage));
+    return state.phase === "done" && expected?.event === "done" && current?.event === "done" && current.sessionId === ctx.sessionId
+      && current.inputBridge === token && current.readyEpoch === expected.readyEpoch && !lockAlive(ctx.paths.lock)
+      && loadStateFile(ctx.paths.state).userInputVersion === inputVersion;
+  };
+  if (!stillIdle() || !await consumeQueueInbox(ctx, state, seq, stillIdle, true)) return refused();
+  await writeSummary(ctx, state, "进行中", undefined, undefined, "合入队列返修已准备，等待原生收件通道处理；修复前基线和业务计数保留。");
+  return JSON.stringify({ ok: true, seq });
+}
+
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
-  if (isLoopMessage(typeof event.prompt === "string" ? event.prompt : "")) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config));
+  const raw = typeof event.prompt === "string" ? event.prompt : "";
+  const expanded = expandFileRefs(raw, ctx.promptDir);
+  const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  const dispatched = dir && stage && process.env.AUTOREVIEW_DEV_INPUT_BRIDGE ? bridgeRepairSequence(dir, stage,
+    { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid), inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE }, raw) : undefined;
+  const machine = dispatched !== undefined || isLoopMessage(raw) || /--- @[^\n]+ ---\n【合入队列返修】/.test(expanded);
+  if (machine) {
+    const state = loadStateFile(ctx.paths.state), repair = await consumeQueueInbox(ctx, state, dispatched);
+    return contextOutput(ctx, "UserPromptSubmit", [conventionFor(ctx), repair].filter(Boolean).join("\n\n"));
+  }
   // 相对引用保持宿主当前目录语义；固定项目根只用于配置、Git 取证、状态和评审。
   const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.promptDir);
   const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
@@ -681,13 +803,17 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
       if (wasRunning || state.rounds.length > 0) state.resumeAfterInputChange = true;
       if (wasDone) { state.phase = "idle"; state.pauseReason = undefined; invalidatedDone = true; }
     }
+    state.experienceActivity = newHookActivity(ctx);
     writeStateFile(ctx.paths.state, state);
   });
   if (criteriaNotice) process.stderr.write(`[autoreview] ${criteriaNotice}\n`);
   if (notice) process.stderr.write(`[autoreview] ${notice}\n`);
   if (notice && ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
   let state = loadStateFile(ctx.paths.state);
-  if (state.enabled === false) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
+  reportQueueStage(ctx, state, "started");
+  // 授权与输入版本已经独立落盘；经验锁、登记读写失败不能吞掉撤权或旧检查的取消信号。
+  experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
+  if (state.enabled === false) return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx), notice);
   if (ctx.configError) {
     await pause(ctx, state, "项目配置不可用，用户输入已保存", undefined, ctx.configError,
       `当前 AUTOREVIEW_DEV_ROOT=${ctx.workDir}；修正它指向的项目根后再提交。`);
@@ -726,7 +852,7 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
     }
   }
   if (invalidatedDone) { state = loadStateFile(ctx.paths.state); await writeSummary(ctx, state, "进行中", undefined, undefined, "用户输入已更新，旧完成资格已撤销。"); }
-  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx.config), notice);
+  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx), notice);
 }
 
 /**
@@ -768,6 +894,10 @@ function guardSignals(ctx: HookContext, controller: AbortController, finished: (
 async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
   let state = loadStateFile(ctx.paths.state);
   if (state.enabled === false) return undefined;
+  const prepared = state.queuePreparedSeq;
+  const queuedRepair = await consumeQueueInbox(ctx, state);
+  if (queuedRepair && prepared === undefined) return JSON.stringify({ decision: "block", reason: queuedRepair });
+  // 原生通道可能不触发 UserPromptSubmit；首次 Stop 仅确认收件，按发送前的基线评审修复。
   const text = lastAssistantMessage(event);
   const marker = classifyMarker(text);
   if (marker === "decision") {
@@ -783,6 +913,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     const current = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
     if (current.fingerprint === baseline) {
       if (state.awaitingRepair) await pause(ctx, state, "返修后没有任何改动");
+      else releaseHookExperience(ctx, state.experienceActivity?.turn);
       return undefined;
     }
     // 没有交付标记但有未评审改动：直接评审，与写了【交付完成】一样。
@@ -833,6 +964,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     state.pauseReason = undefined;
     state.awaitingRepair = false;
     saveStateFile(ctx.paths.state, state);
+    experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
     const round = state.rounds.length + 1;
     const work = runReviewRound({
       cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, round,
@@ -848,6 +980,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       // 完成总结等状态和总表落盘后再写，避免外部把“总结已出现”当成终态抢先结束会话。
       writeSummary: (status) => writeSummary(ctx, state, status === "完成" ? "进行中" : status),
       saveState: () => saveStateFile(ctx.paths.state, state),
+      snapshotDir: join(ctx.paths.dir, "review-snapshots"),
       acceptanceDir: join(ctx.paths.dir, "acceptance", basename(ctx.paths.state, ".state.json")),
       procsFile: ctx.paths.procs,
     });
@@ -855,8 +988,26 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     const outcome = await work;
     controller.signal.throwIfAborted();
     if (outcome.kind === "done") {
-      // 发布前核对来源：内容变化不阻塞，缺失就不写交付、不发完成。
+      const previousDraft = state.experienceDraft?.signature;
+      const drafting = finishExperience({ cwd: ctx.configRoot, session: `${ctx.host}-${ctx.sessionId}`, state,
+        config: ctx.config, exec: ctx.exec, signal: controller.signal, summary: ctx.paths.summary });
+      running = drafting;
+      await drafting;
+      checkUserInputs();
       const context = loadContext(ctx.workDir);
+      if (previousDraft !== state.experienceDraft?.signature) {
+        // 独立调用可能等待数分钟；不能沿用等待前的候选与配置发布完成。
+        const git = createGitEvidence(ctx.exec, ctx.workDir, controller.signal), candidate = await git.snapshot();
+        checkUserInputs();
+        const before = state.lastSnapshotDetails;
+        const sourcesOnly = context && before && candidate.fingerprint !== state.lastFingerprint
+          ? await sourcesOnlyWorkspaceChange(git, before, candidate, (path) => isRegisteredSource(context, ctx.workDir, path)) : false;
+        if ((candidate.fingerprint !== state.lastFingerprint && !sourcesOnly) || JSON.stringify(loadConfig(ctx.configRoot)) !== JSON.stringify(ctx.config)) {
+          await pause(ctx, state, "经验起草期间候选或配置已变化，原检查结果已失效");
+          return undefined;
+        }
+      }
+      // 发布前核对来源：内容变化不阻塞，缺失就不写交付、不发完成。
       const sourceProblem = context ? recordProjectOutcome(context, `${ctx.host}-${ctx.sessionId}`, "done", ctx.paths.summary) : undefined;
       if (sourceProblem) {
         await pause(ctx, state, sourceProblem, undefined, undefined, "补齐 context.sources 登记的文件后再接力。");
@@ -874,9 +1025,12 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       saveStateFile(ctx.paths.state, state);
       // 状态和总表都落盘后再发布完成总结。
       await writeSummary(ctx, state, "完成");
+      state.queueReadyEpoch = randomUUID(); saveStateFile(ctx.paths.state, state);
+      reportQueueStage(ctx, state, "done");
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
       await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
       checkUserInputs();
+      releaseHookExperience(ctx, state.experienceActivity?.turn, true);
       return userOutput(ctx, outcome.hint && `自动评审${done}。${outcome.hint}`);
     }
     if (outcome.kind === "paused") {
@@ -945,9 +1099,11 @@ async function dispatch(event: HookEvent): Promise<string | undefined> {
       configError = `项目配置不可用（AUTOREVIEW_DEV_ROOT=${root}）：${errorText(error)}`;
     }
   }
-  const ctx: HookContext = { host, configRoot: root, workDir: root, promptDir: eventCwd, sessionId, paths, exec: createChildExec(paths.procs), config, configError };
+  const ctx: HookContext = { host, configRoot: root, workDir: root, promptDir: eventCwd, sessionId, paths, exec: createChildExec(paths.procs), config, configError,
+    permissionMode: typeof event.permission_mode === "string" ? event.permission_mode : undefined };
   if (kind === "SessionStart") return configError ? configUnavailable(ctx) : sessionStart(ctx);
   if (kind === "UserPromptSubmit") return userPromptSubmit(ctx, event);
+  if (kind === "LoopQueueRepair") return prepareNativeQueueRepair(ctx, event);
   if (kind === "Stop") return configError ? configUnavailable(ctx) : stop(ctx, event);
   return undefined;
 }
