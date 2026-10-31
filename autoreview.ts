@@ -18,7 +18,7 @@ import { acceptanceTodos, conventionNotice } from "./onboarding.ts";
 import { experienceInjection, experienceSession, experienceTodos } from "./experience.ts";
 import { finishExperience } from "./experience-draft.ts";
 import {
-  inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, readJson, stageFromEnv, statusPath, writeStageStatus,
+  inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, queueAcceptance, readJson, stageFromEnv, statusPath, writeStageStatus,
   type InboxMessage, type StageEvent, type StageLink,
 } from "./pipeline-core.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
@@ -173,7 +173,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     try {
       const status = {
         sessionId: ctx.sessionManager.getSessionId(), host: "pi", pid: process.pid, processStarted: processStartTime(process.pid),
-        summary: summaryPath(ctx), event, ...(event === "done" ? { readyEpoch: state.readyEpoch, sourceInputs: state.inputsFingerprint } : {}), inbox: state.inboxHandled ?? 0, ...extra,
+        summary: summaryPath(ctx), event, ...(event === "done" ? { readyEpoch: state.readyEpoch, sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
       };
       writeStageStatus(pipelineLink, status);
       queueStageEvent({ cwd: ctx.cwd, file: process.env.AUTOREVIEW_BATCH_FILE, stage: pipelineLink.stage, status });
@@ -372,10 +372,10 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     if (state.ledger?.session === session) return;
     // 只认本轮（最后一段）的验收结果，避免配置去掉后把旧记录当成当前欠项。
     const acceptance = state.rounds[state.rounds.length - 1]?.acceptance;
-    const pending = pendingItems(acceptance);
+    const pending = pendingItems(acceptance, state.queueReviewedAcceptance);
     const record = {
       project: projectRootOf(ctx.cwd), session, task: taskTitle(state.requirement),
-      result: resultLine(acceptance, state.rounds.length, state.repairs),
+      result: resultLine(acceptance, state.rounds.length, state.repairs, state.queueReviewedAcceptance),
       summary: summaryPath(ctx), pending,
     };
     let problem: string | undefined;

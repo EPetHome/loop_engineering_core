@@ -3,7 +3,7 @@
  * loop.ts — bin/loop 的实现：开工、启动、状态、合入、清理。
  *
  * 所有子命令支持 --dry-run（只核对、只打印，不改文件或分支）和 --json（标准输出一个 JSON 对象）。
- * 只做本地操作，不推送；开发方不提交，段完成时由流水线按分支名生成提交说明。
+ * 手动命令只做本地操作；队列仅按 merge.push 授权推送。开发方不提交，段完成时由流水线按分支名生成提交说明。
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -18,7 +18,7 @@ import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
 import { registerMiss } from "./misses.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
-import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch } from "./merge-queue.ts";
+import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch, withdrawQueuedBatch, scopeOverlapWarnings, type QueueEntry } from "./merge-queue.ts";
 import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
@@ -605,6 +605,8 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   const lines = [`运行版：${repo.root}（发布分支 ${repo.layout.release}）`];
   if (uncommitted.length) lines.push(`未提交，不在本批分支上：${uncommitted.join("、")}`);
   lines.push(`批次：${batch.plan.name}${batch.branch ? `，分支 ${batch.branch}` : ""}`);
+  const warnings = scopeOverlapWarnings(repo.root, batch.plan.name, [...batch.plan.stages.values()]);
+  lines.push(...warnings);
   const resultWorkspaces: Record<string, unknown>[] = [];
   let primary: string | undefined = batch.workspaces[0]?.path ?? batch.checks[0]?.path ?? [...batch.stages.values()].find((stage) => existsSync(stage.cwd))?.cwd;
   for (const workspace of batch.workspaces) {
@@ -660,7 +662,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
   return { ok: true, command: "开工", dryRun: args.dryRun, repo: repo.root, release: repo.layout.release,
     batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
-    uncommitted,
+    uncommitted, warnings,
     batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
       files: docs.files, restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
     methods, startCommand: start, statusCommand: status, mergeCommand: merge, lines };
@@ -780,7 +782,7 @@ async function cmdStatus(args: ParsedArgs): Promise<Record<string, unknown>> {
     return `${entry.stage}：${entry.phase}；轮次：${round}（状态序号 ${entry.seq}）${reason}；总结：${entry.summary ?? "（无）"}；目录：${entry.dir}`;
   }) : ["没有找到段状态"];
   const fresh = queue ? readMergeQueue(queue.repo)! : undefined;
-  const active = fresh?.entries.filter((entry) => ["pending", "testing", "ready", "returning", "merging"].includes(entry.status)).sort((a, b) => a.order - b.order) ?? [];
+  const active = fresh?.entries.filter((entry) => ["pending", "testing", "ready", "returning", "merging", "withdrawing"].includes(entry.status)).sort((a, b) => a.order - b.order) ?? [];
   const queueEntries = fresh?.entries.map((entry) => {
     const batch = fresh.batches.find((item) => item.id === entry.batch)!;
     const deliveryWarnings = entry.deliveries?.flatMap((delivery) => {
@@ -790,7 +792,7 @@ async function cmdStatus(args: ParsedArgs): Promise<Record<string, unknown>> {
     }) ?? [];
     return { ...entry, position: active.findIndex((item) => item.id === entry.id) + 1 || null, deliveryWarnings };
   }) ?? [];
-  const labels: Record<string, string> = { pending: "排队中", testing: "测试中", ready: "可合入", returning: "正在退回", returned: "已退回开发会话", blocked: "资格失效/等待处理", merging: "合入待恢复", merged: "已合入" };
+  const labels: Record<string, string> = { pending: "排队中", testing: "测试中", ready: "可合入", returning: "正在退回", returned: "已退回开发会话", blocked: "资格失效/等待处理", merging: "合入待恢复", merged: "已合入", stopped: "停止自动排队", withdrawing: "撤回待恢复", withdrawn: "已撤回" };
   if (fresh) lines.push(`合入队列：${fresh.repo}；固定测试工作区：${fresh.workspace}`, ...queueEntries.map((entry) =>
     `${entry.name}：${entry.position ? `队列第 ${entry.position} 位；` : ""}${labels[entry.status]}；测试 ${entry.attempt} 次${entry.reason ? `；${entry.reason}` : ""}${entry.deliveryWarnings.length ? `；${entry.deliveryWarnings.join("；")}` : ""}${entry.log ? `；日志：${entry.log}` : ""}`));
   return { ok: true, command: "状态", dryRun: args.dryRun, stages: entries, queue: queueEntries, queueWorkspace: fresh?.workspace, lines };
@@ -880,17 +882,13 @@ function restoreProjectStash(repo: Repo, stash: ProjectStash): void {
   gitResult(repo.root, ["update-ref", "-d", stash.ref, stash.hash]);
 }
 
-async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): Promise<Record<string, unknown>> {
-  const registration = registeredQueueBatch(repo.root, batch.path)!;
-  checkNoExistingMerge(repo);
-  const dirty = checkRuntime(repo);
-  const uncommitted = [...new Set(dirty.map((change) => change.path))].sort();
-  if (args.dryRun) {
-    const entry = readMergeQueue(repo.root)!.entries.filter((item) => item.batch === registration.id).at(-1);
-    return { ok: true, command: "合入", dryRun: true, release: repo.layout.release, queue: entry ?? null, uncommitted, pushed: false,
-      lines: [`只核对，不写入；队列状态：${entry?.status ?? "尚未完成进队"}；只允许合入测过且发布基线未变化的提交`] };
-  }
-  const entry = await mergeQueuedBatch(repo.root, registration, false, (candidate, save) => {
+/** 手动合入、会话外自动合入与撤回共用运行版保护；调用方持有仓库队列执行锁。 */
+export function applyQueuedResult(root: string, release: string, candidate: QueueEntry, save: (patch: Partial<QueueEntry>) => void, onBegin?: () => void): void {
+    const project = loadProjectLayout(root);
+    const repo: Repo = { root, projectRoot: project.root, layout: project.layout };
+    if (repo.layout.release !== release) throw new LoopError("release 配置已变化，未更新发布分支");
+    checkNoExistingMerge(repo);
+    checkRuntime(repo);
     if (!candidate.result || !candidate.base) throw new LoopError("队列缺少测过的合并结果");
     const current = gitText(repo.root, ["rev-parse", "HEAD"]);
     // 合入进程被杀：先按持久化的 stash 身份恢复，不重复合并已发布的结果。
@@ -901,6 +899,7 @@ async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): P
       save({ runtimeStash: undefined });
     };
     if (current === candidate.result) {
+      if (candidate.base !== candidate.result) save({ runtimePublication: "published" });
       // ref 的 CAS 已成功而 checkout 尚未完成时，由本次用户命令补齐；后台不碰运行版。
       if (gitText(repo.root, ["write-tree"]) === gitText(repo.root, ["rev-parse", `${candidate.base}^{tree}`])) {
         gitText(repo.root, ["read-tree", "-m", "-u", candidate.base, candidate.result]);
@@ -909,7 +908,10 @@ async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): P
       if (gitText(repo.root, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree) throw new LoopError("发布树不是测过的结果");
       return;
     }
-    if (current !== candidate.base) throw new LoopError("发布分支已经变化；中断合入的记录保留，请先核对运行版状态");
+    if (current !== candidate.base) {
+      if (candidate.runtimePublication === "prepared" && !candidate.runtimeStash) save({ status: "ready", reason: "发布分支已经变化，本次尚未开始发布" });
+      throw new LoopError("发布分支已经变化；未覆盖发布分支，请核对队列重测或运行版收尾状态");
+    }
     if (candidate.runtimeStash) restore();
     const changes = workingChanges(repo.root, "运行版");
     const touched = gitText(repo.root, ["diff", "--name-only", "--no-renames", "-z", candidate.base, candidate.result]).split("\0").filter(Boolean);
@@ -919,27 +921,55 @@ async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): P
     const intersects = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
     const overlap = [...new Set(untouched.filter((path) => touched.some((target) => intersects(path, target))))];
     if (overlap.length) { save({ status: "ready" }); throw new LoopError(`运行版未提交改动与测过的合并碰到同一个文件，未合入：${overlap.join("、")}`, { files: overlap }); }
-    const stash = stashProjectChanges(repo, changes, (value) => save({ runtimeStash: value }));
-    let failure: unknown;
+    const stash = stashProjectChanges(repo, changes, (value) => { onBegin?.(); save({ runtimeStash: value }); });
+    let failure: unknown, published = false;
     try {
       gitText(repo.root, ["read-tree", "-n", "-m", "-u", candidate.base, candidate.result]);
+      // 只读检查已过；在第一次可能改运行版的动作前持久化事务意图（有 stash 时更早登记）。
+      onBegin?.();
       // 比较与更新由 Git 原子完成：不能在版本核对和发布之间插入另一个提交。
+      save({ runtimePublication: "publishing" });
       gitText(repo.root, ["-c", "core.hooksPath=/dev/null", "update-ref", `refs/heads/${repo.layout.release}`, candidate.result, candidate.base]);
+      published = true;
+      save({ runtimePublication: "published" });
       gitText(repo.root, ["read-tree", "-m", "-u", candidate.base, candidate.result]);
       if (gitText(repo.root, ["rev-parse", "HEAD"]) !== candidate.result || gitText(repo.root, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree) throw new LoopError("合入结果与测过的提交不一致");
     } catch (error) { failure = error; }
     if (stash) restore();
     if (failure) {
-      // CAS 尚未成功可重新测试；已发布但 checkout 失败时保留 merging，由用户重试收尾。
+      // 只有本次 CAS 确未成功且临时改动已恢复，才退出事务；已发布后的收尾失败保留恢复意图。
       const head = gitText(repo.root, ["rev-parse", "HEAD"]);
-      if (head !== candidate.result) save({ status: "ready" });
+      if (!published && head !== candidate.result) save({ status: "ready", runtimePublication: "prepared" });
+      else save({ runtimePublication: "published" });
       if (head !== candidate.base && head !== candidate.result) throw new LoopError("发布分支已经变化，本次不合入，自动重新测试");
       throw failure;
     }
-  });
+}
+
+async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): Promise<Record<string, unknown>> {
+  const registration = registeredQueueBatch(repo.root, batch.path)!;
+  checkNoExistingMerge(repo);
+  const dirty = checkRuntime(repo);
+  const uncommitted = [...new Set(dirty.map((change) => change.path))].sort();
+  if (args.dryRun) {
+    const entry = readMergeQueue(repo.root)!.entries.filter((item) => item.batch === registration.id).at(-1);
+    return { ok: true, command: "合入", dryRun: true, release: repo.layout.release, queue: entry ?? null, uncommitted, pushed: false,
+      lines: [`只核对，不写入；队列状态：${entry?.status ?? "尚未完成进队"}；只允许合入测过且发布基线未变化的提交`] };
+  }
+  const entry = await mergeQueuedBatch(repo.root, registration, false, (candidate, save) => applyQueuedResult(repo.root, registration.release, candidate, save));
   return { ok: true, command: "合入", dryRun: false, release: repo.layout.release, commit: entry.result, tree: entry.tree,
     queue: entry, uncommitted, pushed: false, lines: [`已合入 ${repo.layout.release}：${entry.name}；提交：${entry.result}（就是测过的结果）；未推送`,
       uncommitted.length ? `运行版原有未提交改动已保留：${uncommitted.join("、")}` : "运行版没有未提交改动"] };
+}
+
+async function cmdWithdraw(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch) throw new LoopError("用法：loop 撤回 <批次.json> [--dry-run] [--json]");
+  const repo = repoOf(process.cwd());
+  const batch = registeredQueueBatch(repo.root, resolve(args.batch));
+  if (!batch) throw new LoopError("本批未通过 loop 开工登记，不能撤回");
+  const entry = await withdrawQueuedBatch(repo.root, batch, args.dryRun, (candidate, save, begin) => applyQueuedResult(repo.root, batch.release, candidate, save, begin));
+  return { ok: true, command: "撤回", dryRun: args.dryRun, release: batch.release, commit: entry.base, queue: entry, pushed: false,
+    lines: [`${args.dryRun ? "可撤回（未写入）" : "已撤回"}：${batch.name}；${batch.release} → ${entry.base}；未推送`] };
 }
 
 async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
@@ -1084,6 +1114,7 @@ const USAGE = `用法：
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
   loop 合入 <批次.json> [--dry-run] [--json]
+  loop 撤回 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]
   loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]
   loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
@@ -1108,6 +1139,7 @@ async function main(): Promise<number> {
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "合入") result = await cmdMerge(args);
+    else if (args.command === "撤回") result = await cmdWithdraw(args);
     else if (args.command === "清理") result = cmdCleanup(args);
     else if (args.command === "漏网") result = cmdMiss(args);
     else if (args.command === "经验") result = cmdExperience(args);

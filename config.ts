@@ -217,6 +217,20 @@ export function parseMethodsConfig(raw: unknown, root: string): MethodsConfig | 
   return { paths, ...(selfCheck ? { selfCheck } : {}), ...(probe ? { probe } : {}) };
 }
 
+/** 只从运行版配置读取授权，不信任批次候选打开的开关。 */
+export interface MergeConfig { auto: boolean; push: boolean }
+export function parseMergeConfig(raw: unknown): MergeConfig {
+  if (raw === undefined) return { auto: false, push: false };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 merge 必须是 JSON 对象`);
+  const data = raw as Record<string, unknown>;
+  for (const key of ["auto", "push"]) if (data[key] !== undefined && typeof data[key] !== "boolean") throw new Error(`${MARKER_FILE} 的 merge.${key} 必须是 boolean`);
+  return { auto: data.auto === true, push: data.push === true };
+}
+export function loadMergeConfig(cwd: string): MergeConfig {
+  const root = findProjectRoot(cwd);
+  return parseMergeConfig(root ? readMarker(root).merge : undefined);
+}
+
 /** 发布分支、开发工作区、本机文件和项目方法的位置；没写的用默认值。 */
 export interface ProjectLayout {
   release: string;
@@ -226,6 +240,7 @@ export interface ProjectLayout {
 }
 
 export function parseProjectLayout(raw: Record<string, unknown>, root: string): ProjectLayout {
+  parseMergeConfig(raw.merge);
   const release = raw.release === undefined ? "main" : nonEmptyString(raw, "release", "main");
   const workspaces: Record<string, string> = {};
   if (raw.workspaces !== undefined) {

@@ -175,7 +175,7 @@ function hasBatch(root: string): boolean {
 
 export function productionCard(roots: string[]): string {
   const lines = ["Loop 规则按需读：", ...PRODUCTION_RULES.map((rule, index) => `- ${rule.description} → ${ruleLine(index)}`),
-    "合入走 bin/loop 合入（合入队列），不要在会话里手动 git 合并。"];
+    "合入走 bin/loop 合入（合入队列），不要在会话里手动 git 合并；打开 merge.auto 后，满足条件由程序自动合入。"];
   const unmigrated = roots.filter((root) => {
     try {
       const raw = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));

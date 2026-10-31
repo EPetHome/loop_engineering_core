@@ -173,6 +173,7 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
   const methods = functionBody(config, "export function parseMethodsConfig");
   const acceptance = functionBody(config, "export function parseAcceptanceConfig");
   const gate = functionBody(config, "export function parseGateConfig");
+  const merge = functionBody(config, "export function parseMergeConfig");
   const preparation = functionBody(sources["preparation.ts"], "export function parsePreparation");
   const repair = functionBody(preparation, "if (data.repair !== undefined)");
   const context = functionBody(sources["project-context.ts"], "export function parseContext");
@@ -193,6 +194,7 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
   for (const key of new Set([...directKeys(gate, ["data"]), ...helperKeys(gate, ["data"])])) {
     fields.add(`gate.${key}`);
   }
+  for (const key of directKeys(merge, ["data"])) fields.add(`merge.${key}`);
   for (const key of new Set([...directKeys(preparation, ["data"]), ...helperKeys(preparation, ["data"])])) {
     fields.add(`preparation.${key}`);
   }
@@ -256,4 +258,6 @@ test("一致性检查覆盖 helper 字段读取方式：新增报缺项，删除
   const removed = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace(`${needle}\n`, "") });
   assert.ok(!removed.has("release"), "helper 和属性访问都删除后，字段应离开比较集合");
   assert.ok(differences(removed, doc).extra.includes("release"), "删除字段应报为清单多项");
+  const mergeAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace("auto: data.auto === true", "auto: data.auto === true, probe: data.probe === true") });
+  assert.ok(differences(mergeAdded, doc).missing.includes("merge.probe"), "merge 子字段新增同样应报清单缺项");
 });

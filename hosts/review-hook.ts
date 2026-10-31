@@ -28,7 +28,7 @@ import { experienceInjection, experienceSession, experienceTodos, hookExperience
 import { finishExperience } from "../experience-draft.ts";
 import { queueStageEvent } from "../merge-queue.ts";
 import { bindHookInputBridge, bridgeRepairSequence } from "./inbox-bridge.ts";
-import { inboxPath, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
+import { inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
@@ -503,12 +503,12 @@ async function recordLedger(ctx: HookContext, state: HookState): Promise<string 
   if (state.ledger?.session === session) return undefined;
   // 只认本轮（最后一段）的验收结果，避免配置去掉后把旧记录当成当前欠项。
   const record = state.rounds[state.rounds.length - 1]?.acceptance;
-  const pending = pendingItems(record);
+  const pending = pendingItems(record, state.queueReviewedAcceptance);
   let problem: string | undefined;
   try {
     const path = appendLedgerRecord({
       project: projectRootOf(ctx.workDir), session, task: taskTitle(state.requirement),
-      result: resultLine(record, state.rounds.length, state.repairs), summary: ctx.paths.summary, pending,
+      result: resultLine(record, state.rounds.length, state.repairs, state.queueReviewedAcceptance), summary: ctx.paths.summary, pending,
     });
     state.ledger = { session, path, pending };
   } catch (error) {
@@ -684,7 +684,8 @@ function reportQueueStage(ctx: HookContext, state: HookState, event: "started" |
   const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
   const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
     inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
-    event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined, sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0 };
+    event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined, sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0,
+    ...(event === "done" ? { acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}) };
   const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
   if (dir && stage) bindHookInputBridge(dir, stage, status, { socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
     token: process.env.CLAUDE_CODE_MESSAGING_TOKEN, mode: ctx.permissionMode });

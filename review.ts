@@ -20,6 +20,8 @@ import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN, resolveTestCmd, type 
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
 import { methodEnv as buildMethodEnv } from "./method-env.ts";
 import { saveReviewSnapshot } from "./snapshots.ts";
+import { queueReviewedResult } from "./merge-queue.ts";
+import type { QueueAcceptance } from "./pipeline-core.ts";
 import { experienceInjection, markExperienceRecurrence } from "./experience.ts";
 import { changedSince, outOfScope, stageScopeFromEnv, type StageScope } from "./scope.ts";
 import { recordGateTree } from "./methods.ts";
@@ -43,6 +45,8 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   /** 独立经验起草的输入指纹与软失败；不参与完成资格。 */
   experienceDraft?: { signature: string; error?: string };
   inputsFingerprint?: string;
+  /** undefined：正常检查；null：兜底命中但历史结论未知；对象：沿用已测资格（空数组才是明确无欠项）。 */
+  queueReviewedAcceptance?: QueueAcceptance | null;
   enabled: boolean;
   baseline?: string;
   baselineUntracked?: string[];
@@ -658,6 +662,26 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     const sourceCover = (path: string): boolean => isRegisteredSource(contextConfig, deps.cwd, path);
     deps = { ...deps, projectContext: context.text, checkInputs, sourceCover };
     await deps.saveState();
+  }
+  deps.state.queueReviewedAcceptance = undefined;
+  const queueEnv = deps.env ?? process.env;
+  if (queueEnv.AUTOREVIEW_BATCH_FILE && queueEnv.AUTOREVIEW_STAGE) {
+    const reviewed = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
+    deps.checkLive?.();
+    const queued = queueReviewedResult(deps.cwd, reviewed, queueEnv);
+    if (queued) {
+      const changed = deps.checkInputs?.(); if (changed) return changed;
+      const reason = `不再评审：工作区提交和树与本批合入队列测过的合并结果完全相同（${queued.entry.result}），没有新的候选改动`;
+      Object.assign(deps.state, { lastSnapshot: reviewed.ref, lastSnapshotDetails: reviewed, lastUntracked: [],
+        lastFingerprint: reviewed.fingerprint, lastCheckedFingerprint: reviewed.fingerprint, unresolvedMustFix: undefined,
+        unresolvedAcceptance: undefined, queueReviewedAcceptance: queued.acceptance });
+      deps.state.rounds.push({ round: deps.round, startedAt: nowStamp(), durationMs: 0, conclusion: reason,
+        mustFixRaw: "", mustFix: [], minor: [], questions: [], recheck: [], note: queued.acceptance === null ? `${reason}；历史队列缺少验收结论，免重复评审未补做验收` : reason });
+      await deps.saveState();
+      await deps.writeSummary?.("完成");
+      return { kind: "done", notes: reason, hint: queued.acceptance === null ? "历史队列缺少验收结论；免重复评审未补做验收，不能据此自动合入，请重新检查必需验收。"
+        : queued.acceptance.manual.length ? `待人工验收：${queued.acceptance.manual.map((item) => `${item.id}：${item.text}`).join("；")}` : undefined };
+    }
   }
   const preparation = deps.config.preparation;
   // 开工依据必须早于准备：准备、门禁和验收都读同一个 state.baseline，不能让准备改写它。

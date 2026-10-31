@@ -8,10 +8,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
-import { queueBatchComplete, queueDir, queueStageEvent, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
-import { inboxPath, readJson, statusPath, writeJsonAtomic, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
+import { queueBatchComplete, queueBatchRecheck, queueDir, queueReviewedResult, queueStageEvent, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
+import { inboxPath, queueAcceptance, readJson, statusPath, writeJsonAtomic, type InboxMessage, type StageStatus, type QueueAcceptance } from "../pipeline-core.ts";
 import { processStartTime } from "../procs.ts";
 import { parsePlan, runPipeline } from "../pipeline.ts";
+import { parseMergeConfig } from "../config.ts";
+import type { AcceptanceRecord } from "../acceptance-core.ts";
 import { hookInputBridgeAvailable, inputBridgePath, inputStatePath, repairText } from "../hosts/inbox-bridge.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -528,4 +530,558 @@ test("dry-run 不启动执行器、不写队列；未开工项目的完成事件
     const nonGit = join(f.root, "non-git"); mkdirSync(nonGit); queueBatchComplete(nonGit, "anything", true);
     assert.equal(f.queue().entries.length, 0);
   } finally { await f.close(); }
+});
+
+function autoConfig(f: ReturnType<typeof fixture>, push = false): void {
+  const path = join(f.repo, ".autoreview.json"), raw = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...raw, merge: { auto: true, push } }));
+}
+function autoComplete(f: ReturnType<typeof fixture>, index: number, acceptance = queueAcceptance(), epoch = randomEpoch()): void {
+  const batch = f.batches[index];
+  queueStageEvent({ cwd: batch.cwd, file: batch.file, stage: "甲", status: { sessionId: `original-dev-${index}`, host: "pi", event: "done", readyEpoch: epoch,
+    summary: join(f.root, `summary-${index}.md`), inbox: readJson<InboxMessage>(inboxPath(batch.dir, "甲"))?.seq ?? 0, acceptance,
+    pid: process.pid, processStarted: processStartTime(process.pid) } });
+}
+const randomEpoch = () => `epoch-${Math.random()}`;
+const automaticMerged = async (f: ReturnType<typeof fixture>, index: number) => {
+  await f.until(() => f.queue().entries.some((entry) => entry.name === `批次${index}` && entry.status === "merged" && entry.mergeNotified)); await f.idle();
+  return f.queue().entries.filter((entry) => entry.name === `批次${index}`).at(-1)!;
+};
+const notification = (f: ReturnType<typeof fixture>, id: string) => readFileSync(join(queueDir(f.repo), `${id}.notification.txt`), "utf8");
+
+test("自动合入配置默认关闭、严格校验；人工与部分验证分开记录", () => {
+  assert.deepEqual(parseMergeConfig(undefined), { auto: false, push: false });
+  assert.deepEqual(parseMergeConfig({}), { auto: false, push: false });
+  assert.deepEqual(parseMergeConfig({ auto: true }), { auto: true, push: false });
+  for (const raw of [null, [], true, { auto: "true" }, { push: 1 }]) assert.throws(() => parseMergeConfig(raw), /merge/);
+  const record: AcceptanceRecord = { verdict: "部分验证", items: [
+    { id: "A1", text: "人工确认布局", verdict: "需人工", detail: "主观判断" },
+    { id: "A2", text: "自动操作", verdict: "无法验证", detail: "任何原因都挡住" },
+  ], logErrors: [], extra: [], runDir: "", durationMs: 0 };
+  assert.equal(queueAcceptance(record).manual.length, 1); assert.equal(queueAcceptance(record).partial.length, 1);
+});
+
+test("自动 A1/A6：精确发布测过的提交，无评审；两个人工逐条通知/记账，不重叠暂存改动原样恢复", async () => {
+  const f = fixture(1);
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "auto\n");
+    writeFileSync(join(f.repo, "unrelated.txt"), "staged\n"); f.git(f.repo, "add", "unrelated.txt"); writeFileSync(join(f.repo, "unrelated.txt"), "unstaged\n");
+    const before = f.evidence(f.batches[0].cwd), cached = f.git(f.repo, "diff", "--cached", "--binary");
+    const acceptance: QueueAcceptance = { failed: [], partial: [], manual: [
+      { id: "A1", text: "人工判断一", detail: "未验" }, { id: "A2", text: "人工判断二", detail: "未验" },
+    ] };
+    autoComplete(f, 0, acceptance); const entry = await automaticMerged(f, 0);
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.result); assert.equal(f.git(f.repo, "rev-parse", "HEAD^{tree}"), entry.tree);
+    assert.equal(f.git(f.repo, "diff", "--cached", "--binary"), cached); assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "unstaged\n");
+    assert.deepEqual(f.evidence(f.batches[0].cwd), before); assert.ok(!existsSync(join(f.root, "sessions.jsonl")), "队列不启动开发/评审会话");
+    assert.match(notification(f, entry.id), /已自动合入[\s\S]*A1：人工判断一[\s\S]*A2：人工判断二/);
+    const ledger = readFileSync(entry.ledger!, "utf8"); assert.match(ledger, new RegExp(`已合入 ${entry.result}`));
+    assert.match(ledger, /甲\/A1 人工：人工判断一/); assert.match(ledger, /甲\/A2 人工：人工判断二/);
+    const again = f.cli("状态"); assert.equal(again.ok, true); await f.idle(); assert.equal(readFileSync(entry.ledger!, "utf8"), ledger, "恢复不重复记账");
+  } finally { await f.close(); }
+});
+
+test("自动 A2：任意部分验证、不通过或旧状态缺结论均停在可合入；未配置 merge 的既有行为保持", async (t) => {
+  for (const kind of ["partial", "failed", "legacy", "off"]) await t.test(kind, async () => {
+    const f = fixture(1);
+    try {
+      if (kind !== "off") autoConfig(f);
+      const base = f.git(f.repo, "rev-parse", "HEAD"); f.write(0, "src/a.txt", "a\n");
+      const acceptance = queueAcceptance();
+      if (kind === "partial" || kind === "failed") acceptance[kind].push({ id: "A7", text: "具体验收条目", detail: "环境或权限或标准含糊均不能放行" });
+      if (kind === "legacy") f.complete(0); else autoComplete(f, 0, acceptance);
+      await f.ready(0); const entry = f.queue().entries[0]; assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
+      assert.match(notification(f, entry.id), /可合入/);
+      if (kind === "partial") assert.match(notification(f, entry.id), /A7 部分验证：具体验收条目/);
+      if (kind === "failed") assert.match(notification(f, entry.id), /A7 不通过：具体验收条目/);
+      if (kind === "legacy") assert.match(notification(f, entry.id), /缺少验收结论/);
+    } finally { await f.close(); }
+  });
+});
+
+test("自动 A3：A 先合入，B 文本冲突附 A 的文件与提交说明；原会话解冲突后到队尾并自动合入", async () => {
+  const f = fixture();
+  try {
+    autoConfig(f); f.mode("hold");
+    f.write(0, "shared.txt", "A version\n"); f.git(f.batches[0].cwd, "add", "shared.txt"); f.git(f.batches[0].cwd, "commit", "-qm", "feat: A 统一共享文案的原因");
+    f.write(1, "shared.txt", "B version\n"); autoComplete(f, 0); await f.until(() => existsSync(f.events)); autoComplete(f, 1);
+    writeFileSync(join(f.root, "release"), "go"); await f.until(() => f.queue().entries[1]?.status === "returned"); await f.idle();
+    const first = f.queue().entries[0], returned = f.queue().entries[1], inbox = readJson<InboxMessage>(inboxPath(f.batches[1].dir, "甲"))!;
+    assert.equal(first.status, "merged"); assert.match(inbox.message, /已先合入的批次：批次0/); assert.match(inbox.message, /shared\.txt/); assert.match(inbox.message, /A 统一共享文案的原因/);
+    const dev = f.batches[1].cwd;
+    f.git(dev, "add", "shared.txt"); f.git(dev, "commit", "-qm", "feat: B own work"); spawnSync("git", ["merge", "main", "--no-edit"], { cwd: dev });
+    f.write(1, "shared.txt", "resolved A+B\n"); f.git(dev, "add", "shared.txt"); f.git(dev, "commit", "-qm", "fix: resolve A+B");
+    f.mode("pass"); autoComplete(f, 1); const merged = await automaticMerged(f, 1);
+    assert.ok(merged.order > returned.order); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), merged.result);
+    assert.equal(readFileSync(join(f.repo, "shared.txt"), "utf8"), "resolved A+B\n");
+  } finally { await f.close(); }
+});
+
+test("自动 A4/A5：合得上但门禁失败标为批次间冲突；第三次停止自动排队，不进入用户接管清零", async () => {
+  const f = fixture();
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "a\n"); autoComplete(f, 0); await automaticMerged(f, 0);
+    f.mode("fail"); f.write(1, "src/b.txt", "b\n");
+    for (let count = 1; count <= 3; count += 1) {
+      autoComplete(f, 1); await f.until(() => f.queue().entries.at(-1)?.status === (count === 3 ? "stopped" : "returned")); await f.idle();
+      const entry = f.queue().entries.at(-1)!; assert.equal(entry.returnCount, count); assert.equal(entry.conflictKind, "integration");
+      assert.match(readJson<InboxMessage>(inboxPath(f.batches[1].dir, "甲"))!.message, /与已合入批次冲突[\s\S]*不记为本批自身缺陷/);
+    }
+    const stopped = f.queue().entries.at(-1)!; assert.match(notification(f, stopped.id), /第 3 次退回，停止自动排队/);
+    const length = f.queue().entries.length; f.mode("pass"); autoComplete(f, 1); f.cli("状态"); await f.idle(); assert.equal(f.queue().entries.length, length);
+  } finally { await f.close(); }
+});
+
+test("自动多段：全部段加整合 e2e 合计；人工不挡，任一段或 e2e 的部分验证都挡", async (t) => {
+  for (const partial of ["none", "stage", "e2e"]) await t.test(partial, async () => {
+    const f = fixture(1);
+    try {
+      autoConfig(f); f.write(0, "src/a.txt", "multi\n");
+      const file = join(f.root, "auto-multi.json"), dir = join(f.root, "auto-multi"); writeFileSync(file, "{}");
+      registerQueueBatch(f.repo, { name: "自动多段", file, dir, project: f.repo, release: "main", steps: [["甲"], ["乙"]], stages: ["甲", "乙"].map((name) => ({ name, cwd: f.batches[0].cwd, branch: f.batches[0].branch, start: "true" })) });
+      for (const stage of ["甲", "乙"]) {
+        const acceptance = queueAcceptance(); acceptance.manual.push({ id: "A1", text: `${stage}人工确认`, detail: "未验" });
+        if (stage === "乙" && partial === "stage") acceptance.partial.push({ id: "A2", text: "段部分验证", detail: "方法含糊" });
+        queueStageEvent({ cwd: f.batches[0].cwd, file, stage, status: { sessionId: stage, event: "done", readyEpoch: stage, inbox: 0, summary: "", acceptance, pid: process.pid, processStarted: processStartTime(process.pid) } });
+      }
+      assert.equal(f.queue().entries.length, 0);
+      const record: AcceptanceRecord = { verdict: "部分验证", items: [{ id: "A3", text: "整合人工确认", verdict: "需人工", detail: "未验" }], runDir: dir, durationMs: 0, extra: [], logErrors: [] };
+      if (partial === "e2e") record.items.push({ id: "A4", text: "整合部分验证", verdict: "无法验证", detail: "权限不足" });
+      queueBatchComplete(f.repo, file, false, record);
+      await f.until(() => partial === "none" ? Boolean(f.queue().entries[0]?.mergeNotified) : f.queue().entries[0]?.status === "ready"); await f.idle();
+      const entry = f.queue().entries[0];
+      assert.equal(entry.status, partial === "none" ? "merged" : "ready");
+      if (partial === "none") {
+        assert.match(notification(f, entry.id), /甲\/A1：甲人工确认[\s\S]*乙\/A1：乙人工确认[\s\S]*整合 e2e\/A3：整合人工确认/);
+        assert.match(readFileSync(entry.ledger!, "utf8"), /整合 e2e\/A3 人工：整合人工确认/);
+      } else assert.match(notification(f, entry.id), partial === "stage" ? /乙：A2 部分验证/ : /整合 e2e：A4 部分验证/);
+    } finally { await f.close(); }
+  });
+});
+
+function multiReady(f: ReturnType<typeof fixture>) {
+  const file = join(f.root, "rechecked-multi.json"), dir = join(f.root, "rechecked-multi"); writeFileSync(file, "{}");
+  registerQueueBatch(f.repo, { name: "重验多段", file, dir, project: f.repo, release: "main", steps: [["甲"], ["乙"]], stages: ["甲", "乙"].map((name) => ({ name, cwd: f.batches[0].cwd, branch: f.batches[0].branch, start: "true" })) });
+  for (const stage of ["甲", "乙"]) queueStageEvent({ cwd: f.batches[0].cwd, file, stage, status: { sessionId: stage, event: "done", readyEpoch: stage, inbox: 0, summary: "", acceptance: queueAcceptance(), pid: process.pid, processStarted: processStartTime(process.pid) } });
+  const passed: AcceptanceRecord = { verdict: "通过", items: [{ id: "A1", text: "整合检查", verdict: "通过", detail: "符合预期" }], runDir: dir, durationMs: 1, extra: [], logErrors: [] };
+  const partial: AcceptanceRecord = { ...passed, verdict: "部分验证", items: [{ id: "A1", text: "整合检查", verdict: "无法验证", detail: "新的部分验证结论" }] };
+  return { file, dir, passed, partial };
+}
+
+test("返修2：整合 e2e 通过→部分验证→通过替换旧资格，同一完成事件保持幂等", async (t) => {
+  for (const versioned of [false, true]) await t.test(versioned ? "按流水线验收代次" : "兼容直接传验收记录", async () => {
+    const f = fixture(1);
+    try {
+      autoConfig(f); f.write(0, "src/a.txt", "candidate\n"); mkdirSync(join(f.repo, "src")); writeFileSync(join(f.repo, "src/a.txt"), "runtime overlap\n");
+      const { file, passed, partial } = multiReady(f), base = f.git(f.repo, "rev-parse", "HEAD");
+      const firstEpoch = versioned ? queueBatchRecheck(f.repo, file) : undefined;
+      queueBatchComplete(f.repo, file, true, passed, firstEpoch);
+      await f.until(() => f.queue().entries[0]?.status === "ready" && existsSync(join(queueDir(f.repo), `${f.queue().entries[0].id}.notification.txt`)) && /自动合入未完成/.test(notification(f, f.queue().entries[0].id))); await f.idle();
+      const first = f.queue().entries[0];
+      queueBatchComplete(f.repo, file, true, passed, firstEpoch); await f.idle(); assert.equal(f.queue().entries.length, 1, "相同结论与代次不重复进队");
+      const secondEpoch = versioned ? queueBatchRecheck(f.repo, file) : undefined;
+      rmSync(join(f.repo, "src/a.txt"));
+      if (versioned) {
+        queueBatchComplete(f.repo, file, true, passed, firstEpoch); await f.idle();
+        assert.equal(f.queue().entries.length, 1); assert.equal(f.queue().entries[0].status, "blocked", "新一轮未结束，旧完成事件不能复活通过资格");
+        assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
+      }
+      queueBatchComplete(f.repo, file, false, partial, secondEpoch);
+      await f.until(() => f.queue().entries.at(-1)?.status === "ready" && Boolean(f.queue().entries.at(-1)?.notified)); await f.idle();
+      const second = f.queue().entries.at(-1)!;
+      assert.equal(f.queue().entries.length, 2); assert.equal(f.queue().entries[0].status, "blocked"); assert.notEqual(second.integrationEpoch, first.integrationEpoch);
+      assert.match(notification(f, second.id), /整合 e2e：A1 部分验证/); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
+      queueBatchComplete(f.repo, file, false, partial, secondEpoch); await f.idle(); assert.equal(f.queue().entries.length, 2);
+      const thirdEpoch = versioned ? queueBatchRecheck(f.repo, file) : undefined;
+      queueBatchComplete(f.repo, file, true, passed, thirdEpoch); // 与第一次完全相同的记录，不能被历史去重吞掉。
+      await f.until(() => Boolean(f.queue().entries.at(-1)?.mergeNotified)); await f.idle();
+      const merged = f.queue().entries.at(-1)!;
+      assert.equal(f.queue().entries.length, 3); assert.equal(merged.status, "merged"); assert.deepEqual(merged.integration, queueAcceptance(passed));
+      assert.equal(f.git(f.repo, "rev-parse", "HEAD"), merged.result);
+      queueBatchComplete(f.repo, file, true, passed, thirdEpoch); await f.idle(); assert.equal(f.queue().entries.length, 3);
+    } finally { await f.close(); }
+  });
+});
+
+test("返修2：整合重验撤销正在测试的旧资格，失败/中断未回报新结果也不会发布旧结果", async () => {
+  const f = fixture(1);
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "candidate\n"); const { file, passed, partial } = multiReady(f), base = f.git(f.repo, "rev-parse", "HEAD");
+    f.mode("hold"); const firstEpoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, firstEpoch);
+    await f.until(() => existsSync(f.events) && f.queue().entries[0]?.status === "testing");
+    const secondEpoch = queueBatchRecheck(f.repo, file); writeFileSync(join(f.root, "release"), "go"); await f.idle();
+    assert.equal(f.queue().entries[0].status, "blocked"); assert.match(f.queue().entries[0].reason!, /整合 e2e 完成资格已变化/); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
+    queueBatchComplete(f.repo, file, true, passed, firstEpoch); await f.idle(); assert.equal(f.queue().entries.length, 1, "迟到的通过不能覆盖新一轮");
+    queueBatchComplete(f.repo, file, false, partial, secondEpoch);
+    await f.until(() => f.queue().entries[1]?.status === "ready" && Boolean(f.queue().entries[1]?.notified)); await f.idle();
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base); assert.match(notification(f, f.queue().entries[1].id), /部分验证/);
+  } finally { await f.close(); }
+});
+
+test("二次返修：最终资格检查后、取得发布资格前发生整合重验，旧执行器不能发布", async (t) => {
+  for (const completed of [false, true]) await t.test(completed ? "重验已提交部分验证" : "重验尚未结束", async () => {
+    const f = fixture(1), resume = join(f.root, "resume-final-check");
+    try {
+      f.write(0, "src/a.txt", "candidate\n"); const { file, passed, partial } = multiReady(f);
+      const epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+      await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
+      const entry = f.queue().entries[0], base = f.git(f.repo, "rev-parse", "HEAD"), paused = join(f.root, "after-final-check"), attempts = join(f.root, "publish-attempts");
+      const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const wrapper = join(f.root, "bin", "git");
+      writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" rev-parse refs/loop/queue/${entry.id}/result "*) if [ ! -f '${paused}' ]; then : > '${paused}'; while [ ! -f '${resume}' ]; do sleep 0.02; done; fi;;\n *" update-ref refs/heads/main "*) echo "$*" >> '${attempts}';;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+      autoConfig(f); f.cli("状态"); await f.until(() => existsSync(paused), "执行器已越过资格检查，停在测过结果的身份查询");
+      assert.equal(f.queue().entries[0].status, "ready");
+      const nextEpoch = queueBatchRecheck(f.repo, file);
+      if (completed) queueBatchComplete(f.repo, file, false, partial, nextEpoch);
+      assert.equal(f.queue().entries[0].status, "blocked", "撤销确已先于发布取得资格完成");
+      assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
+      writeFileSync(resume, "resume");
+      if (completed) await f.until(() => f.queue().entries[1]?.status === "ready" && Boolean(f.queue().entries[1].notified));
+      await f.idle();
+      assert.equal(f.queue().entries[0].status, "blocked", "旧执行器不得用旧快照覆盖撤销状态");
+      assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base, "不发布旧的通过结果"); assert.ok(!existsSync(attempts), "不能尝试发布指针 CAS");
+      if (completed) assert.match(notification(f, f.queue().entries[1].id), /部分验证/);
+    } finally { writeFileSync(resume, "resume"); await f.close(); }
+  });
+});
+
+test("二次返修：已经取得发布资格后，整合重验须等待发布事务收尾", async () => {
+  const f = fixture(1), resume = join(f.root, "resume-publish");
+  let rechecking: Promise<number | null> | undefined, childOutput = "";
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); const { file, passed, partial } = multiReady(f);
+    const epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+    await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
+    const entry = f.queue().entries[0], paused = join(f.root, "before-ref-cas"), started = join(f.root, "recheck-started"), completed = join(f.root, "recheck-completed.json");
+    const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(), wrapper = join(f.root, "bin", "git");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" update-ref refs/heads/main "*) if [ ! -f '${paused}' ]; then : > '${paused}'; while [ ! -f '${resume}' ]; do sleep 0.02; done; fi;;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+    autoConfig(f); f.cli("状态"); await f.until(() => existsSync(paused), "已取得发布资格，停在实际发布 CAS 前");
+    assert.equal(f.queue().entries[0].status, "merging");
+    const publisher = readJson<{ pid: number; started: string }>(join(queueDir(f.repo), "publish.lock"))!;
+    assert.equal(publisher.pid, readJson<{ pid: number }>(f.workerLock())!.pid); assert.equal(processStartTime(publisher.pid), publisher.started);
+    const script = join(f.root, "recheck-during-publish.mjs");
+    writeFileSync(script, `import fs from 'node:fs'; import cp from 'node:child_process';
+import { queueBatchRecheck, queueBatchComplete, readMergeQueue } from ${JSON.stringify(join(ROOT, "merge-queue.ts"))};
+fs.writeFileSync(${JSON.stringify(started)}, 'started');
+const epoch = queueBatchRecheck(${JSON.stringify(f.repo)}, ${JSON.stringify(file)});
+const published = readMergeQueue(${JSON.stringify(f.repo)}).entries[0].status;
+const head = cp.execFileSync('git', ['rev-parse', 'HEAD'], {cwd:${JSON.stringify(f.repo)}, encoding:'utf8'}).trim();
+queueBatchComplete(${JSON.stringify(f.repo)}, ${JSON.stringify(file)}, false, ${JSON.stringify(partial)}, epoch);
+fs.writeFileSync(${JSON.stringify(completed)}, JSON.stringify({epoch, published, head}));\n`);
+    const child = spawn(process.execPath, [script], { cwd: f.root, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.on("data", (data) => { childOutput += data; }); child.stderr.on("data", (data) => { childOutput += data; });
+    rechecking = new Promise((done, fail) => { child.once("error", fail); child.once("exit", done); });
+    await f.until(() => existsSync(started)); await sleep(100);
+    assert.ok(!existsSync(completed), "重验不能在发布锁内抢先改代次或写入部分验证");
+    assert.equal(f.queue().batches.find((batch) => batch.file === file)!.integrationEpoch, epoch);
+    writeFileSync(resume, "resume"); assert.equal(await rechecking, 0, childOutput);
+    await f.until(() => f.queue().entries[1]?.status === "ready" && Boolean(f.queue().entries[1].notified)); await f.idle();
+    const observed = readJson<{ published: string; head: string }>(completed)!;
+    assert.equal(observed.published, "merged"); assert.equal(observed.head, entry.result);
+    assert.equal(f.queue().entries[0].status, "merged"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.result);
+    assert.match(notification(f, f.queue().entries[1].id), /部分验证/);
+  } finally { writeFileSync(resume, "resume"); try { await rechecking; } finally { await f.close(); } }
+});
+
+test("二次返修：已实际发布的旧事务可在新一轮部分验证到达后按原 ID 恢复收尾", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); const { file, passed, partial } = multiReady(f);
+    const epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+    await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
+    autoConfig(f); f.git(f.repo, "add", ".autoreview.json"); f.git(f.repo, "commit", "-qm", "chore: authorize automatic merge");
+    const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(), wrapper = join(f.root, "bin", "git"), failed = join(f.root, "publish-checkout-failed"), attempts = join(f.root, "publish-attempts");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" update-ref refs/heads/main "*) echo "$*" >> '${attempts}';;\n *" read-tree -m -u "*) if [ "$PWD" = '${f.repo}' ] && [ ! -f '${failed}' ]; then : > '${failed}'; echo PUBLISHED_CHECKOUT_INTERRUPTED >&2; exit 1; fi;;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+    f.cli("状态"); await f.until(() => existsSync(failed) && f.queue().entries[0]?.status === "merging" && !existsSync(f.workerLock())); await f.idle();
+    const published = f.queue().entries[0]; assert.equal(f.git(f.repo, "rev-parse", "HEAD"), published.result); assert.ok(!existsSync(join(f.repo, "src/a.txt")), "发布指针已更新而 checkout 尚未收尾");
+    const nextEpoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, false, partial, nextEpoch);
+    await f.until(() => f.queue().entries[0]?.status === "merged" && Boolean(f.queue().entries[0].mergeNotified) && f.queue().entries[1]?.status === "ready" && Boolean(f.queue().entries[1].notified)); await f.idle();
+    assert.equal(f.queue().entries[0].id, published.id); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), published.result);
+    assert.equal(readFileSync(join(f.repo, "src/a.txt"), "utf8"), "candidate\n"); assert.equal(f.git(f.repo, "status", "--porcelain"), "");
+    assert.equal(readFileSync(attempts, "utf8").trim().split("\n").length, 1, "已发布恢复只收尾，不再移动发布指针");
+    assert.match(readFileSync(f.queue().entries[0].ledger!, "utf8"), new RegExp(`已合入 ${published.result}`));
+    assert.match(notification(f, f.queue().entries[1].id), /部分验证/);
+  } finally { await f.close(); }
+});
+
+test("二次返修：未发布的中断事务遇到整合撤销，先恢复私有 stash 再阻断旧资格", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); const { file, passed, partial } = multiReady(f);
+    const epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+    await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
+    autoConfig(f); writeFileSync(join(f.repo, "unrelated.txt"), "staged\n"); f.git(f.repo, "add", "unrelated.txt"); writeFileSync(join(f.repo, "unrelated.txt"), "unstaged\n");
+    const before = f.evidence(f.repo), stash = f.git(f.repo, "stash", "create"), ref = "refs/loop/merge-stash/revoked-before-cas";
+    f.git(f.repo, "update-ref", ref, stash); f.git(f.repo, "read-tree", "--reset", "-u", "HEAD");
+    const queue = f.queue(); Object.assign(queue.entries[0], { status: "merging", automatic: true, pushRequested: false, runtimeStash: { ref, hash: stash } }); writeJsonAtomic(join(queueDir(f.repo), "queue.json"), queue);
+    const nextEpoch = queueBatchRecheck(f.repo, file); f.cli("状态"); await f.until(() => f.queue().entries[0]?.status === "blocked"); await f.idle();
+    assert.deepEqual(f.evidence(f.repo), before, "撤销后仍归还未提交与暂存数据，不发布旧结果"); assert.equal(f.queue().entries[0].runtimeStash, undefined);
+    assert.equal(spawnSync("git", ["show-ref", "--verify", "--quiet", ref], { cwd: f.repo }).status, 1);
+    queueBatchComplete(f.repo, file, false, partial, nextEpoch);
+    await f.until(() => f.queue().entries[1]?.status === "ready" && Boolean(f.queue().entries[1].notified)); await f.idle();
+    assert.deepEqual(f.evidence(f.repo), before); assert.equal(f.queue().entries[0].status, "blocked"); assert.match(notification(f, f.queue().entries[1].id), /部分验证/);
+  } finally { await f.close(); }
+});
+
+test("三次返修1：标记 merging 后首次运行版 HEAD 检查前有外部提交，确认未发布后自动重测并继续队列", async () => {
+  const f = fixture(), resume = join(f.root, "resume-runtime-head");
+  try {
+    f.write(0, "src/a.txt", "A candidate\n"); f.write(1, "src/b.txt", "B candidate\n"); autoComplete(f, 0); autoComplete(f, 1); await f.ready(0);
+    const paused = join(f.root, "before-runtime-head"), realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(), wrapper = join(f.root, "bin", "git");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" rev-parse HEAD "*) if [ "$PWD" = '${f.repo}' ] && [ ! -f '${paused}' ]; then : > '${paused}'; while [ ! -f '${resume}' ]; do sleep 0.02; done; fi;;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+    autoConfig(f); f.cli("状态"); await f.until(() => existsSync(paused), "自动发布已登记意图，停在首次运行版 HEAD 检查前");
+    assert.equal(f.queue().entries[0].status, "merging"); assert.equal(f.queue().entries[0].runtimeStash, undefined); assert.equal(f.queue().entries[0].runtimePublication, "prepared");
+    writeFileSync(join(f.repo, "unrelated.txt"), "external release\n"); f.git(f.repo, "add", "unrelated.txt"); f.git(f.repo, "commit", "-qm", "feat: external release advances before runtime check");
+    const external = f.git(f.repo, "rev-parse", "HEAD"); writeFileSync(resume, "resume"); await f.idle();
+    const [first, second] = f.queue().entries;
+    assert.equal(first.status, "merged", "无发布或待归还副作用的过期基线必须重测，不能永久 merging");
+    assert.equal(first.base, external); assert.ok(first.attempt >= 2); assert.equal(second.status, "merged", "后续批次仍可自动处理");
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD"), second.result); f.git(f.repo, "merge-base", "--is-ancestor", external, second.result!);
+    assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "external release\n"); assert.equal(readFileSync(join(f.repo, "src/a.txt"), "utf8"), "A candidate\n"); assert.equal(readFileSync(join(f.repo, "src/b.txt"), "utf8"), "B candidate\n");
+  } finally { writeFileSync(resume, "resume"); await f.close(); }
+});
+
+test("三次返修2：未配置 merge 的手动 CLI 恢复先归还 stash，撤销资格不阻止归还或遗忘已发布责任", async (t) => {
+  for (const published of [false, true]) await t.test(published ? "已发布后换代仍恢复原事务" : "未发布且资格已撤销", async () => {
+    const f = fixture(1);
+    try {
+      f.write(0, "src/a.txt", "candidate\n"); const { file, dir, passed } = multiReady(f);
+      writeFileSync(file, JSON.stringify({ name: "重验多段", branch: f.batches[0].branch, dir, stages: Object.fromEntries(["甲", "乙"].map((name) => [name, { cwd: f.batches[0].cwd, start: "true" }])), steps: [["甲"], ["乙"]] }));
+      const epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+      await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
+      assert.equal(JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8")).merge, undefined);
+      writeFileSync(join(f.repo, "unrelated.txt"), "staged\n"); f.git(f.repo, "add", "unrelated.txt"); writeFileSync(join(f.repo, "unrelated.txt"), "unstaged\n");
+      const before = f.evidence(f.repo), stash = f.git(f.repo, "stash", "create"), ref = "refs/loop/merge-stash/manual-revoked-before-cas";
+      f.git(f.repo, "update-ref", ref, stash); f.git(f.repo, "read-tree", "--reset", "-u", "HEAD");
+      const queue = f.queue(), entry = queue.entries[0]; Object.assign(entry, { status: "merging", automatic: false, runtimeStash: { ref, hash: stash } }); writeJsonAtomic(join(queueDir(f.repo), "queue.json"), queue);
+      if (published) f.git(f.repo, "update-ref", "refs/heads/main", entry.result!, entry.base!);
+      const nextEpoch = queueBatchRecheck(f.repo, file), recovered = f.cli("合入", file); await f.idle();
+      assert.equal(recovered.ok, published, JSON.stringify(recovered));
+      assert.equal(f.queue().entries[0].status, published ? "merged" : "blocked"); assert.equal(f.queue().entries[0].runtimeStash, undefined);
+      assert.equal(spawnSync("git", ["show-ref", "--verify", "--quiet", ref], { cwd: f.repo }).status, 1);
+      assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "unstaged\n"); assert.equal(f.git(f.repo, "show", ":unrelated.txt"), "staged");
+      assert.equal(f.git(f.repo, "diff", "--cached", "--binary"), before.cached); assert.equal(f.git(f.repo, "diff", "--binary"), before.diff);
+      if (published) {
+        assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.result); assert.equal(readFileSync(join(f.repo, "src/a.txt"), "utf8"), "candidate\n");
+      } else {
+        assert.match(recovered.error, /完成资格已变化/); assert.deepEqual(f.evidence(f.repo), before, "未发布时只归还用户数据，不合入失效候选");
+        queueBatchComplete(f.repo, file, true, passed, nextEpoch);
+        await f.until(() => f.queue().entries[1]?.status === "ready" && Boolean(f.queue().entries[1].notified)); await f.idle();
+        const merged = f.cli("合入", file); assert.equal(merged.ok, true, JSON.stringify(merged)); await f.idle();
+        assert.equal(f.queue().entries[1].status, "merged"); assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "unstaged\n"); assert.equal(f.git(f.repo, "show", ":unrelated.txt"), "staged");
+      }
+    } finally { await f.close(); }
+  });
+});
+
+test("三次返修1：重启恢复 prepared 意图时 release 已前进，无副作用的旧事务仍能重测", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); autoComplete(f, 0); await f.ready(0); autoConfig(f);
+    const queue = f.queue(); Object.assign(queue.entries[0], { status: "merging", automatic: true, runtimePublication: "prepared" }); writeJsonAtomic(join(queueDir(f.repo), "queue.json"), queue);
+    writeFileSync(join(f.repo, "unrelated.txt"), "external release\n"); f.git(f.repo, "add", "unrelated.txt"); f.git(f.repo, "commit", "-qm", "feat: external advance after prepared intent"); const external = f.git(f.repo, "rev-parse", "HEAD");
+    f.cli("状态"); const merged = await automaticMerged(f, 0);
+    assert.equal(merged.base, external); assert.ok(merged.attempt >= 2); assert.equal(merged.runtimePublication, "published");
+    f.git(f.repo, "merge-base", "--is-ancestor", external, merged.result!); assert.equal(readFileSync(join(f.repo, "src/a.txt"), "utf8"), "candidate\n");
+  } finally { await f.close(); }
+});
+
+test("三次返修1：CAS 已成功后 release 又前进，不能把已发布收尾责任误当成未发布重测", async () => {
+  const f = fixture(1), resume = join(f.root, "resume-published-checkout");
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); autoComplete(f, 0); await f.ready(0);
+    const paused = join(f.root, "after-publication-cas"), attempts = join(f.root, "publish-attempts"), realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(), wrapper = join(f.root, "bin", "git");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" update-ref refs/heads/main "*) echo "$*" >> '${attempts}';;\n *" read-tree -m -u "*) if [ "$PWD" = '${f.repo}' ] && [ ! -f '${paused}' ]; then : > '${paused}'; while [ ! -f '${resume}' ]; do sleep 0.02; done; fi;;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+    autoConfig(f); f.cli("状态"); await f.until(() => existsSync(paused), "CAS 已成功，停在 checkout 前");
+    const published = f.queue().entries[0]; assert.equal(published.runtimePublication, "published"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), published.result);
+    const tree = f.git(f.repo, "rev-parse", `${published.result}^{tree}`), external = f.git(f.repo, "commit-tree", tree, "-p", published.result!, "-m", "external release after publication");
+    const advanced = spawnSync(realGit, ["update-ref", "refs/heads/main", external, published.result!], { cwd: f.repo, encoding: "utf8" }); assert.equal(advanced.status, 0, advanced.stderr);
+    writeFileSync(resume, "resume"); await f.idle();
+    assert.equal(f.queue().entries[0].status, "merging"); assert.equal(f.queue().entries[0].runtimePublication, "published"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), external);
+    const before = f.evidence(f.repo); f.cli("状态"); await f.idle();
+    assert.equal(f.queue().entries[0].status, "merging"); assert.equal(f.queue().entries[0].attempt, published.attempt); assert.deepEqual(f.evidence(f.repo), before);
+    assert.equal(readFileSync(attempts, "utf8").trim().split("\n").length, 1, "不重复发布，也不退回或覆盖外部提交");
+  } finally { writeFileSync(resume, "resume"); await f.close(); }
+});
+
+test("三次返修2：手动恢复失败时保留私有 stash 和意图，归还成功前不能清除资格或遗失数据", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); const { file, dir, passed } = multiReady(f);
+    writeFileSync(file, JSON.stringify({ name: "重验多段", branch: f.batches[0].branch, dir, stages: Object.fromEntries(["甲", "乙"].map((name) => [name, { cwd: f.batches[0].cwd, start: "true" }])), steps: [["甲"], ["乙"]] }));
+    const epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+    await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
+    writeFileSync(join(f.repo, "unrelated.txt"), "staged\n"); f.git(f.repo, "add", "unrelated.txt"); writeFileSync(join(f.repo, "unrelated.txt"), "unstaged\n");
+    const stash = f.git(f.repo, "stash", "create"), ref = "refs/loop/merge-stash/manual-restore-failure"; f.git(f.repo, "update-ref", ref, stash); f.git(f.repo, "read-tree", "--reset", "-u", "HEAD");
+    const queue = f.queue(), entry = queue.entries[0]; Object.assign(entry, { status: "merging", automatic: false, runtimePublication: "prepared", runtimeStash: { ref, hash: stash } }); writeJsonAtomic(join(queueDir(f.repo), "queue.json"), queue);
+    queueBatchRecheck(f.repo, file); writeFileSync(join(f.repo, "unrelated.txt"), "new runtime work\n");
+    const failed = f.cli("合入", file); await f.idle(); assert.equal(failed.ok, false); assert.equal(failed.restoreStashFailed, true, JSON.stringify(failed));
+    assert.equal(f.queue().entries[0].status, "merging"); assert.deepEqual(f.queue().entries[0].runtimeStash, { ref, hash: stash }); assert.equal(f.git(f.repo, "rev-parse", ref), stash);
+    assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "new runtime work\n"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.base); assert.ok(!existsSync(join(f.repo, "src/a.txt")));
+    // 只清除本测试新增的冲突工作副本；原暂存/未暂存数据仍由已核对的私有 ref 保留。
+    f.git(f.repo, "read-tree", "--reset", "-u", "HEAD"); const recovered = f.cli("合入", file); await f.idle(); assert.equal(recovered.ok, false); assert.match(recovered.error, /完成资格已变化/);
+    assert.equal(f.queue().entries[0].status, "blocked"); assert.equal(f.queue().entries[0].runtimeStash, undefined);
+    assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "unstaged\n"); assert.equal(f.git(f.repo, "show", ":unrelated.txt"), "staged");
+  } finally { await f.close(); }
+});
+
+test("三次返修1：CAS 结果未确认的 publishing 意图不能按未发布清零或越过资格撤销", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "candidate\n"); const { file, passed } = multiReady(f), epoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, epoch);
+    await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle(); autoConfig(f);
+    const queue = f.queue(), entry = queue.entries[0]; Object.assign(entry, { status: "merging", automatic: true, runtimePublication: "publishing" }); writeJsonAtomic(join(queueDir(f.repo), "queue.json"), queue);
+    queueBatchRecheck(f.repo, file); const before = f.evidence(f.repo); f.cli("状态"); await f.idle();
+    assert.equal(f.queue().entries[0].status, "merging"); assert.equal(f.queue().entries[0].runtimePublication, "publishing"); assert.equal(f.queue().entries[0].attempt, entry.attempt);
+    assert.deepEqual(f.evidence(f.repo), before); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.base); assert.ok(!existsSync(join(f.repo, "src/a.txt")));
+  } finally { await f.close(); }
+});
+
+test("自动 A5：开工 scope.allow 重叠仅提示建议串行，照常开工", async () => {
+  const f = fixture(2, 1);
+  try {
+    const result = f.cli("开工", f.batches[1].file); assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.lines.join("\n"), /批次0[\s\S]*建议改为串行/); assert.ok(existsSync(f.batches[1].cwd));
+  } finally { await f.close(); }
+});
+
+test("自动 A6：运行版重叠的未提交、未跟踪/忽略文件阻止发布且保留", async (t) => {
+  for (const kind of ["tracked", "untracked", "ignored"]) await t.test(kind, async () => {
+    const f = fixture(1);
+    try {
+      autoConfig(f); const path = kind === "tracked" ? "shared.txt" : "src/a.txt"; f.write(0, path, "candidate\n");
+      mkdirSync(dirname(join(f.repo, path)), { recursive: true }); writeFileSync(join(f.repo, path), "runtime dirty\n");
+      if (kind === "ignored") {
+        // info/exclude 在 worktree 间共用；先提交候选，避免同时把开发侧的未跟踪候选也忽略掉。
+        f.git(f.batches[0].cwd, "add", "src/a.txt"); f.git(f.batches[0].cwd, "commit", "-qm", "feat: tracked candidate");
+        writeFileSync(join(f.repo, ".git", "info", "exclude"), "src/a.txt\n");
+      }
+      const base = f.git(f.repo, "rev-parse", "HEAD"); autoComplete(f, 0); await f.ready(0);
+      assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base); assert.equal(readFileSync(join(f.repo, path), "utf8"), "runtime dirty\n");
+      assert.match(notification(f, f.queue().entries[0].id), /未提交改动[\s\S]*同一个文件/);
+    } finally { await f.close(); }
+  });
+});
+
+test("自动 A7：撤回只反向 CAS 本批提交；后面已有批次合入时 release 不动", async () => {
+  const f = fixture();
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "a\n"); autoComplete(f, 0); const first = await automaticMerged(f, 0);
+    const preview = f.cli("撤回", f.batches[0].file, "--dry-run"); assert.equal(preview.ok, true); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), first.result);
+    const result = f.cli("撤回", f.batches[0].file); assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), first.base);
+    assert.equal(f.queue().entries[0].status, "withdrawn"); assert.ok(!existsSync(join(f.repo, "src/a.txt")));
+    // 用户显式重新取得资格后再合入；不抹掉撤回历史。
+    autoComplete(f, 0); await automaticMerged(f, 0);
+    f.write(1, "src/b.txt", "b\n"); autoComplete(f, 1); const second = await automaticMerged(f, 1);
+    const denied = f.cli("撤回", f.batches[0].file); assert.equal(denied.ok, false); assert.match(denied.error, /之后已有其他提交或批次合入/);
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD"), second.result);
+  } finally { await f.close(); }
+});
+
+test("返修3：重叠改动拒绝撤回不留下事务；用户提交后 release 前进，后续批次仍自动合入", async () => {
+  const f = fixture();
+  try {
+    autoConfig(f); f.write(0, "shared.txt", "A merged\n"); autoComplete(f, 0); const first = await automaticMerged(f, 0);
+    writeFileSync(join(f.repo, "shared.txt"), "user staged\n"); f.git(f.repo, "add", "shared.txt"); writeFileSync(join(f.repo, "shared.txt"), "user unstaged\n");
+    const before = f.evidence(f.repo), denied = f.cli("撤回", f.batches[0].file);
+    assert.equal(denied.ok, false); assert.match(denied.error, /未提交改动[\s\S]*同一个文件/);
+    assert.equal(f.queue().entries[0].status, "merged"); assert.equal(f.queue().entries[0].runtimeStash, undefined); assert.deepEqual(f.evidence(f.repo), before, "只读拒绝不改索引、工作树或发布指针");
+    f.git(f.repo, "commit", "-qm", "feat: user commits staged changes"); const advanced = f.git(f.repo, "rev-parse", "HEAD"); assert.notEqual(advanced, first.result);
+    const retry = f.cli("撤回", f.batches[0].file); assert.equal(retry.ok, false); assert.match(retry.error, /之后已有其他提交或批次合入/);
+    assert.equal(f.queue().entries[0].status, "merged"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), advanced);
+    f.cli("状态"); await f.idle();
+    f.write(1, "src/b.txt", "B merged\n"); autoComplete(f, 1); const second = await automaticMerged(f, 1);
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD"), second.result); f.git(f.repo, "merge-base", "--is-ancestor", advanced, second.result!);
+    assert.equal(f.git(f.repo, "show", "HEAD:shared.txt"), "user staged"); assert.equal(readFileSync(join(f.repo, "shared.txt"), "utf8"), "user unstaged\n");
+    assert.equal(f.git(f.repo, "diff", "--cached"), ""); assert.equal(readFileSync(join(f.repo, "src/b.txt"), "utf8"), "B merged\n");
+  } finally { await f.close(); }
+});
+
+test("返修3：撤回 CAS 已成功但工作树收尾失败，保留真实事务并由同一命令恢复", async () => {
+  const f = fixture(1);
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "A merged\n"); autoComplete(f, 0); const first = await automaticMerged(f, 0);
+    f.git(f.repo, "restore", "--", ".autoreview.json"); // 本次只验证发布与 checkout 的事务边界，运行版干净。
+    const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(), marker = join(f.root, "checkout-failed");
+    const wrapper = join(f.root, "bin", "git");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" read-tree -m -u "*) if [ "$PWD" = '${f.repo}' ] && [ ! -f '${marker}' ]; then : > '${marker}'; echo CHECKOUT_INTERRUPTED >&2; exit 1; fi;;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+    const interrupted = f.cli("撤回", f.batches[0].file); assert.equal(interrupted.ok, false); assert.match(interrupted.error, /CHECKOUT_INTERRUPTED/);
+    assert.equal(f.queue().entries[0].status, "withdrawing"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), first.base);
+    assert.ok(existsSync(join(f.repo, "src/a.txt")), "CAS 完成后 checkout 尚未完成的现场保留");
+    f.cli("状态"); await f.idle(); assert.equal(f.queue().entries[0].status, "withdrawing", "后台不能丢弃实际未收尾的意图");
+    const recovered = f.cli("撤回", f.batches[0].file); assert.equal(recovered.ok, true, JSON.stringify(recovered));
+    assert.equal(f.queue().entries[0].status, "withdrawn"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), first.base); assert.ok(!existsSync(join(f.repo, "src/a.txt")));
+    assert.equal(f.git(f.repo, "status", "--porcelain"), "");
+  } finally { await f.close(); }
+});
+
+test("返修3：撤回 CAS 竞争失败且无副作用时退出意图，不阻塞后续队列", async () => {
+  const f = fixture(1);
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "A merged\n"); autoComplete(f, 0); const first = await automaticMerged(f, 0); f.git(f.repo, "restore", "--", ".autoreview.json");
+    const tree = f.git(f.repo, "rev-parse", "HEAD^{tree}"), external = f.git(f.repo, "commit-tree", tree, "-p", first.result!, "-m", "concurrent user release");
+    const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(), marker = join(f.root, "withdraw-race");
+    const wrapper = join(f.root, "bin", "git");
+    writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" update-ref refs/heads/main "*) if [ ! -f '${marker}' ]; then : > '${marker}'; '${realGit}' update-ref refs/heads/main '${external}' '${first.result}'; fi;;\nesac\nexec '${realGit}' "$@"\n`); chmodSync(wrapper, 0o755);
+    const denied = f.cli("撤回", f.batches[0].file); assert.equal(denied.ok, false); assert.match(denied.error, /发布分支已经变化/);
+    assert.equal(f.queue().entries[0].status, "merged"); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), external); assert.equal(f.git(f.repo, "status", "--porcelain"), "");
+    f.cli("状态"); await f.idle(); assert.equal(f.queue().entries[0].status, "merged");
+  } finally { await f.close(); }
+});
+
+test("自动：测试中 release 过期，重测通过后直接合入新基线的结果", async () => {
+  const f = fixture(1);
+  try {
+    autoConfig(f); f.write(0, "src/a.txt", "a\n"); f.mode("hold"); autoComplete(f, 0); await f.until(() => existsSync(f.events));
+    writeFileSync(join(f.repo, "unrelated.txt"), "new release\n"); f.git(f.repo, "add", "unrelated.txt"); f.git(f.repo, "commit", "-qm", "feat: release advanced");
+    const base = f.git(f.repo, "rev-parse", "HEAD"); writeFileSync(join(f.root, "release"), "go");
+    const merged = await automaticMerged(f, 0); assert.ok(merged.attempt >= 2); assert.equal(merged.base, base); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), merged.result);
+  } finally { await f.close(); }
+});
+
+test("自动恢复：CAS 前中断先按私有 stash 恢复配置，再核对并合入，不丢暂存/工作树改动", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "a\n"); autoComplete(f, 0); await f.ready(0); autoConfig(f);
+    writeFileSync(join(f.repo, "unrelated.txt"), "staged\n"); f.git(f.repo, "add", "unrelated.txt"); writeFileSync(join(f.repo, "unrelated.txt"), "unstaged\n");
+    const cached = f.git(f.repo, "diff", "--cached", "--binary"), stash = f.git(f.repo, "stash", "create"), ref = "refs/loop/merge-stash/test-interrupted";
+    f.git(f.repo, "update-ref", ref, stash); f.git(f.repo, "read-tree", "--reset", "-u", "HEAD");
+    const queue = f.queue(); Object.assign(queue.entries[0], { status: "merging", automatic: true, pushRequested: false, runtimeStash: { ref, hash: stash } });
+    writeJsonAtomic(join(queueDir(f.repo), "queue.json"), queue); f.cli("状态"); const merged = await automaticMerged(f, 0);
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD"), merged.result); assert.equal(f.git(f.repo, "diff", "--cached", "--binary"), cached);
+    assert.equal(readFileSync(join(f.repo, "unrelated.txt"), "utf8"), "unstaged\n"); assert.equal(JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8")).merge.auto, true);
+    assert.equal(merged.runtimeStash, undefined); assert.equal(spawnSync("git", ["show-ref", "--verify", "--quiet", ref], { cwd: f.repo }).status, 1);
+  } finally { await f.close(); }
+});
+
+test("自动 A9 兜底边界：同树不同提交、脏工作树、未登记批次均不豁免", async () => {
+  const f = fixture(1);
+  try {
+    f.write(0, "src/a.txt", "a\n"); autoComplete(f, 0); await f.ready(0);
+    const entry = f.queue().entries[0], dev = f.batches[0].cwd, env = { AUTOREVIEW_BATCH_FILE: f.batches[0].file, AUTOREVIEW_STAGE: "甲" };
+    const snapshot = () => ({ ref: f.git(dev, "rev-parse", "HEAD"), head: f.git(dev, "rev-parse", "HEAD"), tree: f.git(dev, "rev-parse", "HEAD^{tree}"), untracked: [], fingerprint: "fixture" });
+    f.git(dev, "reset", "--hard", entry.result!); assert.ok(queueReviewedResult(dev, snapshot(), env));
+    f.git(dev, "commit", "--allow-empty", "-qm", "same tree different commit"); assert.equal(queueReviewedResult(dev, snapshot(), env), undefined);
+    f.git(dev, "reset", "--hard", entry.result!); f.write(0, "shared.txt", "dirty\n"); assert.equal(queueReviewedResult(dev, snapshot(), env), undefined);
+    f.git(dev, "restore", "shared.txt"); assert.equal(queueReviewedResult(dev, snapshot(), { ...env, AUTOREVIEW_BATCH_FILE: join(f.root, "unregistered.json") }), undefined);
+  } finally { await f.close(); }
+});
+
+test("自动 A8：仅推 release 的上游；远端拒绝后本地保留，恢复不重试、不强推", async (t) => {
+  for (const failure of [false, true]) await t.test(failure ? "拒绝推送" : "成功推送", async () => {
+    const f = fixture(1);
+    try {
+      const remote = join(f.root, "remote.git"), counter = join(f.root, "push-attempts"); f.git(f.root, "init", "--bare", "-q", remote);
+      f.git(f.repo, "remote", "add", "origin", remote); f.git(f.repo, "push", "-u", "origin", "main");
+      if (failure) { const hook = join(remote, "hooks", "pre-receive"); writeFileSync(hook, `#!/bin/sh\necho once >> '${counter}'\necho REJECT_SENTINEL >&2\nexit 1\n`); chmodSync(hook, 0o755); }
+      autoConfig(f, true); f.write(0, "src/a.txt", "push\n"); autoComplete(f, 0); const entry = await automaticMerged(f, 0);
+      assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.result); assert.equal(entry.push?.status, failure ? "failed" : "succeeded");
+      assert.equal(f.git(remote, "rev-parse", "refs/heads/main"), failure ? entry.base : entry.result);
+      assert.equal(f.git(remote, "for-each-ref", "--format=%(refname)", "refs/heads"), "refs/heads/main");
+      if (failure) {
+        assert.match(notification(f, entry.id), /推送失败，本地合入保留：[\s\S]*REJECT_SENTINEL/);
+        f.cli("状态"); await f.idle(); assert.equal(readFileSync(counter, "utf8"), "once\n");
+      }
+    } finally { await f.close(); }
+  });
 });

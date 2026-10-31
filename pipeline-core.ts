@@ -7,6 +7,21 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { AcceptanceRecord } from "./acceptance-core.ts";
+
+export interface QueueAcceptanceItem { id: string; text: string; detail: string }
+/** 明确的空数组表示未配置验收或全部通过；缺字段的历史 done 不授予自动合入资格。 */
+export interface QueueAcceptance { failed: QueueAcceptanceItem[]; partial: QueueAcceptanceItem[]; manual: QueueAcceptanceItem[] }
+export function queueAcceptance(record?: AcceptanceRecord): QueueAcceptance {
+  const result: QueueAcceptance = { failed: [], partial: [], manual: [] };
+  for (const item of record?.items ?? []) {
+    const target = item.verdict === "不通过" ? result.failed : item.verdict === "无法验证" ? result.partial : item.verdict === "需人工" ? result.manual : undefined;
+    target?.push({ id: item.id, text: item.text, detail: item.detail });
+  }
+  if (record?.verdict === "不通过" && !result.failed.length) result.failed.push({ id: "验收", text: "验收不通过", detail: record.reason ?? "" });
+  if (record?.verdict === "无法验收" || (record?.verdict === "部分验证" && !result.partial.length && !result.manual.length)) result.partial.push({ id: "验收", text: record.verdict, detail: record.reason ?? "" });
+  return result;
+}
 
 export const PIPELINE_DIR_ENV = "AUTOREVIEW_PIPELINE_DIR";
 export const STAGE_ENV = "AUTOREVIEW_STAGE";
@@ -33,6 +48,8 @@ export interface StageStatus {
   event: StageEvent;
   /** 本次完成资格的身份；恢复重发保持，任何重验或输入失效后重新生成。 */
   readyEpoch?: string;
+  /** 当前完成资格的验收结论；人工与无法验证分开，不把人工项当作部分验证阻断。 */
+  acceptance?: QueueAcceptance;
   /** 此资格所依据的冻结来源版本；消费者在接力边界核对实际文件。 */
   sourceInputs?: string;
   /** 每写一次加 1；编排程序据此认出「派发之后的新事件」。 */

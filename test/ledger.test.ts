@@ -50,6 +50,13 @@ test("L1 总表一段的格式：项目、任务、结果、总结、待回写�
   assert.equal(resultLine(record(), 2, 1), "完成（部分验证）；评审 2 次，返修 1 次");
 });
 
+test("返修1：总表区分明确无验收欠项与兜底后的历史未知，未知不能显示成全部通过", () => {
+  const explicit = { failed: [], partial: [], manual: [] };
+  assert.deepEqual(pendingItems(undefined, explicit), []); assert.equal(resultLine(undefined, 2, 0, explicit), "完成；评审 2 次，返修 0 次");
+  assert.deepEqual(pendingItems(undefined, null), [{ id: "验收结论", kind: "部分验证", reason: "历史队列缺少验收结论；免重复评审未补做验收" }]);
+  assert.equal(resultLine(undefined, 2, 0, null), "完成（部分验证）；评审 2 次，返修 0 次");
+});
+
 test("L2 任务名取需求第一个标题，没有标题取前 40 字", () => {
   assert.equal(taskTitle("# 03三项必修\n\n正文"), "03三项必修");
   assert.equal(taskTitle("说明\n\n## 交付总表与收尾回写\n正文"), "交付总表与收尾回写");
