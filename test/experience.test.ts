@@ -13,7 +13,7 @@ import {
 } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
 import { newReviewState, type ReviewConfig } from "../review.ts";
-import { endHostExperienceSessions } from "../hosts/hook.ts";
+import { endHostExperienceSessions } from "../hosts/review-hook.ts";
 import { projectRootHash } from "../project-context.ts";
 import type { Exec, ExecResult } from "../git.ts";
 

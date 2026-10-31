@@ -26,7 +26,7 @@ import {
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
 import { EXT_DIR, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, workspacePath, type AcceptanceConfig } from "./config.ts";
 import { reapProcs } from "./procs.ts";
-import { createChildExec } from "./hosts/hook.ts";
+import { createChildExec } from "./hosts/review-hook.ts";
 import { createGitEvidence } from "./git.ts";
 import { blockerHint } from "./onboarding.ts";
 import {

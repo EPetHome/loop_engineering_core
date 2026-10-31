@@ -3,8 +3,9 @@
  * 写法段是缺失还是过期、给用户的「把【块 N】复制到 <完整路径>」提示和「需要你做的事」清单。
  * 宿主 Hook、pi 扩展和接入命令共用；块的内容只在接入手册里维护一份。
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { handOverParts, isManualCriterion, type AcceptanceRecord, type Criteria } from "./acceptance-core.ts";
 import { EXT_DIR, MARKER_FILE, type AcceptanceConfig } from "./config.ts";
 
@@ -41,6 +42,48 @@ export function blockVersion(text: string): number | undefined {
   const marked = BLOCK_START.exec(text);
   if (marked) return Number(marked[1]);
   return LEGACY_HEADING.test(text) ? 0 : undefined;
+}
+
+export interface BlockChanges { from: number; to: number; added: string[]; removed: string[] }
+
+/** 按行比较被替换的块，保留条款原文及重复行数量；忽略标记/标题里单纯的版本号变化。 */
+export function blockChanges(before: string, after: string): BlockChanges {
+  const lines = (text: string): string[] => text.split(/\r?\n/).filter((line) => line.trim() && !BLOCK_START.test(line) && line.trim() !== BLOCK_END);
+  const old = lines(before), next = lines(after);
+  const key = (line: string): string => line.replace(/^(## 起草需求时写验收标准（自动验收) v\d+(）)$/, "$1$2");
+  const unmatched = (source: string[], target: string[]): string[] => {
+    const counts = new Map<string, number>();
+    for (const line of target) counts.set(key(line), (counts.get(key(line)) ?? 0) + 1);
+    return source.filter((line) => {
+      const count = counts.get(key(line)) ?? 0;
+      if (!count) return true;
+      counts.set(key(line), count - 1);
+      return false;
+    });
+  };
+  return { from: blockVersion(before) ?? 0, to: blockVersion(after) ?? 0, added: unmatched(next, old), removed: unmatched(old, next) };
+}
+
+/** 同仓库其他工作区里的旧版可变手册，只读列出，不扫描或修改其他项目。 */
+export function olderConventionCopies(root: string, latest: number): string[] {
+  try {
+    const git = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: 5000 });
+    const top = git(["rev-parse", "--show-toplevel"]), trees = git(["worktree", "list", "--porcelain", "-z"]);
+    if (top.status !== 0 || trees.status !== 0) return [];
+    const project = realpathSync(root), subdir = relative(realpathSync(top.stdout.trim()), project);
+    const paths: string[] = [];
+    for (const record of trees.stdout.split("\0")) {
+      if (!record.startsWith("worktree ")) continue;
+      const other = resolve(record.slice("worktree ".length), subdir);
+      if (other === project) continue;
+      const file = conventionTarget(other, "pi");
+      try {
+        const version = blockVersion(readFileSync(file, "utf8"));
+        if (version !== undefined && version < latest) paths.push(file);
+      } catch { /* 未检出/无副本时跳过。 */ }
+    }
+    return paths;
+  } catch { return []; }
 }
 
 export type HostKind = "claude" | "codex" | "pi" | string;

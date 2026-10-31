@@ -12,7 +12,7 @@
 
 几段 pi 会话要**并行或串行开发、最后跑整合 e2e** 时，用 `bin/loop 启动 <批次.json>`：单段直接开会话，多段交给流水线开窗口、等各段完成、跑 e2e，没通过的条目按 `[段名]` 退回那一段修，修完自动重跑。旧的直接执行 `pipeline.ts <计划.json>` 仍然兼容。见下面「流水线与批次」一节。
 
-同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。插件只在用 `bin/loop-dev` 启动的会话里生效；直接打开的会话不评审，只在 SessionStart 收到交付总表待回写提醒。
+同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。自动评审只在用 `bin/loop-dev` 启动的会话里生效；直接打开的会话不评审，SessionStart 保留交付总表待回写提醒。两类会话都在生产 Loop 时按需收到指路和配置校验，读文件、讨论和普通开发不注入。
 
 ## Claude Code / Codex 用法
 
@@ -27,7 +27,7 @@ bash bin/loop-dev codex --cwd /你的开发目录 --init /任务文件.md
 
 也可以不传任务文件，进入后直接发送需求。任务文件相对路径按执行命令时的目录解析；`--cwd` 是开发目录。文件仍以 `@"绝对路径"` 交给宿主，里面的授权文字不能代替用户亲手授权。
 
-插件按启动方式生效：入口设置 `AUTOREVIEW_DEV_ROOT=<启动时从 --cwd 向上找到的 .autoreview.json 所在目录>`，Hook 只认这个变量。只有这样的会话才会注入开发约定、记录需求和基线、评审/返修/暂停/发通知并写状态与总结；直接打开的宿主会话这些事都不做。项目根在启动时固定，会话中途 `cd` 到别的目录不会改变它，也不会改用子目录里的 `.autoreview.json`。唯一例外是交付总表的「待回写」提醒：没有变量的会话在 SessionStart 仍按当前目录判断项目并注入这一句，不带开发约定。
+自动评审按启动方式生效：入口设置 `AUTOREVIEW_DEV_ROOT=<启动时从 --cwd 向上找到的 .autoreview.json 所在目录>`，评审只认这个变量（生产 Loop 的指路与校验不按它区分）。只有这样的会话才会注入开发约定、记录需求和基线、评审/返修/暂停/发通知并写状态与总结；直接打开的宿主会话这些事都不做。项目根在启动时固定，会话中途 `cd` 到别的目录不会改变它，也不会改用子目录里的 `.autoreview.json`。交付总表的「待回写」提醒独立保留：没有变量的会话在 SessionStart 仍按当前目录判断项目并注入这一句，不带开发约定；生产 Loop 的辅助仅在下面列出的工具动作之后触发，不增加会话开始内容。
 
 变量指向的目录不存在或里面没有 `.autoreview.json` 时，按「项目配置不可用」处理，提示和总结里会写出变量的值。旧状态文件不清理、不迁移。Pi 的 `autoreview.ts`、流水线和 `bin/pi-dev` 行为不变。
 
@@ -50,7 +50,7 @@ claude plugin install autoreview@autoreview-local
 /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin add autoreview@autoreview-local
 ```
 
-然后新开宿主会话。Codex 在会话输入框输入 `/hooks`，核对并信任 autoreview 的 SessionStart、UserPromptSubmit、Stop；安装不等于 Hook 已获信任。原生接口依据：[Claude Code Hooks](https://code.claude.com/docs/en/hooks)、[OpenAI Hooks](https://learn.chatgpt.com/docs/hooks)。这是本机插件；移动仓库或换机器时需先更新 `plugins/autoreview/hooks/hooks.json` 的 Node 和引擎路径，再更新插件并重新检查信任。
+然后新开宿主会话。Codex 在会话输入框输入 `/hooks`，核对并信任 autoreview 的 SessionStart、UserPromptSubmit、PostToolUse、Stop；安装不等于 Hook 已获信任。原生接口依据：[Claude Code Hooks](https://code.claude.com/docs/en/hooks)、[OpenAI Hooks](https://learn.chatgpt.com/docs/hooks)。这是本机插件；移动仓库或换机器时需先更新 `plugins/autoreview/hooks/hooks.json` 的 Node 和引擎路径，再更新插件并重新检查信任。
 
 - 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。仍须通过 `bin/loop-dev` 启动才会进入开发会话。
 - 开工工具还读 `release`（发布分支，默认 `main`）、`workspaces`（工作区名字到路径）、`localFiles`（只在本机的文件）和 `methods`（项目方法文件 `paths`，可选 `selfCheck`、`probe`）。全部字段、类型和默认值见 [工具清单.md](工具清单.md)。
@@ -62,6 +62,47 @@ claude plugin install autoreview@autoreview-local
 - 联调可用假评审：`AUTOREVIEW_REVIEWER_CMD=/Users/Admin/Desktop/loop/test/fake-reviewer.mjs`、`FAKE_MODE=pass|pass-after-1|always-fix|fail|modify`；假验收方 / 假起草方：`AUTOREVIEW_ACCEPTANCE_CMD=…/test/fake-tester.mjs`、`AUTOREVIEW_CRITERIA_CMD=…/test/fake-drafter.mjs`。
 
 **范围**：上述入口支持单个开发会话；多段 `pipeline.ts`、`/review` 等 Pi 命令和后置 `--autoreview-accept-cmd` 仍属于 Pi 入口。Hook 的准备检查在交付后的检查开始前执行；需要开发前准备时先使用项目已有准备方法。`--init` 的 `{}` 只启用静态评审，不代表已配置门禁或自动验收。在 Loop 自身开发时，本仓库真实 E2E 仍是独立必需检查，Hook 总结完成不代表该项已通过。
+
+### 生产 Loop：按动作指路与即时校验
+
+Claude Code 和 Codex 共用 PostToolUse（只匹配 `Write|Edit|MultiEdit|Bash|apply_patch`，不用 `if`）；无论是否通过 `loop-dev` 启动，行为相同，Pi 不在此 Hook 范围内。
+
+- 写/改 `docs/batches/**/批次.json`、项目根 `.autoreview.json`：复用 Loop 的只读解析校验；正确时静默。引用的提示词、E2E 标准等尚未写出时只提示「尚未找到」，不是错误。
+- 写/改 `.autoreview/methods/**`、`**/prompt/提示词-*.md`，或运行 `bin/loop`、`bin/pi-dev`：本会话第一次给一张不超过 6 行的指路卡，指向规则所在文件/标题；未接入批次流程时附迁移位置。
+- Bash（Codex 的 `exec_command` 按 `Bash` 匹配）命令文本里出现这些写入路径时，执行后按磁盘内容校验；支持重定向、脚本和 `cd` 后的路径。不执行命令来猜路径，不扫描脚本内部的隐式写入。只读命令、普通命令和业务文件不输出，也不加载校验模块。
+- 除 `.autoreview.json` 本身外，没有项目标记的动作不触发。指路按宿主 + `session_id` 记一次；SessionStart 的 `source=compact` 清指路标记。同文件同报错在本会话不重复。
+- 指路和错误合成一条 `hookSpecificOutput.additionalContext`，不 block、不撤销写入；辅助异常静默退出 0。状态在 `~/.pi-autoreview/production-loop/`，不写项目、不改变原有 Stop 评审和返修。
+
+**合入后部署（本任务不会替你更新本机插件）**：以下命令在运行版 `/Users/Admin/Desktop/loop` 使用；先退出旧 Claude Code 会话，再更新并重新打开以重新加载插件：
+
+```bash
+cd /Users/Admin/Desktop/loop
+claude plugin marketplace update autoreview-local
+claude plugin update autoreview@autoreview-local
+claude
+```
+
+本机 Codex 没有 `plugin update`；退出旧会话后，手动重装这一个本地插件以刷新缓存，再重新打开（以下仅为部署说明，本任务不会执行）：
+
+```bash
+cd /Users/Admin/Desktop/loop
+CODEX=/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+"$CODEX" plugin remove autoreview@autoreview-local
+"$CODEX" plugin add autoreview@autoreview-local
+"$CODEX"
+```
+
+在 Codex 输入框执行 `/hooks`，重新审阅、信任变更后的 autoreview 定义（必须包含 **PostToolUse**），之后新开会话。不要把“已安装”当成“新 Hook 已信任”；若列表没有 PostToolUse，先在插件管理中更新 autoreview，再重查 `/hooks`。
+
+**真实宿主采样核对（A9，合入后人工执行）**：每个宿主从启动终端继承这个开关，默认关闭。原始输入可能含项目内容，目录只保存在本机，核对后按实际路径自行释放。
+
+```bash
+export AUTOREVIEW_PRODUCTION_SAMPLES="$(mktemp -d "${TMPDIR:-/tmp}/loop-hook-samples.XXXXXX")"
+printf '本次原始输入目录：%s\n' "$AUTOREVIEW_PRODUCTION_SAMPLES"
+# 在同一终端用 claude 或上面的 codex 绝对路径启动宿主；在你的已接入项目中操作。
+```
+
+让两个宿主各自在项目中写 `docs/batches/hook-smoke/批次.json`，内容为 `{"name":"hook-smoke"}`。预期同一条上下文里看到指路卡和 `批次文件的 stages 必须是对象`，指向 README 批次一节；再写同样错误不重复，改对后静默。打开采样目录中的 `.json` 核对：Claude Write/Edit 是 `tool_input.file_path`；Codex apply_patch 和两边 Bash 是 `tool_input.command`；两边都有 `session_id`、`cwd`。结束后在启动终端执行 `unset AUTOREVIEW_PRODUCTION_SAMPLES`。这一步未实测前，不算真实宿主装配/业务验收通过。
 
 ## 门禁（可选，建议配）
 

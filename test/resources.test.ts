@@ -38,7 +38,7 @@ test('成功、失败和中断都释放缓存并保留系统临时目录里的�
   const root = mkdtempSync(join(tmpdir(), 'autoreview-artifacts-'));
   const previous = process.env.AUTOREVIEW_RESOURCE_ROOT;
   process.env.AUTOREVIEW_RESOURCE_ROOT = join(root, 'owned');
-  const { createChildExec } = await import('../hosts/hook.ts');
+  const { createChildExec } = await import('../hosts/review-hook.ts');
   const { managedShell } = await import('../resources.ts');
   try {
     for (const mode of ['success', 'failure', 'interrupted']) await t.test(mode, async () => {

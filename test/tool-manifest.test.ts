@@ -135,7 +135,7 @@ function realSources(): Sources {
     "config.ts": read("config.ts"),
     "preparation.ts": read("preparation.ts"),
     "project-context.ts": read("project-context.ts"),
-    "hosts/hook.ts": read("hosts/hook.ts"),
+    "hosts/review-hook.ts": read("hosts/review-hook.ts"),
   };
 }
 
@@ -176,7 +176,7 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
   const preparation = functionBody(sources["preparation.ts"], "export function parsePreparation");
   const repair = functionBody(preparation, "if (data.repair !== undefined)");
   const context = functionBody(sources["project-context.ts"], "export function parseContext");
-  const review = functionBody(sources["hosts/hook.ts"], "export function loadConfig");
+  const review = functionBody(sources["hosts/review-hook.ts"], "export function loadConfig");
 
   const fields = new Set<string>();
   for (const key of new Set([...directKeys(layout, ["raw"]), ...helperKeys(layout, ["raw"])])) fields.add(key);

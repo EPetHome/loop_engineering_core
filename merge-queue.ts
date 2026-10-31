@@ -511,7 +511,7 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
       copyTestLocalFiles(state, batch, workDir);
       const gate = loadGateConfig(workDir) ?? loadGateConfig(batch.project);
       if (!gate) throw new Error("项目没有配置 gate，不能宣布可合入；请配置项目门禁后再次触发队列");
-      const { createChildExec } = await import("./hosts/hook.ts");
+      const { createChildExec } = await import("./hosts/review-hook.ts");
       const resource = createRunResource(`merge-queue:${entry.id}`, undefined, procs);
       entry.log = join(state.dir, `${entry.id}-a${entry.attempt}.gate.log`);
       entry.runtimeGate = hash(loadGateConfig(batch.project));
@@ -619,7 +619,7 @@ async function main(): Promise<void> {
       const procs = join(state.dir, `integration-${batchId}.procs.json`);
       reapProcs(procs);
       if (readProcs(procs).length) throw new Error("上次整合编排释放未确认，未重复启动");
-      const { createChildExec } = await import("./hosts/hook.ts");
+      const { createChildExec } = await import("./hosts/review-hook.ts");
       const result = await createChildExec(procs)(process.execPath, [join(HERE, "pipeline.ts"), batch.file, "--from", "e2e", "--project-root", batch.project, "--default-workspace", "dev分支"],
         { cwd: state.repo, timeout: 24 * 60 * 60_000, role: "队列返修后整合编排" });
       if (result.code !== 0) console.error(result.stderr || result.stdout);

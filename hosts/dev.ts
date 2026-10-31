@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN } from "../config.ts";
-import { endHostExperienceSessions, hookPaths, loadConfig } from "./hook.ts";
+import { endHostExperienceSessions, hookPaths, loadConfig } from "./review-hook.ts";
 import { launchHookHost } from "./inbox-bridge.ts";
 import { registeredQueueBatch } from "../merge-queue.ts";
 import { readJson } from "../pipeline-core.ts";

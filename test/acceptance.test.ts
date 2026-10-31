@@ -17,7 +17,7 @@ import {
 import { ACCEPTANCE_EVENTS_PATH, ACCEPTANCE_PROMPT_PATH, RECOVERY_PROMPT_PATH, parseElapsed, runAcceptanceStage, type AcceptanceDeps } from "../acceptance.ts";
 import { checkRoundBudget, DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
 import { blockerHint } from "../onboarding.ts";
-import { createChildExec } from "../hosts/hook.ts";
+import { createChildExec } from "../hosts/review-hook.ts";
 import { processStartTime, readProcs, reapProcs } from "../procs.ts";
 import { recordToolActivity } from "../acceptance-events.ts";
 import { renderSummary } from "../core.ts";

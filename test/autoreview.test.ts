@@ -17,7 +17,7 @@ import { approveExperience, experienceDataFile, experienceFile, importExperience
 import { registerAcceptanceMaterials } from "../materials.ts";
 import { readReviewSnapshot } from "../snapshots.ts";
 import { contextDir, loadContext } from "../project-context.ts";
-import { createChildExec } from "../hosts/hook.ts";
+import { createChildExec } from "../hosts/review-hook.ts";
 import type { Exec, ExecResult } from "../git.ts";
 import { queueDir, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
 

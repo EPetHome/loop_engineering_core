@@ -26,7 +26,7 @@ import { queueStageEvent } from "./merge-queue.ts";
 import { classifyFailure, failureLabel } from "./failure.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
 import { methodEnv } from "./method-env.ts";
-import { createChildExec, expandFileRefs } from "./hosts/hook.ts";
+import { createChildExec, expandFileRefs } from "./hosts/review-hook.ts";
 import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "./materials.ts";

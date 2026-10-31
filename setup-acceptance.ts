@@ -1,6 +1,6 @@
 /**
  * setup-acceptance.ts — 一条命令给项目接入自动验收：探测项目怎么启动，写好 .autoreview.json 的 acceptance，
- * 在 AGENTS.md（和 Claude Code 读的 CLAUDE.md）里插入或更新接入手册的【块 1】。
+ * 在 .autoreview/CONVENTIONS.md 插入或更新接入手册的【块 1】，输出版本/条款差异和其他工作区旧副本。
  * 先打印要改什么，你确认了才写；可以重复跑：已有的 acceptance 保留不动，【块 1】只替换标记之间的那一段。
  *
  * 用法：node /Users/Admin/Desktop/loop/setup-acceptance.ts <项目目录> [--yes] [--host claude|codex|pi]
@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { checkRoundBudget, MARKER_FILE, parseAcceptanceConfig, parseGateConfig } from "./config.ts";
-import { BLOCK_END, BLOCK_START, blockVersion, conventionTarget, copyNotice, GUIDE_DOC, readBlock } from "./onboarding.ts";
+import { BLOCK_END, BLOCK_START, blockChanges, blockVersion, conventionTarget, copyNotice, GUIDE_DOC, olderConventionCopies, readBlock, type BlockChanges } from "./onboarding.ts";
 import { DEFAULT_TIMEOUT_MIN } from "./review.ts";
 
 export interface Detection {
@@ -137,7 +137,7 @@ export function detectProject(root: string, port: number): Detection {
 }
 
 /** 在文件内容里插入或更新【块 1】：有标记就替换标记之间，旧版标题就整段换掉，都没有就追加到末尾。 */
-export function upsertBlock(content: string, block: string): { text: string; action: "追加" | "更新" | "已是最新"; warning?: string } {
+export function upsertBlock(content: string, block: string): { text: string; action: "追加" | "更新" | "已是最新"; warning?: string; changes?: BlockChanges } {
   const latest = blockVersion(block) ?? 0;
   const lines = content.split("\n");
   const start = lines.findIndex((line) => BLOCK_START.test(line));
@@ -145,12 +145,12 @@ export function upsertBlock(content: string, block: string): { text: string; act
     const end = lines.findIndex((line, index) => index > start && line.trim() === BLOCK_END);
     if (end < 0) return { text: content, action: "已是最新", warning: `找到了开始标记却没有结束标记「${BLOCK_END}」，没有改动，请手动整理` };
     if ((blockVersion(lines[start]) ?? 0) >= latest) return { text: content, action: "已是最新" };
-    return { text: [...lines.slice(0, start), block, ...lines.slice(end + 1)].join("\n"), action: "更新" };
+    return { text: [...lines.slice(0, start), block, ...lines.slice(end + 1)].join("\n"), action: "更新", changes: blockChanges(lines.slice(start, end + 1).join("\n"), block) };
   }
   const legacy = lines.findIndex((line) => /^##\s*起草需求时写验收标准（自动验收）\s*$/.test(line.trim()));
   if (legacy >= 0) {
     const close = lines.findIndex((line, index) => index > legacy && line.trim() === "开发时不要补写或修改验收标准；验收标准只认用户发来的消息。");
-    if (close >= 0) return { text: [...lines.slice(0, legacy), block, ...lines.slice(close + 1)].join("\n"), action: "更新" };
+    if (close >= 0) return { text: [...lines.slice(0, legacy), block, ...lines.slice(close + 1)].join("\n"), action: "更新", changes: blockChanges(lines.slice(legacy, close + 1).join("\n"), block) };
   }
   const base = content.replace(/\s*$/, "");
   return { text: `${base ? `${base}\n\n` : ""}${block}\n`, action: "追加" };
@@ -162,7 +162,8 @@ export interface Plan {
   /** 要写的 .autoreview.json 全文；undefined 表示不动。 */
   config?: string;
   configAction: string;
-  files: { file: string; text: string; action: string; warning?: string }[];
+  files: { file: string; text: string; action: string; warning?: string; changes?: BlockChanges }[];
+  olderCopies: string[];
   tips: string[];
 }
 
@@ -196,7 +197,8 @@ export async function planSetup(root: string, host?: string): Promise<Plan> {
   tips.push("常驻 AGENTS.md / CLAUDE.md 保持不变；可变流程只在 .autoreview/CONVENTIONS.md 维护，稳定规则按需引用该入口。");
   const files = [...targets].map((file) => ({ file, ...upsertBlock(readText(file), block) }));
   if (detection.needsBrowser && !detection.hasPlaywright) tips.push(copyNotice(3, root));
-  return { root, detection, config, configAction, files, tips };
+  const olderCopies = olderConventionCopies(root, blockVersion(block) ?? 0);
+  return { root, detection, config, configAction, files, olderCopies, tips };
 }
 
 export function renderPlan(plan: Plan): string {
@@ -206,7 +208,14 @@ export function renderPlan(plan: Plan): string {
   plan.files.forEach((entry, index) => {
     lines.push(`${index + 2}. ${entry.file}：${entry.action === "已是最新" ? "【块 1】已是最新，不用改" : `${entry.action}【块 1】（来自 ${GUIDE_DOC}）`}`);
     if (entry.warning) lines.push(`   - ${entry.warning}`);
+    if (entry.changes) {
+      lines.push(`   写法块变更：v${entry.changes.from} → v${entry.changes.to}`);
+      for (const [label, clauses] of [["新增", entry.changes.added], ["删除", entry.changes.removed]] as const) {
+        lines.push(`   ${label}条款原文：${clauses.length ? "" : "无"}`, ...clauses.map((line) => `     ${line}`));
+      }
+    }
   });
+  if (plan.olderCopies.length) lines.push("", "同仓库其他工作区的旧版副本（只列出，不修改）：", ...plan.olderCopies.map((path) => `- ${path}`));
   if (plan.tips.length > 0) lines.push("", "还需要你做：", ...plan.tips.map((tip) => `- ${tip}`));
   return lines.join("\n");
 }

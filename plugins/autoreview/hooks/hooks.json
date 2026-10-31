@@ -22,6 +22,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/Admin/.hermes/node/bin/node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON /Users/Admin/Desktop/loop/hosts/hook.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

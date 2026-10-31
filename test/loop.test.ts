@@ -9,7 +9,7 @@ import test, { after } from "node:test";
 import { parsePlan, stageScript } from "../pipeline.ts";
 import { readMethodsRecord, recordGateTree } from "../methods.ts";
 import { commitAll } from "../workspace.ts";
-import { createChildExec } from "../hosts/hook.ts";
+import { createChildExec } from "../hosts/review-hook.ts";
 import { changedSince, outOfScope } from "../scope.ts";
 
 const LOOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");

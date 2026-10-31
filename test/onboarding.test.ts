@@ -1,7 +1,7 @@
 /** 接入：接入手册的复制块、目标文件、写法段状态、下一步提示、接入命令；产物只写 os.tmpdir()。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,10 +9,10 @@ import test from "node:test";
 import { extractCriteria, isAuthorizationCriterion, isManualCriterion, type AcceptanceRecord } from "../acceptance-core.ts";
 import { parseAcceptanceConfig } from "../config.ts";
 import {
-  acceptanceTodos, blockerHint, blockVersion, conventionNotice, conventionStatus, conventionTarget, extractBlock,
+  acceptanceTodos, blockerHint, blockChanges, blockVersion, conventionNotice, conventionStatus, conventionTarget, extractBlock,
   GUIDE_DOC, manualHint, readBlock, SETUP_SCRIPT,
 } from "../onboarding.ts";
-import { detectProject, planSetup, RESET_NOTE, upsertBlock } from "../setup-acceptance.ts";
+import { detectProject, planSetup, renderPlan, RESET_NOTE, upsertBlock } from "../setup-acceptance.ts";
 
 const SETUP = fileURLToPath(new URL("../setup-acceptance.ts", import.meta.url));
 const tempDir = (): string => mkdtempSync(join(tmpdir(), "autoreview-onboard-"));
@@ -215,7 +215,7 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("O9 A5：装着 v5【块 1】的项目跑接入命令，整段替换为 v6，标记外不变", async () => {
+test("O9：装着 v5【块 1】的项目跑接入命令，整段替换为 v6，标记外不变", async () => {
   const root = tempDir();
   try {
     write(root, "package.json", JSON.stringify({ bin: { todo: "bin/todo.js" } }));
@@ -244,4 +244,35 @@ test("O9 A5：装着 v5【块 1】的项目跑接入命令，整段替换为 v6�
     assert.match(written, /## 收尾回写（自动评审 v1）/);
     assert.equal(conventionStatus(root, "pi").status, "最新");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("A8 接入输出 v5 → v6、新增条款原文、其他工作区旧副本；只改目标不动旧副本", async () => {
+  const temp = tempDir(), root = join(temp, "repo"), other = join(temp, "other 工作区"), latest = join(temp, "current"), future = join(temp, "future");
+  mkdirSync(root);
+  const git = (...args: string[]): void => {
+    const result = spawnSync("git", args, { cwd: root, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  try {
+    git("init", "-q", "-b", "main"); git("config", "user.email", "onboard@example.test"); git("config", "user.name", "onboard");
+    const block = readBlock(1), clause = "批次参数写进 `批次.json`，不要在批次目录里写门禁或启动脚本。";
+    const old = block.replaceAll("v6", "v5").replace(`\n\n${clause}`, "");
+    write(root, ".autoreview.json", '{"acceptance":{}}');
+    write(root, ".autoreview/CONVENTIONS.md", `# 保留项目正文\n\n${old}\n`);
+    git("add", "."); git("commit", "-qm", "v5");
+    git("worktree", "add", "-qb", "old-copy", other); git("worktree", "add", "-qb", "current-copy", latest); git("worktree", "add", "-qb", "future-copy", future);
+    write(latest, ".autoreview/CONVENTIONS.md", block); write(future, ".autoreview/CONVENTIONS.md", block.replaceAll("v6", "v7"));
+    const copy = join(realpathSync(other), ".autoreview/CONVENTIONS.md"), before = readFileSync(copy);
+    const plan = await planSetup(root), rendered = renderPlan(plan);
+    assert.match(rendered, /v5 → v6/); assert.ok(rendered.includes(`新增条款原文：\n     ${clause}`));
+    assert.match(rendered, /删除条款原文：无/); assert.deepEqual(plan.olderCopies, [copy]); assert.ok(rendered.includes(copy));
+    assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 5, "计划不写盘");
+    const run = spawnSync(process.execPath, [SETUP, root, "--yes"], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /v5 → v6/); assert.ok(run.stdout.includes(clause)); assert.ok(run.stdout.includes(copy));
+    assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 6);
+    assert.deepEqual(readFileSync(copy), before, "另一个工作区旧副本字节不变");
+    const noChange = await planSetup(root); assert.equal(noChange.files[0].action, "已是最新"); assert.ok(renderPlan(noChange).includes(copy), "目标最新时仍提示旧副本");
+    const changes = blockChanges("<!-- autoreview:acceptance v1 -->\n- 删除条款原文。\n重复\n重复\n<!-- /autoreview:acceptance -->", "<!-- autoreview:acceptance v2 -->\n- 新增条款原文。\n重复\n<!-- /autoreview:acceptance -->");
+    assert.deepEqual(changes, { from: 1, to: 2, added: ["- 新增条款原文。"], removed: ["- 删除条款原文。", "重复"] });
+  } finally { rmSync(temp, { recursive: true, force: true }); }
 });

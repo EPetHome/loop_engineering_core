@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createChildExec } from "../hosts/hook.ts";
+import { createChildExec } from "../hosts/review-hook.ts";
 import { processStartTime, readProcs, reapProcs, registerProc, releaseProc } from "../procs.ts";
 
 const running = (pid: number): boolean => {
