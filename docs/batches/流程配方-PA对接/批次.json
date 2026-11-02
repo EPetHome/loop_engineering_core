@@ -1,0 +1,23 @@
+{
+  "name": "流程配方-PA对接",
+  "branch": "feat/recipe-commit",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
+  "stages": {
+    "事件与查询": {
+      "prompt": "../../prompt/提示词-流程配方-3事件与查询.md",
+      "workspace": "流程配方",
+      "scope": { "deny": ["docs/", "项目文档/", "项目模板/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    },
+    "送话与续跑": {
+      "prompt": "../../prompt/提示词-流程配方-4送话与续跑.md",
+      "workspace": "流程配方",
+      "scope": { "deny": ["docs/", "项目文档/", "项目模板/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    },
+    "只评审与执行命令": {
+      "prompt": "../../prompt/提示词-流程配方-5只评审与执行命令.md",
+      "workspace": "流程配方",
+      "scope": { "deny": ["docs/", "项目文档/", "项目模板/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    }
+  },
+  "steps": [["事件与查询"], ["送话与续跑"], ["只评审与执行命令"]]
+}
