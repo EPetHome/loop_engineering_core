@@ -22,6 +22,8 @@ import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch
 import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
 import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, writePhase, type PhaseRecord } from "./events.ts";
 import { queryBatches } from "./query.ts";
+import { paInfo, sendWords } from "./pa.ts";
+import { resumeBatch } from "./pa-resume.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
@@ -39,7 +41,7 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; rest: string[] }
+interface ParsedArgs { command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
@@ -50,6 +52,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
     else if (arg === "--apply") result.apply = true;
+    else if (["--stage", "--id", "--text-file", "--grant-file", "--wait"].includes(arg)) {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith("--")) throw new LoopError(`${arg} 需要一个值`);
+      const keys: Record<string, "stage" | "id" | "textFile" | "grantFile" | "wait"> = { "--stage": "stage", "--id": "id", "--text-file": "textFile", "--grant-file": "grantFile", "--wait": "wait" };
+      const key = keys[arg];
+      if (result[key] !== undefined) throw new LoopError(`${arg} 不能重复`);
+      if (arg === "--wait") {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) throw new LoopError("--wait 需要 0–3600 秒");
+        result.wait = seconds;
+      } else (result as any)[key] = value;
+    }
     else if (arg === "--round") {
       const value = argv[++i];
       if (!value || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new LoopError("--round 需要正整数轮次");
@@ -65,6 +79,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if ((result.stage !== undefined || result.textFile !== undefined || result.wait !== undefined) && result.command !== "送话") throw new LoopError("--stage、--text-file、--wait 只用于 loop 送话");
+  if (result.grantFile !== undefined && result.command !== "续跑") throw new LoopError("--grant-file 只用于 loop 续跑");
+  if (result.id !== undefined && !["送话", "续跑"].includes(result.command ?? "")) throw new LoopError("--id 只用于 loop 送话/续跑");
   if (result.all && (result.command !== "查询" || result.batch)) throw new LoopError("--all 只用于 loop 查询，不能同时指定批次文件");
   if (result.command === "查询" && (result.rest.length || result.recheck || result.launcher)) throw new LoopError("用法：loop 查询 [<批次.json> | --all] --json");
   if (result.round !== undefined && result.command !== "漏网") throw new LoopError("--round 只用于 loop 漏网");
@@ -1142,11 +1159,22 @@ function cmdPush(args: ParsedArgs): Record<string, unknown> {
     lines: commits.map((item) => `${args.dryRun ? "将推送" : "已推送"} ${item.branch} ${item.commit} → origin；不推 release，不强推`) };
 }
 
+async function cmdPA(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch || !args.id || args.rest.length || args.launcher || args.recheck || (args.command === "送话" && (!args.stage || !args.textFile))) throw new LoopError("用法：loop 送话 <批次.json> --stage <段> --id <编号> --text-file <文件|-> [--wait 秒] --json；loop 续跑 <批次.json> --id <编号> [--grant-file <文件|->] --json");
+  const info = paInfo(resolve(args.batch));
+  const input = (file: string) => () => readFileSync(file === "-" ? 0 : resolve(file), "utf8");
+  return args.command === "送话"
+    ? sendWords({ info, stage: args.stage!, id: args.id, readText: input(args.textFile!), wait: args.wait, dryRun: args.dryRun })
+    : resumeBatch({ info, id: args.id, readGrant: args.grantFile ? input(args.grantFile) : undefined, dryRun: args.dryRun });
+}
+
 const USAGE = `用法：
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
   loop 查询 [<批次.json> | --all] --json
+  loop 送话 <批次.json> --stage <段> --id <编号> --text-file <文件|-> [--wait 秒] --json
+  loop 续跑 <批次.json> --id <编号> [--grant-file <文件|->] --json
   loop 推送 <批次.json> [--dry-run] [--json]
   loop 合入 <批次.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
@@ -1174,6 +1202,8 @@ async function main(): Promise<number> {
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "查询") result = queryBatches(args.batch);
+    else if (args.command === "送话") result = await cmdPA(args);
+    else if (args.command === "续跑") result = await cmdPA(args);
     else if (args.command === "推送") result = cmdPush(args);
     else if (args.command === "合入") result = await cmdMerge(args);
     else if (args.command === "撤回") result = await cmdWithdraw(args);

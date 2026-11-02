@@ -48,6 +48,9 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   /** undefined：正常检查；null：兜底命中但历史结论未知；对象：沿用已测资格（空数组才是明确无欠项）。 */
   queueReviewedAcceptance?: QueueAcceptance | null;
   enabled: boolean;
+  userInputVia?: "user" | "pa";
+  userInputCount?: number;
+  paRelays?: import("./pa-records.ts").RelaySource[];
   baseline?: string;
   baselineUntracked?: string[];
   /** 开工时未跟踪文件的内容哈希和模式；只豁免确实没变的文件。 */

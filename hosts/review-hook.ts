@@ -21,11 +21,13 @@ import {
   checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, MARKER_FILE, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
-import { observeStage } from "../events.ts";
+import { batchInfo, observeStage } from "../events.ts";
+import { consumeRelay } from "../pa.ts";
+import { hasRelayHeader, rememberPAInput } from "../pa-records.ts";
 import { systemNotify } from "../notify.ts";
 import type { FailureKind } from "../failure.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
-import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
+import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
@@ -273,7 +275,7 @@ const PHASES = new Set(["idle", "reviewing", "done", "paused"]);
 /** 只有文件不存在才初始化；读取/解析/结构非法都抛错，由统一收口暂停。 */
 const USER_INPUT_CHANGED = "用户输入在检查期间更新，旧检查已停止";
 const stateBases = new WeakMap<HookState, HookState>();
-const inputKeys = ["requirement", "criteria", "grants", "inputsFingerprint", "userInputVersion", "resumeAfterInputChange"] as const;
+const inputKeys = ["requirement", "criteria", "grants", "inputsFingerprint", "userInputVersion", "resumeAfterInputChange", "userInputVia", "userInputCount", "paRelays"] as const;
 const rememberState = (state: HookState): HookState => { stateBases.set(state, structuredClone(state)); return state; };
 const copyInputs = (target: HookState, source: HookState): void => { for (const key of inputKeys) (target as any)[key] = source[key]; };
 
@@ -483,7 +485,7 @@ async function writeSummary(
     materialCleanup: state.materialCleanup,
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
-    criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance,
+    criteria: state.criteria, grants: state.grants, paRelays: state.paRelays, unresolvedAcceptance: state.unresolvedAcceptance,
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
     unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
     sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
@@ -508,7 +510,7 @@ async function recordLedger(ctx: HookContext, state: HookState): Promise<string 
   try {
     const path = appendLedgerRecord({
       project: projectRootOf(ctx.workDir), session, task: taskTitle(state.requirement),
-      result: resultLine(record, state.rounds.length, state.repairs, state.queueReviewedAcceptance), summary: ctx.paths.summary, pending,
+      result: resultLine(record, state.rounds.length, state.repairs, state.queueReviewedAcceptance), summary: ctx.paths.summary, pending, paRelays: state.paRelays,
     });
     state.ledger = { session, path, pending };
   } catch (error) {
@@ -611,7 +613,7 @@ function ledgerReminder(ctx: HookContext): string | undefined {
  * 下一次 Stop 照常自动评审，返修计数重新算。活进程还在评审时一律不动。
  * Stop 的 block 续跑不经过 UserPromptSubmit；即使经过，那时 phase 已是 idle、锁已释放。
  */
-function resumeOnPrompt(ctx: HookContext, state: HookState): void {
+function resumeOnPrompt(ctx: HookContext, state: HookState, userEvent = true): void {
   if (lockAlive(ctx.paths.lock)) return;
   // 锁的持有者死了，它起的评审等子进程可能还活着：先清掉，再算恢复。
   reapOrphans(ctx);
@@ -624,7 +626,7 @@ function resumeOnPrompt(ctx: HookContext, state: HookState): void {
   state.pauseHint = undefined;
   state.awaitingRepair = false;
   state.repairs = 0;
-  observe(ctx, state, "running", { via: "user" });
+  observe(ctx, state, "running", userEvent ? { via: "user" } : {});
 }
 
 /** 引用文件的上限：最多 3 个，每个不超过 200KB，二进制不读。 */
@@ -759,36 +761,42 @@ async function prepareNativeQueueRepair(ctx: HookContext, event: HookEvent): Pro
 }
 
 async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<string | undefined> {
-  const raw = typeof event.prompt === "string" ? event.prompt : "";
-  const expanded = expandFileRefs(raw, ctx.promptDir);
+  const incoming = typeof event.prompt === "string" ? event.prompt : "";
   const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
+  const relay = hasRelayHeader(incoming) && dir && stage && process.env.AUTOREVIEW_BATCH_FILE
+    ? await consumeRelay({ message: incoming, info: batchInfo(process.env.AUTOREVIEW_BATCH_FILE, ctx.workDir, dir), stage,
+      session: { host: ctx.host, id: ctx.sessionId }, summary: ctx.paths.summary }) : undefined;
+  const raw = relay?.text ?? incoming, provenance = { verifiedRelay: Boolean(relay) };
+  const expanded = expandFileRefs(raw, ctx.promptDir);
   const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
   const dispatched = dir && stage && process.env.AUTOREVIEW_DEV_INPUT_BRIDGE ? bridgeRepairSequence(dir, stage,
     { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid), inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE }, raw) : undefined;
-  const machine = dispatched !== undefined || isLoopMessage(raw) || /--- @[^\n]+ ---\n【合入队列返修】/.test(expanded);
+  const machine = dispatched !== undefined || isLoopMessage(raw, provenance) || /--- @[^\n]+ ---\n【合入队列返修】/.test(expanded);
   if (machine) {
     const state = loadStateFile(ctx.paths.state), repair = await consumeQueueInbox(ctx, state, dispatched);
     return contextOutput(ctx, "UserPromptSubmit", [conventionFor(ctx), repair].filter(Boolean).join("\n\n"));
   }
   // 相对引用保持宿主当前目录语义；固定项目根只用于配置、Git 取证、状态和评审。
-  const prompt = expandFileRefs(typeof event.prompt === "string" ? event.prompt : "", ctx.promptDir);
-  const typed = typedByUser(typeof event.prompt === "string" ? event.prompt : "");
+  const prompt = expanded;
+  const typed = typedByUser(raw, provenance);
   let notice: string | undefined, criteriaNotice: string | undefined, invalidatedDone = false;
   // 权限和标准先独立落盘；配置、来源索引、Git 都不得成为吞掉撤权的前置条件。
   withStateWriteLock(ctx.paths.state, () => {
     const state = loadStateFile(ctx.paths.state);
     const before = JSON.stringify(inputKeys.slice(0, 4).map((key) => state[key]));
     const wasRunning = lockAlive(ctx.paths.lock), wasDone = state.phase === "done";
-    if (state.enabled !== false) resumeOnPrompt(ctx, state);
+    if (state.enabled !== false) resumeOnPrompt(ctx, state, !relay);
+    if (relay) state.repairs = 0;
     if (state.requirement === undefined && prompt.trim()) state.requirement = prompt;
-    const criteria = criteriaFromUser(prompt, state.criteria);
+    const criteria = criteriaFromUser(prompt, state.criteria, provenance);
     if (criteria) { state.criteria = criteria; state.grants = undefined; criteriaNotice = `已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`; }
     const grants = grantsFromUser(typed, state.criteria, state.grants);
     if (grants && state.criteria) { state.grants = grants; notice = `自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的条目"}）`; }
-    if (before !== JSON.stringify(inputKeys.slice(0, 4).map((key) => state[key]))) {
+    rememberPAInput(state, relay, grants && relay ? typed : undefined);
+    if (relay || before !== JSON.stringify(inputKeys.slice(0, 4).map((key) => state[key]))) {
       state.userInputVersion = randomUUID();
       if (wasRunning || state.rounds.length > 0) state.resumeAfterInputChange = true;
-      if (wasDone) { state.phase = "idle"; state.pauseReason = undefined; invalidatedDone = true; }
+      if (wasDone) { state.phase = "idle"; state.pauseReason = undefined; state.queueReadyEpoch = undefined; state.ledger = undefined; invalidatedDone = true; }
     }
     state.experienceActivity = newHookActivity(ctx);
     writeStateFile(ctx.paths.state, state);
@@ -797,6 +805,10 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   if (notice) process.stderr.write(`[autoreview] ${notice}\n`);
   if (notice && ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
   let state = loadStateFile(ctx.paths.state);
+  if (relay) {
+    try { appendPARelayRecord({ project: projectRootOf(ctx.workDir), session: `${ctx.host}-${ctx.sessionId}`, summary: ctx.paths.summary, source: state.paRelays!.at(-1)! }); }
+    catch (error) { process.stderr.write(`[autoreview] PA 来源写入交付总表失败（编号 ${relay.id}）：${String(error)}\n`); }
+  }
   reportQueueStage(ctx, state, "started");
   // 授权与输入版本已经独立落盘；经验锁、登记读写失败不能吞掉撤权或旧检查的取消信号。
   experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
@@ -838,8 +850,8 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
       if (state.phase === "done") await writeSummary(ctx, state, "完成");
     }
   }
-  if (invalidatedDone) { state = loadStateFile(ctx.paths.state); await writeSummary(ctx, state, "进行中", undefined, undefined, "用户输入已更新，旧完成资格已撤销。"); }
-  return contextOutput(ctx, "UserPromptSubmit", conventionFor(ctx), notice);
+  if (invalidatedDone || relay) { state = loadStateFile(ctx.paths.state); await writeSummary(ctx, state, "进行中", undefined, undefined, "用户输入已更新，旧完成资格已撤销。"); }
+  return contextOutput(ctx, "UserPromptSubmit", [conventionFor(ctx), relay ? `【PA 转达已核对】转达头不属于需求，以下原文按用户本人输入处理：\n${raw}` : ""].filter(Boolean).join("\n\n"), notice);
 }
 
 /**

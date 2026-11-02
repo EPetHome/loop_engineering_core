@@ -24,12 +24,14 @@ import {
 import { processStartTime, reapProcs } from "./procs.ts";
 import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "./merge-queue.ts";
 import { classifyFailure, failureLabel, type FailureKind } from "./failure.ts";
-import { observeStage } from "./events.ts";
+import { batchInfo, observeStage } from "./events.ts";
+import { consumeRelay } from "./pa.ts";
+import { hasRelayHeader, rememberPAInput, relayMessage, wordRecords } from "./pa-records.ts";
 import { systemNotify } from "./notify.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
 import { methodEnv } from "./method-env.ts";
 import { createChildExec, expandFileRefs } from "./hosts/review-hook.ts";
-import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
+import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "./materials.ts";
 import { isRegisteredSource, loadContext, recordProjectOutcome, recordSourceChange, refreshContext, type ContextConfig, type ContextResult } from "./project-context.ts";
@@ -102,6 +104,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   let inboxTimer: ReturnType<typeof setInterval> | undefined;
   let contextTimer: ReturnType<typeof setInterval> | undefined;
   let inboxBusy = false;
+  const wordsDispatched = new Set<string>();
+  let verifiedRelayPrompt: string | undefined;
   let cleanupWork: Promise<void> | undefined;
   let cleanupRecordPath: string | undefined;
   let latestCtx: ExtensionContext | undefined;
@@ -245,7 +249,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
-      criteria: state.criteria, grants: state.grants, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
+      criteria: state.criteria, grants: state.grants, paRelays: state.paRelays, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
       sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
       ponytailMissing, materialCleanup: state.materialCleanup,
       ledger: state.phase === "done" && state.ledger
@@ -387,7 +391,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const record = {
       project: projectRootOf(ctx.cwd), session, task: taskTitle(state.requirement),
       result: resultLine(acceptance, state.rounds.length, state.repairs, state.queueReviewedAcceptance),
-      summary: summaryPath(ctx), pending,
+      summary: summaryPath(ctx), pending, paRelays: state.paRelays,
     };
     let problem: string | undefined;
     try {
@@ -788,8 +792,20 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const ctx = latestCtx;
     const life = lifecycle;
     if (!link || !ctx || inboxBusy || !life.active || reviewRunning || state.phase === "reviewing" || gitAvailability !== "available") return;
+    if (!ctx.isIdle()) return;
+    try {
+      if (["paused", "done"].includes(state.phase)) {
+        const word = wordRecords(link.dir, link.stage).find((row) => row.state === "delivered" && !wordsDispatched.has(row.id)
+          && row.session?.host === "pi" && row.session.id === ctx.sessionManager.getSessionId());
+        if (word) {
+          wordsDispatched.add(word.id);
+          pi.sendUserMessage(relayMessage(word.id, word.text));
+          return;
+        }
+      }
+    } catch (error) { await pauseForError(ctx, error, life); return; }
     const inbox = readJson<InboxMessage>(inboxPath(link.dir, link.stage));
-    if (!inbox || !(inbox.seq > (state.inboxHandled ?? 0)) || !ctx.isIdle()) return;
+    if (!inbox || !(inbox.seq > (state.inboxHandled ?? 0))) return;
     inboxBusy = true;
     try {
       const snap = await evidence(ctx, life).snapshot();
@@ -981,6 +997,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     cleanupWork = undefined; cleanupRecordPath = undefined;
     latestCtx = ctx;
     pipelineLink = stageFromEnv(process.env);
+    wordsDispatched.clear();
+    verifiedRelayPrompt = undefined;
     trackExperienceSession(ctx, true);
     checkPonytail(ctx);
     if (inboxTimer) clearInterval(inboxTimer);
@@ -1114,29 +1132,43 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   // 原生 input 事件保留来源，发生在技能/模板展开之前；扩展消息不能产生用户权限。
   pi.on("input", async (event, ctx) => {
     const life = lifecycle;
-    if (!life.active || !["interactive", "rpc"].includes(event.source) || isLoopMessage(event.text)) return { action: "continue" as const };
+    verifiedRelayPrompt = undefined;
+    if (!life.active) return { action: "continue" as const };
+    const relay = hasRelayHeader(event.text) && pipelineLink && process.env.AUTOREVIEW_BATCH_FILE
+      ? await consumeRelay({ message: event.text, info: batchInfo(process.env.AUTOREVIEW_BATCH_FILE, ctx.cwd, pipelineLink.dir), stage: pipelineLink.stage,
+        session: { host: "pi", id: ctx.sessionManager.getSessionId() }, summary: summaryPath(ctx) }) : undefined;
+    const raw = relay?.text ?? event.text, provenance = { verifiedRelay: Boolean(relay) };
+    if ((!relay && !["interactive", "rpc"].includes(event.source)) || isLoopMessage(raw, provenance)) return { action: "continue" as const };
     latestCtx = ctx;
     const before = JSON.stringify([state.requirement, state.criteria, state.grants]);
     const hadReview = state.rounds.length > 0 || state.phase === "done" || reviewRunning;
     try {
       developerRunning = true;
+      if (relay) state.repairs = 0;
       if (state.phase === "paused" && gitAvailability !== "unsupported") {
         const reason = state.pauseReason;
         state.phase = "idle"; state.pauseReason = undefined; state.pauseHint = undefined; state.awaitingRepair = false; state.repairs = 0;
-        observe(ctx, "running", { via: "user" });
+        observe(ctx, "running", relay ? {} : { via: "user" });
         ctx.ui.notify(`自动评审：已恢复（上次暂停：${reason ?? "未知原因"}）`, "info");
       }
-      const prompt = event.text.includes('<file name="') ? event.text : expandFileRefs(event.text, ctx.cwd);
+      const prompt = raw.includes('<file name="') ? raw : expandFileRefs(raw, ctx.cwd);
       if (state.requirement === undefined && prompt.trim()) state.requirement = prompt;
-      const criteria = criteriaFromUser(prompt, state.criteria);
+      const criteria = criteriaFromUser(prompt, state.criteria, provenance);
       if (criteria) { state.criteria = criteria; state.grants = undefined; }
-      const grants = grantsFromUser(typedByUser(event.text), state.criteria, state.grants);
+      const typed = typedByUser(raw, provenance);
+      const grants = grantsFromUser(typed, state.criteria, state.grants);
       if (grants) state.grants = grants;
-      if (hadReview && before !== JSON.stringify([state.requirement, state.criteria, state.grants])) await invalidateCompletion(ctx, life);
+      rememberPAInput(state, relay, grants && relay ? typed : undefined);
+      if (relay) {
+        try { appendPARelayRecord({ project: projectRootOf(ctx.cwd), session: ctx.sessionManager.getSessionId(), summary: summaryPath(ctx), source: state.paRelays!.at(-1)! }); }
+        catch (error) { ctx.ui.notify(`PA 来源写入交付总表失败（编号 ${relay.id}）：${String(error)}`, "warning"); }
+      }
+      if (hadReview && (relay || before !== JSON.stringify([state.requirement, state.criteria, state.grants]))) await invalidateCompletion(ctx, life);
       else { saveState(life); updateStatus(ctx, life); }
       if (criteria) ctx.ui.notify(`自动验收：已记录验收标准第 ${criteria.version} 版（${criteria.items.length} 条）`, "info");
       if (grants && state.criteria) ctx.ui.notify(`自动验收：已记录你的授权（${authorizationLine(state.criteria, grants) ?? "标准里没有对应的条目"}）`, "info");
-      return { action: "continue" as const };
+      if (relay) { await rewriteSummary(ctx, life); verifiedRelayPrompt = raw; }
+      return relay ? { action: "transform" as const, text: raw } : { action: "continue" as const };
     } catch (error) {
       activeTask?.controller.abort();
       await pauseForError(ctx, error, life);
@@ -1149,7 +1181,9 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const life = lifecycle;
     if (!life.active) return;
     // Pi 1.2 的插件消息没有 prompt，不能当成用户接管、需求或授权。
-    const prompt = event.messageType === "custom" || isLoopMessage(event.prompt ?? "") ? undefined : event.prompt;
+    const provenance = { verifiedRelay: verifiedRelayPrompt !== undefined && verifiedRelayPrompt === event.prompt };
+    verifiedRelayPrompt = undefined;
+    const prompt = event.messageType === "custom" || isLoopMessage(event.prompt ?? "", provenance) ? undefined : event.prompt;
     // 来源内容变化不再撤销完成资格，这里只比较用户输入（需求、标准、授权）。
     const previousInputs = JSON.stringify([state.requirement, state.criteria, state.grants]);
     const hadReview = state.rounds.length > 0 || state.phase === "done" || reviewRunning;

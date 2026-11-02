@@ -83,10 +83,10 @@ export function recordBatchInfo(info: BatchInfo): void {
   try { if (JSON.stringify(readJson(batchInfoPath(info.dir))) !== JSON.stringify(info)) writeJsonAtomic(batchInfoPath(info.dir), info); }
   catch (error) { eventError(info.batch.file, null, error); }
 }
-function eventError(file: string, seq: number | null, error: unknown): void {
+export function eventError(file: string, seq: number | null, error: unknown, detail: Record<string, unknown> = {}): void {
   try {
     mkdirSync(eventsRoot(), { recursive: true });
-    appendFileSync(join(eventsRoot(), "errors.log"), `${JSON.stringify({ at: new Date().toISOString(), batch: file, seq, reason: String(error) })}\n`);
+    appendFileSync(join(eventsRoot(), "errors.log"), `${JSON.stringify({ at: new Date().toISOString(), batch: file, seq, ...detail, reason: String(error) })}\n`);
   } catch { /* 连本机留底也不可写时，stderr 是最后出口。 */ }
   try { process.stderr.write(`[Loop PA] ${file} seq=${seq ?? "未分配"}：${String(error)}\n`); } catch { /* 业务不能受观测故障影响 */ }
 }
@@ -98,8 +98,8 @@ function ownerDead(owner: Owner): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
 }
 /** 完整锁身份通过硬链接原子发布；回收者同样串行，不按年龄接管。 */
-function eventLock(): () => void {
-  const root = eventsRoot(), path = join(root, ".lock"), token = randomUUID();
+export function eventLock(path = join(eventsRoot(), ".lock")): () => void {
+  const root = dirname(path), token = randomUUID();
   mkdirSync(root, { recursive: true });
   const mine: Owner = { pid: process.pid, started: processStartTime(process.pid), token };
   if (!mine.started) throw new Error("无法确认事件锁进程启动时间");
@@ -141,7 +141,10 @@ export function pushEvent(info: BatchInfo, stage: string | null, status: EventSt
   let seq: number | null = null, release: (() => void) | undefined;
   try {
     const dir = readPAConfig().eventsDir;
-    if (!dir) return;
+    if (!dir) {
+      if (detail.via === "pa") eventError(info.batch.file, null, "PA 恢复事件未配置接收目录", { via: "pa", id: detail.id });
+      return;
+    }
     release = eventLock();
     const path = sequencePath(info.batch.file);
     let state: Sequence;
@@ -167,7 +170,7 @@ export function pushEvent(info: BatchInfo, stage: string | null, status: EventSt
       const path = join(eventsRoot(), "details", `${id}.json`);
       mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(detail));
       event.evidence.detail = path;
-      event.detail = { path, ...Object.fromEntries(["next", "scope", "branch", "commit", "via", "id", "failureKind"].filter((key) => key in detail).map((key) => [key, detail[key]])) };
+      event.detail = { path, ...Object.fromEntries(["next", "scope", "branch", "commit", "via", "id", "failureKind", "paGrantsUsed"].filter((key) => key in detail).map((key) => [key, detail[key]])) };
     }
     mkdirSync(dir, { recursive: true });
     const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
@@ -177,7 +180,7 @@ export function pushEvent(info: BatchInfo, stage: string | null, status: EventSt
       if (writeSync(fd, line) !== line.length) throw new Error("事件未完整写入");
     } finally { closeSync(fd); }
     return event;
-  } catch (error) { eventError(info.batch.file, seq, error); return; }
+  } catch (error) { eventError(info.batch.file, seq, error, { ...(detail.via === "pa" ? { via: "pa", id: detail.id } : {}), ...(detail.paGrantsUsed ? { paGrantsUsed: detail.paGrantsUsed } : {}) }); return; }
   finally { try { release?.(); } catch (error) { eventError(info.batch.file, seq, error); } }
 }
 
@@ -193,11 +196,12 @@ export function writePhase(info: BatchInfo, stage: string | null, phase: PhaseRe
 }
 
 /** 验收调用结束不等于批次已提交；欠项与证据在真实提交完成前继续受保护。 */
-export function reportUncommittedBatch(info: BatchInfo, record?: AcceptanceRecord): void {
+export function reportUncommittedBatch(info: BatchInfo, record?: AcceptanceRecord, paGrantsUsed?: string[]): void {
   const reason = eventReason(record?.verdict === "部分验证" ? "整批验收部分验证，尚未完成提交" : "整批尚未完成提交，成果与证据保留");
   const evidence = { summary: join(info.dir, "report.md"), ...(record?.runDir ? { acceptance: record.runDir } : {}) };
   const next: NextAction = record?.verdict === "部分验证" ? "resume" : "manual";
-  const detail = { next, acceptance: { verdict: record?.verdict ?? "未验证", ...queueAcceptance(record) } };
+  const detail = { next, acceptance: { verdict: record?.verdict ?? "未验证", ...queueAcceptance(record) },
+    paGrantsUsed: paGrantsUsed ?? readJson<PhaseRecord>(phasePath(info.dir, null))?.detail.paGrantsUsed ?? [] };
   writePhase(info, null, "paused", { status: "paused", ...reason, next, evidence, detail });
   if (info.batch.file) pushEvent(info, null, "paused", reason, evidence, detail);
 }

@@ -297,8 +297,9 @@ function enqueue(dir: string, batchId: string, requireAcceptance: boolean, integ
       review: { stages: stageDetails.map((item) => ({ stage: item.stage, ...item.detail.review as object })) },
       acceptance: { verdict: !batch.acceptance ? "未配置" : integration?.partial.length || integration?.manual.length ? "部分验证" : "通过", ...(integration ?? { failed: [], partial: [], manual: [] }) } };
     const evidence = stageDetails.length === 1 ? stageDetails[0].evidence : { summary: join(batch.dir, "report.md"), ...Object.fromEntries(stageDetails.flatMap((item) => Object.entries(item.evidence).map(([key, value]) => [`${item.stage}.${key}`, value]))) };
+    const paGrantsUsed = readJson<PhaseRecord>(phasePath(batch.dir, null))?.detail.paGrantsUsed;
     const commits = commitBatch({ id: batch.id, name: batch.name, release: batch.release, scratch: state.dir, candidates, previous: batch.commits,
-      event: { info: batchEventInfo(batch), detail: { ...detail, completion: signature }, evidence },
+      event: { info: batchEventInfo(batch), detail: { ...detail, completion: signature, ...(paGrantsUsed ? { paGrantsUsed } : {}) }, evidence },
       save: (records) => { batch.commits = records; writeJsonAtomic(statePath(dir), state); } });
     if (duplicate) return commits;
     const id = randomUUID(), sources: Source[] = commits.map((item) => ({ cwd: item.cwd, branch: item.branch, head: item.commit, tree: item.tree, commit: item.commit }));

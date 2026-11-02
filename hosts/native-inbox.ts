@@ -59,30 +59,51 @@ export function nativeCommand(command: string, args: string[], cwd: string, env:
 }
 
 export async function sendNativeRepair(options: { command: string; host: string; cwd: string; env: NodeJS.ProcessEnv; sessionId: string; message: string;
-  id: string; claude?: ClaudeInbox; childPid: number; childStarted: string; signal: AbortSignal }): Promise<void> {
+  id: string; from?: string; claude?: ClaudeInbox; childPid: number; childStarted: string; signal: AbortSignal }): Promise<void> {
   const { signal } = options;
   signal.throwIfAborted();
   if (processStartTime(options.childPid) !== options.childStarted) throw new Error("原宿主进程身份已变化，未发送到其他会话");
   if (options.host === "codex") {
-    await nativeCommand(options.command, ["queue", "--thread", options.sessionId, "--message", options.message, "--cd", options.cwd], options.cwd, options.env, signal);
+    const output = await nativeCommand(options.command, ["queue", "--thread", options.sessionId, "--message", options.message, "--cd", options.cwd], options.cwd, options.env, signal);
+    if (options.from === "loop-pa" && output.trim().startsWith("{")) {
+      try {
+        const response = JSON.parse(output);
+        if (response.error || response.ok === false || response.success === false) throw new Error("原生 queue 未确认投递成功");
+      } catch (error) { throw new Error(`原生 queue 投递结果不明：${String(error)}`); }
+    }
     return;
   }
   const channel = options.claude;
   if (!channel || !localInboxSocket(channel.socket)) throw new Error("Claude 尚未发布可核对的本地原生收件通道");
   await new Promise<void>((accept, reject) => {
     const socket = createConnection(channel.socket);
+    let response = "", connected = false;
     const fail = (error: Error) => { socket.destroy(); reject(error); };
     const cancel = () => fail(new Error("原会话投递已取消"));
     signal.addEventListener("abort", cancel, { once: true });
     socket.setTimeout(5000, () => fail(new Error("原生收件通道超时")));
     socket.on("error", () => fail(new Error("原生收件通道连接失败")));
+    socket.on("data", (data) => { response += data.toString("utf8"); if (response.length > 65536) fail(new Error("原生收件应答过大，投递结果不明")); });
     socket.on("connect", () => {
+      connected = true;
       if (signal.aborted || processStartTime(options.childPid) !== options.childStarted) { cancel(); return; }
       socket.end(`${JSON.stringify({ type: "auth", token: channel.token })}\n${JSON.stringify({ type: "user", session_id: options.sessionId,
-        uuid: options.id, msg_id: options.id, from: "loop-merge-queue", ...(channel.fromMode ? { from_mode: channel.fromMode } : {}),
+        uuid: options.id, msg_id: options.id, from: options.from ?? "loop-merge-queue", ...(channel.fromMode ? { from_mode: channel.fromMode } : {}),
         message: { role: "user", content: options.message } })}\n`);
     });
-    socket.on("end", accept);
-    socket.on("close", (hadError) => { signal.removeEventListener("abort", cancel); if (!hadError) accept(); });
+    const confirm = () => {
+      if (!connected) { fail(new Error("原生收件未建立连接，投递结果不明")); return; }
+      if (options.from === "loop-pa" && response.trim()) {
+        try {
+          for (const line of response.trim().split("\n")) {
+            const reply = JSON.parse(line);
+            if (reply.error || reply.ok === false || reply.success === false || /error|denied|failed/.test(reply.type ?? "")) throw new Error("原生收件拒绝投递");
+          }
+        } catch (error) { fail(new Error(`原生收件应答不明：${String(error)}`)); return; }
+      }
+      accept();
+    };
+    socket.on("end", confirm);
+    socket.on("close", (hadError) => { signal.removeEventListener("abort", cancel); if (!hadError) confirm(); });
   });
 }

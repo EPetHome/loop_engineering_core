@@ -5,6 +5,7 @@
  * 评审输入拼接、总结渲染、注入给开发方的约定。所有函数可被 Node 直接单测。
  */
 import { createHash } from "node:crypto";
+import { relaySourceLines } from "./pa-records.ts";
 import {
   ACCEPTANCE_CONVENTION, authorizationLine, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria, type Grants,
 } from "./acceptance-core.ts";
@@ -130,6 +131,8 @@ export interface SummaryInput {
   changedFiles?: string[];
   gitStatusShort: string;
   notes?: string;
+  /** 经 PA 转达的输入与授权来源。 */
+  paRelays?: import("./pa-records.ts").RelaySource[];
   /** 冻结的验收标准（配了 acceptance 时）。 */
   criteria?: Criteria;
   /** 你对 [授权] 条目的答复。 */
@@ -382,6 +385,7 @@ export function renderSummary(input: SummaryInput): string {
   }
   if (input.newCommits) lines.push(`- 开发方新增提交：${input.newCommits} 个（基线之后，只记录不评判）`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
+  if (input.paRelays?.length) lines.push("## PA 转达来源", ...relaySourceLines(input.paRelays));
   const sourceChanges = input.sourceChanges ?? [];
   if (sourceChanges.length > 0 || input.sourceChangeNote) {
     lines.push("## 开发期间来源变化");

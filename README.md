@@ -406,9 +406,33 @@ bin/loop 查询 /开发空间/docs/batches/x/批次.json --json
 bin/loop 查询 --all --json   # 省略批次参数时同样查所有已记录批次
 ```
 
-返回固定外壳 `{"v":1,"at":"…","batches":[…]}`；每批含 `project`、`batch{file,name,recipe,paGrants:[]}`、`branch`、`commit`、`pushed`、整批 `state/pause/next`、`stages`、`queue`、`evidence`、`events{lastSeq}`。每段有 `stage/state/round/repairs/lastActivity/pause/session/evidence/paRelays:[]`；完整 JSON 示例见 [工具清单「PA 对接」](工具清单.md#pa-对接)。未知提交、队列、会话为 `null`，不猜成通过。
+返回固定外壳 `{"v":1,"at":"…","batches":[…]}`；每批含 `project`、`batch{file,name,recipe,paGrants:[{id,at}]}`、`branch`、`commit`、`pushed`、整批 `state/pause/next`、`stages`、`queue`、`evidence`、`events{lastSeq}`。每段有 `stage/state/round/repairs/lastActivity/pause/session/evidence/paRelays`（最近 50 条已读取转达的 `{id,at}`）；完整 JSON 示例见 [工具清单「PA 对接」](工具清单.md#pa-对接)。未知提交、队列、会话为 `null`，不猜成通过。
 
-两个宿主各写 `<段>.phase.json`；整批阶段写 `batch.phase.json`，查询不解析 Markdown。原 `<段>.status.json` 的接力和合入语义不变。`loop 清理` 和完成后瘦身都保留尚未 `done/failed` 的整批证据。送话、续跑、只评审和停止命令不在本段范围。
+两个宿主各写 `<段>.phase.json`；整批阶段写 `batch.phase.json`，查询不解析 Markdown。原 `<段>.status.json` 的接力和合入语义不变。`loop 清理` 和完成后瘦身都保留尚未 `done/failed` 的整批证据。只评审和停止命令不在本节范围。
+
+### 送话、续跑与回执
+
+PA 先记账并分配编号，再从**没有 Loop 开发会话环境变量**的进程调用：
+
+```bash
+bin/loop 送话 /开发空间/批次.json --stage 甲 --id m1 --text-file /用户原话.txt --wait 30 --json
+# 文件可换成 -，从 stdin 读取；原文不 trim、不改换行。
+bin/loop 续跑 /开发空间/批次.json --id r1 --grant-file /用户授权答复.txt --json
+```
+
+送话仅在段暂停、需要决定、返修到上限或已完成时投递；运行/评审中返回 `rejected「段正在运行」`，不保存消息、不占编号。按 PID 加启动时间核对原会话，已关闭返回 `failed「会话已关闭」`，不新建或恢复会话。带 `AUTOREVIEW_STAGE` 或 `AUTOREVIEW_PIPELINE_DIR`（即使空值）直接拒绝。`--id` 在段内查重，重复调用只返回当前回执；不会重新读取原文或重发。
+
+回执示例：`{"v":1,"ok":true,"command":"送话","id":"m1","state":"read","sha256":"…","at":"…","readAt":"…"}`。`delivered` 只表示通道已送到，`read` 才表示会话核对并读取；`--wait` 内未读取仍返回 `delivered`。调用超时或结果不明为 `unknown`，**不重试**；可用同编号查询回执。退出码：`read/delivered` 为 0，拒绝、失败或不明为 1；参数错误为 2。两命令也支持只读 `--dry-run`。
+
+原文与 SHA-256 留在 `<流水线目录>/<段>.words/<id>.json`，先记 `sending` 再投递。Pi 轮询独立的用户原话收件位置；Claude 走原会话本地认证 socket；Codex 走 `queue --thread`。消息头为 `【用户原话 · 经 PA 转达 · <id>】` 加换行；会话核对记录、原文哈希、`delivered` 状态和会话身份，一次性改为 `read`。核对后的原文走用户输入路径，包括授权；只有消息开头的独立转达头才按信封核对；正文或文件里引用消息头不改变用户来源，撤权与标准更新照常处理。伪造、篡改和重复消费均作机器消息，不更新标准或授权，并报告「送话核对失败」。已完成段读到转达也撤销旧完成资格，按用户的「再改一下」继续。
+
+每次读取都发 `resumed{via:"pa",id}`（位于 `detail`）；发不出去时 `events/errors.log` 带编号。会话状态保留 `userInputVia:"pa"`、输入序号及转达编号；总结和交付总表都记录「经 PA 转达，编号 …」，授权答复另列一行。环境变量防护只是辅助，不能代替 PA 按编号对账。
+
+整批流水线已退出时用「续跑」，不向段送话。`next:"manual"` 或原编排进程仍在则拒绝；`next:"grant"` 必须提供能解析出当前授权答复的原文。答复只追加到 `grants.pa.jsonl`（`{id,text,at,via:"pa",criteriaHash,criteriaEpoch}`），写入时绑定当时标准的条目全文、版本及授权代次，不修改标准文件。各段完成时后台执行 `pipeline.ts --from 验收`，否则走多段启动路径；回执 `started` 含后台 PID、启动时间、日志和实际命令，**不表示验收通过**。编号幂等，重复调用不再启动。
+
+授权只对答复时的标准有效：新增条目、同编号条目内容/归属或版本变化后，旧 PA 答复全部失效，须用新编号重新答复；标准改回旧文本也不复活旧授权。「同意授权：全部」只对应当时已冻结的具体编号。直接写入的无绑定行仍可使用，但首次读取即在 `grants.pa.bindings.json` 固定原文哈希、标准范围及具体答复；遇到已知标准变化的旧行不能自动绑定到新标准，不能修改原文后复用编号。
+
+查询中的 `batch.paGrants` 列出授权文件的**全部**编号（含直接写入的行及已失效行）；每次实际读取 PA 授权的流水线事件在 `detail.paGrantsUsed` 列出命中当前标准的全部编号，后续暂停/完成事件也带上它们，供 PA 核对未经过续跑写入的授权。
 
 ## 启动入口（bin/pi-dev）
 

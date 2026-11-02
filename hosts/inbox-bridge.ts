@@ -10,7 +10,7 @@ import { localInboxSocket, nativeCommand, nativeLaunch, sendNativeRepair, type C
 
 interface Bridge {
   token: string; host: string; sessionId?: string; pid: number; started: string; childPid: number; childStarted: string;
-  socket?: string;
+  socket?: string; command?: string;
 }
 interface NativeBinding { token: string; sessionId: string; childPid: number; childStarted: string; channel: ClaudeInbox }
 interface RepairDispatch { seq: number; sessionId: string; signal: string; id?: string; prepared?: boolean; sent?: boolean; sentAt?: number; warning?: string }
@@ -76,6 +76,15 @@ export function hookInputBridgeAvailable(dir: string, stage: string, status: Sta
     && bridge.pid === status.pid && bridge.started === status.processStarted && bridge.started && processStartTime(bridge.pid) === bridge.started
     && bridge.childStarted && processStartTime(bridge.childPid) === bridge.childStarted
     && (status.host === "codex" || (nativeBinding(bridge) && bridge.socket && localInboxSocket(bridge.socket))));
+}
+
+/** PA 复用原宿主认证通道；不启动、不恢复会话，也不使用终端键盘。 */
+export async function deliverHookWords(dir: string, stage: string, status: StageStatus, message: string, id: string, cwd = process.cwd()): Promise<void> {
+  if (!hookInputBridgeAvailable(dir, stage, status)) throw new Error("原宿主收件通道或进程身份无法核对");
+  const bridge = readJson<Bridge>(inputBridgePath(dir, stage))!;
+  await sendNativeRepair({ command: bridge.command ?? (status.host === "codex" ? process.env.CODEX_BIN || "codex" : "claude"),
+    host: status.host!, cwd, env: process.env, sessionId: status.sessionId, message, id, from: "loop-pa",
+    claude: nativeBinding(bridge), childPid: bridge.childPid, childStarted: bridge.childStarted, signal: new AbortController().signal });
 }
 
 /** 复用已安装 node-pty；macOS helper 缺执行位时仅修复本次私有副本。 */
@@ -207,7 +216,7 @@ export function launchHookHost(options: HookHostOptions): void {
   try {
     const childStarted = processStartTime(terminal.pid);
     if (!started || !childStarted) throw new Error("无法核对宿主及原会话进程身份");
-    writePrivate(path, { token: options.token, host: options.host, pid: process.pid, started, childPid: terminal.pid, childStarted, socket: native.socket } satisfies Bridge);
+    writePrivate(path, { token: options.token, host: options.host, pid: process.pid, started, childPid: terminal.pid, childStarted, socket: native.socket, command: options.command } satisfies Bridge);
     if (process.stdin.isTTY) process.stdin.setRawMode?.(true);
     process.stdin.on("data", forwardInput); process.stdin.resume(); process.stdout.on("resize", resize);
     for (const signal of signals) process.on(signal, forwardSignal);

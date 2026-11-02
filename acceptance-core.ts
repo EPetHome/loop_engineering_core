@@ -98,11 +98,15 @@ export function grantsFromUser(text: string, criteria: Criteria | undefined, pre
 
 /** 程序自己发给开发方的消息：不是用户打的字；继续识别旧流水线返修开头。 */
 const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|整批验收返修|流水线 e2e 返修) · |合入队列返修】|流程等待】|流程准备】)/;
-export const isLoopMessage = (prompt: string): boolean => LOOP_MESSAGE.test(prompt);
+/** 只有开头的独立转达头才是信封；正文、文件或行内引用不改变真实用户来源。 */
+export const isPARelayEnvelope = (prompt: string): boolean => /^\s*【用户原话 · 经 PA 转达 · [^\r\n】]*】\r?\n/.test(prompt);
+export interface UserPromptProvenance { verifiedRelay?: boolean }
+export const isLoopMessage = (prompt: string, provenance: UserPromptProvenance = {}): boolean =>
+  LOOP_MESSAGE.test(prompt) || (!provenance.verifiedRelay && isPARelayEnvelope(prompt));
 
 /** 用户亲手打的字：程序自己发的消息不算，pi 展开的 <file> 块去掉（宿主 Hook 直接传没展开的原文）。 */
-export function typedByUser(prompt: string): string {
-  if (LOOP_MESSAGE.test(prompt)) return "";
+export function typedByUser(prompt: string, provenance: UserPromptProvenance = {}): string {
+  if (isLoopMessage(prompt, provenance)) return "";
   return prompt.replace(/<file name="[^"]*">[\s\S]*?<\/file>/g, "");
 }
 
@@ -246,8 +250,8 @@ export function stripCriteriaSection(text: string): string {
 }
 
 /** 用户消息里带「## 验收标准」时生成新一版标准（替换旧的）；没有返回 undefined。只对用户发来的消息调用。 */
-export function criteriaFromUser(prompt: string, previous?: Criteria): Criteria | undefined {
-  if (isLoopMessage(prompt)) return undefined;
+export function criteriaFromUser(prompt: string, previous?: Criteria, provenance: UserPromptProvenance = {}): Criteria | undefined {
+  if (isLoopMessage(prompt, provenance)) return undefined;
   const items = extractCriteria(prompt);
   if (!items) return undefined;
   return { source: "用户", items, version: (previous?.version ?? 0) + 1, updatedAt: new Date().toISOString() };

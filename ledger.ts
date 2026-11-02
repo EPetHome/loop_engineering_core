@@ -11,6 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { stripCriteriaSection, type AcceptanceRecord } from "./acceptance-core.ts";
 import type { QueueAcceptance } from "./pipeline-core.ts";
 import type { BatchCommit } from "./commit-batch.ts";
+import { relaySourceLines, type RelaySource } from "./pa-records.ts";
 
 export const LEDGER_FILE = "交付记录.md";
 
@@ -97,6 +98,16 @@ export interface LedgerRecord {
   result: string;
   summary: string;
   pending: PendingItem[];
+  paRelays?: RelaySource[];
+}
+
+/** 转达读取后即单独留来源；即使之后暂停，也不能等完成才让 PA 对账。 */
+export function appendPARelayRecord(record: { project: string; session: string; summary: string; source: RelaySource }, path = deliveryLedgerPath()): string {
+  return appendSegment([
+    `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 ${oneLine(record.session, 200)}`,
+    "- 类型：用户原话，经 PA 转达（非完成结论）",
+    ...relaySourceLines([record.source]), `- 总结：${oneLine(record.summary, 1000)}`, "- [ ] 已回写原单", "",
+  ].join("\n"), path);
 }
 
 export function ledgerStamp(date = new Date()): string {
@@ -111,6 +122,7 @@ export function renderLedgerRecord(record: LedgerRecord): string {
     `- 任务：${oneLine(record.task, 240)}`,
     `- 结果：${oneLine(record.result, 200)}`,
     `- 总结：${oneLine(record.summary, 1000)}`,
+    ...relaySourceLines(record.paRelays),
     "- [ ] 已回写原单",
     ...record.pending.map((item) => item.kind === "人工"
       ? `- [ ] ${oneLine(item.id, 40)} 人工`

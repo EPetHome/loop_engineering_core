@@ -20,7 +20,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  authorizationStatus, extractCriteria, formatFailedItems, grantsFromUser, isAuthorizationCriterion, isManualCriterion,
+  authorizationStatus, extractCriteria, formatFailedItems, isAuthorizationCriterion, isManualCriterion,
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
@@ -28,6 +28,7 @@ import { EXT_DIR, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_B
 import { processStartTime, reapProcs } from "./procs.ts";
 import { batchInfo, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
+import { mergePAGrants, readPAGrants } from "./pa-records.ts";
 import type { FailureKind } from "./failure.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { createGitEvidence } from "./git.ts";
@@ -105,6 +106,8 @@ export interface Plan {
   prepare?: string;
   acceptance?: AcceptancePlan;
   maxParallel?: number;
+  /** 本次实际读取并命中当前标准的 PA 授权编号。 */
+  paGrantsUsed?: string[];
 }
 
 export class PlanError extends Error {}
@@ -351,7 +354,9 @@ export async function preflight(plan: Plan, options: { fromAcceptance?: boolean;
     }
     if (acceptance.items.some((item) => isAuthorizationCriterion(item.text))) {
       const criteria: Criteria = { source: "用户", items: acceptance.items, version: 1, updatedAt: "" };
-      const pendingGrants = authorizationStatus(criteria, grantsFromUser(acceptance.requirement, criteria)).pending;
+      const merged = mergePAGrants(plan.dir, acceptance.requirement, criteria);
+      plan.paGrantsUsed = merged.used;
+      const pendingGrants = authorizationStatus(criteria, merged.grants).pending;
       add("整批验收的 [授权] 条目都已答复", pendingGrants.length === 0, pendingGrants.length === 0 ? "已答复"
         : `${pendingGrants.join("、")} 还没答复：在 ${acceptance.criteriaFile} 里加一行「同意授权：${pendingGrants.join("、")}」或「不授权：${pendingGrants.join("、")}」`);
     }
@@ -401,6 +406,7 @@ function pipelineInfo(plan: Plan): BatchInfo {
 }
 function pipelineEvent(plan: Plan, phase: PhaseRecord["phase"], status: "started" | "paused" | "repair-limit" | "failed" | "resumed", text: string, detail: Record<string, unknown> = {}, failureKind?: FailureKind): void {
   try {
+    detail = { ...detail, paGrantsUsed: plan.paGrantsUsed ?? [] };
     const info = pipelineInfo(plan), reason = eventReason(text, failureKind), evidence = { summary: resolve(plan.dir, "report.md"),
       ...(typeof detail.log === "string" ? { log: detail.log } : {}), ...(typeof detail.acceptance === "string" ? { acceptance: detail.acceptance } : {}) };
     writePhase(info, null, phase, { status, ...reason, evidence, detail,
@@ -467,7 +473,7 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
         ...(status !== "failed" ? { next: detail.next ?? "manual" } : {}), ...(detail.failureKind ? { failureKind: detail.failureKind } : {}),
         ...(detail.log ? { log: detail.log } : {}), ...(acceptanceRecord ? { acceptance: acceptanceRecord.runDir } : {}),
         ...(status === "repair-limit" ? { mustFix: acceptanceRecord ? formatFailedItems(acceptanceRecord) : line } : {}) }, detail.failureKind);
-    } else if (!submitted) reportUncommittedBatch(pipelineInfo(plan), acceptanceRecord);
+    } else if (!submitted) reportUncommittedBatch(pipelineInfo(plan), acceptanceRecord, plan.paGrantsUsed);
     // submitted 的 done phase / 事件只由提交模块发布，不能用退出码 0 补造终态。
     io.notify(`流水线 ${plan.name}：${line}`);
     return code;
@@ -488,6 +494,12 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
   options.signal?.throwIfAborted();
   // 开跑前检查：有一项不过就不开任何窗口。
   const checks = await preflight(plan, { fromAcceptance: options.fromAcceptance, env: io.preflightEnv });
+  const auditPAGrants = () => {
+    if (!plan.paGrantsUsed?.length) return;
+    pipelineEvent(plan, "running", "resumed", "", { via: "auto", paGrantsUsed: plan.paGrantsUsed });
+    report.push(...readPAGrants(plan.dir).filter((row) => plan.paGrantsUsed!.includes(row.id)).map((row) => `- 授权答复经 PA 转达，编号 ${row.id}：${JSON.stringify(row.text)}`));
+  };
+  auditPAGrants();
   report.push("", "## 开跑前检查", ...checks.map((check) => `- ${check.ok ? "🟢" : "🔴"} ${check.name}：${check.detail}`), "");
   for (const check of checks) io.log(`${check.ok ? "🟢" : "🔴"} ${check.name}：${check.detail}`);
   const failed = checks.filter((check) => !check.ok);
@@ -644,7 +656,10 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
 
   const criteria: Criteria = { source: "用户", items: acceptance.items, version: 1, updatedAt: new Date().toISOString() };
   // [授权] 条目的答复写在标准文件里（你自己的文件）；没答复的停下来问你，不让验收方先动手。
-  const grants = grantsFromUser(acceptance.requirement, criteria);
+  const merged = mergePAGrants(plan.dir, acceptance.requirement, criteria);
+  plan.paGrantsUsed = merged.used;
+  const grants = merged.grants;
+  auditPAGrants();
   const pending = authorizationStatus(criteria, grants).pending;
   if (pending.length > 0) {
     return finish(2, `整批验收标准里 ${pending.join("、")} 要你授权：同意就在 ${acceptance.criteriaFile} 里加一行「同意授权：${pending.join("、")}」，`
