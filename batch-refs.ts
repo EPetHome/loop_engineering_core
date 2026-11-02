@@ -10,7 +10,7 @@ function insideRoot(root: string, absolute: string): string | undefined {
 /**
  * 提示词和验收标准随 worktree 重定位；仓库外相对引用改成原绝对目标。
  * 其他资源只有列入实际搬运的仓库相对路径 movedFiles 时才跟随，否则固定原目标。
- * cwd、dir、e2e.workDir 和验收日志不是随批次搬运的资源，相对路径固定为原绝对目标。
+ * cwd、dir、acceptance.workDir 和验收日志不是随批次搬运的资源，相对路径固定为原绝对目标。
  */
 export function remapBatchReferences(
   raw: Record<string, unknown>, mainRoot: string, batchRoot: string, batchPath: string,
@@ -58,12 +58,15 @@ export function remapBatchReferences(
       remapPonytail(stage);
     }
   }
-  if (copy.e2e && typeof copy.e2e === "object" && !Array.isArray(copy.e2e)) {
-    const e2e = copy.e2e as Record<string, unknown>;
-    if (e2e.workDir !== undefined) e2e.workDir = originalPath(e2e.workDir);
-    if (e2e.criteria !== undefined) e2e.criteria = remap(e2e.criteria);
-    if (e2e.acceptance && typeof e2e.acceptance === "object" && !Array.isArray(e2e.acceptance)) {
-      const acceptance = e2e.acceptance as Record<string, unknown>;
+  for (const key of ["acceptance", "e2e"]) { // 兼容旧字段及其嵌套配置，保留输入格式。
+    const value = copy[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const block = value as Record<string, unknown>;
+    if (block.workDir !== undefined) block.workDir = originalPath(block.workDir);
+    if (block.criteria !== undefined) block.criteria = remap(block.criteria);
+    const config = key === "acceptance" ? block : block.acceptance;
+    if (config && typeof config === "object" && !Array.isArray(config)) {
+      const acceptance = config as Record<string, unknown>;
       if (Array.isArray(acceptance.logs)) acceptance.logs = acceptance.logs.map(originalPath);
       if (acceptance.guide !== undefined) acceptance.guide = remapDependency(acceptance.guide);
       // actions 只允许批次目录内的相对路径，随目录搬运，不改成不合法的绝对路径。

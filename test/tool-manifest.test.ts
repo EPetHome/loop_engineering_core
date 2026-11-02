@@ -147,7 +147,10 @@ function batchFields(sources: Sources = realSources()): Set<string> {
 
   const fields = new Set<string>();
   for (const key of directKeys(parsePlan, ["raw"])) fields.add(key);
-  for (const match of parsePlan.matchAll(new RegExp(`\\braw\\.e2e\\.(${KEY})`, "g"))) fields.add(`e2e.${match[1]}`);
+  // 新批次平铺验收配置；input.acceptance 仅用于兼容旧嵌套配置，不是新字段。
+  for (const key of directKeys(parsePlan, ["input"])) if (key !== "acceptance") fields.add(`acceptance.${key}`);
+  const acceptance = functionBody(sources["config.ts"], "export function parseAcceptanceConfig");
+  for (const key of new Set([...directKeys(acceptance, ["data"]), ...helperKeys(acceptance, ["data"])])) fields.add(`acceptance.${key}`);
 
   const stage = directKeys(parsePlan, ["value"]);
   const pi = directKeys(piOptions, ["value"]);

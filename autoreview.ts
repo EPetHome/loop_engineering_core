@@ -766,7 +766,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   };
 
   /**
-   * 流水线收件箱：编排程序把 e2e 没通过、归这一段的条目写进来，开发方空闲时发给它。
+   * 流水线收件箱：编排程序把整批验收没通过、归这一段的条目写进来，开发方空闲时发给它。
    * 发之前把评审起点重定到此刻，下一轮评审只看这次返修的改动（同一仓库里别的段的改动不算到这一段头上）；
    * 这些条目当作「上一轮必修」交给评审复查。
    */
@@ -1041,7 +1041,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
           }
         }
       }
-      // 流水线里的段：报一次当前状态（重开的会话如果已经完成或暂停，就照实报；e2e 返修还没处理完时只报 started，
+      // 流水线里的段：报一次当前状态（重开的会话如果已经完成或暂停，就照实报；整批验收返修还没处理完时只报 started，
       // 免得编排程序误以为已经修好），开始看收件箱。
       if (pipelineLink) {
         const event = state.awaitingInbox !== undefined ? "started" : state.phase === "done" ? "done" : state.phase === "paused" ? "paused" : "started";
@@ -1219,7 +1219,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       // 暂停状态不自动评审，等你发消息让开发方继续（before_agent_start 解除）或输入 /review。
       if (state.phase === "paused") return;
       if (state.needsInputReview) { if (state.enabled) void startReview(ctx, "auto"); return; }
-      // 流水线 e2e 返修：有改动就评审（不看标记）；没改代码多半是认为不归自己，报给编排程序（它会找你），不评审。
+      // 整批验收返修：有改动就评审（不看标记）；没改代码多半是认为不归自己，报给编排程序（它会找你），不评审。
       if (state.awaitingInbox !== undefined) {
         const current = await evidence(ctx, life).snapshot();
         checkLive(life);

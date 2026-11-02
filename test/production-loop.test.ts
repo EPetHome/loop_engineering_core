@@ -192,7 +192,7 @@ test("返修 1：heredoc 保留引号和命令归属，支持分隔符变体、c
   } finally { h.close(); }
 });
 
-test("A4 提示词/e2e 标准尚未写出只提示尚未找到，不当错误", () => {
+test("A4 提示词/验收标准尚未写出只提示尚未找到，不当错误", () => {
   for (const host of hosts) {
     const h = fixture();
     try {
@@ -200,9 +200,14 @@ test("A4 提示词/e2e 标准尚未写出只提示尚未找到，不当错误", 
       const missing = h.context(h.run(h.editEvent(host, batchFile)).stdout);
       assert.match(missing, /尚未找到：.*提示词-x\.md/); assert.doesNotMatch(missing, /错误|不存在/);
       h.write(promptFile, "# 已写出\n"); assert.equal(h.run(h.editEvent(host, batchFile)).stdout, "");
-      const raw = JSON.parse(h.valid()); raw.e2e = { workDir: ".", criteria: "验收标准.md" };
-      h.write(batchFile, JSON.stringify(raw));
-      assert.match(h.context(h.run(h.editEvent(host, batchFile)).stdout), /尚未找到：.*验收标准\.md/);
+      for (const key of ["acceptance", "e2e"]) { // 兼容旧批次字段的缺文件提示。
+        const raw = JSON.parse(h.valid()); raw[key] = { workDir: ".", criteria: "验收标准.md" };
+        h.write(batchFile, JSON.stringify(raw));
+        const context = h.context(h.run(h.editEvent(host, batchFile, key)).stdout);
+        assert.match(context, /尚未找到：.*验收标准\.md/);
+        if (key === "acceptance") assert.doesNotMatch(context, /旧写法|建议改成/);
+        else assert.match(context, /旧写法，建议改成 acceptance/);
+      }
     } finally { h.close(); }
   }
 });

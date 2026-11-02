@@ -31,8 +31,10 @@ export interface QueueBatch {
   id: string; name: string; file: string; dir: string; project: string; release: string;
   stages: QueueStage[]; steps: string[][];
   /** 最近核对的整批验收开关；实际完成资格仍须绑定本轮配置，文件缺失不能当成未配置。 */
+  acceptance?: boolean;
+  /** 兼容旧队列记录/登记参数；读取时归一化为 acceptance，新记录不再写它。 */
   e2e?: boolean;
-  /** 最近一次整合验收的身份；开验即更新，不能在新一轮期间沿用旧完成资格。 */
+  /** 最近一次整批验收的身份；开验即更新，不能在新一轮期间沿用旧完成资格。 */
   integrationEpoch?: string;
   commits?: BatchCommit[];
   commitSignature?: string;
@@ -41,7 +43,7 @@ export interface QueueBatch {
   lastRunQualification?: string;
 }
 export interface QueuePipelineRun {
-  dir: string; batch: string; token: string; e2e: boolean; configuration: string;
+  dir: string; batch: string; token: string; acceptance: boolean; configuration: string;
   qualification?: string; release: () => void;
 }
 interface Source { branch: string; cwd: string; head: string; tree: string; commit: string }
@@ -88,6 +90,10 @@ function load(dir: string): MergeQueue {
   catch (error) { throw new Error(`无法读取合入队列记录 ${statePath(dir)}：${String(error)}`); }
   if (state.version !== 1 || state.dir !== dir || state.workspace !== join(dir, "worktree") || !Array.isArray(state.entries) || !Array.isArray(state.batches)) throw new Error(`合入队列记录不可用：${statePath(dir)}`);
   if (commonDir(state.repo) !== state.common) throw new Error("合入队列仓库身份已变化，保留记录，未继续");
+  for (const batch of state.batches) {
+    batch.acceptance ??= batch.e2e; // 兼容旧队列开关，integration / integrationEpoch 保持原样。
+    delete batch.e2e;
+  }
   return state;
 }
 export function readMergeQueue(repo: string): MergeQueue | undefined {
@@ -168,9 +174,11 @@ export function registerQueueBatch(repo: string, value: Omit<QueueBatch, "id">):
   try {
     const state: MergeQueue = existsSync(statePath(dir)) ? load(dir)
       : { version: 1, repo, common, dir, workspace: join(dir, "worktree"), nextOrder: 1, batches: [], entries: [] };
-    const batch: QueueBatch = { ...value, e2e: value.e2e ?? Boolean(readJson<{ e2e?: unknown }>(value.file)?.e2e), file: canonical(value.file), dir: canonical(value.dir), project: canonical(value.project),
+    const raw = readJson<{ acceptance?: unknown; e2e?: unknown }>(value.file); // 兼容旧批次字段。
+    const batch: QueueBatch = { ...value, acceptance: value.acceptance ?? value.e2e ?? Boolean(raw?.acceptance ?? raw?.e2e), file: canonical(value.file), dir: canonical(value.dir), project: canonical(value.project),
       stages: value.stages.map((stage) => ({ ...stage, cwd: canonical(stage.cwd) })),
       id: hash([value.name, value.stages.map((stage) => [stage.name, stage.branch])]) };
+    delete batch.e2e; // 旧登记参数只读，不写回。
     for (const stage of batch.stages) {
       const top = realpathSync(gitText(stage.cwd, ["rev-parse", "--show-toplevel"]));
       if (top === repo || commonDir(top) !== common || overlaps(top, dir)) throw new Error(`合入队列只接收独立的本仓库开发 worktree：${stage.cwd}`);
@@ -212,11 +220,11 @@ function qualifications(batch: QueueBatch): Qualification[] | undefined {
   }
   return result;
 }
-function enqueue(dir: string, batchId: string, requireE2e: boolean, integration?: QueueAcceptance, integrationEpoch?: string, expectedIntegrationEpoch = false, run?: QueuePipelineRun): boolean {
+function enqueue(dir: string, batchId: string, requireAcceptance: boolean, integration?: QueueAcceptance, integrationEpoch?: string, expectedIntegrationEpoch = false, run?: QueuePipelineRun): boolean {
   return publication(dir, () => change(dir, (state) => {
     const batch = state.batches.find((item) => item.id === batchId)!;
     if (run) checkPipelineRun(run, batch);
-    if (batch.stages.length > 1 && !requireE2e) return false;
+    if (batch.stages.length > 1 && !requireAcceptance) return false;
     const stopped = state.entries.some((entry) => entry.batch === batchId && entry.autoStopped);
     const qualification = qualifications(batch);
     if (!qualification) return false;
@@ -239,13 +247,13 @@ function enqueue(dir: string, batchId: string, requireE2e: boolean, integration?
     }
     const integrationConclusions: string[] = [];
     if (batch.stages.length > 1) {
-      let conclusion = batch.e2e ? "通过（流水线确认）" : "未配置，跳过";
+      let conclusion = batch.acceptance ? "通过（流水线确认）" : "未配置，跳过";
       if (integration) {
         conclusion = "通过";
         if (integration.failed.length) conclusion = "不通过";
         else if (integration.partial.length || integration.manual.length) conclusion = "部分验证（见总表欠项）";
       }
-      integrationConclusions.push(`整合 e2e：${conclusion}`);
+      integrationConclusions.push(`整批验收：${conclusion}`);
     }
     const candidates = [...new Set(batch.stages.map((stage) => stage.branch))].map((branch) => {
       const stages = batch.stages.filter((stage) => stage.branch === branch);
@@ -262,7 +270,7 @@ function enqueue(dir: string, batchId: string, requireE2e: boolean, integration?
     for (const [index, source] of sources.entries()) gitText(state.repo, ["-c", "core.hooksPath=/dev/null", "update-ref", `refs/loop/queue/${id}/source-${index}`, source.commit]);
     const entry: QueueEntry = { id, batch: batchId, name: batch.name, qualification, sources, ...(integration ? { integration } : {}), ...(integrationEpoch ? { integrationEpoch } : {}), order: state.nextOrder++, status: "pending", attempt: 0, createdAt: stamp(), updatedAt: stamp() };
     try { entry.ledger = appendBatchCommitRecord({ project: state.repo, batch: batch.name, entry: id, file: batch.file, commits,
-      conclusions: candidates.flatMap((item) => item.conclusions), pending: [...qualification.flatMap((item) => [...(item.acceptance?.partial ?? []), ...(item.acceptance?.manual ?? [])].map((pending) => ({ ...pending, id: `${item.stage}/${pending.id}` }))), ...[...(integration?.partial ?? []), ...(integration?.manual ?? [])].map((item) => ({ ...item, id: `整合 e2e/${item.id}` }))] }); }
+      conclusions: candidates.flatMap((item) => item.conclusions), pending: [...qualification.flatMap((item) => [...(item.acceptance?.partial ?? []), ...(item.acceptance?.manual ?? [])].map((pending) => ({ ...pending, id: `${item.stage}/${pending.id}` }))), ...[...(integration?.partial ?? []), ...(integration?.manual ?? [])].map((item) => ({ ...item, id: `整批验收/${item.id}` }))] }); }
     catch (error) { entry.ledgerError = String(error); }
     batch.commitSignature = signature; batch.commitLedger = entry.ledger;
     if (!stopped) state.entries.push(entry);
@@ -326,11 +334,12 @@ export function pushQueueBatch(repo: string, batch: QueueBatch, dryRun: boolean)
   return dryRun ? perform() : publication(queueDir(repo), perform);
 }
 
-function batchConfiguration(file: string): { e2e: boolean; signature: string } {
+function batchConfiguration(file: string): { acceptance: boolean; signature: string } {
   try {
     const text = readFileSync(file, "utf8"), raw = JSON.parse(text);
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("批次文件必须是对象");
-    return { e2e: raw.e2e !== undefined, signature: hash(text) };
+    if (raw.acceptance !== undefined && raw.e2e !== undefined) throw new Error("acceptance 和 e2e 只能写一个"); // 兼容旧批次。
+    return { acceptance: raw.acceptance !== undefined || raw.e2e !== undefined, signature: hash(text) };
   } catch (error) { throw new Error(`无法核对本轮批次配置 ${file}：${String(error)}`); }
 }
 function checkPipelineRun(run: QueuePipelineRun, batch: QueueBatch): void {
@@ -338,18 +347,18 @@ function checkPipelineRun(run: QueuePipelineRun, batch: QueueBatch): void {
   if (batchConfiguration(batch.file).signature !== run.configuration) throw new Error("本轮运行期间批次配置已变化，请按当前计划重新检查；未提交");
 }
 /** 正常启动与队列续跑共用同一把运行锁；在任何异步准备/开发/验收之前登记。 */
-export function beginQueuePipeline(repo: string, file: string, e2e: boolean): QueuePipelineRun | undefined {
+export function beginQueuePipeline(repo: string, file: string, acceptance: boolean): QueuePipelineRun | undefined {
   const batch = registeredQueueBatch(repo, file);
   if (!batch || batch.stages.length < 2) return undefined;
   const dir = queueDir(repo), release = lock(dir, `integration-${batch.id}`);
   if (!release) throw new Error("本批流水线正在运行，未重复启动");
   try {
     const configuration = batchConfiguration(batch.file);
-    if (configuration.e2e !== e2e) throw new Error("本轮计划与当前批次文件的 e2e 配置不一致，请重新加载计划");
-    publication(dir, () => change(dir, (state) => { state.batches.find((item) => item.id === batch.id)!.e2e = e2e; }));
+    if (configuration.acceptance !== acceptance) throw new Error("本轮计划与当前批次文件的整批验收配置不一致，请重新加载计划");
+    publication(dir, () => change(dir, (state) => { state.batches.find((item) => item.id === batch.id)!.acceptance = acceptance; }));
     const qualification = qualifications(batch);
     return { dir, batch: batch.id, token: readJson<LockOwner>(join(dir, `integration-${batch.id}.lock`))!.token,
-      e2e, configuration: configuration.signature, qualification: qualification ? hash(qualification) : undefined, release };
+      acceptance, configuration: configuration.signature, qualification: qualification ? hash(qualification) : undefined, release };
   } catch (error) { release(); throw error; }
 }
 export function endQueuePipeline(run: QueuePipelineRun): void {
@@ -375,22 +384,22 @@ export function queueBatchRecheck(repo: string, file: string, run?: QueuePipelin
     }
     state.batches.find((item) => item.id === batch.id)!.integrationEpoch = epoch;
     for (const entry of state.entries) if (entry.batch === batch.id && ["pending", "testing", "ready", "blocked"].includes(entry.status)) {
-      Object.assign(entry, { status: "blocked", reason: "整合 e2e 正在重验，旧完成资格已撤销", updatedAt: stamp() });
+      Object.assign(entry, { status: "blocked", reason: "整批验收正在重验，旧完成资格已撤销", updatedAt: stamp() });
     }
   }));
   return epoch;
 }
-export function queueBatchComplete(repo: string, file: string, e2ePassed: boolean, record?: AcceptanceRecord, integrationEpoch?: string, run?: QueuePipelineRun): void {
+export function queueBatchComplete(repo: string, file: string, acceptancePassed: boolean, record?: AcceptanceRecord, integrationEpoch?: string, run?: QueuePipelineRun): void {
   const batch = registeredQueueBatch(repo, file);
   if (!batch) return;
   if (run) checkPipelineRun(run, batch);
-  const configured = run?.e2e ?? (batchConfiguration(batch.file).e2e || batch.e2e === true || Boolean(record) || integrationEpoch !== undefined);
+  const configured = run?.acceptance ?? (batchConfiguration(batch.file).acceptance || batch.acceptance === true || Boolean(record) || integrationEpoch !== undefined);
   // 本轮确实跑过但未通过的验收，绝不能被开工时的“未配置”覆盖。
-  const passed = e2ePassed && (!record || record.verdict === "通过");
+  const passed = acceptancePassed && (!record || record.verdict === "通过");
   const eligible = passed || (!configured && !record);
   if (run) {
     const current = qualifications(batch), signature = current ? hash(current) : undefined;
-    if (run.e2e && run.qualification && signature !== run.qualification) throw new Error("整批完成资格已变化，未采用旧验收结果");
+    if (run.acceptance && run.qualification && signature !== run.qualification) throw new Error("整批完成资格已变化，未采用旧验收结果");
     run.qualification = signature;
   }
   if (batch.stages.length > 1 && !eligible) {
@@ -401,7 +410,7 @@ export function queueBatchComplete(repo: string, file: string, e2ePassed: boolea
       const qualification = qualifications(current);
       if (qualification) current.lastRunQualification = hash(qualification);
       for (const entry of state.entries) if (entry.batch === batch.id && ["pending", "testing", "ready", "blocked"].includes(entry.status)) {
-        Object.assign(entry, { status: "blocked", reason: "整合 e2e 未通过，旧完成资格已撤销", updatedAt: stamp() });
+        Object.assign(entry, { status: "blocked", reason: "整批验收未通过，旧完成资格已撤销", updatedAt: stamp() });
       }
     }));
     kickMergeQueue(repo);
@@ -532,7 +541,7 @@ function copyTestLocalFiles(state: MergeQueue, batch: QueueBatch, workDir: strin
 }
 function qualificationProblem(state: MergeQueue, batch: QueueBatch, entry: QueueEntry): string | undefined {
   const latest = load(state.dir);
-  if (batch.stages.length > 1 && latest.batches.find((item) => item.id === batch.id)?.integrationEpoch !== entry.integrationEpoch) return "整合 e2e 完成资格已变化，旧结果已失效";
+  if (batch.stages.length > 1 && latest.batches.find((item) => item.id === batch.id)?.integrationEpoch !== entry.integrationEpoch) return "整批验收完成资格已变化，旧结果已失效";
   if (latest.entries.filter((item) => item.batch === batch.id).at(-1)?.id !== entry.id) return "本批已有新的完成资格，旧结果已失效";
   const currentQualification = qualifications(batch);
   if (!currentQualification || hash(currentQualification) !== hash(entry.qualification)) return "批次完成资格已变化，需要原开发会话重新完成检查";
@@ -545,7 +554,7 @@ function qualificationProblem(state: MergeQueue, batch: QueueBatch, entry: Queue
 }
 function notify(state: MergeQueue, entry: QueueEntry, text?: string): void {
   const batch = state.batches.find((item) => item.id === entry.batch)!;
-  const conclusions = [...entry.qualification.map((item) => ({ label: item.stage, acceptance: item.acceptance })), ...(entry.integration ? [{ label: "整合 e2e", acceptance: entry.integration }] : [])]
+  const conclusions = [...entry.qualification.map((item) => ({ label: item.stage, acceptance: item.acceptance })), ...(entry.integration ? [{ label: "整批验收", acceptance: entry.integration }] : [])]
     .flatMap(({ label, acceptance }) => [...(acceptance?.partial ?? []).map((item) => `${label}：${item.id} 部分验证：${item.text}；${item.detail}`),
       ...(acceptance?.failed ?? []).map((item) => `${label}：${item.id} 不通过：${item.text}；${item.detail}`),
       ...(acceptance?.manual ?? []).map((item) => `${label}/${item.id}：${item.text}；${item.detail}`)]);
@@ -555,7 +564,7 @@ function notify(state: MergeQueue, entry: QueueEntry, text?: string): void {
 }
 function manualItems(entry: QueueEntry): QueueAcceptanceItem[] {
   return [...entry.qualification.flatMap((item) => (item.acceptance?.manual ?? []).map((manual) => ({ ...manual, id: `${item.stage}/${manual.id}` }))),
-    ...(entry.integration?.manual ?? []).map((item) => ({ ...item, id: `整合 e2e/${item.id}` }))];
+    ...(entry.integration?.manual ?? []).map((item) => ({ ...item, id: `整批验收/${item.id}` }))];
 }
 function precedingChanges(state: MergeQueue, batch: QueueBatch, entry: QueueEntry): string {
   if (!entry.base) return "";
@@ -986,7 +995,7 @@ async function main(): Promise<void> {
       reapProcs(procs);
       if (readProcs(procs).length) throw new Error("上次整合编排释放未确认，未重复启动");
       const { createChildExec } = await import("./hosts/review-hook.ts");
-      const result = await createChildExec(procs)(process.execPath, [join(HERE, "pipeline.ts"), batch.file, "--from", "e2e", "--project-root", batch.project, "--default-workspace", "dev分支"],
+      const result = await createChildExec(procs)(process.execPath, [join(HERE, "pipeline.ts"), batch.file, "--from", "验收", "--project-root", batch.project, "--default-workspace", "dev分支"],
         { cwd: state.repo, timeout: 24 * 60 * 60_000, role: "队列返修后整合编排" });
       if (result.code !== 0) console.error(result.stderr || result.stdout);
       // 仅正常收尾过的运行可以立即接新资格；崩溃/入口失败保留待恢复资格，等下一次状态或 done 重试。

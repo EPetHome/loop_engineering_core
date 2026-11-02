@@ -24,9 +24,10 @@ const write = (root: string, path: string, text: string): void => {
 test("O1 接入手册里的三块都在，内容能被程序直接用", () => {
   const doc = readFileSync(GUIDE_DOC, "utf8");
   const block1 = extractBlock(doc, 1)!;
-  assert.equal(blockVersion(block1), 6);
-  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v6/);
-  // v2：起草任务提示词只写四节、不做的事、流水线 e2e 标归属。
+  assert.equal(blockVersion(block1), 7);
+  assert.match(block1.split("\n")[0], /^<!-- autoreview:acceptance v7/);
+  // v2：起草任务提示词只写四节、不做的事、流水线验收标归属；v7 统一叫整批验收。
+  assert.match(block1, /最后跑整批验收（流水线）/);
   assert.match(block1, /## 起草任务提示词（自动评审 v2）[\s\S]*以下四节/);
   assert.match(block1, /不重复全仓阅读或手工抄写/);
   assert.match(block1, /不要写联调或端到端测试的步骤/);
@@ -73,7 +74,7 @@ test("O3 写法段状态与提醒：缺失 → 旧版 → 最新；提醒里写�
     for (const part of [GUIDE_DOC, "【块 1】", conventionTarget(root, "pi"), SETUP_SCRIPT]) assert.ok(missing.includes(part), `缺少：${part}`);
     write(root, ".autoreview/CONVENTIONS.md", "## 起草需求时写验收标准（自动验收）\n旧的\n");
     assert.equal(conventionStatus(root, "codex").status, "旧版");
-    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v6）/);
+    assert.match(conventionNotice(root, "codex")!, /旧版（v0，最新 v7）/);
     write(root, ".autoreview/CONVENTIONS.md", `# 流程说明\n\n${readBlock(1)}\n`);
     assert.equal(conventionStatus(root, "codex").status, "最新");
     assert.equal(conventionNotice(root, "codex"), undefined);
@@ -173,7 +174,7 @@ test("O7 插入或更新【块 1】：追加、按标记替换、已是最新、
   assert.equal(appended.action, "追加");
   assert.equal(appended.text, `# 我的规则\n保留\n\n${block}\n`);
   assert.equal(upsertBlock(appended.text, block).action, "已是最新");
-  const older = appended.text.replace("autoreview:acceptance v6", "autoreview:acceptance v0").replace("旧内容不存在", "");
+  const older = appended.text.replace("autoreview:acceptance v7", "autoreview:acceptance v0").replace("旧内容不存在", "");
   const updated = upsertBlock(`${older}\n## 之后的规则\n也保留\n`, block);
   assert.equal(updated.action, "更新");
   assert.ok(updated.text.includes("# 我的规则\n保留") && updated.text.includes("## 之后的规则\n也保留"));
@@ -203,7 +204,7 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
     const config = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));
     assert.equal(config.maxRepairs, 2);
     assert.equal(config.acceptance.start, "npm run dev");
-    assert.match(readFileSync(conventionTarget(root, "pi"), "utf8"), /autoreview:acceptance v6/);
+    assert.match(readFileSync(conventionTarget(root, "pi"), "utf8"), /autoreview:acceptance v7/);
     assert.equal(readFileSync(join(root, "AGENTS.md"), "utf8"), "# 稳定规则\n用户原文保持不变。\n");
     assert.equal(readFileSync(join(root, "CLAUDE.md"), "utf8"), "# 说明\n");
     const again = await planSetup(root);
@@ -215,14 +216,31 @@ test("O8 接入命令：先给计划不写盘；--yes 写入且保留已有字�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("O9：装着 v5【块 1】的项目跑接入命令，整段替换为 v6，标记外不变", async () => {
+test("v6 接入项目提醒升级并实际替换为 v7，只更新可变写法块", () => {
+  const root = tempDir();
+  try {
+    write(root, ".autoreview.json", '{"acceptance":{}}');
+    const old = readBlock(1).replaceAll("v7", "v6").replaceAll("整批验收", "整合 e2e"); // 兼容旧版手册文案。
+    write(root, ".autoreview/CONVENTIONS.md", `# 项目正文\n\n${old}\n\n保留尾部\n`);
+    write(root, "AGENTS.md", "# 稳定规则\n"); write(root, "CLAUDE.md", "@AGENTS.md\n");
+    assert.match(conventionNotice(root, "pi")!, /旧版（v6，最新 v7）/);
+    const run = spawnSync(process.execPath, [SETUP, root, "--yes"], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /v6 → v7/);
+    assert.equal(readFileSync(conventionTarget(root, "pi"), "utf8"), `# 项目正文\n\n${readBlock(1)}\n\n保留尾部\n`);
+    assert.equal(conventionStatus(root, "pi").status, "最新");
+    assert.equal(readFileSync(join(root, "AGENTS.md"), "utf8"), "# 稳定规则\n");
+    assert.equal(readFileSync(join(root, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("O9：装着 v5【块 1】的项目跑接入命令，整段替换为 v7，标记外不变", async () => {
   const root = tempDir();
   try {
     write(root, "package.json", JSON.stringify({ bin: { todo: "bin/todo.js" } }));
     const current = readBlock(1);
     // 模拟旧版 v5：没有 v6 新增的批次参数说明。
-    const oldBlock = current.replace("<!-- autoreview:acceptance v6", "<!-- autoreview:acceptance v5")
-      .replace("## 起草需求时写验收标准（自动验收 v6）", "## 起草需求时写验收标准（自动验收 v5）")
+    const oldBlock = current.replace("<!-- autoreview:acceptance v7", "<!-- autoreview:acceptance v5")
+      .replace("## 起草需求时写验收标准（自动验收 v7）", "## 起草需求时写验收标准（自动验收 v5）")
       .replace(/\n\n批次参数写进 `批次\.json`[^\n]*/, "");
     write(root, ".autoreview/CONVENTIONS.md", `# 项目自己的流程\n\n${oldBlock}\n\n## 项目自己的补充\n保留我\n`);
     assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 5);
@@ -232,7 +250,7 @@ test("O9：装着 v5【块 1】的项目跑接入命令，整段替换为 v6，�
     assert.ok(entry.text.startsWith("# 项目自己的流程"));
     assert.ok(entry.text.includes("## 项目自己的补充\n保留我"));
     assert.equal(entry.text.match(/autoreview:acceptance v/g)?.length, 1, "只保留一份新版块");
-    assert.match(entry.text, /autoreview:acceptance v6/);
+    assert.match(entry.text, /autoreview:acceptance v7/);
     assert.match(entry.text, /批次参数写进 `批次\.json`，不要在批次目录里写门禁或启动脚本/);
     assert.match(entry.text, /## 收尾回写（自动评审 v1）/);
     assert.doesNotMatch(entry.text, /autoreview:acceptance v5/);
@@ -246,7 +264,7 @@ test("O9：装着 v5【块 1】的项目跑接入命令，整段替换为 v6，�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("A8 接入输出 v5 → v6、新增条款原文、其他工作区旧副本；只改目标不动旧副本", async () => {
+test("A8 接入输出 v5 → v7、新增条款原文、其他工作区旧副本；只改目标不动旧副本", async () => {
   const temp = tempDir(), root = join(temp, "repo"), other = join(temp, "other 工作区"), latest = join(temp, "current"), future = join(temp, "future");
   mkdirSync(root);
   const git = (...args: string[]): void => {
@@ -256,20 +274,20 @@ test("A8 接入输出 v5 → v6、新增条款原文、其他工作区旧副本�
   try {
     git("init", "-q", "-b", "main"); git("config", "user.email", "onboard@example.test"); git("config", "user.name", "onboard");
     const block = readBlock(1), clause = "批次参数写进 `批次.json`，不要在批次目录里写门禁或启动脚本。";
-    const old = block.replaceAll("v6", "v5").replace(`\n\n${clause}`, "");
+    const old = block.replaceAll("v7", "v5").replace(`\n\n${clause}`, "");
     write(root, ".autoreview.json", '{"acceptance":{}}');
     write(root, ".autoreview/CONVENTIONS.md", `# 保留项目正文\n\n${old}\n`);
     git("add", "."); git("commit", "-qm", "v5");
     git("worktree", "add", "-qb", "old-copy", other); git("worktree", "add", "-qb", "current-copy", latest); git("worktree", "add", "-qb", "future-copy", future);
-    write(latest, ".autoreview/CONVENTIONS.md", block); write(future, ".autoreview/CONVENTIONS.md", block.replaceAll("v6", "v7"));
+    write(latest, ".autoreview/CONVENTIONS.md", block); write(future, ".autoreview/CONVENTIONS.md", block.replaceAll("v7", "v8"));
     const copy = join(realpathSync(other), ".autoreview/CONVENTIONS.md"), before = readFileSync(copy);
     const plan = await planSetup(root), rendered = renderPlan(plan);
-    assert.match(rendered, /v5 → v6/); assert.ok(rendered.includes(`新增条款原文：\n     ${clause}`));
+    assert.match(rendered, /v5 → v7/); assert.ok(rendered.includes(`新增条款原文：\n     ${clause}`));
     assert.match(rendered, /删除条款原文：无/); assert.deepEqual(plan.olderCopies, [copy]); assert.ok(rendered.includes(copy));
     assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 5, "计划不写盘");
     const run = spawnSync(process.execPath, [SETUP, root, "--yes"], { encoding: "utf8" });
-    assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /v5 → v6/); assert.ok(run.stdout.includes(clause)); assert.ok(run.stdout.includes(copy));
-    assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 6);
+    assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /v5 → v7/); assert.ok(run.stdout.includes(clause)); assert.ok(run.stdout.includes(copy));
+    assert.equal(blockVersion(readFileSync(conventionTarget(root, "pi"), "utf8")), 7);
     assert.deepEqual(readFileSync(copy), before, "另一个工作区旧副本字节不变");
     const noChange = await planSetup(root); assert.equal(noChange.files[0].action, "已是最新"); assert.ok(renderPlan(noChange).includes(copy), "目标最新时仍提示旧副本");
     const changes = blockChanges("<!-- autoreview:acceptance v1 -->\n- 删除条款原文。\n重复\n重复\n<!-- /autoreview:acceptance -->", "<!-- autoreview:acceptance v2 -->\n- 新增条款原文。\n重复\n<!-- /autoreview:acceptance -->");

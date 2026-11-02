@@ -31,7 +31,7 @@ export const DEFAULT_RESET_TIMEOUT_SEC = 120;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
 export const DEFAULT_GATE_TIMEOUT_MIN = 10;
 
-/** 门禁：每轮验收和评审之前由程序执行的确定性检查（单测、类型检查、e2e 脚本等）。 */
+/** 门禁：每轮验收和评审之前由程序执行的确定性检查（单测、类型检查、验收脚本等）。 */
 export interface GateConfig {
   /** 在开发目录用 /bin/sh -c 执行，退出码 0 为通过。 */
   cmd: string;

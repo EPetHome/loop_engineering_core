@@ -139,12 +139,12 @@ function normalizedRaw(repo: Repo, raw: Record<string, unknown>): Record<string,
   return copy;
 }
 
-export function loadBatch(repo: Repo, path: string): BatchPlan {
+export function loadBatch(repo: Repo, path: string, options: { warn?: (message: string) => void } = {}): BatchPlan {
   const absolute = resolve(path);
   const raw = readBatch(absolute);
   const planDir = dirname(absolute);
   const normalized = normalizedRaw(repo, raw);
-  const plan = parsePlan(normalized, planDir, process.env, { batchFile: absolute, projectRoot: repo.projectRoot });
+  const plan = parsePlan(normalized, planDir, process.env, { batchFile: absolute, projectRoot: repo.projectRoot, warn: options.warn });
   const branch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
   const stages = new Map<string, { branch?: string; workspace?: string; cwd: string; prompt?: string }>();
   const byPath = new Map<string, WorkspaceUse>();
@@ -269,7 +269,7 @@ interface BatchDocs {
   batchPath: string;
 }
 
-/** 批次文档：批次目录里的全部文件、各段 prompt、e2e.criteria；只取仓库内且相对 HEAD 有变化的。 */
+/** 批次文档：批次目录里的全部文件、各段 prompt、acceptance.criteria；只取仓库内且相对 HEAD 有变化的。 */
 function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): BatchDocs {
   const branch = batch.branch ?? [...batch.stages.values()].find((stage) => stage.branch)?.branch;
   const target = branch ? [...batch.workspaces, ...batch.checks].find((workspace) => workspace.branch === branch) : undefined;
@@ -282,7 +282,7 @@ function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): 
     for (const file of filesUnder(dir)) candidates.add(resolve(file));
   }
   for (const stage of batch.plan.stages.values()) if (stage.prompt) candidates.add(resolve(stage.prompt));
-  if (batch.plan.e2e) candidates.add(resolve(batch.plan.e2e.criteriaFile));
+  if (batch.plan.acceptance) candidates.add(resolve(batch.plan.acceptance.criteriaFile));
 
   const byPath = new Map(changes.map((change) => [change.path, change]));
   const files: string[] = [];
@@ -653,7 +653,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     // 外部/非 git 段沿用原行为，不把它们接入 git 合入队列。
     if (stages.every((stage) => stage.branch && worktrees(repo.root).some((item) => item.path === gitResult(stage.cwd, ["rev-parse", "--show-toplevel"]).stdout.trim()))) {
       registerQueueBatch(repo.root, { name: opened.plan.name, file: opened.path, dir: opened.plan.dir, project: repo.projectRoot,
-        release: repo.layout.release, stages, steps: opened.plan.steps, e2e: Boolean(opened.plan.e2e) });
+        release: repo.layout.release, stages, steps: opened.plan.steps, acceptance: Boolean(opened.plan.acceptance) });
     }
   }
   const start = batchCommand("启动", docs.batchPath);

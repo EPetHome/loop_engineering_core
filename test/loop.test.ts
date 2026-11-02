@@ -249,13 +249,13 @@ test("A5 开工输出用开发空间里的批次文件路径，loop 启动能取
   writeFileSync(criteria, "## 验收标准\n1. 操作：执行本批\n   预期：通过\n");
   writeFileSync(batch, JSON.stringify({ name: "文档批次", branch: "feat/文档",
     stages: { 甲: { prompt, workspace: "dev分支" } }, steps: [["甲"]],
-    e2e: { workDir: ".", criteria } }, null, 2));
+    acceptance: { workDir: ".", criteria } }, null, 2));
   const opened = jsonOf(loop(f.repo, ["开工", batch, "--json"]));
   const workspaceBatch = join(f.worktree, "docs", "batches", "文档批次", "批次.json");
   assert.ok(existsSync(workspaceBatch));
   const moved = JSON.parse(readFileSync(workspaceBatch, "utf8"));
   assert.equal(moved.stages.甲.prompt, join(f.worktree, "docs", "prompt", "提示词-文档.md"), "批次文件里的绝对提示词路径改到开发空间");
-  assert.equal(moved.e2e.criteria, join(f.worktree, "docs", "prompt", "验收-文档.md"), "批次文件里的绝对验收标准路径改到开发空间");
+  assert.equal(moved.acceptance.criteria, join(f.worktree, "docs", "prompt", "验收-文档.md"), "批次文件里的绝对验收标准路径改到开发空间");
   const quoted = workspaceBatch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   assert.match(String(opened.startCommand), new RegExp(quoted));
   assert.match(String(opened.statusCommand), new RegExp(quoted));
@@ -323,7 +323,7 @@ test("依赖路径与实际搬运范围一致：全局和段级 Ponytail 能启�
       writeFileSync(batch, JSON.stringify({ name: "依赖", branch: "feat/依赖",
         ...(level === "全局" ? { pi: { ponytail } } : {}),
         stages: { 甲: { prompt: "../../../prompt.md", workspace: "dev分支", ...(level === "段级" ? { ponytail } : {}) } },
-        steps: [["甲"]], e2e: { workDir: f.repo, criteria: "验收.md", acceptance: { guide: ref(guide) } },
+        steps: [["甲"]], acceptance: { workDir: f.repo, criteria: "验收.md", guide: ref(guide) },
       }, null, 2));
       const opened = loop(f.repo, ["开工", batch, "--json"]);
       assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
@@ -344,8 +344,8 @@ test("依赖路径与实际搬运范围一致：全局和段级 Ponytail 能启�
       const plan = parsePlan(JSON.parse(readFileSync(movedBatch, "utf8")), dirname(movedBatch), process.env,
         { projectRoot: f.repo, batchFile: movedBatch });
       assert.equal(plan.stages.get("甲")!.ponytail!.extension, expected(extension));
-      assert.equal(plan.e2e!.acceptance.guide, expected(guide));
-      assert.equal(readFileSync(plan.e2e!.acceptance.guide!, "utf8"), "操作说明原文\n");
+      assert.equal(plan.acceptance!.acceptance.guide, expected(guide));
+      assert.equal(readFileSync(plan.acceptance!.acceptance.guide!, "utf8"), "操作说明原文\n");
     });
   }
 });
@@ -397,7 +397,7 @@ test("原生开发空间批次保留相对引用解析，不按 worktree 来源�
   const plan = parsePlan(JSON.parse(readFileSync(batch, "utf8")), wt, process.env,
     { batchFile: batch, projectRoot: f.repo });
   assert.equal(plan.stages.get("甲")!.prompt, prompt, "相对提示词按批次所在目录解析");
-  assert.equal(plan.e2e!.criteriaFile, criteria, "相对验收标准按批次所在目录解析");
+  assert.equal(plan.acceptance!.criteriaFile, criteria, "相对验收标准按批次所在目录解析");
 });
 
 test("A6 运行版不在发布分支时不开工，项目根、分支和 worktree 都不变", () => {

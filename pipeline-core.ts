@@ -2,7 +2,7 @@
  * pipeline-core.ts — 流水线的共用约定：pi 扩展（每一段的会话）和 pipeline.ts（编排）都用。
  *
  * 每一段会话由流水线启动时带两个环境变量：AUTOREVIEW_PIPELINE_DIR（流水线目录）、AUTOREVIEW_STAGE（段名）。
- * 扩展把这一段的状态写到 <目录>/<段>.status.json；编排程序把 e2e 返修写到 <目录>/<段>.inbox.json，
+ * 扩展把这一段的状态写到 <目录>/<段>.status.json；编排程序把整批验收返修写到 <目录>/<段>.inbox.json，
  * 扩展读到后发给开发方。没有这两个环境变量的会话完全不受影响。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";

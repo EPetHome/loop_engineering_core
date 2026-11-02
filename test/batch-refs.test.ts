@@ -11,6 +11,13 @@ const dir = dirname(batch);
 const external = resolve("/project/resources");
 const fromBatch = (path: string): string => relative(dir, path);
 
+/** 用同一组路径同时验证旧嵌套批次和新平铺批次。 */
+function flat(raw: Record<string, unknown>): Record<string, unknown> {
+  const { e2e, ...rest } = structuredClone(raw); // 旧写法兼容夹具。
+  const { acceptance, ...fields } = e2e as Record<string, unknown>;
+  return { ...rest, acceptance: { ...fields, ...(acceptance as Record<string, unknown>) } };
+}
+
 test("搬运路径：目录、日志和未搬运依赖保留原目标，文档引用跟随 worktree", () => {
   const raw = {
     dir: "./state",
@@ -44,6 +51,7 @@ test("搬运路径：目录、日志和未搬运依赖保留原目标，文档�
       guide: raw.e2e.acceptance.guide,
     } },
   });
+  assert.deepEqual(remapBatchReferences(flat(raw), main, workspace, batch), flat(moved), "新平铺配置的目录、日志和依赖遵守相同搬运规则");
   assert.deepEqual(raw, before, "不修改原批次对象");
   const movedBatch = resolve(workspace, relative(main, batch));
   assert.deepEqual(remapBatchReferences(moved, main, workspace, movedBatch), moved, "重复重定位不漂移");
@@ -71,6 +79,7 @@ test("搬运路径：只有实际搬运的 Ponytail 和验收说明重定位到�
     stages: { 甲: { ponytail: { extension: stageExtension } } },
     e2e: { acceptance: { guide } },
   }, "位于批次目录内也不能在未搬运时假定目标有副本");
+  assert.deepEqual(remapBatchReferences(flat(raw), main, workspace, batch, files), flat(moved), "新平铺配置中只有实际搬运的说明跟随开发空间");
 });
 
 test("搬运路径：其他仓库外相对资源固定原目标，绝对目录不变", () => {
@@ -92,4 +101,5 @@ test("搬运路径：其他仓库外相对资源固定原目标，绝对目录�
     e2e: { workDir: external, criteria, acceptance: { guide } },
   });
   assert.deepEqual(remapBatchReferences(raw, main, main, batch), raw, "同一工作区不重写相对路径");
+  assert.deepEqual(remapBatchReferences(flat(raw), main, workspace, batch), flat(remapBatchReferences(raw, main, workspace, batch)), "新平铺配置的仓库外资源同样固定原目标");
 });

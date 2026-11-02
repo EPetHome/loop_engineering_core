@@ -55,7 +55,7 @@ export interface AcceptanceDeps {
   onCleanup?: (work: Promise<void>, recordPath: string) => void;
   resource?: RunResource;
   callId?: string;
-  /** 整合验收采用的各段资格身份，仅存审计材料，不作为通过证据。 */
+  /** 整批验收采用的各段资格身份，仅存审计材料，不作为通过证据。 */
   upstreamEpochs?: unknown;
   /** 开发目录：被测系统在这里启动。 */
   workDir: string;

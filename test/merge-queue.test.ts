@@ -142,14 +142,14 @@ if(mode.startsWith('fail')) process.exit(1);
     } };
 }
 
-function repeatableMulti(f: ReturnType<typeof fixture>, options: { e2e?: boolean; front?: boolean; reset?: string } = {}) {
+function repeatableMulti(f: ReturnType<typeof fixture>, options: { acceptance?: boolean; front?: boolean; reset?: string } = {}) {
   const dev = f.batches[0].cwd, file = join(f.root, "repeatable.json"), dir = join(f.root, "repeatable"), criteria = join(f.root, "repeatable-criteria.md");
   const front = options.front ? join(dev, "front") : dev; mkdirSync(front, { recursive: true });
   writeFileSync(criteria, "## 验收标准\nA1. [甲] 操作：检查第一项\n    预期：通过\nA2. [乙] 操作：检查第二项\n    预期：通过\n");
-  const e2e = { workDir: dev, criteria, acceptance: { timeoutMin: 2, ...(options.reset ? { reset: options.reset } : {}) } };
-  const raw = { name: "可重复完成", branch: f.batches[0].branch, dir, stages: { 甲: { cwd: dev, start: "true" }, 乙: { cwd: front, start: "true" } }, steps: [["甲"], ["乙"]], ...(options.e2e ? { e2e } : {}) };
+  const acceptance = { workDir: dev, criteria, timeoutMin: 2, ...(options.reset ? { reset: options.reset } : {}) };
+  const raw = { name: "可重复完成", branch: f.batches[0].branch, dir, stages: { 甲: { cwd: dev, start: "true" }, 乙: { cwd: front, start: "true" } }, steps: [["甲"], ["乙"]], ...(options.acceptance ? { acceptance } : {}) };
   writeFileSync(file, JSON.stringify(raw));
-  registerQueueBatch(f.repo, { name: raw.name, file, dir, project: f.repo, release: "main", e2e: Boolean(options.e2e), steps: raw.steps,
+  registerQueueBatch(f.repo, { name: raw.name, file, dir, project: f.repo, release: "main", acceptance: Boolean(options.acceptance), steps: raw.steps,
     stages: Object.entries(raw.stages).map(([name, stage]) => ({ name, ...stage, branch: raw.branch })) });
   const done = async (name: "甲" | "乙", epoch: string) => {
     const cwd = raw.stages[name].cwd, candidate = await createGitEvidence(childExec, cwd).snapshot();
@@ -159,7 +159,7 @@ function repeatableMulti(f: ReturnType<typeof fixture>, options: { e2e?: boolean
   const io = { launch: () => { throw new Error("续跑不应重新启动开发会话"); }, notify: (_message: string) => {}, log: (_message: string) => {}, pollMs: 20, silenceMs: 1000,
     preflightEnv: { pi: process.env.PI_BIN, permission: process.env.PERMISSION_EXTENSION, autoreview: join(ROOT, "autoreview.ts"), playwright: () => true } };
   const plan = () => parsePlan(JSON.parse(readFileSync(file, "utf8")), f.root, process.env, { batchFile: file, projectRoot: f.repo });
-  return { dev, front, file, dir, raw, e2e, done, io, plan };
+  return { dev, front, file, dir, raw, acceptance, done, io, plan };
 }
 
 async function fakeAcceptance<T>(f: ReturnType<typeof fixture>, action: (state: string) => Promise<T>): Promise<T> {
@@ -169,32 +169,47 @@ async function fakeAcceptance<T>(f: ReturnType<typeof fixture>, action: (state: 
   finally { for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
 }
 
-test("返修1：开工后新增整批 e2e，部分验证不提交、不进队，通过后才提交", async () => {
+test("兼容旧队列开关：只读归一化，保留 integrationEpoch 和其他历史材料", async () => {
+  const f = fixture(1);
+  try {
+    const multi = repeatableMulti(f, { acceptance: true }), queue = f.queue();
+    const batch = queue.batches.find((item) => item.file === multi.file)!;
+    delete batch.acceptance; batch.e2e = true; batch.integrationEpoch = "legacy-epoch"; // 旧状态兼容。
+    const path = join(queue.dir, "queue.json"); writeJsonAtomic(path, queue);
+    const before = readFileSync(path);
+    const loaded = f.queue().batches.find((item) => item.file === multi.file)!;
+    assert.equal(loaded.acceptance, true); assert.equal(loaded.e2e, undefined); // 旧字段只在读取边界使用。
+    assert.equal(loaded.integrationEpoch, "legacy-epoch");
+    assert.deepEqual(readFileSync(path), before, "只读状态查询不迁移磁盘记录");
+  } finally { await f.close(); }
+});
+
+test("返修1：开工后新增整批验收，部分验证不提交、不进队，通过后才提交", async () => {
   const f = fixture(1);
   try { await fakeAcceptance(f, async () => {
     const multi = repeatableMulti(f);
-    assert.equal(f.queue().batches.find((batch) => batch.file === multi.file)!.e2e, false);
-    writeFileSync(multi.file, JSON.stringify({ ...multi.raw, e2e: multi.e2e }));
+    assert.equal(f.queue().batches.find((batch) => batch.file === multi.file)!.acceptance, false);
+    writeFileSync(multi.file, JSON.stringify({ ...multi.raw, acceptance: multi.acceptance }));
     f.write(0, "src/a.txt", "checked\n"); await multi.done("甲", "a1"); await multi.done("乙", "b1");
     const head = f.git(multi.dev, "rev-parse", "HEAD"); process.env.FAKE_ACC_UNKNOWN = "A1";
-    assert.equal(await runPipeline(multi.plan(), multi.io, { fromE2e: true }), 0);
+    assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 0);
     assert.match(readFileSync(join(multi.dir, "report.md"), "utf8"), /部分验证/);
     assert.equal(f.queue().entries.length, 0); assert.equal(f.git(multi.dev, "rev-parse", "HEAD"), head);
-    assert.equal(f.queue().batches.find((batch) => batch.file === multi.file)!.e2e, true, "按本轮实际配置同步，不沿用开工时的 false");
+    assert.equal(f.queue().batches.find((batch) => batch.file === multi.file)!.acceptance, true, "按本轮实际配置同步，不沿用开工时的 false");
     process.env.FAKE_ACC_UNKNOWN = "";
-    assert.equal(await runPipeline(multi.plan(), multi.io, { fromE2e: true }), 0);
+    assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 0);
     await f.until(() => f.queue().entries.at(-1)?.status === "ready"); await f.idle();
     assert.notEqual(f.git(multi.dev, "rev-parse", "HEAD"), head); assert.equal(f.queue().entries.length, 1);
   }); } finally { await f.close(); }
 });
 
-test("返修2：无 e2e 多段退出后再次完成，ready/blocked 均自动重压；停止排队仍只提交", async (t) => {
+test("返修2：无整批验收多段退出后再次完成，ready/blocked 均自动重压；停止排队仍只提交", async (t) => {
   for (const phase of ["ready", "blocked", "stopped"]) await t.test(phase, async () => {
     const f = fixture(1);
     try {
       const multi = repeatableMulti(f); f.write(0, "src/a.txt", "first\n");
       await multi.done("甲", "a1"); await multi.done("乙", "b1");
-      assert.equal(await runPipeline(multi.plan(), multi.io, { fromE2e: true }), 0);
+      assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 0);
       await f.until(() => f.queue().entries[0]?.status === "ready"); await f.idle();
       const old = f.queue().entries[0].sources[0].commit;
       if (phase === "blocked") {
@@ -215,20 +230,20 @@ test("返修2：无 e2e 多段退出后再次完成，ready/blocked 均自动重
   });
 });
 
-test("返修2：有 e2e 多段再次完成先重验；运行中状态查询和直接启动都不能重复验收", async () => {
-  const f = fixture(1), resume = join(f.root, "resume-e2e");
+test("返修2：有整批验收多段再次完成先重验；运行中状态查询和直接启动都不能重复验收", async () => {
+  const f = fixture(1), resume = join(f.root, "resume-acceptance");
   try { await fakeAcceptance(f, async (state) => {
     const reset = join(f.root, "repeat-reset.mjs"), entered = join(f.root, "reset-entered"), hold = join(f.root, "hold-reset"), resets = join(f.root, "resets");
     writeFileSync(reset, `import fs from 'node:fs'; fs.appendFileSync(${JSON.stringify(resets)}, 'reset\\n'); if(fs.existsSync(${JSON.stringify(hold)})){fs.writeFileSync(${JSON.stringify(entered)}, 'entered'); while(!fs.existsSync(${JSON.stringify(resume)})) await new Promise(r=>setTimeout(r,20));}`);
-    const multi = repeatableMulti(f, { e2e: true, reset: `${process.execPath} ${reset}` });
+    const multi = repeatableMulti(f, { acceptance: true, reset: `${process.execPath} ${reset}` });
     f.write(0, "src/a.txt", "first\n"); await multi.done("甲", "a1"); await multi.done("乙", "b1");
-    assert.equal(await runPipeline(multi.plan(), multi.io, { fromE2e: true }), 0);
+    assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 0);
     await f.until(() => f.queue().entries[0]?.status === "ready"); await f.idle();
     const old = f.queue().entries[0].sources[0].commit;
     writeFileSync(hold, "hold"); f.write(0, "src/a.txt", "again\n"); await multi.done("甲", "a2");
     await f.until(() => existsSync(entered), "重复完成已自动启动整批重验");
     f.cli("状态"); f.cli("状态");
-    assert.equal(await runPipeline(multi.plan(), multi.io, { fromE2e: true }), 2, "活动流水线不得再启动第二份");
+    assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 2, "活动流水线不得再启动第二份");
     assert.equal(f.git(multi.dev, "rev-parse", "HEAD"), old, "本轮验收通过前不能提交");
     assert.equal(readFileSync(join(state, "acc-count"), "utf8"), "1");
     writeFileSync(resume, "go"); await f.until(() => f.queue().entries.length === 2 && f.queue().entries[1].status === "ready"); await f.idle();
@@ -583,7 +598,7 @@ test("A7 杀掉测试执行器后按登记释放孤儿门禁并恢复；不丢�
   } finally { await f.close(); }
 });
 
-test("多段完成事件不提前进队；必须整合 e2e 通过；失败文件按 scope 路由，未定位时说明退回最后一段", async () => {
+test("多段完成事件不提前进队；必须整批验收通过；失败文件按 scope 路由，未定位时说明退回最后一段", async () => {
   const f = fixture(1);
   try {
     const first = f.batches[0], multi = join(f.root, "multi.json"), dir = join(f.root, "multi-pipeline");
@@ -595,7 +610,7 @@ test("多段完成事件不提前进队；必须整合 e2e 通过；失败文件
     f.write(0, "src/a.txt", "a\n"); f.mode("fail");
     for (const stage of ["甲", "乙"]) queueStageEvent({ cwd: first.cwd, file: multi, stage, status: { sessionId: `multi-${stage}`, event: "done", readyEpoch: stage, summary: "", inbox: 0, pid: process.pid, processStarted: processStartTime(process.pid) } });
     assert.equal(f.queue().entries.length, 0);
-    queueBatchComplete(f.repo, multi, false); assert.equal(f.queue().entries.length, 1, "没有 e2e 标准时跳过验收并进队");
+    queueBatchComplete(f.repo, multi, false); assert.equal(f.queue().entries.length, 1, "没有整批验收标准时跳过验收并进队");
     queueBatchComplete(f.repo, multi, true);
     await f.until(() => f.queue().entries[0]?.status === "returned");
     assert.ok(readJson<InboxMessage>(inboxPath(dir, "甲"))); assert.equal(readJson<InboxMessage>(inboxPath(dir, "乙")), undefined);
@@ -618,7 +633,7 @@ test("门禁输出无法定位失败文件时，明确说明原因并退回多�
   } finally { await f.close(); }
 });
 
-test("多段完整接线：整合 e2e 后自动进队；队列退回原段修好后自动重跑 e2e 并重新进队", async () => {
+test("多段完整接线：整批验收后自动进队；队列退回原段修好后自动重跑验收并重新进队", async () => {
   const f = fixture(1);
   const variables = { AUTOREVIEW_ACCEPTANCE_CMD: join(ROOT, "test", "fake-tester.mjs"), FAKE_STATE_DIR: join(f.root, "tester-state") };
   const old = Object.fromEntries(Object.keys(variables).map((key) => [key, process.env[key]]));
@@ -629,7 +644,7 @@ test("多段完整接线：整合 e2e 后自动进队；队列退回原段修好
     const raw = { name: "多段整合", branch: f.batches[0].branch, dir, stages: {
       甲: { cwd: f.batches[0].cwd, start: "true", scope: { allow: ["src/a.txt"] } },
       乙: { cwd: f.batches[0].cwd, start: "true", scope: { allow: ["src/b.txt"] } },
-    }, steps: [["甲"], ["乙"]], e2e: { workDir: f.batches[0].cwd, criteria, acceptance: { timeoutMin: 2 } } };
+    }, steps: [["甲"], ["乙"]], acceptance: { workDir: f.batches[0].cwd, criteria, timeoutMin: 2 } };
     writeFileSync(file, JSON.stringify(raw)); assert.equal(f.cli("开工", file).ok, true);
     f.write(0, "src/a.txt", "bad\n"); f.write(0, "src/b.txt", "b\n");
     const done = (stage: string, epoch: string, inbox = 0) => queueStageEvent({ cwd: f.batches[0].cwd, file, stage, status: {
@@ -639,8 +654,8 @@ test("多段完整接线：整合 e2e 后自动进队；队列退回原段修好
     const plan = parsePlan(raw, f.root, process.env, { batchFile: file, projectRoot: f.repo });
     f.mode("fail");
     const code = await runPipeline(plan, { launch: () => { throw new Error("不应新开开发会话"); }, notify: () => {}, log: () => {}, pollMs: 20, silenceMs: 1000,
-      preflightEnv: { pi: process.env.PI_BIN, permission: process.env.PERMISSION_EXTENSION, autoreview: join(ROOT, "autoreview.ts"), playwright: () => true } }, { fromE2e: true });
-    assert.equal(code, 0, `${readFileSync(join(dir, "report.md"), "utf8")}\n${readFileSync(join(dir, "e2e", "r1", "result.json"), "utf8")}`); await f.until(() => f.queue().entries[0]?.status === "returned");
+      preflightEnv: { pi: process.env.PI_BIN, permission: process.env.PERMISSION_EXTENSION, autoreview: join(ROOT, "autoreview.ts"), playwright: () => true } }, { fromAcceptance: true });
+    assert.equal(code, 0, `${readFileSync(join(dir, "report.md"), "utf8")}\n${readFileSync(join(dir, "e2e", "r1", "result.json"), "utf8")}`); await f.until(() => f.queue().entries[0]?.status === "returned"); // 兼容旧材料目录。
     const inbox = readJson<InboxMessage>(inboxPath(dir, "甲"))!; assert.ok(inbox); assert.equal(readJson(inboxPath(dir, "乙")), undefined);
     f.write(0, "src/a.txt", "fixed\n"); f.mode("pass"); done("甲", "repaired-a", inbox.seq);
     await f.until(() => f.queue().entries.length === 2 && f.queue().entries[1].status === "ready"); await f.idle();
@@ -773,7 +788,7 @@ test("自动 A4/A5：合得上但门禁失败标为批次间冲突；第三次�
 });
 
 test("多段结构化结论：人工和部分验证均保留，整批部分验证不得压缩进队",  async (t) => {
-  for (const partial of ["none", "stage", "e2e"]) await t.test(partial, async () => {
+  for (const partial of ["none", "stage", "acceptance"]) await t.test(partial, async () => {
     const f = fixture(1);
     try {
       autoConfig(f); f.write(0, "src/a.txt", "multi\n");
@@ -786,13 +801,13 @@ test("多段结构化结论：人工和部分验证均保留，整批部分验�
       }
       assert.equal(f.queue().entries.length, 0);
       const record: AcceptanceRecord = { verdict: "部分验证", items: [{ id: "A3", text: "整合人工确认", verdict: "需人工", detail: "未验" }], runDir: dir, durationMs: 0, extra: [], logErrors: [] };
-      if (partial === "e2e") record.items.push({ id: "A4", text: "整合部分验证", verdict: "无法验证", detail: "权限不足" });
+      if (partial === "acceptance") record.items.push({ id: "A4", text: "整合部分验证", verdict: "无法验证", detail: "权限不足" });
       const head = f.git(f.batches[0].cwd, "rev-parse", "HEAD");
       queueBatchComplete(f.repo, file, false, record); await f.idle();
       assert.equal(f.queue().entries.length, 0, "实际整批验收部分验证不能被旧的未配置标记放行");
       assert.equal(f.git(f.batches[0].cwd, "rev-parse", "HEAD"), head);
       assert.equal(queueAcceptance(record).manual[0].id, "A3");
-      assert.equal(queueAcceptance(record).partial.length, partial === "e2e" ? 1 : 0);
+      assert.equal(queueAcceptance(record).partial.length, partial === "acceptance" ? 1 : 0);
       const stage = readJson<StageStatus>(statusPath(dir, "乙"))!;
       assert.equal(stage.acceptance!.manual[0].text, "乙人工确认");
       assert.equal(stage.acceptance!.partial.length, partial === "stage" ? 1 : 0);
@@ -810,7 +825,7 @@ function multiReady(f: ReturnType<typeof fixture>) {
   return { file, dir, passed, partial };
 }
 
-test("返修2：整合 e2e 通过→部分验证→通过替换旧资格，同一完成事件保持幂等", async (t) => {
+test("返修2：整批验收通过→部分验证→通过替换旧资格，同一完成事件保持幂等", async (t) => {
   for (const versioned of [false, true]) await t.test(versioned ? "按流水线验收代次" : "兼容直接传验收记录", async () => {
     const f = fixture(1);
     try {
@@ -853,7 +868,7 @@ test("返修2：整合重验撤销正在测试的旧资格，失败/中断未回
     f.mode("hold"); const firstEpoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, firstEpoch);
     await f.until(() => existsSync(f.events) && f.queue().entries[0]?.status === "testing");
     const secondEpoch = queueBatchRecheck(f.repo, file); writeFileSync(join(f.root, "release"), "go"); await f.idle();
-    assert.equal(f.queue().entries[0].status, "blocked"); assert.match(f.queue().entries[0].reason!, /整合 e2e 完成资格已变化/); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
+    assert.equal(f.queue().entries[0].status, "blocked"); assert.match(f.queue().entries[0].reason!, /整批验收完成资格已变化/); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
     queueBatchComplete(f.repo, file, true, passed, firstEpoch); await f.idle(); assert.equal(f.queue().entries.length, 1, "迟到的通过不能覆盖新一轮");
     queueBatchComplete(f.repo, file, false, partial, secondEpoch); await f.idle();
     assert.equal(f.queue().entries.length, 1, "部分验证不进队"); assert.equal(f.queue().entries[0].status, "blocked");
@@ -1272,9 +1287,9 @@ test("提交 A1/A3：含批次文档压成一个；重发幂等，推前重压�
 test("已配置整批验收时，失败或部分验证不压缩；只有通过后提交进队", async () => {
   const f = fixture(1);
   try {
-    const dev = f.batches[0].cwd, file = join(f.root, "required-e2e.json"), dir = join(f.root, "required-e2e");
-    writeFileSync(file, JSON.stringify({ e2e: {} }));
-    registerQueueBatch(f.repo, { name: "必需整批验收", file, dir, project: f.repo, release: "main", e2e: true, steps: [["甲"], ["乙"]],
+    const dev = f.batches[0].cwd, file = join(f.root, "required-acceptance.json"), dir = join(f.root, "required-acceptance");
+    writeFileSync(file, JSON.stringify({ acceptance: {} }));
+    registerQueueBatch(f.repo, { name: "必需整批验收", file, dir, project: f.repo, release: "main", acceptance: true, steps: [["甲"], ["乙"]],
       stages: ["甲", "乙"].map((name) => ({ name, cwd: dev, branch: f.batches[0].branch, start: "true" })) });
     f.write(0, "src/a.txt", "checked\n");
     for (const stage of ["甲", "乙"]) queueStageEvent({ cwd: dev, file, stage, status: { sessionId: stage, event: "done", readyEpoch: stage, summary: "", inbox: 0 } });

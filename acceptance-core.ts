@@ -96,8 +96,8 @@ export function grantsFromUser(text: string, criteria: Criteria | undefined, pre
   return found ? { version: criteria.version, approved: [...approved], denied: [...denied] } : undefined;
 }
 
-/** 程序自己发给开发方的消息（返修、门禁、流水线 e2e 返修）：不是用户打的字。 */
-const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|流水线 e2e 返修) · |合入队列返修】|流程等待】|流程准备】)/;
+/** 程序自己发给开发方的消息：不是用户打的字；继续识别旧流水线返修开头。 */
+const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|整批验收返修|流水线 e2e 返修) · |合入队列返修】|流程等待】|流程准备】)/;
 export const isLoopMessage = (prompt: string): boolean => LOOP_MESSAGE.test(prompt);
 
 /** 用户亲手打的字：程序自己发的消息不算，pi 展开的 <file> 块去掉（宿主 Hook 直接传没展开的原文）。 */
@@ -755,7 +755,7 @@ export function renderAcceptanceForReview(record: AcceptanceRecord): string {
   const allManual = record.items.length > 0 && record.items.every((item) => item.verdict === "需人工");
   const summary = allManual
     ? "此前验收标准全部交给用户，程序没有启动系统实测。"
-    : `此前验收记录：${record.verdict}。${record.reason ?? ""}这不是当前候选已通过的依据；本轮静态评审不要启动系统或重跑 E2E。`;
+    : `此前验收记录：${record.verdict}。${record.reason ?? ""}这不是当前候选已通过的依据；本轮静态评审不要启动系统或重跑验收。`;
   return [
     "## 验收结果",
     summary,
