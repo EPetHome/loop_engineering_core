@@ -83,6 +83,7 @@ export type RoundRecord = ParsedReview & {
 export interface GateRecord {
   command: string;
   result: "通过" | "不通过" | "超时" | "无法执行" | "环境阻塞" | "检查方法故障" | "原因待诊断";
+  failureKind?: import("./failure.ts").FailureKind;
   durationMs: number;
   exitCode?: number;
   /** 输出最后几行（stdout 与 stderr 按出现顺序合在一起）。 */

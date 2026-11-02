@@ -6,6 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,21 @@ export const HERMES_BIN = "/Users/Admin/.hermes/node/bin";
 /** 测试命令：含「/」的相对路径按本仓库根目录解析。 */
 export function resolveTestCmd(raw: string): string {
   return raw.includes("/") && !isAbsolute(raw) ? resolve(EXT_DIR, raw) : raw;
+}
+
+/** PA 属于用户，不进入项目配置；每次读取以便通知开关即时生效。 */
+export interface PAConfig { eventsDir?: string; localNotify: boolean }
+export function readPAConfig(env: NodeJS.ProcessEnv = process.env): PAConfig {
+  const file = env.LOOP_PA_CONFIG || join(homedir(), ".pi-autoreview", "config.json");
+  let raw;
+  try { raw = JSON.parse(readFileSync(file, "utf8")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { localNotify: true }; throw error; }
+  const pa = raw?.pa;
+  if (pa === undefined) return { localNotify: true };
+  if (!pa || typeof pa !== "object" || Array.isArray(pa)) throw new Error(`${file} 的 pa 必须是对象`);
+  if (pa.eventsDir !== undefined && (typeof pa.eventsDir !== "string" || !isAbsolute(pa.eventsDir))) throw new Error(`${file} 的 pa.eventsDir 必须是绝对路径`);
+  if (pa.localNotify !== undefined && typeof pa.localNotify !== "boolean") throw new Error(`${file} 的 pa.localNotify 必须是布尔值`);
+  return { ...(pa.eventsDir ? { eventsDir: pa.eventsDir } : {}), localNotify: pa.localNotify ?? true };
 }
 
 export const MARKER_FILE = ".autoreview.json";

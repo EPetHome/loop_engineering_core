@@ -1,7 +1,9 @@
 /** 会话完成后的磁盘材料瘦身。身份来自 Loop 记录，不由目录名、时间或 PID 推断。 */
 import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { readPAConfig } from "./config.ts";
+import { batchInfoPath, canonicalBatchFile, phasePath, type BatchInfo, type PhaseRecord } from "./events.ts";
 import { writeJsonAtomic } from "./pipeline-core.ts";
 import { projectRootOf } from "./ledger.ts";
 import { REVIEW_SNAPSHOTS } from "./snapshots.ts";
@@ -19,12 +21,21 @@ export interface MaterialSession {
   procsFile: string;
   acceptanceDir: string;
   runDirs: string[];
+  batch?: { file: string; dir: string };
 }
 
 export function materialSession(sessionId: string, workDir: string, summary: string, phase: string, runDirs: string[] = []): MaterialSession {
   const stem = basename(summary, ".md"), dir = dirname(summary);
-  return { format: "loop-session-materials-v1", sessionId, workDir, phase, summary,
+  const session: MaterialSession = { format: "loop-session-materials-v1", sessionId, workDir, phase, summary,
     procsFile: join(dir, `${stem}.procs.json`), acceptanceDir: join(dir, "acceptance", stem), runDirs };
+  const batchDir = process.env.AUTOREVIEW_PIPELINE_DIR, file = process.env.AUTOREVIEW_BATCH_FILE, stage = process.env.AUTOREVIEW_STAGE;
+  if (batchDir && file && stage) {
+    try {
+      const info = json(batchInfoPath(batchDir)) as BatchInfo;
+      if (info.stages.some((item) => item.stage === stage && resolve(item.cwd) === resolve(workDir))) session.batch = { file: info.batch.file, dir: batchDir };
+    } catch { /* 未核对的环境变量不能认领材料；历史清理另按段状态检查。 */ }
+  }
+  return session;
 }
 
 const sessionFile = (session: MaterialSession): string => session.summary.replace(/\.md$/, ".materials.json");
@@ -123,8 +134,47 @@ function acceptanceRegistration(session: MaterialSession, path: string): (() => 
   } catch { /* 不能核对就保留 */ }
 }
 
+/** 按明确的段状态/材料关联保护整批证据，不能把多段中某段 done 当成整批结束。 */
+function batchMaterialGuard(session: MaterialSession): () => boolean {
+  const root = dirname(dirname(session.summary)), dirs = new Set<string>();
+  if (session.batch) dirs.add(session.batch.dir);
+  try { for (const name of readdirSync(join(root, "pipelines"))) dirs.add(join(root, "pipelines", name)); } catch { /* 无历史流水线 */ }
+  const queueRoot = process.env.AUTOREVIEW_MERGE_QUEUE_ROOT ?? join(root, "merge-queues");
+  try { for (const name of readdirSync(queueRoot)) {
+    try { for (const batch of json(join(queueRoot, name, "queue.json")).batches ?? []) dirs.add(batch.dir); } catch { /* 单个不可读队列不能跳过其他已登记批次 */ }
+  } } catch { /* 无历史队列 */ }
+  const checks: (() => boolean)[] = [];
+  for (const dir of dirs) {
+    let associated = session.batch?.dir === dir;
+    try {
+      associated ||= readdirSync(dir).filter((name) => name.endsWith(".status.json") || name.endsWith(".phase.json")).some((name) => {
+        try { const item = json(join(dir, name)); return item.summary === session.summary || item.evidence?.summary === session.summary; } catch { return false; }
+      });
+      if (!associated) continue;
+      const info = json(batchInfoPath(dir)) as BatchInfo;
+      if (!associated) continue;
+      if (session.batch?.dir === dir && info.batch.file !== session.batch.file) return () => false;
+      const path = phasePath(dir, null), phase = json(path) as PhaseRecord;
+      if (!["done", "failed"].includes(phase.phase)) return () => false;
+      checks.push(watchFile(dir, path), watchFile(dir, batchInfoPath(dir)));
+    } catch { if (associated) return () => false; }
+  }
+  return () => checks.every((check) => check());
+}
+function eventDirectoryOutside(path: string): boolean {
+  try {
+    const dir = readPAConfig().eventsDir;
+    if (!dir) return true;
+    const within = (a: string, b: string): boolean => { const rel = relative(resolve(a), resolve(b)); return !rel || (!rel.startsWith("..") && !isAbsolute(rel)); };
+    const target = canonicalBatchFile(path), events = canonicalBatchFile(dir);
+    return !within(target, events) && !within(events, target);
+  } catch { return false; }
+}
 function cleanSession(session: MaterialSession, resources: RunResource[], result: MaterialCleanup, unchanged: () => boolean = () => true): void {
   if (session.phase !== "done") return;
+  const batchUnchanged = batchMaterialGuard(session), originalCheck = unchanged;
+  unchanged = () => originalCheck() && batchUnchanged();
+  if (!batchUnchanged()) { unknown(result, session.summary, "所属批次尚未 done/failed 或完成依据无法核对，整批证据保留"); return; }
   if (!consumersStopped(session.procsFile)) {
     unknown(result, session.procsFile, "消费者释放未确认或进程登记损坏，本会话材料全部保留"); return;
   }
@@ -133,6 +183,7 @@ function cleanSession(session: MaterialSession, resources: RunResource[], result
       try {
         if (!materialExists(path)) continue;
         if (!["released", "retained"].includes(item.status)) { unknown(result, path, `资源状态 ${item.status}，释放未确认`); continue; }
+        if (!eventDirectoryOutside(path)) { unknown(result, path, "与 PA 事件目录重叠，不参与清理"); continue; }
         const registered = resourceChecks.get(item);
         slimMaterialDirectory(item.root, path, result, () => unchanged() && registered?.() === true && consumersStopped(session.procsFile));
       } catch (error) { unknown(result, path, String(error)); }
@@ -144,6 +195,7 @@ function cleanSession(session: MaterialSession, resources: RunResource[], result
       const path = join(session.acceptanceDir, name);
       const registered = acceptanceRegistration(session, path);
       if (!registered) { unknown(result, path, "验收目录缺少登记，或登记与会话/实际路径不符"); continue; }
+      if (!eventDirectoryOutside(path)) { unknown(result, path, "与 PA 事件目录重叠，不参与清理"); continue; }
       slimMaterialDirectory(dirname(dirname(session.acceptanceDir)), path, result, () => unchanged() && registered() && consumersStopped(session.procsFile));
     }
   } catch (error) { if (!missing(error)) unknown(result, session.acceptanceDir, String(error)); }
@@ -289,6 +341,10 @@ export function cleanupMaterialHistory(options: { apply?: boolean; dataRoot?: st
               || item.summary !== summary || item.procsFile !== session.procsFile || item.acceptanceDir !== session.acceptanceDir
               || !["idle", "reviewing", "accepting", "done", "paused"].includes(item.phase) || !Array.isArray(item.runDirs) || !item.runDirs.every((path: unknown) => typeof path === "string")) throw new Error("会话材料登记不匹配");
             materialPhase = item.phase;
+            if (item.batch) {
+              if (typeof item.batch.file !== "string" || typeof item.batch.dir !== "string" || !isAbsolute(item.batch.file) || !isAbsolute(item.batch.dir)) throw new Error("材料批次关联无效");
+              session.batch = item.batch;
+            }
           }
           // 材料登记与原生状态不是原子写入；即使登记和总结都是 done，也不能跳过权威状态核对。
           if (materialExists(statePath)) {

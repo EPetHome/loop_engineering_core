@@ -4,6 +4,11 @@
  * 保留 PATH、资源运行身份及其他环境，不能改变生产执行器的环境传递行为。
  */
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// PA 测试显式换成自己的临时配置；其他测试绝不读取真实用户配置。
+process.env.LOOP_PA_CONFIG = join(tmpdir(), `loop-pa-disabled-${process.pid}.json`);
 
 // 完成路径新增的独立起草不调用真实模型；需要其他行为的用例显式覆盖，产物仍由夹具隔离。
 process.env.AUTOREVIEW_EXPERIENCE_CMD = fileURLToPath(new URL("./fake-experience.mjs", import.meta.url));

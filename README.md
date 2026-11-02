@@ -379,6 +379,37 @@ Hook 原会话通道要求本地宿主支持上述原生接口，启动时先探
 
 `loop 撤回 <批次.json>` 只对已登记且已合入的批次生效：`release` 仍在本批结果时，用反向比较交换回到合入前的提交，并沿用运行版未提交改动保护；已有后续提交或批次时拒绝且通知，不动 `release`。撤回的只读检查拒绝不会留下阻塞队列的事务；实际已开始但未收尾的变更才保留「撤回待恢复」。撤回只在本地，不替你撤回远端。完整状态字段和恢复选项见 [工具清单.md](工具清单.md)「bin/loop」。
 
+## PA 对接
+
+PA（personal agent）配置在用户级 `~/.pi-autoreview/config.json`，不放进项目的 `.autoreview.json`：
+
+```json
+{ "pa": { "eventsDir": "/你的PA目录/loop-events", "localNotify": false } }
+```
+
+不写 `eventsDir` 就不推事件；`localNotify` 默认 `true`。`false` 只关桌面弹窗，仍写 stderr，不影响会话提示、Claude systemMessage、队列 `.notification.txt` 或打开终端。测试用 `LOOP_PA_CONFIG=/临时目录/pa.json`，不读写真实配置。事件目录应在 PA 的 `inbox/` **之外**。
+
+Loop 按本地日期向 `events-YYYY-MM-DD.jsonl` 追加一整行 v1 JSON：
+
+```json
+{"v":1,"seq":1,"id":"UUID","at":"2026-11-02T10:00:00.000Z","project":"/项目根","batch":{"file":"/开发空间/docs/batches/x/批次.json","name":"x","recipe":"develop"},"stage":"甲","status":"paused","reason":{"category":"环境","text":"门禁环境阻塞"},"evidence":{"summary":"/状态/总结.md","log":"/状态/gate.log"},"detail":{"round":1,"repairs":0,"failureKind":"environment","next":"send"}}
+```
+
+状态有 `started`、`needs-decision`、`paused`、`repair-limit`、`done`、`failed`、`resumed`、`queue`。整批事件 `stage:null`；暂停的 `detail.next` 为 `send`（段会话）、`resume`（整批可续跑）、`grant`（整批待授权）或 `manual`（必须电脑处理）。单段仅在程序提交成功后发整批 `done`，带 `branch`、`commit` 和检查结论；多段另有每段的 `done{scope:"段"}`。`done` 不代表已推送、已合入或人工业务验收通过。
+
+序号逐批持久化在 `~/.pi-autoreview/events/`，重启接着编，不补历史；全局锁核对 PID 加启动时间。同段相同状态与关键详情去重，恢复后可再报告暂停。追加失败不挡批次，序号仍消耗，原因在该目录的 `errors.log`。详情超过 8 KiB 时放进证据文件，事件保留绝对路径。Loop 不改名、截断或删除 PA 的日期文件，读取偏移与清理由 PA 管。
+
+查询独立于 `loop 状态`，**纯读、不恢复队列、不启动测试**：
+
+```bash
+bin/loop 查询 /开发空间/docs/batches/x/批次.json --json
+bin/loop 查询 --all --json   # 省略批次参数时同样查所有已记录批次
+```
+
+返回固定外壳 `{"v":1,"at":"…","batches":[…]}`；每批含 `project`、`batch{file,name,recipe,paGrants:[]}`、`branch`、`commit`、`pushed`、整批 `state/pause/next`、`stages`、`queue`、`evidence`、`events{lastSeq}`。每段有 `stage/state/round/repairs/lastActivity/pause/session/evidence/paRelays:[]`；完整 JSON 示例见 [工具清单「PA 对接」](工具清单.md#pa-对接)。未知提交、队列、会话为 `null`，不猜成通过。
+
+两个宿主各写 `<段>.phase.json`；整批阶段写 `batch.phase.json`，查询不解析 Markdown。原 `<段>.status.json` 的接力和合入语义不变。`loop 清理` 和完成后瘦身都保留尚未 `done/failed` 的整批证据。送话、续跑、只评审和停止命令不在本段范围。
+
 ## 启动入口（bin/pi-dev）
 
 正常批次用 `bin/loop 启动 <批次.json>`，不要手抄 pi 命令：单段直接执行该段启动命令，多段交给流水线；写 `prompt` 的段统一经过 `bin/pi-dev`。需要单独启动一个会话时，才直接用它：

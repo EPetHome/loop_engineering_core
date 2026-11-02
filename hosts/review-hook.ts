@@ -21,6 +21,9 @@ import {
   checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, MARKER_FILE, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
+import { observeStage } from "../events.ts";
+import { systemNotify } from "../notify.ts";
+import type { FailureKind } from "../failure.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
@@ -79,6 +82,7 @@ interface HookContext {
   config: ReviewConfig;
   configError?: string;
   permissionMode?: string;
+  transcript?: string;
 }
 
 /**
@@ -450,11 +454,7 @@ export function lastAssistantMessage(event: HookEvent): string {
 
 /** SessionStart 只有 10 秒时限，那里发通知要传更短的 timeoutMs。 */
 async function notify(body: string, exec: Exec, timeoutMs = 15_000): Promise<void> {
-  process.stderr.write(`[autoreview] ${body}\n`);
-  try {
-    const escaped = body.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    await exec("osascript", ["-e", `display notification "${escaped}" with title "自动评审"`], { cwd: homedir(), timeout: timeoutMs });
-  } catch { /* 通知失败不影响评审结果 */ }
+  await systemNotify("自动评审", body, { exec, timeoutMs });
 }
 
 async function writeSummary(
@@ -523,13 +523,21 @@ async function recordLedger(ctx: HookContext, state: HookState): Promise<string 
   return problem;
 }
 
+function observe(ctx: HookContext, state: HookState, phase: "running" | "reviewing" | "paused" | "done", extra: { via?: "user" | "auto"; question?: string; replay?: boolean } = {}): void {
+  const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
+  observeStage({ cwd: ctx.workDir, summary: ctx.paths.summary, state, phase,
+    reason: phase === "paused" ? state.pauseReason : undefined, failureKind: phase === "paused" ? state.pauseFailureKind : undefined,
+    session: { host: ctx.host, id: ctx.sessionId, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid), log: ctx.transcript }, ...extra });
+}
+
 /** 暂停：存状态、写总结、尽力通知；每一步失败都不阻断下一步。hint 是给你的下一步。 */
 async function pause(
-  ctx: HookContext, state: HookState, reason: string, changedFiles?: string[], notes?: string, hint?: string,
+  ctx: HookContext, state: HookState, reason: string, changedFiles?: string[], notes?: string, hint?: string, failureKind?: FailureKind, question?: string,
 ): Promise<void> {
   try { const current = loadStateFile(ctx.paths.state); if (current.userInputVersion !== state.userInputVersion) copyInputs(state, current); } catch { /* 保留原错误现场 */ }
   state.phase = "paused";
   state.pauseReason = reason;
+  state.pauseFailureKind = failureKind;
   state.pauseHint = hint;
   state.awaitingRepair = false;
   try { saveStateFile(ctx.paths.state, state); } catch (error) {
@@ -538,8 +546,9 @@ async function pause(
   try { await writeSummary(ctx, state, "暂停", reason, changedFiles, notes); } catch (error) {
     process.stderr.write(`autoreview hook: 总结写入失败：${errorText(error)}\n`);
   }
+  observe(ctx, state, "paused", { question });
   // Claude Code 里下一步走 systemMessage；其他宿主只有系统通知，就把下一步带上。
-  await notify(`${basename(ctx.workDir)}：暂停（${reason}）${hint && ctx.host !== "claude" ? `。${hint}` : ""}`, ctx.exec);
+  await notify(`${basename(ctx.workDir)}：暂停（${reason}）${hint && ctx.host !== "claude" ? `。${hint}` : ""}${question ? `\n${question}` : ""}`, ctx.exec);
 }
 
 /** 没有活进程持锁时，清掉上一个 Hook 被杀后留下的子进程。 */
@@ -557,6 +566,7 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
   state.experienceActivity = newHookActivity(ctx);
   saveStateFile(ctx.paths.state, state);
   experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
+  observe(ctx, state, state.phase === "paused" ? "paused" : state.phase === "done" ? "done" : "running", { replay: state.phase !== "idle" });
   if (state.enabled === false) return undefined;
   const git = createGitEvidence(ctx.exec, ctx.workDir);
   const repository = await git.isRepository();
@@ -614,6 +624,7 @@ function resumeOnPrompt(ctx: HookContext, state: HookState): void {
   state.pauseHint = undefined;
   state.awaitingRepair = false;
   state.repairs = 0;
+  observe(ctx, state, "running", { via: "user" });
 }
 
 /** 引用文件的上限：最多 3 个，每个不超过 200KB，二进制不读。 */
@@ -681,6 +692,7 @@ export function endHostExperienceSessions(root: string, host: string, runId: str
 }
 
 function reportQueueStage(ctx: HookContext, state: HookState, event: "started" | "done"): void {
+  observe(ctx, state, event === "done" ? "done" : "running");
   const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
   const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
     inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
@@ -718,6 +730,7 @@ async function consumeQueueInbox(ctx: HookContext, state: HookState, expectedSeq
   state.phase = "idle"; state.awaitingRepair = false; state.pauseReason = undefined; state.pauseHint = undefined;
   state.ledger = undefined; state.resumeAfterInputChange = true;
   saveStateFile(ctx.paths.state, state);
+  observe(ctx, state, "running", { via: "auto" });
   reportQueueStage(ctx, state, "started");
   return inbox.message;
 }
@@ -846,8 +859,9 @@ function guardSignals(ctx: HookContext, controller: AbortController, finished: (
         // 业务执行已取消；独立 cleanup 有自己的超时，完成后才释放宿主锁。
         await finished();
         const state = loadStateFile(ctx.paths.state);
-        state.phase = "paused"; state.pauseReason = INTERRUPTED; state.awaitingRepair = false;
+        state.phase = "paused"; state.pauseReason = INTERRUPTED; state.pauseFailureKind = undefined; state.awaitingRepair = false;
         saveStateFile(ctx.paths.state, state);
+        observe(ctx, state, "paused");
         const path = cleanupRecord();
         let detail = path ? `外部资源释放记录：${path}` : undefined;
         if (path) { try { const record = JSON.parse(readFileSync(path, "utf8")); detail = `外部资源释放：${record.status}；记录：${path}；${record.reason ?? ""}`; } catch { /* 未确认 */ } }
@@ -876,7 +890,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   const marker = classifyMarker(text);
   if (marker === "decision") {
     if (state.phase === "paused") return undefined;
-    await pause(ctx, state, "开发方需要你决定");
+    await pause(ctx, state, "开发方需要你决定", undefined, undefined, undefined, undefined, text);
     return undefined;
   }
   // 暂停状态不自动评审，等你再提交消息（UserPromptSubmit 解除，与 pi 扩展一致）。
@@ -943,6 +957,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     state.pauseReason = undefined;
     state.awaitingRepair = false;
     saveStateFile(ctx.paths.state, state);
+    observe(ctx, state, "reviewing");
     experienceSession(ctx.configRoot, `${ctx.host}-${ctx.sessionId}`, true);
     const round = state.rounds.length + 1;
     const work = runReviewRound({
@@ -1014,11 +1029,12 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     }
     if (outcome.kind === "paused") {
       const reason = outcome.reason ?? "评审失败";
-      await pause(ctx, state, reason, outcome.changedFiles, outcome.notes, outcome.hint);
+      await pause(ctx, state, reason, outcome.changedFiles, outcome.notes, outcome.hint, outcome.failureKind);
       return userOutput(ctx, outcome.hint && `自动评审暂停（${reason}）。${outcome.hint}`);
     }
     state.phase = "idle";
     saveStateFile(ctx.paths.state, state);
+    observe(ctx, state, "running");
     return JSON.stringify({ decision: "block", reason: outcome.message ?? "" });
   } catch (error) {
     if ((error as Error)?.message === changedInputReason) controller.abort(error);
@@ -1079,7 +1095,8 @@ async function dispatch(event: HookEvent): Promise<string | undefined> {
     }
   }
   const ctx: HookContext = { host, configRoot: root, workDir: root, promptDir: eventCwd, sessionId, paths, exec: createChildExec(paths.procs), config, configError,
-    permissionMode: typeof event.permission_mode === "string" ? event.permission_mode : undefined };
+    permissionMode: typeof event.permission_mode === "string" ? event.permission_mode : undefined,
+    transcript: typeof event.transcript_path === "string" ? resolve(event.transcript_path) : undefined };
   if (kind === "SessionStart") return configError ? configUnavailable(ctx) : sessionStart(ctx);
   if (kind === "UserPromptSubmit") return userPromptSubmit(ctx, event);
   if (kind === "LoopQueueRepair") return prepareNativeQueueRepair(ctx, event);

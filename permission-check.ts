@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PI_BIN, PERMISSION_EXT } from "./config.ts";
 import { currentMethodsFingerprint, recordPermissionCheck } from "./methods.ts";
 import { PIPELINE_DIR_ENV, PIPELINE_LAUNCH_TOKEN_ENV, STAGE_ENV, writeStageStatus } from "./pipeline-core.ts";
+import { batchInfo, eventReason, pushEvent, writePhase } from "./events.ts";
 
 interface Probe { name: string; toolName: string; input: Record<string, unknown> }
 type NativeResult = { available: true; ok: boolean; reason?: string } | { available: false; reason: string };
@@ -114,6 +115,12 @@ function reportStartupFailure(reason: string): void {
   try {
     writeStageStatus({ dir, stage }, { sessionId: "startup", summary: "", event: "startup-failed", inbox: 0,
       pauseReason: `权限自动执行检查未通过：${reason}` });
+    const file = process.env.AUTOREVIEW_BATCH_FILE;
+    if (file) {
+      const info = batchInfo(file, process.cwd(), dir), why = eventReason(`启动入口失败：${reason}`), detail = { exitCode: 1 };
+      writePhase(info, stage, "failed", { status: "failed", ...why, detail });
+      pushEvent(info, stage, "failed", why, {}, detail);
+    }
   } catch { /* 写不回状态时仍以非零退出；编排程序会看到进程退出 */ }
 }
 

@@ -72,6 +72,8 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   phase: "idle" | "reviewing" | "accepting" | "done" | "paused";
   materialCleanup?: string;
   pauseReason?: string;
+  /** 原执行器的分类随暂停持久化；事件与查询不重新从日志推断。 */
+  pauseFailureKind?: FailureKind;
   /** 暂停时给你看的下一步（写进总结「需要你做的事」），恢复时清掉。 */
   pauseHint?: string;
   /** 本会话已经提醒过写法段缺失或过期（每个会话只提醒一次）。 */
@@ -313,20 +315,21 @@ async function gateStep(
   const record: GateRecord = { command: gate.cmd, result: "通过", durationMs: clock.now() - startedTs };
   if (resource) record.cleanup = resourceLine(resource);
   if (!res) {
-    record.result = "无法执行";
+    record.result = "无法执行"; record.failureKind = "environment";
     record.detail = tail(failure, 300);
   } else {
     record.exitCode = res.code;
     record.outputTail = gateOutputTail(output);
     if (res.killed) {
-      record.result = "超时";
+      record.result = "超时"; record.failureKind = "environment";
       record.detail = `超过 ${Math.round(timeout / 60_000)} 分钟没跑完，被终止`;
     } else if (SHELL_CANNOT_RUN.has(res.code)) {
-      record.result = "无法执行";
+      record.result = "无法执行"; record.failureKind = "environment";
       record.detail = `退出码 ${res.code}：命令找不到或不能执行`;
     } else if (res.code !== 0) {
       const failure = classifyFailure(res.code, output);
       record.result = failure.kind === "product" ? "不通过" : failureLabel(failure.kind) as GateRecord["result"];
+      record.failureKind = failure.kind;
       record.detail = failure.reason;
     }
     record.logPath = deps.writeInput(
@@ -335,7 +338,7 @@ async function gateStep(
     );
   }
   if (resource?.status === "cleanup-failed") {
-    record.result = "环境阻塞";
+    record.result = "环境阻塞"; record.failureKind = "environment";
     record.detail = `临时资源释放未确认：${resource.detail}`;
   }
   const middle = await git.snapshot();
@@ -362,7 +365,7 @@ async function gateStep(
     return {
       outcome: {
         kind: "paused", reason: `门禁${record.result}`,
-        failureKind: record.result === "检查方法故障" ? "method" : record.result === "原因待诊断" ? "unknown" : "environment",
+        failureKind: record.failureKind,
         notes: [record.detail, record.outputTail && `输出最后几行：${tail(record.outputTail, 300)}`].filter(Boolean).join("；"),
         hint: `检查 .autoreview.json 的 gate（命令：${gate.cmd}，时限 ${gate.timeoutMin} 分钟）能在项目目录跑完，再发消息继续`,
       },

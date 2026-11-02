@@ -16,6 +16,9 @@ import { parseMergeConfig } from "../config.ts";
 import { workingTree } from "../commit-batch.ts";
 import { createGitEvidence } from "../git.ts";
 import { childExec } from "../hosts/review-hook.ts";
+import { phasePath, type PhaseRecord } from "../events.ts";
+import { queryBatches } from "../query.ts";
+import { materialSession, recordMaterialSession, registerAcceptanceMaterials, slimCompletedSession } from "../materials.ts";
 
 // 替身开发会话在发 done 前冻结已检查的候选，不让产品代码临时补造资格。
 function queueStageEvent(options: Parameters<typeof realQueueStageEvent>[0]): void {
@@ -28,7 +31,7 @@ import { hookInputBridgeAvailable, inputBridgePath, inputStatePath, repairText }
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const LOOP = join(ROOT, "loop.ts");
-const keys = ["HOME", "PATH", "AUTOREVIEW_MERGE_QUEUE_ROOT", "AUTOREVIEW_MERGE_QUEUE_LAUNCHER", "AUTOREVIEW_RESOURCE_ROOT", "AUTOREVIEW_PROJECTS_ROOT", "PI_BIN", "PI_NODE_BIN", "LOOP_DIR", "PERMISSION_EXTENSION", "PONYTAIL_EXTENSION", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"];
+const keys = ["HOME", "PATH", "LOOP_PA_CONFIG", "AUTOREVIEW_MERGE_QUEUE_ROOT", "AUTOREVIEW_MERGE_QUEUE_LAUNCHER", "AUTOREVIEW_RESOURCE_ROOT", "AUTOREVIEW_PROJECTS_ROOT", "PI_BIN", "PI_NODE_BIN", "LOOP_DIR", "PERMISSION_EXTENSION", "PONYTAIL_EXTENSION", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"];
 function fixture(count = 2, openCount = count) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "loop-merge-queue-"))), repo = join(root, "repo");
   const saved = keys.map((key) => process.env[key]);
@@ -142,6 +145,13 @@ if(mode.startsWith('fail')) process.exit(1);
     } };
 }
 
+function paEvents(f: ReturnType<typeof fixture>) {
+  const dir = join(f.root, "pa-events"), config = join(f.root, "pa.json");
+  writeFileSync(config, JSON.stringify({ pa: { eventsDir: dir, localNotify: false } })); process.env.LOOP_PA_CONFIG = config;
+  return () => existsSync(dir) ? readdirSync(dir).filter((file) => file.endsWith(".jsonl")).sort().flatMap((file) =>
+    readFileSync(join(dir, file), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))) : [];
+}
+
 function repeatableMulti(f: ReturnType<typeof fixture>, options: { acceptance?: boolean; front?: boolean; reset?: string } = {}) {
   const dev = f.batches[0].cwd, file = join(f.root, "repeatable.json"), dir = join(f.root, "repeatable"), criteria = join(f.root, "repeatable-criteria.md");
   const front = options.front ? join(dev, "front") : dev; mkdirSync(front, { recursive: true });
@@ -187,7 +197,7 @@ test("兼容旧队列开关：只读归一化，保留 integrationEpoch 和其�
 test("返修1：开工后新增整批验收，部分验证不提交、不进队，通过后才提交", async () => {
   const f = fixture(1);
   try { await fakeAcceptance(f, async () => {
-    const multi = repeatableMulti(f);
+    const rows = paEvents(f), multi = repeatableMulti(f);
     assert.equal(f.queue().batches.find((batch) => batch.file === multi.file)!.acceptance, false);
     writeFileSync(multi.file, JSON.stringify({ ...multi.raw, acceptance: multi.acceptance }));
     f.write(0, "src/a.txt", "checked\n"); await multi.done("甲", "a1"); await multi.done("乙", "b1");
@@ -196,10 +206,25 @@ test("返修1：开工后新增整批验收，部分验证不提交、不进队�
     assert.match(readFileSync(join(multi.dir, "report.md"), "utf8"), /部分验证/);
     assert.equal(f.queue().entries.length, 0); assert.equal(f.git(multi.dev, "rev-parse", "HEAD"), head);
     assert.equal(f.queue().batches.find((batch) => batch.file === multi.file)!.acceptance, true, "按本轮实际配置同步，不沿用开工时的 false");
+    const phase = readJson<PhaseRecord>(phasePath(multi.dir, null))!;
+    assert.equal(phase.phase, "paused", "PA 返修1：未提交的部分验证不能发布整批 done");
+    assert.equal(phase.next, "resume"); assert.match(phase.text, /部分验证.*未.*提交/);
+    const conclusion = phase.detail.acceptance as { verdict: string; partial: { id: string }[] };
+    assert.equal(conclusion.verdict, "部分验证"); assert.equal(conclusion.partial[0].id, "A1"); assert.ok(existsSync(phase.evidence.acceptance));
+    const queried: any = queryBatches(multi.file).batches[0]; assert.equal(queried.state, "paused"); assert.equal(queried.commit, null); assert.equal(queried.pause.text, phase.text);
+    assert.equal(rows().filter((event) => event.status === "done" && event.stage === null).length, 0);
+    const summary = join(process.env.HOME!, ".pi-autoreview", "material-test", "fake.md"); mkdirSync(dirname(summary), { recursive: true }); writeFileSync(summary, "材料保护替身\n");
+    const session = materialSession("fake", multi.dev, summary, "done"); session.batch = { file: multi.file, dir: multi.dir };
+    const runDir = join(session.acceptanceDir, "r1"), large = join(runDir, "node_modules", "large.bin"); mkdirSync(dirname(large), { recursive: true }); writeFileSync(large, Buffer.alloc(256 * 1024 + 1));
+    recordMaterialSession(session); registerAcceptanceMaterials(session.sessionId, session.workDir, runDir, session.procsFile);
+    assert.match(slimCompletedSession(session), /整批证据保留/); assert.ok(existsSync(large), "整批未完成时已完成段的材料仍保留");
     process.env.FAKE_ACC_UNKNOWN = "";
     assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 0);
     await f.until(() => f.queue().entries.at(-1)?.status === "ready"); await f.idle();
     assert.notEqual(f.git(multi.dev, "rev-parse", "HEAD"), head); assert.equal(f.queue().entries.length, 1);
+    assert.equal(readJson<PhaseRecord>(phasePath(multi.dir, null))!.phase, "done");
+    assert.equal(rows().filter((event) => event.status === "done" && event.stage === null).length, 1);
+    slimCompletedSession(session); assert.equal(existsSync(large), false, "实际提交完成后才恢复原有瘦身资格");
   }); } finally { await f.close(); }
 });
 
@@ -235,7 +260,7 @@ test("返修2：有整批验收多段再次完成先重验；运行中状态查�
   try { await fakeAcceptance(f, async (state) => {
     const reset = join(f.root, "repeat-reset.mjs"), entered = join(f.root, "reset-entered"), hold = join(f.root, "hold-reset"), resets = join(f.root, "resets");
     writeFileSync(reset, `import fs from 'node:fs'; fs.appendFileSync(${JSON.stringify(resets)}, 'reset\\n'); if(fs.existsSync(${JSON.stringify(hold)})){fs.writeFileSync(${JSON.stringify(entered)}, 'entered'); while(!fs.existsSync(${JSON.stringify(resume)})) await new Promise(r=>setTimeout(r,20));}`);
-    const multi = repeatableMulti(f, { acceptance: true, reset: `${process.execPath} ${reset}` });
+    const rows = paEvents(f), multi = repeatableMulti(f, { acceptance: true, reset: `${process.execPath} ${reset}` });
     f.write(0, "src/a.txt", "first\n"); await multi.done("甲", "a1"); await multi.done("乙", "b1");
     assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 0);
     await f.until(() => f.queue().entries[0]?.status === "ready"); await f.idle();
@@ -243,7 +268,15 @@ test("返修2：有整批验收多段再次完成先重验；运行中状态查�
     writeFileSync(hold, "hold"); f.write(0, "src/a.txt", "again\n"); await multi.done("甲", "a2");
     await f.until(() => existsSync(entered), "重复完成已自动启动整批重验");
     f.cli("状态"); f.cli("状态");
+    const phaseFile = phasePath(multi.dir, null), beforePhase = readFileSync(phaseFile), beforeTime = statSync(phaseFile).mtimeMs;
+    const lifecycle = () => rows().filter((event) => event.batch.file === multi.file && event.stage === null && event.status !== "queue");
+    const beforeEvents = lifecycle(); assert.equal(JSON.parse(beforePhase.toString()).phase, "running");
     assert.equal(await runPipeline(multi.plan(), multi.io, { fromAcceptance: true }), 2, "活动流水线不得再启动第二份");
+    assert.deepEqual(readFileSync(phaseFile), beforePhase, "PA 返修2：未取得运行权不能覆盖活动 phase 或进程身份"); assert.equal(statSync(phaseFile).mtimeMs, beforeTime);
+    const rejected = f.cli("启动", multi.file, "--launcher", "background"); assert.equal(rejected.ok, false); assert.equal(rejected.exitCode, 2);
+    assert.deepEqual(readFileSync(phaseFile), beforePhase, "loop 启动也不能在运行锁之前写 started"); assert.equal(statSync(phaseFile).mtimeMs, beforeTime);
+    assert.deepEqual(lifecycle(), beforeEvents, "重复启动不应产生虚假 started/resumed/paused 事件");
+    const queried: any = queryBatches(multi.file).batches[0]; assert.equal(queried.state, "running"); assert.equal(queried.pause, null);
     assert.equal(f.git(multi.dev, "rev-parse", "HEAD"), old, "本轮验收通过前不能提交");
     assert.equal(readFileSync(join(state, "acc-count"), "utf8"), "1");
     writeFileSync(resume, "go"); await f.until(() => f.queue().entries.length === 2 && f.queue().entries[1].status === "ready"); await f.idle();
@@ -829,6 +862,7 @@ test("返修2：整批验收通过→部分验证→通过替换旧资格，同�
   for (const versioned of [false, true]) await t.test(versioned ? "按流水线验收代次" : "兼容直接传验收记录", async () => {
     const f = fixture(1);
     try {
+      const rows = paEvents(f);
       autoConfig(f); f.write(0, "src/a.txt", "candidate\n"); mkdirSync(join(f.repo, "src")); writeFileSync(join(f.repo, "src/a.txt"), "runtime overlap\n");
       const { file, passed, partial } = multiReady(f), base = f.git(f.repo, "rev-parse", "HEAD");
       const firstEpoch = versioned ? queueBatchRecheck(f.repo, file) : undefined;
@@ -836,7 +870,10 @@ test("返修2：整批验收通过→部分验证→通过替换旧资格，同�
       await f.until(() => f.queue().entries[0]?.status === "ready" && Boolean(f.queue().entries[0].notified)); await f.idle();
       assert.equal(f.cli("合入", file).ok, false, "重叠脏文件仍阻止用户合入");
       const first = f.queue().entries[0];
+      const doneEvents = () => rows().filter((event) => event.batch.file === file && event.stage === null && event.status === "done");
+      assert.equal(doneEvents().length, 1);
       queueBatchComplete(f.repo, file, true, passed, firstEpoch); await f.idle(); assert.equal(f.queue().entries.length, 1, "相同结论与代次不重复进队");
+      assert.equal(doneEvents().length, 1, "同一次完成的重放不能重复通知");
       const secondEpoch = versioned ? queueBatchRecheck(f.repo, file) : undefined;
       rmSync(join(f.repo, "src/a.txt"));
       if (versioned) {
@@ -852,11 +889,14 @@ test("返修2：整批验收通过→部分验证→通过替换旧资格，同�
       const thirdEpoch = versioned ? queueBatchRecheck(f.repo, file) : undefined;
       queueBatchComplete(f.repo, file, true, passed, thirdEpoch); // 与第一次完全相同的记录，不能被历史去重吞掉。
       await f.until(() => f.queue().entries.at(-1)?.status === "ready" && Boolean(f.queue().entries.at(-1)?.notified)); await f.idle();
+      assert.equal(doneEvents().length, 2, "PA 返修3：同一提交在部分验证后重新通过，必须产生新的 done");
+      assert.equal(doneEvents()[1].detail.commit, doneEvents()[0].detail.commit, "该场景确实复用相同提交号");
       const published = f.cli("合入", file); assert.equal(published.ok, true, JSON.stringify(published)); await f.idle();
       const merged = f.queue().entries.at(-1)!;
       assert.equal(f.queue().entries.length, 2); assert.equal(merged.status, "merged"); assert.deepEqual(merged.integration, queueAcceptance(passed));
       assert.equal(f.git(f.repo, "rev-parse", "HEAD"), merged.result);
       queueBatchComplete(f.repo, file, true, passed, thirdEpoch); await f.idle(); assert.equal(f.queue().entries.length, 2);
+      assert.equal(doneEvents().length, 2, "新完成的后续重放同样不重复通知");
     } finally { await f.close(); }
   });
 });

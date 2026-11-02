@@ -125,6 +125,41 @@ function fixture(options: { marker?: string | null; maxRepairs?: number; files?:
   };
 }
 
+test("PA A1-A4：Claude/Codex Hook 的事件、phase、通知关闭、恢复与 FailureKind", async (t) => {
+  for (const host of ["claude", "codex"]) await t.test(host, () => {
+    const h = fixture({ marker: JSON.stringify({ gate: { cmd: "printf 'AUTOREVIEW_FAILURE=environment PA_ENV_BLOCK\\n'; exit 75", timeoutMin: 1 } }) });
+    try {
+      const config = join(h.root, "pa.json"), file = join(h.root, "batch.json"), dir = join(h.home, ".pi-autoreview", "pipelines", "pa"), events = join(h.root, "events");
+      writeFileSync(config, JSON.stringify({ pa: { eventsDir: events, localNotify: false } }));
+      writeFileSync(file, JSON.stringify({ name: "pa", dir, stages: { 甲: { cwd: h.repo, start: "fake" } } }));
+      const env = { AUTOREVIEW_HOST: host, LOOP_PA_CONFIG: config, AUTOREVIEW_BATCH_FILE: file, AUTOREVIEW_PIPELINE_DIR: dir, AUTOREVIEW_STAGE: "甲" };
+      const rows = () => readdirSync(events).filter((name) => name.endsWith(".jsonl")).flatMap((name) => readFileSync(join(events, name), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
+      h.run(h.event("SessionStart"), { env }); assert.equal(rows()[0].status, "started"); assert.equal(rows()[0].seq, 1);
+      h.run(h.event("UserPromptSubmit", { prompt: "需求" }), { env });
+      const question = "A. 保留\nB. 改动\n【需要你决定】", stopped = h.run(h.event("Stop", { last_assistant_message: question }), { env });
+      const decision = rows().at(-1); assert.equal(decision.status, "needs-decision"); assert.equal(decision.detail.question, question); assert.equal(decision.detail.next, "send");
+      assert.ok(stopped.stderr.includes(question)); assert.equal(h.notifications(), "");
+      h.run(h.event("SessionStart"), { env }); assert.equal(rows().filter((event) => event.status === "needs-decision").length, 1, "重启不补旧暂停");
+      h.run(h.event("UserPromptSubmit", { prompt: "选 A" }), { env }); assert.equal(rows().at(-1).status, "resumed"); assert.equal(rows().at(-1).detail.via, "user");
+      h.write("file.txt", "changed\n"); h.run(h.delivered(), { env });
+      const paused = rows().at(-1); assert.equal(paused.status, "paused"); assert.equal(paused.reason.category, "环境"); assert.equal(paused.detail.failureKind, "environment"); assert.ok(existsSync(paused.evidence.log));
+      const query = spawnSync(process.execPath, [fileURLToPath(new URL("../loop.ts", import.meta.url)), "查询", file, "--json"], { cwd: h.root, env: { ...process.env, HOME: h.home, ...env }, encoding: "utf8" });
+      assert.equal(query.status, 0, query.stderr + query.stdout); const stage = JSON.parse(query.stdout).batches[0].stages[0];
+      assert.equal(stage.pause.category, paused.reason.category); assert.equal(stage.pause.text, paused.reason.text);
+      assert.equal(JSON.parse(readFileSync(join(dir, "甲.phase.json"), "utf8")).phase, "paused");
+    } finally { h.close(); }
+    const h2 = fixture({ marker: JSON.stringify({ maxRepairs: 0 }) });
+    try {
+      const file = join(h2.root, "batch.json"), dir = join(h2.root, "pipeline"), config = join(h2.root, "pa.json"), events = join(h2.root, "events");
+      writeFileSync(file, JSON.stringify({ name: "pa-limit", dir, stages: { 甲: { cwd: h2.repo, start: "fake" } } })); writeFileSync(config, JSON.stringify({ pa: { eventsDir: events, localNotify: false } }));
+      const env = { AUTOREVIEW_HOST: host, LOOP_PA_CONFIG: config, AUTOREVIEW_BATCH_FILE: file, AUTOREVIEW_PIPELINE_DIR: dir, AUTOREVIEW_STAGE: "甲" };
+      h2.run(h2.event("UserPromptSubmit", { prompt: "需求" }), { env }); h2.write("file.txt", "change\n"); h2.run(h2.delivered(), { env, mode: "always-fix" });
+      const rows = readdirSync(events).flatMap((name) => readFileSync(join(events, name), "utf8").trim().split("\n").map((line) => JSON.parse(line))), last = rows.at(-1);
+      assert.equal(last.status, "repair-limit"); assert.equal(last.detail.mustFix, h2.readState(host).unresolvedMustFix); assert.ok(last.detail.mustFix.length > 0);
+    } finally { h2.close(); }
+  });
+});
+
 test("Claude/Codex 实际 Hook 入口保存完整快照，漏网 CLI 不改变原会话状态与总结", async (t) => {
   for (const host of ["claude", "codex"]) await t.test(host, () => {
     const h = fixture();

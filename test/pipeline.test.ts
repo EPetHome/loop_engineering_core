@@ -1,4 +1,5 @@
 /** 流水线：计划解析（含旧写法兼容）、归属、派发分批；接力、整批验收、回流（假段进程 + 假验收方）。产物只写 os.tmpdir()。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

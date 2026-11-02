@@ -5,6 +5,7 @@ import { existsSync, lstatSync, readFileSync, readlinkSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import { gitBlobHash, type Snapshot } from "./git.ts";
 import { branchType, checkBranchName, gitText, localFilePaths } from "./workspace.ts";
+import { eventReason, pushEvent, writePhase, type BatchInfo, type Evidence } from "./events.ts";
 
 export interface BatchCommit {
   branch: string; cwd: string; base: string; commit: string; tree: string;
@@ -56,8 +57,10 @@ export function checkedTree(cwd: string, candidate: Snapshot | string, scratch: 
 
 /** 所有分支先核对再开始提交；一个分支一个本批提交，推过的提交作为追加边界。 */
 export function commitBatch(options: { id: string; name: string; release: string; scratch: string; candidates: CommitCandidate[];
-  previous?: BatchCommit[]; save: (records: BatchCommit[]) => void }): BatchCommit[] {
+  previous?: BatchCommit[]; save: (records: BatchCommit[]) => void;
+  event?: { info: BatchInfo; detail: Record<string, unknown>; evidence: Evidence } }): BatchCommit[] {
   const records = [...(options.previous ?? [])];
+  try {
   const plans = options.candidates.map((source) => {
     checkBranchName(source.branch);
     if (gitText(source.cwd, ["branch", "--show-current"]) !== source.branch) throw new Error(`批次工作区分支已变化：${source.cwd}`);
@@ -100,5 +103,20 @@ export function commitBatch(options: { id: string; name: string; release: string
     if (at < 0) records.push(record); else records[at] = record;
     options.save(records);
   }
+  if (options.event) {
+    const { info, evidence } = options.event;
+    const detail = { ...options.event.detail, scope: "整批", branch: records[0]?.branch ?? null, commit: records[0]?.commit ?? null,
+      ...(records.length > 1 ? { commits: records.map(({ branch, commit }) => ({ branch, commit })) } : {}) };
+    writePhase(info, null, "done", { status: "done", evidence, detail });
+    pushEvent(info, null, "done", eventReason(), evidence, detail);
+  }
   return records;
+  } catch (error) {
+    if (options.event) {
+      const { info, evidence } = options.event, reason = eventReason(`提交核对失败：${String(error)}`), detail = { exitCode: 1 };
+      writePhase(info, null, "failed", { status: "failed", ...reason, evidence, detail });
+      pushEvent(info, null, "failed", reason, evidence, detail);
+    }
+    throw error;
+  }
 }

@@ -22,6 +22,8 @@ import { createChildExec } from "../hosts/review-hook.ts";
 import type { Exec, ExecResult } from "../git.ts";
 import { mergeQueuedBatch, queueDir, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
 import { statusPath, writeJsonAtomic } from "../pipeline-core.ts";
+import { phasePath } from "../events.ts";
+import { queryBatches } from "../query.ts";
 
 type Result = ExecResult;
 type Call = { command: string; args: string[]; options: Partial<Parameters<Exec>[2]> };
@@ -2304,6 +2306,81 @@ test("返修1：Pi 历史未知验收经过 A9 兜底仍不授予自动合入资
     assert.equal(spawnSync("git", ["rev-parse", "HEAD"], { cwd: runtime, encoding: "utf8" }).stdout.trim(), entry.base);
     assert.match(h.summary(), /历史队列缺少验收结论/);
   } finally { if (old === undefined) delete process.env.AUTOREVIEW_BATCH_FILE; else process.env.AUTOREVIEW_BATCH_FILE = old; await h.close(); }
+});
+
+function paFixture(h: ReturnType<typeof harness>, t: test.TestContext) {
+  const config = join(h.root, "pa.json"), file = join(h.root, "batch.json"), events = join(h.root, "events");
+  const old = { LOOP_PA_CONFIG: process.env.LOOP_PA_CONFIG, AUTOREVIEW_BATCH_FILE: process.env.AUTOREVIEW_BATCH_FILE };
+  process.env.LOOP_PA_CONFIG = config; process.env.AUTOREVIEW_BATCH_FILE = file;
+  t.after(() => { for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  writeFileSync(config, JSON.stringify({ pa: { eventsDir: events, localNotify: false } }));
+  writeFileSync(file, JSON.stringify({ name: "PA测试", dir: h.pipelineDir, stages: { 甲: { cwd: h.repo, start: "fixture" } } }));
+  const rows = () => existsSync(events) ? readdirSync(events).filter((file) => file.endsWith(".jsonl")).flatMap((file) => readFileSync(join(events, file), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))) : [];
+  return { config, file, events, rows };
+}
+
+test("PA A1/A2：Pi 替身会话开始；决定事件带问题和选项原文，关通知仍有 stderr，恢复写 phase", async (t) => {
+  const h = harness({ stage: "甲" }), pa = paFixture(h, t);
+  try {
+    await h.event("session_start"); assert.equal(pa.rows()[0].status, "started"); assert.equal(pa.rows()[0].seq, 1);
+    await h.begin(); const question = "请选择\nA. 保留原状\nB. 改接口\n【需要你决定】"; h.assistant(question);
+    let stderr = ""; const original = process.stderr.write;
+    process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as typeof process.stderr.write;
+    try { await h.event("agent_settled"); } finally { process.stderr.write = original; }
+    const event = pa.rows().at(-1); assert.equal(event.status, "needs-decision"); assert.equal(event.detail.question, question);
+    assert.deepEqual(event.detail.options, ["A. 保留原状", "B. 改接口"]); assert.equal(event.detail.next, "send");
+    assert.equal(h.calls.filter((call) => call.command === "osascript").length, 0); assert.ok(stderr.includes(question));
+    const phase = JSON.parse(readFileSync(phasePath(h.pipelineDir, "甲"), "utf8")); assert.equal(phase.status, "needs-decision");
+    const before = readFileSync(statusPath(h.pipelineDir, "甲")); await h.begin("选 A");
+    assert.equal(pa.rows().at(-1).status, "resumed"); assert.equal(pa.rows().at(-1).detail.via, "user");
+    assert.equal(JSON.parse(readFileSync(phasePath(h.pipelineDir, "甲"), "utf8")).phase, "running");
+    assert.deepEqual(readFileSync(statusPath(h.pipelineDir, "甲")), before, "恢复 phase 不覆盖接力 status");
+  } finally { await h.close(); }
+});
+
+test("PA A3：Pi 门禁保留执行器的 environment 分类和日志，查询原因与事件相同", async (t) => {
+  const h = harness({ stage: "甲" }), pa = paFixture(h, t);
+  try {
+    h.write(".autoreview.json", JSON.stringify({ gate: { cmd: "fake gate", timeoutMin: 1 } })); h.git("add", ".autoreview.json"); h.git("commit", "-qm", "config");
+    h.acceptor = () => result("AUTOREVIEW_FAILURE=environment TEST_ENV_BLOCK\n", 75);
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "change\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    const event = pa.rows().at(-1); assert.equal(event.status, "paused"); assert.equal(event.reason.category, "环境"); assert.equal(event.detail.failureKind, "environment"); assert.equal(event.detail.next, "send");
+    assert.ok(existsSync(event.evidence.log)); const query: any = queryBatches(pa.file).batches[0];
+    assert.deepEqual({ category: query.stages[0].pause.category, text: query.stages[0].pause.text }, event.reason);
+    assert.equal(query.stages[0].evidence.log, event.evidence.log);
+  } finally { await h.close(); }
+});
+
+test("PA A4：Pi 返修上限输出剩余必修原文", async (t) => {
+  const h = harness({ stage: "甲", flags: { "autoreview-max-repairs": "0" } }), pa = paFixture(h, t);
+  try {
+    h.reviewer = () => result(FIX); await h.event("session_start"); await h.begin(); h.write("file.txt", "change\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    const event = pa.rows().at(-1); assert.equal(event.status, "repair-limit"); assert.equal(event.detail.mustFix, h.state().unresolvedMustFix); assert.match(event.detail.mustFix, /问题：必修 X/);
+  } finally { await h.close(); }
+});
+
+test("PA A5/A7：单段只在程序提交后发整批 done；接收目录只读时批次仍正常完成", async (t) => {
+  for (const readonly of [false, true]) await t.test(readonly ? "只读目录" : "正常目录", async (t) => {
+    const h = harness({ stage: "甲" }), pa = paFixture(h, t);
+    try {
+      h.write(".autoreview.json", JSON.stringify({ gate: { cmd: "true", timeoutMin: 1 } })); h.git("add", ".autoreview.json"); h.git("commit", "-qm", "config");
+      const runtime = join(h.root, "runtime"); h.git("worktree", "add", "-b", "release", runtime, "HEAD"); h.git("branch", "-m", "feat/pa");
+      registerQueueBatch(runtime, { name: "PA测试", file: pa.file, dir: h.pipelineDir, project: runtime, release: "release", steps: [["甲"]], stages: [{ name: "甲", cwd: h.repo, branch: "feat/pa", start: "fixture" }] });
+      if (readonly) { mkdirSync(pa.events); chmodSync(pa.events, 0o500); }
+      await h.event("session_start"); await h.begin(); h.write("file.txt", "checked\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+      await until(() => readMergeQueue(runtime)?.entries[0]?.status === "ready", "提交后进队且释放门禁");
+      assert.equal(h.state().phase, "done"); assert.equal(h.git("status", "--porcelain"), "");
+      if (readonly) {
+        assert.equal(pa.rows().length, 0); assert.match(readFileSync(join(h.home, ".pi-autoreview", "events", "errors.log"), "utf8"), /"seq":\d+.*EACCES|"seq":\d+.*EPERM/);
+      } else {
+        const done = pa.rows().filter((event) => event.status === "done"); assert.equal(done.length, 1); assert.equal(done[0].stage, null); assert.equal(done[0].detail.scope, "整批");
+        assert.equal(done[0].detail.branch, "feat/pa"); assert.equal(done[0].detail.commit, h.git("rev-parse", "feat/pa"));
+        assert.equal(h.git("merge-base", "--is-ancestor", done[0].detail.commit, "feat/pa"), "");
+        assert.equal(done[0].detail.gate, "通过"); assert.equal(done[0].detail.review.mustFix, 0); assert.equal(done[0].detail.acceptance.verdict, "未配置");
+        await h.event("session_shutdown"); await h.event("session_start"); assert.equal(pa.rows().filter((event) => event.status === "done").length, 1, "恢复不补历史 done");
+      }
+    } finally { if (existsSync(pa.events)) chmodSync(pa.events, 0o700); await h.close(); }
+  });
 });
 
 test("扩展加载时撤掉一次性启动回报身份，自定义 start 的子进程不能再回报失败", async () => {

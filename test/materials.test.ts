@@ -1,4 +1,5 @@
 /** 运行材料释放；所有身份、会话和磁盘数据均在系统临时目录。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs, { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -10,6 +11,7 @@ import test from "node:test";
 import { renderSummary } from "../core.ts";
 import { cleanupMaterialHistory, materialSession, recordMaterialSession, registerAcceptanceMaterials, slimCompletedSession } from "../materials.ts";
 import { createRunResource, newMaterialCleanup, releaseRunResource, slimMaterialDirectory } from "../resources.ts";
+import { batchInfo, writePhase } from "../events.ts";
 
 const LOOP = fileURLToPath(new URL("../bin/loop", import.meta.url));
 const SMALL = 256 * 1024;
@@ -94,6 +96,35 @@ test("暂停、开发中、评审中、必需验收中均不改变任何材料",
     assert.deepEqual(snapshot(h.data), before);
     assert.ok(existsSync(file));
   });
+});
+
+test("PA 证据保护：某段虽已完成，整批 paused/running 时不能清理；整批 done/failed 后才按原规则瘦身", (t) => {
+  const h = fixture(t), file = join(h.root, "batch.json"), dir = join(h.data, "pipelines", "batch");
+  writeFileSync(file, JSON.stringify({ name: "batch", dir, stages: { 甲: { cwd: h.work, start: "fake" } } }));
+  const info = batchInfo(file, h.work, dir);
+  h.session.batch = { file: info.batch.file, dir }; h.save();
+  writePhase(info, "甲", "done", { status: "done", evidence: { summary: h.summary } });
+  const large = put(join(h.run, "node_modules", "large.bin"));
+  for (const phase of ["running", "paused"] as const) {
+    writePhase(info, null, phase, { next: "resume" });
+    const before = snapshot(h.data), result = h.history(true);
+    assert.equal(result.files, 0); assert.ok(result.unknown.some((item) => /整批证据保留/.test(item.reason))); assert.deepEqual(snapshot(h.data), before);
+  }
+  writePhase(info, null, "done", { status: "done" }); assert.equal(h.history(true).files, 1); assert.equal(existsSync(large), false);
+  put(large); writePhase(info, null, "failed", { status: "failed" }); assert.equal(h.history(true).files, 1);
+});
+
+test("PA 的事件目录即使嵌在已完成材料里，也不能被 loop 清理截断或删除", (t) => {
+  const h = fixture(t), dir = join(h.run, "node_modules", "pa-events"), file = put(join(dir, "events-2026-11-02.jsonl"));
+  const config = join(h.root, "pa.json"), old = process.env.LOOP_PA_CONFIG;
+  process.env.LOOP_PA_CONFIG = config;
+  t.after(() => { if (old === undefined) delete process.env.LOOP_PA_CONFIG; else process.env.LOOP_PA_CONFIG = old; });
+  const alias = join(h.root, "event-alias"); symlinkSync(dir, alias);
+  for (const eventsDir of [dir, alias]) {
+    writeFileSync(config, JSON.stringify({ pa: { eventsDir } }));
+    const before = readFileSync(file), result = h.history(true);
+    assert.equal(result.files, 0); assert.deepEqual(readFileSync(file), before); assert.ok(result.unknown.some((item) => /PA 事件目录/.test(item.reason)));
+  }
 });
 
 test("无登记/错登记/链接只列归属不明；不按名字认领，也不跟随链接目标", (t) => {

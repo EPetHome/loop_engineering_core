@@ -20,6 +20,8 @@ import { registerMiss } from "./misses.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
 import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch, pushQueueBatch, withdrawQueuedBatch, scopeOverlapWarnings, type QueueEntry } from "./merge-queue.ts";
 import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
+import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, writePhase, type PhaseRecord } from "./events.ts";
+import { queryBatches } from "./query.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
@@ -37,13 +39,14 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { command?: string; batch?: string; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; rest: string[] }
+interface ParsedArgs { command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--json") result.json = true;
+    else if (arg === "--all") result.all = true;
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
     else if (arg === "--apply") result.apply = true;
@@ -62,6 +65,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.all && (result.command !== "查询" || result.batch)) throw new LoopError("--all 只用于 loop 查询，不能同时指定批次文件");
+  if (result.command === "查询" && (result.rest.length || result.recheck || result.launcher)) throw new LoopError("用法：loop 查询 [<批次.json> | --all] --json");
   if (result.round !== undefined && result.command !== "漏网") throw new LoopError("--round 只用于 loop 漏网");
   if (result.apply && result.command !== "清理") throw new LoopError("--apply 只用于 loop 清理");
   if (result.command === "清理" && (result.batch || result.rest.length || result.recheck || result.launcher)) throw new LoopError("loop 清理不接受批次文件、--recheck 或 --launcher");
@@ -688,6 +693,14 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
     const actual = currentBranch(stage.cwd);
     if (actual !== branch) throw new LoopError(`段 ${name} 的目录在分支 ${actual ?? "detached"}，批次要求 ${branch}；未启动`);
   }
+  const info = { ...batchInfo(batch.path, repo.projectRoot, batch.plan.dir), project: repo.projectRoot,
+    stages: [...batch.plan.stages.values()].map((stage) => ({ stage: stage.name, cwd: stage.cwd, branch: stage.branch ?? batch.plan.branch, prompt: stage.prompt })) };
+  const started = (): void => {
+    recordBatchInfo(info);
+    const detail = { recipe: info.batch.recipe, ...(names.length === 1 && batch.plan.stages.get(names[0])?.prompt ? { prompt: batch.plan.stages.get(names[0])!.prompt } : {}) };
+    writePhase(info, null, "running", { status: "started", detail });
+    pushEvent(info, null, "started", eventReason(), {}, detail);
+  };
   if (names.length === 1) {
     const stage = batch.plan.stages.get(names[0])!;
     const command = stage.start;
@@ -703,8 +716,15 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
       const lines = [`启动：${command}`, ...(printed !== command ? [`经过 pi-dev 的实际命令：${printed}`] : [])];
       return { ok: true, command: "启动", dryRun: true, mode: "single", stage: stage.name, cwd: stage.cwd, startCommand: command, commands: [printed], lines };
     }
+    started();
     const res = spawnSync("/bin/sh", ["-c", command], { cwd: stage.cwd, encoding: args.json ? "utf8" : undefined, stdio: args.json ? "pipe" : "inherit",
       env: { ...process.env, AUTOREVIEW_PIPELINE_DIR: batch.plan.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
+    const phase = readJson<PhaseRecord>(phasePath(batch.plan.dir, stage.name));
+    if ((res.status ?? 1) !== 0 && (!phase || phase.phase === "failed")) {
+      const reason = eventReason(`启动失败：${res.error ?? `退出码 ${res.status}`}`), detail = { exitCode: res.status ?? 1 };
+      writePhase(info, null, "failed", { status: "failed", ...reason, detail });
+      pushEvent(info, null, "failed", reason, {}, detail);
+    }
     return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, mode: "single", stage: stage.name, cwd: stage.cwd,
       exitCode: res.status, ...(args.json ? { stdout: res.stdout, stderr: res.stderr } : {}), lines: [`启动：${command}`] };
   }
@@ -714,6 +734,7 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
     const command = commandString(argv);
     return { ok: true, command: "启动", dryRun: true, mode: "pipeline", stages: names, commands: [command], lines: [`流水线：${command}`] };
   }
+  // 多段由真正取得运行锁的 pipeline 发布 started；父入口不能抢先覆盖活动批次。
   const res = spawnSync(argv[0], argv.slice(1), { cwd: repo.root, encoding: args.json ? "utf8" : undefined,
     stdio: args.json ? "pipe" : "inherit" });
   return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, mode: "pipeline", stages: names,
@@ -1125,6 +1146,7 @@ const USAGE = `用法：
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
+  loop 查询 [<批次.json> | --all] --json
   loop 推送 <批次.json> [--dry-run] [--json]
   loop 合入 <批次.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
@@ -1151,6 +1173,7 @@ async function main(): Promise<number> {
     if (args.command === "开工") result = await cmdOpen(args);
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
+    else if (args.command === "查询") result = queryBatches(args.batch);
     else if (args.command === "推送") result = cmdPush(args);
     else if (args.command === "合入") result = await cmdMerge(args);
     else if (args.command === "撤回") result = await cmdWithdraw(args);

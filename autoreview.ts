@@ -23,7 +23,9 @@ import {
 } from "./pipeline-core.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
 import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "./merge-queue.ts";
-import { classifyFailure, failureLabel } from "./failure.ts";
+import { classifyFailure, failureLabel, type FailureKind } from "./failure.ts";
+import { observeStage } from "./events.ts";
+import { systemNotify } from "./notify.ts";
 import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
 import { methodEnv } from "./method-env.ts";
 import { createChildExec, expandFileRefs } from "./hosts/review-hook.ts";
@@ -157,6 +159,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     if (latestCtx) {
       trackExperienceSession(latestCtx, lifecycle.active && (developerRunning || state.phase !== "done"));
       recordMaterialSession(sessionMaterials(latestCtx));
+      if (state.phase === "reviewing" || state.phase === "accepting") observe(latestCtx, "reviewing");
     }
   };
   const sessionMaterials = (ctx: ExtensionContext) => materialSession(ctx.sessionManager.getSessionId(), ctx.cwd, summaryPath(ctx),
@@ -167,8 +170,16 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     state.materialCleanup = slimCompletedSession(sessionMaterials(ctx));
     saveState(life);
   };
+  const observe = (ctx: ExtensionContext, phase: "running" | "reviewing" | "paused" | "done", extra: { via?: "user" | "auto"; replay?: boolean } = {}): void => {
+    const id = ctx.sessionManager.getSessionId();
+    observeStage({ cwd: ctx.cwd, summary: summaryPath(ctx), state, phase, reason: phase === "paused" ? state.pauseReason : undefined,
+      failureKind: phase === "paused" ? state.pauseFailureKind : undefined, question: lastAssistantText(ctx.sessionManager.getEntries()),
+      session: { host: "pi", id, pid: process.pid, processStarted: processStartTime(process.pid),
+        ...(process.env.PI_SESSION_ID === id && process.env.PI_SESSION_FILE ? { log: process.env.PI_SESSION_FILE } : {}) }, ...extra });
+  };
   /** 流水线里的段：把完成、暂停、返修后没改动写进状态文件，编排程序据此接力。写失败不影响评审。 */
-  const reportStage = (ctx: ExtensionContext, event: StageEvent, extra: { pauseReason?: string; reply?: string } = {}): boolean => {
+  const reportStage = (ctx: ExtensionContext, event: StageEvent, extra: { pauseReason?: string; reply?: string } = {}, replay = false): boolean => {
+    observe(ctx, event === "done" ? "done" : event === "paused" ? "paused" : "running", { replay });
     if (!pipelineLink) return true;
     try {
       const status = {
@@ -202,10 +213,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     if (!live(life, signal)) return;
     try { ctx.ui.notify(detail ? `${body}\n${detail}` : body, type); } catch { /* 无 UI 时仍尝试系统通知 */ }
     if (!live(life, signal)) return;
-    try {
-      const escaped = body.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      await pi.exec("osascript", ["-e", `display notification "${escaped}" with title "自动评审"`], { timeout: 15_000, signal });
-    } catch { /* 通知失败不影响成果 */ }
+    await systemNotify("自动评审", body, { exec: (cmd, args, options) => pi.exec(cmd, args, options), signal });
   };
   const writeSummary = async (
     ctx: ExtensionContext, status: "进行中" | "完成" | "暂停", life: Lifecycle,
@@ -251,11 +259,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   /** 错误处理的副作用逐个隔离；任何一步失败都不能挡住后面的通知。 */
   const pause = async (
     ctx: ExtensionContext, reason: string, life: Lifecycle,
-    unresolvedMustFix = state.unresolvedMustFix, changedFiles?: string[], notes?: string, signal?: AbortSignal, hint?: string,
+    unresolvedMustFix = state.unresolvedMustFix, changedFiles?: string[], notes?: string, signal?: AbortSignal, hint?: string, failureKind?: FailureKind,
   ): Promise<void> => {
     if (!live(life, signal)) return;
     state.phase = "paused";
     state.pauseReason = reason;
+    state.pauseFailureKind = failureKind;
     state.pauseHint = hint;
     state.unresolvedMustFix = unresolvedMustFix;
     state.awaitingRepair = false;
@@ -268,7 +277,8 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       await writeSummary(ctx, "暂停", life, reason, unresolvedMustFix, changedFiles, notes, signal);
     } catch (error) { errors.push(`总结写入失败：${errorText(error)}`); }
     if (!live(life, signal)) return;
-    await notifyUser(ctx, `${basename(ctx.cwd)}：暂停（${reason}）${errors.length ? `；${errors.join("；")}` : ""}`, "warning", life, signal, hint);
+    const question = reason === "开发方需要你决定" ? `\n${lastAssistantText(ctx.sessionManager.getEntries())}` : "";
+    await notifyUser(ctx, `${basename(ctx.cwd)}：暂停（${reason}）${errors.length ? `；${errors.join("；")}` : ""}${question}`, "warning", life, signal, hint);
   };
   const pauseForError = async (ctx: ExtensionContext, error: unknown, life: Lifecycle, signal?: AbortSignal): Promise<void> => {
     if (!live(life, signal)) return;
@@ -468,6 +478,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const input = JSON.stringify([state.requirement, state.criteria, state.grants]);
     void (task?.finished ?? Promise.resolve()).then(() => {
       if (!live(life, task?.controller.signal) || input !== JSON.stringify([state.requirement, state.criteria, state.grants])) return;
+      observe(ctx, "running");
       if (ctx.isIdle()) pi.sendUserMessage(message);
       else pi.sendUserMessage(message, { deliverAs: "followUp" });
     }).catch((error) => { if (live(life)) void pauseForError(ctx, error, life); });
@@ -515,8 +526,10 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         const message = `【自动验收 · 第 ${state.repairs} 次返修】\n${state.unresolvedAcceptance}\n请按失败证据修复并定向自测，完整检查由程序执行。最后一行写【交付完成】。`;
         deliverRepair(ctx, message, life);
       } else {
-        await pause(ctx, `必需验收命令${acceptRunLabel(record)}${record.failureKind ? `（${failureLabel(record.failureKind)}）` : ""}`,
-          life, state.unresolvedMustFix, undefined, record.detail, signal, "保留候选与计数；处理阻塞后用 /accept 继续本段验收");
+        const atLimit = record.failureKind === "product" && state.repairs >= currentConfig(ctx).maxRepairs;
+        if (atLimit) { state.unresolvedMustFix = undefined; state.unresolvedAcceptance = `必需验收命令不通过：${record.command}\n${record.outputTail ?? record.detail ?? ""}`; }
+        await pause(ctx, atLimit ? "达到返修上限" : `必需验收命令${acceptRunLabel(record)}${record.failureKind ? `（${failureLabel(record.failureKind)}）` : ""}`,
+          life, state.unresolvedMustFix, undefined, record.detail, signal, "保留候选与计数；处理阻塞后用 /accept 继续本段验收", atLimit ? undefined : record.failureKind);
       }
     }
     const errors: string[] = [];
@@ -754,7 +767,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       return;
     }
     if (outcome.kind === "paused") {
-      await pause(ctx, outcome.reason!, life, state.unresolvedMustFix, outcome.changedFiles, outcome.notes, signal, outcome.hint);
+      await pause(ctx, outcome.reason!, life, state.unresolvedMustFix, outcome.changedFiles, outcome.notes, signal, outcome.hint, outcome.failureKind);
       return;
     }
     // 后面的保存与消息交接是同步的，异步准备完成前不能提前解锁 phase。
@@ -798,6 +811,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       state.awaitingInbox = inbox.seq;
       saveState(life);
       updateStatus(ctx, life);
+      observe(ctx, "running", { via: "auto" });
       if (!reportStage(ctx, "started")) throw new Error("无法撤销旧流水线完成状态");
       await writeSummary(ctx, "进行中", life, undefined, undefined, undefined, "收到整合返修，旧接力资格已撤销。");
       pi.sendUserMessage(inbox.message);
@@ -1045,7 +1059,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       // 免得编排程序误以为已经修好），开始看收件箱。
       if (pipelineLink) {
         const event = state.awaitingInbox !== undefined ? "started" : state.phase === "done" ? "done" : state.phase === "paused" ? "paused" : "started";
-        reportStage(ctx, event, { pauseReason: state.pauseReason });
+        reportStage(ctx, event, { pauseReason: state.pauseReason }, entries.some((entry) => entry.type === "custom" && entry.customType === "autoreview-state"));
         inboxTimer = setInterval(() => void checkInbox(), pollMs());
         inboxTimer.unref?.();
       }
@@ -1109,6 +1123,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       if (state.phase === "paused" && gitAvailability !== "unsupported") {
         const reason = state.pauseReason;
         state.phase = "idle"; state.pauseReason = undefined; state.pauseHint = undefined; state.awaitingRepair = false; state.repairs = 0;
+        observe(ctx, "running", { via: "user" });
         ctx.ui.notify(`自动评审：已恢复（上次暂停：${reason ?? "未知原因"}）`, "info");
       }
       const prompt = event.text.includes('<file name="') ? event.text : expandFileRefs(event.text, ctx.cwd);
@@ -1178,7 +1193,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
             saveState: () => saveState(life), onProgress: (text) => ctx.ui.notify(text, "info") });
           checkLive(life);
           if (!result.ok) {
-            await pause(ctx, `开发前准备未通过：${result.reason}`, life);
+            await pause(ctx, `开发前准备未通过：${result.reason}`, life, undefined, undefined, result.log, undefined, undefined, result.kind);
             ctx.abort();
             return;
           }
