@@ -1,6 +1,6 @@
 # Loop 自动评审与验收（Pi / Claude Code / Codex）
 
-> 批次准备：写提示词和 `批次.json` → `bin/loop 开工` → `bin/loop 启动`。开发会话内部顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整批验收在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，工具和字段见 [工具清单](工具清单.md)，写法规则见 [接入手册](README-验收标准.md)。接入命令只更新 `.autoreview/CONVENTIONS.md`，保持 AGENTS.md 和 CLAUDE.md 不变。
+> 开发批次准备：写提示词和 `批次.json` → `bin/loop 开工` → `bin/loop 启动`；只评审已有提交可直接用 `bin/loop 评审`，不需开工。开发会话内部顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整批验收在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，工具和字段见 [工具清单](工具清单.md)，写法规则见 [接入手册](README-验收标准.md)。接入命令只更新 `.autoreview/CONVENTIONS.md`，保持 AGENTS.md 和 CLAUDE.md 不变。
 
 给 pi 开发会话加一个 `-e`：开发方写完（写不写【交付完成】都行），扩展自动让独立评审检查改动；有必修就发回**同一个**开发会话返修，最多 4 次；没有必修或到达上限就停下，弹 macOS 通知并写总结。
 
@@ -308,6 +308,36 @@ node snapshots.ts /命令输出的案例草稿.json /新的复原目录
 
 复原前校验快照/输入/内容哈希和路径，恢复原始文件字节、可执行模式与链接；不重建 `.git` 历史、不运行项目代码。缺内容或校验失败就报错，不把部分复原当成功。完整参数、JSON 字段与退出码见 [工具清单](工具清单.md)「loop 漏网」。
 
+## 配方怎么选
+
+只看任务定义里的三件事：**改不改东西、完成到哪一层、有几段**，不靠模型猜任务难度。
+
+| 任务定义 | 配方/入口 | 完成边界 |
+|---|---|---|
+| 不改东西，只检查已有提交 | 只评审：`review-only` / `loop 评审` | 只出报告，不返修、不提交、不进合入队列 |
+| 要改东西，只有一段 | 单段开发：`develop`（默认） | 开发、门禁、评审及已配置必需验收 → 已提交、已记录、问推不推 |
+| 要改东西，有多段，要做到整批 | 多段开发：`develop` + `stages/steps` | 各段检查完成 → 配置的整批验收 → 整批提交与记录 |
+
+这是三个使用配方，但 `recipe` 字段只有 `develop`、`review-only` 两个合法值；其他值退出 3 并列出合法值。不做只验收配方；推送、合入仍需用户决定，不属于自动完成。
+
+### 只评审已有改动
+
+```bash
+cd /你的仓库
+/Users/Admin/Desktop/loop/bin/loop 评审 --base main --head feat/某任务 --requirement /需求.md --criteria /标准.md --note /交付说明.md --json
+# 三个文件选项可省略；评审的是 base → head 的已提交改动，不含当前工作区未提交内容。
+```
+
+也可直接写批次后 `bin/loop 启动 /批次.json --json`，**不用先开工**：
+
+```json
+{"name":"补评审","recipe":"review-only","review":{"repo":"/你的仓库","base":"main","head":"feat/某任务","requirement":"需求.md","criteria":"标准.md"}}
+```
+
+批次中的路径相对批次文件；命令行文件路径相对当前目录。Loop 在系统临时目录分离检出 head，复用现有只读评审提示词、解析、重试和总预算，不跑门禁、准备或验收，正常、失败和可捕获中断都释放临时 worktree；原工作区的文件和索引不动。不记经验复发、不写收件箱和交付总表、不进队。
+
+报告在 `~/.pi-autoreview/reports/<ID>/report.md`、`report.json`，含基线/候选提交号、改动文件、必修原文（触发条件及后果）、建议、需求疑问、模型和耗时。JSON 另有 `exitCode/reason/report/reportJson`；退出 **0 无必修、1 有必修、2 评审失败或超时**，失败也保留报告。事件为 `started` → `done{recipe:"review-only",report}`，失败为 `failed`。这里 `done` 只表示报告产出，不表示没有必修或通过业务验收。
+
 ## 流水线与批次（几段并行 / 串行 + 整批验收）
 
 正常批次只准备两份材料：提示词和 `docs/batches/<批次>/批次.json`。批次目录不再放门禁、棘轮或启动脚本；项目固定方法写一份在 `.autoreview/methods/`，启动固定经过 `bin/pi-dev`。
@@ -355,6 +385,7 @@ bin/loop 状态 [批次.json]                     # 段状态、队列位置、�
 bin/loop 推送 docs/batches/<批次>/批次.json   # 用户决定后，只推批次分支到 origin；不强推
 bin/loop 合入 docs/batches/<批次>/批次.json   # 手动核对并合入测过的结果；不推送
 bin/loop 撤回 docs/batches/<批次>/批次.json   # 仅 release 仍停在本批结果时撤回；不推送
+bin/loop 停止 docs/batches/<批次>/批次.json --json  # 也可加 --stage 甲；按登记身份停止，保留成果
 ```
 
 开工后，启动、状态、推送、合入命令里的批次文件路径改用开工输出中的开发空间路径；批次文件本来就在发布分支上时，原来的项目根路径也照常可用。
@@ -408,7 +439,27 @@ bin/loop 查询 --all --json   # 省略批次参数时同样查所有已记录�
 
 返回固定外壳 `{"v":1,"at":"…","batches":[…]}`；每批含 `project`、`batch{file,name,recipe,paGrants:[{id,at}]}`、`branch`、`commit`、`pushed`、整批 `state/pause/next`、`stages`、`queue`、`evidence`、`events{lastSeq}`。每段有 `stage/state/round/repairs/lastActivity/pause/session/evidence/paRelays`（最近 50 条已读取转达的 `{id,at}`）；完整 JSON 示例见 [工具清单「PA 对接」](工具清单.md#pa-对接)。未知提交、队列、会话为 `null`，不猜成通过。
 
-两个宿主各写 `<段>.phase.json`；整批阶段写 `batch.phase.json`，查询不解析 Markdown。原 `<段>.status.json` 的接力和合入语义不变。`loop 清理` 和完成后瘦身都保留尚未 `done/failed` 的整批证据。只评审和停止命令不在本节范围。
+两个宿主各写 `<段>.phase.json`；整批阶段写 `batch.phase.json`，查询不解析 Markdown。原 `<段>.status.json` 的接力和合入语义不变。`loop 清理` 和完成后瘦身都保留尚未 `done/failed` 的整批证据。
+
+### PA 执行命令 JSON v1
+
+`loop 合入/推送/停止 --json` 成功、失败（含参数错误）都有 `{v:1,ok,action,reason:{category,text}}`，保留原 `command` 等扩展字段。固定字段未知或本次未执行为 `null`，不拿布尔值充当提交号：
+
+```json
+{"v":1,"ok":true,"action":"合入","release":"main","merged":"完整提交号","queueStatus":"merged","reason":{"category":"其他","text":""}}
+{"v":1,"ok":true,"action":"推送","branch":"feat/x","remote":"origin","pushed":"完整提交号","reason":{"category":"其他","text":""}}
+{"v":1,"ok":false,"action":"推送","branch":"feat/x","remote":"origin","pushed":null,"reason":{"category":"其他","text":"Git 拒绝原因"}}
+```
+
+多分支推送的 `branch/pushed` 对应第一分支，`commits[]` 逐分支列出完整记录；dry-run 的 `pushed/merged` 为 null，不表示实际执行。合入的旧兼容入口没有队列时 `queueStatus:null`。`ok` 与提交字段只是执行结果，不代表业务验收。
+
+`bin/loop 停止 /开发空间/批次.json [--stage 甲] --json` 先核对 `batch.info.json`、会话状态和启动登记的批次归属；只兼容已登记的同仓库 worktree 同位置别名，不凭名称/分支接受任意复制品。归属不匹配时不发信号、不释放资源、不覆盖状态；找不到活动身份时拒绝，不能冒充已停止。只评审省略 name 时，启动、查询和停止均使用 `只评审` 的默认目录。
+
+正式启动链在独立进程组运行编排/会话。每次 spawn 的候选身份单独留在 `launches/<ID>.json`；整批执行器取得运行权后才发布 `batch.launch.json`，登记组长、启动时间、随机标记和 `runId`，与 phase 的会话运行代次绑定。PA 续跑、整批验收恢复和原开发会话返修恢复都登记新运行；原开发会话仍使用原 `sessionId`，不重发原需求。会话恢复命令由稳定的 Node 组长等待收尾，shell/宿主切换或尚未登记时也能核对新组。恢复派发与停止撤销资格共用发布锁，停止后重取登记，避免漏掉刚恢复的组；被拒绝的重复启动不能覆盖活动身份，段派发也不覆盖仍活动的组。宿主 PID 可以不是组长，停止仍要核对它确实属于该登记组，不能结束共享终端组。
+
+前台 `loop 启动` 收到 SIGINT（Ctrl+C）、SIGTERM 或 SIGHUP 时，按**本次 spawn 的不可变身份**转发信号并等待收尾，不因后来更新的活动登记误伤另一次运行。正常取消等报告、临时 worktree 和受管子进程释放后返回；为已有外部 cleanup 留出有界预算，130 秒后仅补偿本次启动的残留组，未确认项明确报错并保留登记，不冒充完成。取消编排仍保留独立开发窗口，不再派发下游。
+
+停止命令随后核对宿主、会话、PID、启动时间及独立进程组；先停止编排防止再派发，指定段时不结束其他开发段。先给已核对宿主收尾机会，再按登记释放消费者和缓存，撤销本批队列资格为 `stopped`（已停止），迟到完成不能复活。工作区、分支、总结和证据不删；未收尾的合入/撤回事务保留并要求先恢复原事务。返回 `stopped/skipped/resources/queueStatus/reason`，不匹配身份或共享终端组不碰并列入 `skipped`；释放未确认也单列，此时 `ok:false`、退出 1。归属与活动身份核对通过后的非 dry-run 停止发 `failed`，`reason.category:"已停止"`；归属拒绝或无身份时不写已停止事件。不按端口、同名命令或进程年龄认领。
 
 ### 送话、续跑与回执
 

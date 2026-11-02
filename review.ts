@@ -107,7 +107,10 @@ export interface ReviewConfig {
 }
 
 export interface ReviewOutcome {
-  kind: "done" | "repair" | "paused";
+  kind: "done" | "repair" | "paused" | "report";
+  /** report：只返回静态评审，不进入开发交付与返修。 */
+  review?: ParsedReview;
+  record?: RoundRecord;
   /** kind=repair：发回开发方的返修消息。 */
   message?: string;
   /** kind=paused：暂停原因。 */
@@ -122,6 +125,7 @@ export interface ReviewOutcome {
 }
 
 export interface ReviewDeps {
+  sink?: "repair" | "report";
   getConfig?: () => ReviewConfig;
   cleanupExec?: Exec;
   onCleanup?: (work: Promise<void>, recordPath: string) => void;
@@ -489,7 +493,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     await deps.saveState();
   }
   const clock: RoundClock = { startedAt, startedTs, deadline, now };
-  const scope = await scopeStep(deps, before, clock);
+  const scope = deps.sink === "report" ? undefined : await scopeStep(deps, before, clock);
   if (scope) return scope.outcome;
   let gate: GateRecord | undefined;
   if (config.gate) {
@@ -594,6 +598,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
   const changedBeforeAcceptance = deps.checkInputs?.();
   if (changedBeforeAcceptance) return changedBeforeAcceptance;
+  if (deps.sink === "report") return { kind: "report", review: parsed, record };
   const experienceRoot = findProjectRoot(cwd);
   if (experienceRoot && parsed.mustFix.length) {
     parsed.mustFixRaw = markExperienceRecurrence(experienceRoot, deps.devSessionId, parsed.mustFixRaw);
@@ -629,6 +634,10 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
 /** 准备和自动恢复有自己的有限预算；不进入用户接管路径，不清零业务计数。 */
 export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
+  if (deps.sink === "report") {
+    // 复用同一评审调用/解析/预算；不运行项目方法、不采用开发队列资格。
+    return runOneReviewRound({ ...deps, config: { ...deps.config, maxRepairs: 0, gate: undefined, acceptance: undefined, preparation: undefined } });
+  }
   // 绑定实际使用的输入；父目录配置不一定在当前 Git 工作区里。
   const configVersion = JSON.stringify(deps.config);
   const requirement = deps.state.requirement, criteria = JSON.stringify(deps.state.criteria), grants = JSON.stringify(deps.state.grants);

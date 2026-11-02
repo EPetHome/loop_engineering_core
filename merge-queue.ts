@@ -9,9 +9,10 @@ import { loadGateConfig, loadProjectLayout } from "./config.ts";
 import { commitBatch, workingTree, type BatchCommit } from "./commit-batch.ts";
 import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, reportUncommittedBatch, writePhase, type BatchInfo, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
+import { runBatchCommand } from "./launch.ts";
 import { hookInputBridgeAvailable } from "./hosts/inbox-bridge.ts";
 import { inboxPath, queueAcceptance, readJson, statusPath, writeJsonAtomic, writeStageStatus, type InboxMessage, type StageStatus, type QueueAcceptance, type QueueAcceptanceItem } from "./pipeline-core.ts";
-import { processStartTime, readProcs, reapProcs } from "./procs.ts";
+import { processStartTime, readProcs, reapProcs, type ProcEntry } from "./procs.ts";
 import { createRunResource, managedShell, releaseRunResource } from "./resources.ts";
 import { inScope, type StageScope } from "./scope.ts";
 import { loadContext } from "./project-context.ts";
@@ -31,6 +32,8 @@ export interface QueueStage {
 }
 export interface QueueBatch {
   id: string; name: string; file: string; dir: string; project: string; release: string;
+  /** 用户显式停止：迟到的 done/恢复不得重新提交或排队。 */
+  stopped?: boolean;
   stages: QueueStage[]; steps: string[][];
   /** 最近核对的整批验收开关；实际完成资格仍须绑定本轮配置，文件缺失不能当成未配置。 */
   acceptance?: boolean;
@@ -155,6 +158,7 @@ function update(dir: string, id: string, patch: Partial<QueueEntry>): QueueEntry
   const entry = change(dir, (state) => {
     const entry = state.entries.find((item) => item.id === id);
     if (!entry) throw new Error("队列条目已不存在");
+    if (entry.status === "stopped" && state.batches.find((batch) => batch.id === entry.batch)?.stopped && patch.status !== "stopped") return entry;
     Object.assign(entry, patch, { updatedAt: stamp() }); return entry;
   });
   try { if (patch.status !== undefined) reportQueue(load(dir), entry); } catch (error) { process.stderr.write(`[Loop PA] 队列事件未发送：${String(error)}\n`); }
@@ -224,6 +228,26 @@ export function registeredQueueBatch(repo: string, file: string): QueueBatch | u
   return raw && state.batches.find((batch) => batch.name === raw.name && batch.stages.every((stage) => stage.branch === (raw.stages?.[stage.name]?.branch ?? raw.branch)));
 }
 
+export function stopQueueBatch(repo: string, batch: QueueBatch, dryRun = false): { entries: string[]; procs: string[]; consumers: { path: string; proc: ProcEntry }[] } {
+  const initial = readMergeQueue(repo)!;
+  const apply = (state: MergeQueue) => {
+    const target = state.batches.find((item) => item.id === batch.id)!;
+    const entries = state.entries.filter((item) => item.batch === batch.id && !["merged", "withdrawn"].includes(item.status));
+    if (entries.some((item) => ["merging", "withdrawing"].includes(item.status))) throw new Error("合入/撤回事务尚未收尾，保留原事务；先用原执行命令恢复收尾后再停止");
+    const procs = entries.some((item) => item.status === "testing") ? [join(state.dir, "gate.procs.json")] : [];
+    const consumers = procs.flatMap((path) => readProcs(path).map((proc) => ({ path, proc })));
+    if (!dryRun) {
+      target.stopped = true;
+      for (const entry of entries) Object.assign(entry, { status: "stopped", reason: "已停止", updatedAt: stamp() });
+    }
+    return { entries: entries.map((item) => item.id), procs, consumers };
+  };
+  if (dryRun) return apply(initial);
+  const result = publication(initial.dir, () => change(initial.dir, apply));
+  for (const id of result.entries) reportQueue(load(initial.dir), load(initial.dir).entries.find((item) => item.id === id)!);
+  return result;
+}
+
 /** 私有 index 冻结有效工作区（含未跟踪文件）；只写队列记录与 Git 对象，不碰开发索引/分支/文件。 */
 function sourceTree(state: MergeQueue, cwd: string): { head: string; tree: string } {
   return workingTree(cwd, state.dir);
@@ -244,6 +268,7 @@ function qualifications(batch: QueueBatch): Qualification[] | undefined {
 function enqueue(dir: string, batchId: string, requireAcceptance: boolean, integration?: QueueAcceptance, integrationEpoch?: string, expectedIntegrationEpoch = false, run?: QueuePipelineRun): BatchCommit[] | undefined {
   return publication(dir, () => change(dir, (state) => {
     const batch = state.batches.find((item) => item.id === batchId)!;
+    if (batch.stopped) return;
     if (run) checkPipelineRun(run, batch);
     if (batch.stages.length > 1 && !requireAcceptance) return;
     const stopped = state.entries.some((entry) => entry.batch === batchId && entry.autoStopped);
@@ -414,6 +439,7 @@ export function endQueuePipeline(run: QueuePipelineRun): void {
 export function queueBatchRecheck(repo: string, file: string, run?: QueuePipelineRun): string | undefined {
   const batch = registeredQueueBatch(repo, file);
   if (!batch || batch.stages.length < 2) return undefined;
+  if (batch.stopped) throw new Error("已停止");
   const epoch = randomUUID();
   publication(queueDir(repo), () => change(queueDir(repo), (state) => {
     if (run) {
@@ -431,7 +457,7 @@ export function queueBatchRecheck(repo: string, file: string, run?: QueuePipelin
 /** 返回本次由提交模块核对成功的提交；未登记、资格不足和迟到结果都不冒充完成。 */
 export function queueBatchComplete(repo: string, file: string, acceptancePassed: boolean, record?: AcceptanceRecord, integrationEpoch?: string, run?: QueuePipelineRun): BatchCommit[] | undefined {
   const batch = registeredQueueBatch(repo, file);
-  if (!batch) return;
+  if (!batch || batch.stopped) return;
   if (run) checkPipelineRun(run, batch);
   const configured = run?.acceptance ?? (batchConfiguration(batch.file).acceptance || batch.acceptance === true || Boolean(record) || integrationEpoch !== undefined);
   // 本轮确实跑过但未通过的验收，绝不能被开工时的“未配置”覆盖。
@@ -492,7 +518,7 @@ export function kickMergeQueue(repo: string): void {
   launch(state.dir, "worker");
 }
 function integrationNeeded(state: MergeQueue, batch: QueueBatch): boolean {
-  if (batch.stages.length < 2) return false;
+  if (batch.stopped || batch.stages.length < 2) return false;
   const entry = state.entries.filter((item) => item.batch === batch.id).at(-1), current = qualifications(batch);
   if (!current || entry?.deliveries?.some((item) => !item.sent)) return false;
   const handled = batch.lastRunQualification ?? (entry ? hash(entry.qualification) : undefined);
@@ -503,7 +529,7 @@ function maybeIntegrate(dir: string, batchId: string): void {
   if (!release) return;
   try {
     const state = load(dir), batch = state.batches.find((item) => item.id === batchId)!;
-    if (!integrationNeeded(state, batch)) return;
+    if (batch.stopped || !integrationNeeded(state, batch)) return;
     const running = readJson<LockOwner>(join(dir, `integration-${batchId}.lock`));
     if (running && !deadOwner(running)) return;
     // 触发器已发出但尚未进入流水线时，也要去重，不能只检查运行锁。
@@ -583,6 +609,7 @@ function copyTestLocalFiles(state: MergeQueue, batch: QueueBatch, workDir: strin
   }
 }
 function qualificationProblem(state: MergeQueue, batch: QueueBatch, entry: QueueEntry): string | undefined {
+  if (batch.stopped) return "已停止";
   const latest = load(state.dir);
   if (batch.stages.length > 1 && latest.batches.find((item) => item.id === batch.id)?.integrationEpoch !== entry.integrationEpoch) return "整批验收完成资格已变化，旧结果已失效";
   if (latest.entries.filter((item) => item.batch === batch.id).at(-1)?.id !== entry.id) return "本批已有新的完成资格，旧结果已失效";
@@ -757,6 +784,7 @@ async function runDeveloperSession(state: MergeQueue, entry: QueueEntry, stageNa
   const release = lock(state.dir, `session-${hash([batch.id, stageName])}`);
   if (!release) return;
   try {
+  if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) return;
   const status = readJson<StageStatus>(statusPath(batch.dir, delivery.stage));
   if (!status?.sessionId || status.inbox >= delivery.seq || (status.pid && status.processStarted && processStartTime(status.pid) === status.processStarted)) return;
   const stage = batch.stages.find((item) => item.name === delivery.stage)!;
@@ -768,13 +796,15 @@ async function runDeveloperSession(state: MergeQueue, entry: QueueEntry, stageNa
     const prompt = join(state.dir, `${entry.id}-${delivery.stage.replace(/[^\w\u4e00-\u9fff-]/g, "_")}.repair.md`);
     writeFileSync(prompt, delivery.message);
   }
-  await new Promise<void>((done, fail) => {
-    const child = spawn("/bin/sh", ["-c", command], { cwd: stage.cwd, stdio: "inherit", env: {
+  const result = await publication(state.dir, () => {
+    if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) return;
+    // 返回 Promise 前同步建立并登记新组；发布锁只保护派发，不等待开发会话结束。
+    return runBatchCommand(batchEventInfo(batch), stage.name, process.execPath, [join(HERE, "session-command.ts"), command], { cwd: stage.cwd, capture: false, env: {
       ...process.env, AUTOREVIEW_PIPELINE_DIR: batch.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.file,
       AUTOREVIEW_PIPELINE_LAUNCH: "", AUTOREVIEW_PIPELINE_LAUNCH_TOKEN: "",
     } });
-    child.on("error", fail); child.on("exit", () => done());
   });
+  if (result?.error) throw result.error;
   } finally { release(); }
 }
 function deliverReturns(state: MergeQueue, batch: QueueBatch, entry: QueueEntry): void {
@@ -858,20 +888,28 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
       const gate = loadGateConfig(workDir) ?? loadGateConfig(batch.project);
       if (!gate) throw new Error("项目没有配置 gate，不能宣布可合入；请配置项目门禁后再次触发队列");
       const { createChildExec } = await import("./hosts/review-hook.ts");
+      if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) continue;
       const resource = createRunResource(`merge-queue:${entry.id}`, undefined, procs);
-      entry.log = join(state.dir, `${entry.id}-a${entry.attempt}.gate.log`);
-      entry.runtimeGate = hash(loadGateConfig(batch.project));
-      update(state.dir, entry.id, { log: entry.log, runtimeGate: entry.runtimeGate, gate });
-      writeFileSync(entry.log, "");
+      const stopped = new AbortController();
+      const checkStopped = setInterval(() => {
+        try { if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) stopped.abort(); }
+        catch { stopped.abort(); } // 停止身份不可核对也不能继续发布。
+      }, 100);
+      const gateSignal = signal ? AbortSignal.any([signal, stopped.signal]) : stopped.signal;
       let result;
       try {
-        result = await createChildExec(procs)("/bin/sh", ["-c", managedShell(gate.cmd, resource)], { cwd: workDir, timeout: gate.timeoutMin * 60_000, signal, role: "合入队列门禁", onOutput: (chunk) => appendFileSync(entry.log!, chunk),
+        entry.log = join(state.dir, `${entry.id}-a${entry.attempt}.gate.log`);
+        entry.runtimeGate = hash(loadGateConfig(batch.project));
+        update(state.dir, entry.id, { log: entry.log, runtimeGate: entry.runtimeGate, gate });
+        writeFileSync(entry.log, "");
+        result = await createChildExec(procs)("/bin/sh", ["-c", managedShell(gate.cmd, resource)], { cwd: workDir, timeout: gate.timeoutMin * 60_000, signal: gateSignal, role: "合入队列门禁", onOutput: (chunk) => appendFileSync(entry.log!, chunk),
           env: { AUTOREVIEW_BASE_REV: base, AUTOREVIEW_BATCH_FILE: testBatchFile(state, batch), AUTOREVIEW_STAGE: "", AUTOREVIEW_RUN_DIR: state.dir } });
         const output = `${result.stdout}${result.stderr}`;
         writeFileSync(entry.log, output);
         entry.output = output.trimEnd().split(/\r?\n/).slice(-40).join("\n");
         update(state.dir, entry.id, { output: entry.output });
-      } finally { releaseRunResource(resource); }
+      } finally { clearInterval(checkStopped); releaseRunResource(resource); }
+      if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) continue;
       if (resource.status !== "released" || result.processesReleased !== true) throw new Error("队列门禁资源释放未确认，未发布结果");
       signal?.throwIfAborted();
       // 失败门禁可留下诊断文件或修改跟踪文件：先留输出、恢复测试区，再可靠退回。

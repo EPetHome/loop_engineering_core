@@ -6,7 +6,7 @@
  * 扩展读到后发给开发方。没有这两个环境变量的会话完全不受影响。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { AcceptanceRecord } from "./acceptance-core.ts";
 import type { Snapshot } from "./git.ts";
 
@@ -50,6 +50,8 @@ export const POLL_ENV = "AUTOREVIEW_PIPELINE_POLL_MS";
 export type StageEvent = "started" | "done" | "paused" | "no-change" | "startup-failed";
 
 export interface StageStatus {
+  batchFile?: string;
+  runId?: string;
   stage: string;
   sessionId: string;
   /** 原开发宿主及进程身份；队列只恢复同一会话，不能按 PID 猜归属。 */
@@ -123,7 +125,8 @@ export function writeJsonAtomic(path: string, data: unknown): void {
 export function writeStageStatus(link: StageLink, status: Omit<StageStatus, "stage" | "seq" | "updatedAt">): StageStatus {
   const path = statusPath(link.dir, link.stage);
   const previous = readJson<StageStatus>(path);
-  const next: StageStatus = { ...status, stage: link.stage, seq: (previous?.seq ?? 0) + 1, updatedAt: new Date().toISOString() };
+  const batchFile = status.batchFile ?? process.env.AUTOREVIEW_BATCH_FILE;
+  const next: StageStatus = { ...status, ...(batchFile ? { batchFile: resolve(batchFile) } : {}), runId: status.runId ?? process.env.AUTOREVIEW_LAUNCH_ID, stage: link.stage, seq: (previous?.seq ?? 0) + 1, updatedAt: new Date().toISOString() };
   writeJsonAtomic(path, next);
   return next;
 }

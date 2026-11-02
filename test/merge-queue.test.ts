@@ -1401,12 +1401,13 @@ test("提交 A6/A7：旧自动配置只提醒；推送只发批次分支，远�
     autoConfig(f, true); f.write(0, "src/a.txt", "push\n"); autoComplete(f, 0); await f.ready(0);
     assert.equal(f.git(f.repo, "rev-parse", "main"), base);
     assert.equal(f.git(remote, "for-each-ref", "--format=%(refname)", "refs/heads"), "");
-    const preview = f.cli("推送", f.batches[0].file, "--dry-run"); assert.equal(preview.ok, true); assert.equal(preview.pushed, false);
+    const preview = f.cli("推送", f.batches[0].file, "--dry-run"); assert.equal(preview.ok, true); assert.equal(preview.pushed, null);
     const outsideBatch = join(f.root, "outside-batch.json"); writeFileSync(outsideBatch, readFileSync(f.batches[0].file));
     assert.equal(f.cli("推送", outsideBatch, "--dry-run").ok, true, "与其他子命令一样支持仓库外的批次入口");
     assert.equal(f.git(remote, "for-each-ref", "--format=%(refname)", "refs/heads"), "");
-    assert.equal(f.cli("推送", f.batches[0].file).ok, true);
+    const pushed = f.cli("推送", f.batches[0].file); assert.equal(pushed.ok, true);
     const commit = f.queue().batches[0].commits![0]; assert.equal(commit.pushed, commit.commit);
+    assert.equal(pushed.v, 1); assert.equal(pushed.action, "推送"); assert.equal(pushed.branch, "feat/b0"); assert.equal(pushed.remote, "origin"); assert.equal(pushed.pushed, commit.commit);
     assert.equal(f.git(remote, "for-each-ref", "--format=%(refname)", "refs/heads"), "refs/heads/feat/b0");
     assert.equal(f.git(f.repo, "config", "branch.feat/b0.remote"), "origin");
     assert.equal(f.git(f.repo, "config", "branch.feat/b0.merge"), "refs/heads/feat/b0");
@@ -1414,10 +1415,13 @@ test("提交 A6/A7：旧自动配置只提醒；推送只发批次分支，远�
     f.git(f.repo, "push", "origin", `${foreign}:refs/heads/feat/b0`);
     f.write(0, "src/a.txt", "local advance\n"); autoComplete(f, 0); await f.ready(0);
     const rejected = f.cli("推送", f.batches[0].file); assert.equal(rejected.ok, false); assert.match(rejected.error, /未强推[\s\S]*(rejected|fetch first|non-fast-forward)/i);
+    assert.equal(rejected.v, 1); assert.equal(rejected.action, "推送"); assert.equal(rejected.branch, "feat/b0"); assert.equal(rejected.remote, "origin"); assert.equal(rejected.pushed, null);
+    assert.ok(rejected.reason.category); assert.ok(rejected.reason.text);
     assert.equal(f.git(remote, "rev-parse", "refs/heads/feat/b0"), foreign);
     assert.equal(f.queue().batches[0].commits![0].pushed, commit.commit, "失败不覆盖上次成功推送记录");
     assert.equal(f.git(f.repo, "rev-parse", "main"), base);
-    assert.equal(f.cli("合入", f.batches[0].file).ok, true); await f.idle();
+    const merged = f.cli("合入", f.batches[0].file); assert.equal(merged.ok, true); await f.idle();
+    assert.equal(merged.v, 1); assert.equal(merged.action, "合入"); assert.equal(merged.release, "main"); assert.equal(merged.merged, f.git(f.repo, "rev-parse", "main")); assert.equal(merged.queueStatus, "merged");
     assert.equal(f.git(remote, "for-each-ref", "--format=%(refname)", "refs/heads"), "refs/heads/feat/b0");
   } finally { await f.close(); }
 });

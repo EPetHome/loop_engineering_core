@@ -1,13 +1,13 @@
 /** 整批 PA 续跑；只重启编排，不改标准文件，不恢复已关闭的段会话。 */
-import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, openSync } from "node:fs";
+import { appendFileSync, closeSync, openSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { authorizationStatus, grantsFromUser, typedByUser, type Criteria } from "./acceptance-core.ts";
-import { eventError, eventLock, eventReason, phasePath, pushEvent, writePhase, type BatchInfo, type PhaseRecord } from "./events.ts";
+import { canonicalBatchFile, eventError, eventLock, eventReason, phasePath, pushEvent, writePhase, type BatchInfo, type PhaseRecord } from "./events.ts";
 import { parsePlan } from "./pipeline.ts";
 import { inboxPath, readJson, statusPath, type InboxMessage, type StageStatus } from "./pipeline-core.ts";
 import { processStartTime } from "./procs.ts";
+import { startBatchProcess } from "./launch.ts";
 import { appendPARelayRecord } from "./ledger.ts";
 import { sessionAlive } from "./pa.ts";
 import { bindPAGrant, checkPAId, grantsPath, readPAGrants, readPAJson, writePAJson, type PAGrant } from "./pa-records.ts";
@@ -20,11 +20,25 @@ export async function resumeBatch(options: { info: BatchInfo; id: string; readGr
   const previous = readPAJson<Record<string, unknown>>(path);
   if (previous) return previous;
   const refused = (text: string, extra: Record<string, unknown> = {}) => ({ v: 1, ok: false, command: "续跑", id, state: "rejected", reason: eventReason(text), ...extra });
+  const startingPath = join(info.dir, "pa-starting.json");
+  let initialPhase: PhaseRecord | undefined;
+  const updateStarting = (value?: Record<string, unknown>): void => {
+    const release = eventLock(join(info.dir, ".pa-resume.lock"));
+    try {
+      if (readPAJson<{ id: string }>(startingPath)?.id === id) {
+        if (value) writePAJson(startingPath, value); else rmSync(startingPath, { force: true });
+      }
+    } finally { release(); }
+  };
   let argv: string[] = [], grant: PAGrant | undefined, result: Record<string, unknown> | undefined;
   const prepare = () => {
     result = readPAJson<Record<string, unknown>>(path);
     if (result) return;
     const phase = readJson<PhaseRecord>(phasePath(info.dir, null));
+    initialPhase = phase;
+    const starting = readPAJson<{ batchFile: string; id: string; pid: number; processStarted: string; phaseSignature: string }>(startingPath);
+    if (starting && canonicalBatchFile(starting.batchFile) === canonicalBatchFile(info.batch.file)
+      && starting.phaseSignature === JSON.stringify(phase) && sessionAlive(starting)) { result = refused("流水线正在启动"); return; }
     if (phase?.next === "manual") { result = refused(`需要在电脑上处理：${phase.text}`); return; }
     if (sessionAlive(phase?.session) || phase?.phase === "running" || phase?.phase === "reviewing") {
       if (sessionAlive(phase?.session)) { result = refused("流水线正在运行"); return; }
@@ -58,35 +72,37 @@ export async function resumeBatch(options: { info: BatchInfo; id: string; readGr
       catch (error) { eventError(info.batch.file, null, error, { via: "pa", id }); }
     }
     writePAJson(path, result);
-    // 先占用短暂的启动位置，另一编号不能趁 spawn 的异步窗口重复启动。
-    const occupied = writePhase(info, null, "running", { status: "resumed", detail: { via: "pa", id },
-      session: { host: "pipeline-launch", id, pid: process.pid, processStarted: processStartTime(process.pid) } });
-    if (!occupied) throw new Error("续跑启动身份无法落盘，未启动编排");
+    // 短暂派发占位独立于活动 phase；只有真正取得运行权的编排能更新运行身份。
+    writePAJson(startingPath, { batchFile: info.batch.file, id, pid: process.pid, processStarted: processStartTime(process.pid), phaseSignature: JSON.stringify(phase) });
   };
   if (options.dryRun) prepare();
   else { const release = eventLock(join(info.dir, ".pa-resume.lock")); try { prepare(); } finally { release(); } }
   if (!argv.length || options.dryRun) return { ...result!, ...(options.dryRun ? { dryRun: true } : {}) };
   try {
-    const launched = await (options.launch ?? launchPipeline)(argv, info.project, join(info.dir, "pa-resume.log"));
+    const launched = await (options.launch ?? ((argv, cwd, log) => launchPipeline(info, argv, cwd, log)))(argv, info.project, join(info.dir, "pa-resume.log"));
     result = { ...result, state: "started", ...launched };
-    // 实际编排自己发布 PID 与阶段；父入口绝不读改写，避免覆盖刚到达的 paused/done。
+    updateStarting({ batchFile: info.batch.file, id, ...launched, phaseSignature: JSON.stringify(initialPhase) });
+    // 实际编排自己发布 PID、运行代次与阶段；父入口不覆盖活动 phase。
     pushEvent(info, null, "resumed", eventReason(), { log: join(info.dir, "pa-resume.log") }, { via: "pa", id });
   } catch (error) {
     const text = `流水线启动失败：${String(error)}`;
     result = { ...result, ok: false, state: "failed", reason: eventReason(text) };
-    writePhase(info, null, "paused", { status: "paused", ...eventReason(text), next: "resume", detail: { via: "pa", id, next: "resume" } });
-    pushEvent(info, null, "paused", eventReason(text), {}, { via: "pa", id, next: "resume" });
+    updateStarting();
+    if (JSON.stringify(readJson<PhaseRecord>(phasePath(info.dir, null))) === JSON.stringify(initialPhase)) {
+      writePhase(info, null, "paused", { status: "paused", ...eventReason(text), next: "resume", detail: { via: "pa", id, next: "resume" } });
+      pushEvent(info, null, "paused", eventReason(text), {}, { via: "pa", id, next: "resume" });
+    }
   }
   writePAJson(path, result);
   return result!;
 }
 
-async function launchPipeline(argv: string[], cwd: string, log: string): Promise<{ pid: number; processStarted: string }> {
+async function launchPipeline(info: BatchInfo, argv: string[], cwd: string, log: string): Promise<{ pid: number; processStarted: string }> {
   const fd = openSync(log, "a", 0o600);
   try {
     const env = { ...process.env };
     for (const key of ["AUTOREVIEW_STAGE", "AUTOREVIEW_PIPELINE_DIR", "AUTOREVIEW_PIPELINE_LAUNCH", "AUTOREVIEW_PIPELINE_LAUNCH_TOKEN"]) delete env[key];
-    const child = spawn(argv[0], argv.slice(1), { cwd, env, detached: true, stdio: ["ignore", fd, fd] });
+    const child = startBatchProcess(info, null, argv[0], argv.slice(1), { cwd, env, stdio: ["ignore", fd, fd] });
     await new Promise<void>((accept, reject) => { child.once("spawn", accept); child.once("error", reject); });
     const pid = child.pid!, started = processStartTime(pid);
     child.unref();

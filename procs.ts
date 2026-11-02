@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface ProcEntry {
   pgid: number;
@@ -27,6 +28,80 @@ export interface ProcEntry {
 export function processStartTime(pid: number): string {
   const res = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000 });
   return res.status === 0 ? (res.stdout ?? "").trim() : "";
+}
+
+export function processGroup(pid: number): number | undefined {
+  const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8", timeout: 5000 });
+  const pgid = Number(result.stdout?.trim());
+  return result.status === 0 && Number.isSafeInteger(pgid) && pgid > 1 ? pgid : undefined;
+}
+
+export interface SessionGroup { pid: number; processStarted: string; token: string }
+
+/** 核对独立启动器留下的随机标记，不按命令名称或组号猜归属。 */
+function hasProcessOwner(pid: number, token: string): boolean {
+  const result = spawnSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 5000 });
+  return result.status === 0 && result.stdout.split(/\s+/).includes(`AUTOREVIEW_PROCESS_OWNER=${token}`);
+}
+
+/** 正式启动组是否仍属本次启动；无法证明归属时返回 undefined，不按年龄接管。 */
+export function ownedProcessGroupAlive(group: SessionGroup): boolean | undefined {
+  if (!Number.isSafeInteger(group.pid) || group.pid < 2 || !group.processStarted || !group.token) return undefined;
+  const alive = groupAlive(group.pid);
+  if (alive !== true) return alive;
+  const leader = processStartTime(group.pid);
+  if (leader && leader !== group.processStarted) return false;
+  if (leader && hasProcessOwner(group.pid, group.token)) return true;
+  const owned = tokenProcesses(group.token);
+  return owned?.some((item) => item.pgid === group.pid) ? true : undefined;
+}
+
+/** 前台取消只通知本次 spawn 的组，不读取可被后续运行替换的活动登记。 */
+export function signalOwnedProcessGroup(group: SessionGroup, signal: NodeJS.Signals): { signalled: boolean; alreadyExited?: boolean; reason?: string } {
+  if (group.pid === process.pid || group.pid === processGroup(process.pid)) return { signalled: false, reason: "拒绝向共享调用者进程组发送信号" };
+  const alive = ownedProcessGroupAlive(group);
+  if (alive === false) return { signalled: false, alreadyExited: true };
+  if (alive === undefined) return { signalled: false, reason: "本次启动进程组归属无法核对，未发送信号" };
+  try { process.kill(-group.pid, signal); return { signalled: true }; }
+  catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? { signalled: false, alreadyExited: true } : { signalled: false, reason: String(error) };
+  }
+}
+
+/** 宿主可以不是组长，但只能结束由正式启动器登记并再次核对的独立组。 */
+export async function stopSessionGroup(session: { pid?: number; processStarted?: string }, dryRun = false, group?: SessionGroup): Promise<{ stopped: boolean; reason?: string; alreadyExited?: boolean }> {
+  const pid = session.pid;
+  if (!Number.isSafeInteger(pid) || pid! < 2 || pid === process.pid || !session.processStarted) return { stopped: false, reason: "进程身份登记不完整" };
+  const started = processStartTime(pid!);
+  if (!started) {
+    try { process.kill(pid!, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return groupAlive(group?.pid ?? pid!) === false
+        ? { stopped: true, alreadyExited: true }
+        : { stopped: false, reason: "组长已退出，仍有进程组或无法核对，未触碰" };
+    }
+    return { stopped: false, reason: "无法核对进程启动时间" };
+  }
+  if (started !== session.processStarted) return { stopped: false, reason: "进程启动时间不匹配，未触碰" };
+  const pgid = processGroup(pid!);
+  const owned = (): boolean => {
+    if (!group) return pgid === pid;
+    if (!Number.isSafeInteger(group.pid) || group.pid < 2 || !group.processStarted || !group.token || pgid !== group.pid) return false;
+    if (group.pid === process.pid || group.pid === processGroup(process.pid)) return false;
+    const leader = processStartTime(group.pid);
+    if (leader && leader !== group.processStarted) return false;
+    return hasProcessOwner(pid!, group.token) || Boolean(leader && hasProcessOwner(group.pid, group.token));
+  };
+  if (!owned()) return { stopped: false, reason: "没有匹配的独立进程组登记，拒绝结束共享进程组" };
+  if (dryRun) return { stopped: true };
+  // 发信号前同时重核宿主身份与组归属；给宿主执行已有收尾逻辑的机会。
+  if (processStartTime(pid!) !== started || processGroup(pid!) !== pgid || !owned()) return { stopped: false, reason: "停止前进程身份已变化" };
+  killGroup(pgid!, "SIGTERM");
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (groupAlive(pgid!) === false) return { stopped: true };
+    await sleep(100);
+  }
+  return releaseProcessTree({ pgid: pgid!, started: group?.processStarted ?? started, token: group?.token }) ? { stopped: true } : { stopped: false, reason: "进程组释放未确认，保留登记" };
 }
 
 /** 进程组里还有没有进程（组长可能先退出，后代仍在）。 */

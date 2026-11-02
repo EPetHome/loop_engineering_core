@@ -44,11 +44,17 @@ export function queryBatches(file?: string): { v: 1; at: string; batches: Record
     const registered = queue?.batches.find((batch) => canonicalBatchFile(batch.file) === info.batch.file);
     const entry = queue?.entries.filter((item) => item.batch === registered?.id).at(-1);
     const active = queue?.entries.filter((item) => ["pending", "testing", "ready", "returning", "merging", "withdrawing"].includes(item.status)).sort((a, b) => a.order - b.order) ?? [];
-    const batchPhase = readJson<PhaseRecord>(phasePath(info.dir, null));
+    const recorded = readJson<BatchInfo>(batchInfoPath(info.dir));
+    const owned = recorded?.batch.file && canonicalBatchFile(recorded.batch.file) === canonicalBatchFile(info.batch.file)
+      && canonicalBatchFile(recorded.dir) === canonicalBatchFile(info.dir);
+    const belongs = (path?: string): boolean => !path || canonicalBatchFile(path) === canonicalBatchFile(info.batch.file);
+    const batchRecord = owned ? readJson<PhaseRecord>(phasePath(info.dir, null)) : undefined;
+    const batchPhase = belongs(batchRecord?.batchFile) ? batchRecord : undefined;
     const commit = registered?.commits?.[0];
     const stages = info.stages.map((stage) => {
       const statusFile = statusPath(info.dir, stage.stage), phaseFile = phasePath(info.dir, stage.stage);
-      const status = readJson<StageStatus>(statusFile), phase = readJson<PhaseRecord>(phaseFile);
+      const statusRecord = owned ? readJson<StageStatus>(statusFile) : undefined, phaseRecord = owned ? readJson<PhaseRecord>(phaseFile) : undefined;
+      const status = belongs(statusRecord?.batchFile) ? statusRecord : undefined, phase = belongs(phaseRecord?.batchFile) ? phaseRecord : undefined;
       const reason = eventReason(status?.pauseReason);
       const state = phase ? phase.phase === "running" || phase.phase === "reviewing" ? "running" : phase.status
         : status?.event === "paused" ? pauseStatus(reason) : status?.event === "startup-failed" ? "failed" : status?.event === "done" ? "done" : "running";
@@ -59,9 +65,9 @@ export function queryBatches(file?: string): { v: 1; at: string; batches: Record
         pause: phase ? paused(phase) : status?.event === "paused" ? { ...reason, since: status.updatedAt } : null,
         ...(phase?.next ? { next: phase.next } : {}),
         session: session ? { host: session.host, id: session.id, alive: session.pid && session.processStarted ? processStartTime(session.pid) === session.processStarted : false } : null,
-        evidence, paRelays: wordRecords(info.dir, stage.stage).filter((row) => row.state === "read").sort((a, b) => (b.readAt ?? b.at).localeCompare(a.readAt ?? a.at)).slice(0, 50).map((row) => ({ id: row.id, at: row.readAt ?? row.at })) };
+        evidence, paRelays: (owned ? wordRecords(info.dir, stage.stage) : []).filter((row) => row.state === "read").sort((a, b) => (b.readAt ?? b.at).localeCompare(a.readAt ?? a.at)).slice(0, 50).map((row) => ({ id: row.id, at: row.readAt ?? row.at })) };
     });
-    return { project: info.project, batch: { ...info.batch, paGrants: readPAGrants(info.dir).map(({ id, at }) => ({ id, at })) },
+    return { project: info.project, batch: { ...info.batch, paGrants: (owned ? readPAGrants(info.dir) : []).map(({ id, at }) => ({ id, at })) },
       branch: commit?.branch ?? batchPhase?.detail.branch ?? info.stages[0]?.branch ?? null,
       commit: commit?.commit ?? batchPhase?.detail.commit ?? null, pushed: commit?.pushed ?? null,
       ...(registered?.commits && registered.commits.length > 1 ? { commits: registered.commits } : {}),

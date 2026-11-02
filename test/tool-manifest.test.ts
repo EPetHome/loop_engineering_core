@@ -147,6 +147,9 @@ function batchFields(sources: Sources = realSources()): Set<string> {
 
   const fields = new Set<string>();
   for (const key of directKeys(parsePlan, ["raw"])) fields.add(key);
+  for (const key of directKeys(parsePlan, ["raw.review"])) fields.add(`review.${key}`);
+  const reviewFiles = /for \(const key of \[([^\]]+)\] as const\) if \(raw\.review/.exec(parsePlan)?.[1] ?? "";
+  for (const match of reviewFiles.matchAll(/"([^"]+)"/g)) fields.add(`review.${match[1]}`);
   // 新批次平铺验收配置；input.acceptance 仅用于兼容旧嵌套配置，不是新字段。
   for (const key of directKeys(parsePlan, ["input"])) if (key !== "acceptance") fields.add(`acceptance.${key}`);
   const acceptance = functionBody(sources["config.ts"], "export function parseAcceptanceConfig");

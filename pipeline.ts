@@ -13,10 +13,10 @@
  * 写 start 时原样执行，那条命令里的 pi 必须加载 autoreview.ts。开任何窗口之前先做开跑前检查，有一项不过就不开跑。
  */
 import { randomUUID } from "node:crypto";
+import { beginBatchRun, startBatchProcess, type BatchRun } from "./launch.ts";
 import { setTimeout as sleep } from "node:timers/promises";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -26,7 +26,7 @@ import {
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
 import { EXT_DIR, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, workspacePath, type AcceptanceConfig } from "./config.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
-import { batchInfo, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
+import { batchInfo, batchLocation, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
 import { mergePAGrants, readPAGrants } from "./pa-records.ts";
 import type { FailureKind } from "./failure.ts";
@@ -92,7 +92,15 @@ export interface AcceptancePlan {
   acceptance: AcceptanceConfig;
   maxRounds: number;
 }
+export type Recipe = "develop" | "review-only";
+export interface ReviewPlan {
+  repo: string; base: string; head: string; requirement?: string; criteria?: string; note?: string;
+}
 export interface Plan {
+  /** 本次取得运行权的代次，不从批次文件读取。 */
+  runId?: string;
+  recipe?: Recipe;
+  review?: ReviewPlan;
   name: string;
   /** 批次分支（批次.json 的 branch）；写了才在段完成时由程序提交。 */
   branch?: string;
@@ -111,6 +119,12 @@ export interface Plan {
 }
 
 export class PlanError extends Error {}
+
+export function parseRecipe(value: unknown): Recipe {
+  if (value === undefined) return "develop";
+  if (value !== "develop" && value !== "review-only") throw new PlanError('recipe 可用的值："develop"、"review-only"');
+  return value;
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -169,6 +183,16 @@ export function piCommand(planName: string, stage: string, prompt: string, pi: P
 /** 解析并校验计划文件；相对路径按计划文件所在目录解析。 */
 export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv = process.env, options: { projectRoot?: string; defaultWorkspace?: string; batchFile?: string; warn?: (message: string) => void } = {}): Plan {
   if (!isObject(raw)) throw new PlanError("计划文件必须是 JSON 对象");
+  const recipe = parseRecipe(raw.recipe);
+  if (recipe === "review-only") {
+    if (!isObject(raw.review)) throw new PlanError("review-only 的 review 必须是对象");
+    const review: ReviewPlan = { repo: resolve(planDir, text(raw.review.repo, "review.repo")), base: text(raw.review.base, "review.base"), head: text(raw.review.head, "review.head") };
+    for (const key of ["requirement", "criteria", "note"] as const) if (raw.review[key] !== undefined) review[key] = resolve(planDir, text(raw.review[key], `review.${key}`));
+    if (raw.name !== undefined) text(raw.name, "name");
+    if (raw.dir !== undefined) text(raw.dir, "dir");
+    const { name, dir } = batchLocation(raw, planDir);
+    return { recipe, review, name, dir, stages: new Map(), steps: [], ...(options.batchFile ? { file: resolve(options.batchFile) } : {}) };
+  }
   if (raw.acceptance !== undefined && raw.e2e !== undefined) throw new PlanError("计划文件的 acceptance 和 e2e 只能写一个"); // 兼容旧字段，但不合并两套配置。
   const name = text(raw.name, "name");
   if (!isObject(raw.stages) || Object.keys(raw.stages).length === 0) throw new PlanError("计划文件的 stages 至少要有一段");
@@ -221,9 +245,8 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
   for (const stage of stages.keys()) {
     if (!listed.includes(stage)) throw new PlanError(`段「${stage}」没有排进 steps`);
   }
-  const dir = raw.dir === undefined
-    ? resolve(homedir(), ".pi-autoreview", "pipelines", fileSafe(name))
-    : resolve(planDir, text(raw.dir, "dir"));
+  if (raw.dir !== undefined) text(raw.dir, "dir");
+  const { dir } = batchLocation(raw, planDir);
   const prepare = raw.prepare === undefined ? undefined : text(raw.prepare, "prepare");
 
   const legacy = raw.e2e !== undefined; // 兼容旧批次字段及其嵌套验收配置。
@@ -259,7 +282,7 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
   }
   const maxParallel = raw.maxParallel ?? 2;
   if (!Number.isSafeInteger(maxParallel) || (maxParallel as number) < 1) throw new PlanError("maxParallel 必须是正整数");
-  return { name, dir, stages, steps, prepare, acceptance, maxParallel: maxParallel as number,
+  return { recipe, name, dir, stages, steps, prepare, acceptance, maxParallel: maxParallel as number,
     ...(batchBranch ? { branch: batchBranch } : {}), ...(options.batchFile ? { file: resolve(options.batchFile) } : {}) };
 }
 
@@ -410,19 +433,32 @@ function pipelineEvent(plan: Plan, phase: PhaseRecord["phase"], status: "started
     const info = pipelineInfo(plan), reason = eventReason(text, failureKind), evidence = { summary: resolve(plan.dir, "report.md"),
       ...(typeof detail.log === "string" ? { log: detail.log } : {}), ...(typeof detail.acceptance === "string" ? { acceptance: detail.acceptance } : {}) };
     writePhase(info, null, phase, { status, ...reason, evidence, detail,
-      ...(detail.next ? { next: detail.next as NextAction } : {}), session: { host: "pipeline", id: plan.name, pid: process.pid, processStarted: processStartTime(process.pid) } });
+      ...(detail.next ? { next: detail.next as NextAction } : {}), session: { host: "pipeline", id: plan.name, pid: process.pid, processStarted: processStartTime(process.pid), runId: plan.runId } });
     if (plan.file) pushEvent(info, null, status, reason, evidence, detail);
   } catch (error) { process.stderr.write(`[Loop PA] 流水线事件未发送：${String(error)}\n`); }
 }
 
 /** 跑一条流水线，返回退出码（见文件头）。 */
 export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromAcceptance?: boolean; signal?: AbortSignal } = {}): Promise<number> {
-  let run: QueuePipelineRun | undefined;
-  try { run = plan.file ? beginQueuePipeline(plan.stages.values().next().value!.cwd, plan.file, Boolean(plan.acceptance)) : undefined; }
-  // 尚未取得运行权的调用没有资格发布批次状态，尤其不能覆盖另一活动流水线。
-  catch (error) { io.notify(`流水线 ${plan.name}：${(error as Error).message}`); return 2; }
+  if (plan.recipe === "review-only") {
+    const { runReviewOnly } = await import("./review-only.ts");
+    const result = await runReviewOnly(plan.review!, { file: plan.file, name: plan.name, dir: plan.dir });
+    io.log(`报告：${result.report}`);
+    return result.exitCode as number;
+  }
+  let run: QueuePipelineRun | undefined, active: BatchRun | undefined;
+  try {
+    run = plan.file ? beginQueuePipeline(plan.stages.values().next().value!.cwd, plan.file, Boolean(plan.acceptance)) : undefined;
+    active = beginBatchRun(pipelineInfo(plan), run?.token);
+    plan.runId = active.runId;
+  }
+  // 尚未取得运行权的调用没有资格发布活动组或批次状态。
+  catch (error) { run?.release(); io.notify(`流水线 ${plan.name}：${(error as Error).message}`); return 2; }
   try { return await runPipelineBody(plan, io, options, run); }
-  finally { if (run) endQueuePipeline(run); }
+  finally {
+    try { active.release(); }
+    finally { delete plan.runId; if (run) endQueuePipeline(run); }
+  }
 }
 
 async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAcceptance?: boolean; signal?: AbortSignal }, run?: QueuePipelineRun): Promise<number> {
@@ -772,15 +808,18 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
 }
 
 /** macOS：开一个终端窗口跑脚本。 */
-function launchTerminal(_stage: StagePlan, script: string): void {
-  const escaped = script.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  spawnSync("osascript", ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", "tell application \"Terminal\" to activate"]);
+function launchTerminal(plan: Plan) {
+  return (stage: StagePlan, script: string): void => {
+    const command = [process.execPath, join(EXT_DIR, "launch.ts"), JSON.stringify(pipelineInfo(plan)), stage.name, stage.cwd, script].map(shellQuote).join(" ");
+    const escaped = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    spawnSync("osascript", ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", "tell application \"Terminal\" to activate"]);
+  };
 }
 
-function launchBackground(dir: string) {
+function launchBackground(plan: Plan) {
   return (stage: StagePlan, script: string): void => {
-    const out = openSync(resolve(dir, `${fileSafe(stage.name)}.log`), "a");
-    try { spawn("/bin/sh", ["-c", script], { detached: true, stdio: ["ignore", out, out] }).unref(); }
+    const out = openSync(resolve(plan.dir, `${fileSafe(stage.name)}.log`), "a");
+    try { startBatchProcess(pipelineInfo(plan), stage.name, "/bin/sh", ["-c", script], { cwd: stage.cwd, stdio: ["ignore", out, out] }).unref(); }
     finally { closeSync(out); }
   };
 }
@@ -821,7 +860,7 @@ async function main(): Promise<void> {
   for (const signal of signals) process.on(signal, cancel);
   try {
   process.exitCode = await runPipeline(plan, {
-    launch: launcher === "terminal" ? launchTerminal : launchBackground(plan.dir),
+    launch: launcher === "terminal" ? launchTerminal(plan) : launchBackground(plan),
     notify: notifySystem,
     log: (message) => console.log(`[流水线] ${message}`),
     pollMs: pollMs(process.env, 2000),

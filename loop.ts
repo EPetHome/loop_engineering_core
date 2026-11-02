@@ -24,7 +24,10 @@ import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, writePha
 import { queryBatches } from "./query.ts";
 import { paInfo, sendWords } from "./pa.ts";
 import { resumeBatch } from "./pa-resume.ts";
-import { parsePlan, type Plan } from "./pipeline.ts";
+import { runReviewOnly } from "./review-only.ts";
+import { stopBatch } from "./stop.ts";
+import { runBatchCommand } from "./launch.ts";
+import { parsePlan, parseRecipe, PlanError, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
 import type { StageStatus } from "./pipeline-core.ts";
 import {
@@ -41,7 +44,7 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
+interface ParsedArgs { base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
@@ -52,6 +55,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
     else if (arg === "--apply") result.apply = true;
+    else if (["--base", "--head", "--requirement", "--criteria", "--note"].includes(arg)) {
+      const key = arg.slice(2) as "base" | "head" | "requirement" | "criteria" | "note";
+      const value = argv[++i];
+      if (!value || value.startsWith("--") || result[key] !== undefined) throw new LoopError(`${arg} 需要一个值且不能重复`);
+      result[key] = value;
+    }
     else if (["--stage", "--id", "--text-file", "--grant-file", "--wait"].includes(arg)) {
       const value = argv[++i];
       if (value === undefined || value.startsWith("--")) throw new LoopError(`${arg} 需要一个值`);
@@ -79,7 +88,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
-  if ((result.stage !== undefined || result.textFile !== undefined || result.wait !== undefined) && result.command !== "送话") throw new LoopError("--stage、--text-file、--wait 只用于 loop 送话");
+  if (result.stage !== undefined && !["送话", "停止"].includes(result.command ?? "")) throw new LoopError("--stage 只用于 loop 送话/停止");
+  if ((result.textFile !== undefined || result.wait !== undefined) && result.command !== "送话") throw new LoopError("--text-file、--wait 只用于 loop 送话");
+  if ([result.base, result.head, result.requirement, result.criteria, result.note].some((value) => value !== undefined) && result.command !== "评审") throw new LoopError("--base、--head、--requirement、--criteria、--note 只用于 loop 评审");
   if (result.grantFile !== undefined && result.command !== "续跑") throw new LoopError("--grant-file 只用于 loop 续跑");
   if (result.id !== undefined && !["送话", "续跑"].includes(result.command ?? "")) throw new LoopError("--id 只用于 loop 送话/续跑");
   if (result.all && (result.command !== "查询" || result.batch)) throw new LoopError("--all 只用于 loop 查询，不能同时指定批次文件");
@@ -165,6 +176,8 @@ export function loadBatch(repo: Repo, path: string, options: { warn?: (message: 
   const absolute = resolve(path);
   const raw = readBatch(absolute);
   const planDir = dirname(absolute);
+  const recipe = parseRecipe(raw.recipe);
+  if (recipe === "review-only") return { raw, path: absolute, planDir, plan: parsePlan(raw, planDir, process.env, { batchFile: absolute }), workspaces: [], checks: [], stages: new Map() };
   const normalized = normalizedRaw(repo, raw);
   const plan = parsePlan(normalized, planDir, process.env, { batchFile: absolute, projectRoot: repo.projectRoot, warn: options.warn });
   const branch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
@@ -697,6 +710,20 @@ function commandString(argv: string[]): string {
 
 async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
   if (!args.batch) throw new LoopError("用法：loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]");
+  const file = resolve(args.batch), raw = readBatch(file);
+  if (parseRecipe(raw.recipe) === "review-only") {
+    const plan = parsePlan(raw, dirname(file), process.env, { batchFile: file });
+    if (args.dryRun) return { ...await runReviewOnly(plan.review!, { file, name: plan.name, dir: plan.dir, dryRun: true }), command: "启动", mode: "review-only" };
+    const info = batchInfo(file, plan.review!.repo, plan.dir);
+    try {
+      const res = await runBatchCommand(info, null, process.execPath, [join(LOOP_ROOT, "review-only.ts"), file], { cwd: process.cwd(), capture: true });
+      if (!res.stdout.trim()) throw new Error(String(res.error ?? res.stderr));
+      return { ...JSON.parse(res.stdout), command: "启动", mode: "review-only" };
+    } catch (error) {
+      const text = `评审启动失败：${String(error)}`;
+      return { ok: false, command: "启动", mode: "review-only", recipe: "review-only", exitCode: 2, reason: eventReason(text), error: text, lines: [text] };
+    }
+  }
   const repo = repoOf(process.cwd());
   const batch = loadBatch(repo, args.batch);
   const names = batch.plan.steps.flat();
@@ -734,10 +761,10 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
       return { ok: true, command: "启动", dryRun: true, mode: "single", stage: stage.name, cwd: stage.cwd, startCommand: command, commands: [printed], lines };
     }
     started();
-    const res = spawnSync("/bin/sh", ["-c", command], { cwd: stage.cwd, encoding: args.json ? "utf8" : undefined, stdio: args.json ? "pipe" : "inherit",
+    const res = await runBatchCommand(info, stage.name, "/bin/sh", ["-c", command], { cwd: stage.cwd, capture: args.json,
       env: { ...process.env, AUTOREVIEW_PIPELINE_DIR: batch.plan.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
     const phase = readJson<PhaseRecord>(phasePath(batch.plan.dir, stage.name));
-    if ((res.status ?? 1) !== 0 && (!phase || phase.phase === "failed")) {
+    if ((res.status ?? 1) !== 0 && (!phase || phase.phase === "failed") && phase?.category !== "已停止") {
       const reason = eventReason(`启动失败：${res.error ?? `退出码 ${res.status}`}`), detail = { exitCode: res.status ?? 1 };
       writePhase(info, null, "failed", { status: "failed", ...reason, detail });
       pushEvent(info, null, "failed", reason, {}, detail);
@@ -752,8 +779,7 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
     return { ok: true, command: "启动", dryRun: true, mode: "pipeline", stages: names, commands: [command], lines: [`流水线：${command}`] };
   }
   // 多段由真正取得运行锁的 pipeline 发布 started；父入口不能抢先覆盖活动批次。
-  const res = spawnSync(argv[0], argv.slice(1), { cwd: repo.root, encoding: args.json ? "utf8" : undefined,
-    stdio: args.json ? "pipe" : "inherit" });
+  const res = await runBatchCommand(info, null, argv[0], argv.slice(1), { cwd: repo.root, capture: args.json });
   return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, mode: "pipeline", stages: names,
     exitCode: res.status, ...(args.json ? { stdout: res.stdout, stderr: res.stderr } : {}),
     lines: [`流水线已结束（退出码 ${res.status}）：${names.join("、")}`] };
@@ -1155,7 +1181,7 @@ function cmdPush(args: ParsedArgs): Record<string, unknown> {
   const batch = registeredQueueBatch(repo.root, file);
   if (!batch) throw new LoopError("本批未用 loop 开工登记，不能推送");
   const commits = pushQueueBatch(repo.root, batch, args.dryRun);
-  return { ok: true, command: "推送", dryRun: args.dryRun, remote: "origin", commits, pushed: !args.dryRun,
+  return { ok: true, command: "推送", dryRun: args.dryRun, remote: "origin", branch: commits[0]?.branch ?? null, commits, pushed: args.dryRun ? null : commits[0]?.commit ?? null,
     lines: commits.map((item) => `${args.dryRun ? "将推送" : "已推送"} ${item.branch} ${item.commit} → origin；不推 release，不强推`) };
 }
 
@@ -1168,7 +1194,33 @@ async function cmdPA(args: ParsedArgs): Promise<Record<string, unknown>> {
     : resumeBatch({ info, id: args.id, readGrant: args.grantFile ? input(args.grantFile) : undefined, dryRun: args.dryRun });
 }
 
+async function cmdReview(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (args.batch || args.rest.length || !args.base || !args.head || args.recheck || args.launcher) throw new LoopError("用法：loop 评审 --base <提交或分支> --head <提交或分支> [--requirement 文件] [--criteria 文件] [--note 文件] [--json]");
+  return runReviewOnly({ repo: process.cwd(), base: args.base, head: args.head,
+    ...(args.requirement ? { requirement: resolve(args.requirement) } : {}), ...(args.criteria ? { criteria: resolve(args.criteria) } : {}), ...(args.note ? { note: resolve(args.note) } : {}) }, { dryRun: args.dryRun });
+}
+
+/** PA 执行命令无论在哪一步失败，都返回同一外壳及固定字段。 */
+function executionResult(command: string | undefined, result: Record<string, unknown>, args?: ParsedArgs): Record<string, unknown> {
+  if (!["推送", "合入", "停止"].includes(command ?? "")) return result;
+  let release: string | null = null, queueStatus: string | null = null, branch: string | null = null;
+  try {
+    const repo = repoOf(process.cwd()); release = repo.layout.release;
+    const batch = args?.batch ? registeredQueueBatch(repo.root, resolve(args.batch)) : undefined;
+    if (batch) {
+      release = batch.release; branch = batch.commits?.[0]?.branch ?? batch.stages[0]?.branch ?? null;
+      queueStatus = readMergeQueue(repo.root)?.entries.filter((entry) => entry.batch === batch.id).at(-1)?.status ?? null;
+    }
+  } catch { /* 未核对到的字段显式 null，不猜提交。 */ }
+  const reason = result.reason ?? eventReason(result.ok === false ? String(result.error ?? result.stderr ?? "执行失败") : "");
+  return { v: 1, action: command, ...result, reason,
+    ...(command === "合入" ? { release: result.release ?? release, merged: result.ok === true && !result.dryRun ? result.commit ?? (result.merges as any[])?.at(-1)?.commit ?? null : null, queueStatus: (result.queue as QueueEntry)?.status ?? queueStatus } : {}),
+    ...(command === "推送" ? { branch: result.branch ?? branch, remote: "origin", pushed: typeof result.pushed === "string" ? result.pushed : null } : {}) };
+}
+
 const USAGE = `用法：
+  loop 评审 --base <提交或分支> --head <提交或分支> [--requirement 文件] [--criteria 文件] [--note 文件] [--json]
+  loop 停止 <批次.json> [--stage <段>] [--dry-run] --json
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
@@ -1187,7 +1239,7 @@ async function main(): Promise<number> {
   let args: ParsedArgs;
   try { args = parseArgs(argv); } catch (error) {
     const json = argv.includes("--json"), dryRun = argv.includes("--dry-run");
-    const result = { ok: false, command: argv[0], dryRun, error: (error as Error).message };
+    const result = executionResult(argv[0], { ok: false, command: argv[0], dryRun, error: (error as Error).message });
     if (json) console.log(JSON.stringify(result, null, 2)); else console.error(`loop: ${(error as Error).message}\n${USAGE}`);
     return 2;
   }
@@ -1198,7 +1250,13 @@ async function main(): Promise<number> {
   }
   try {
     let result: Record<string, unknown>;
-    if (args.command === "开工") result = await cmdOpen(args);
+    if (args.command === "评审") result = await cmdReview(args);
+    else if (args.command === "停止") {
+      if (!args.batch || args.rest.length || args.recheck || args.launcher) throw new LoopError("用法：loop 停止 <批次.json> [--stage <段>] --json");
+      parseRecipe(readBatch(resolve(args.batch)).recipe);
+      result = await stopBatch(resolve(args.batch), { stage: args.stage, dryRun: args.dryRun });
+    }
+    else if (args.command === "开工") result = await cmdOpen(args);
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
     else if (args.command === "查询") result = queryBatches(args.batch);
@@ -1211,18 +1269,19 @@ async function main(): Promise<number> {
     else if (args.command === "漏网") result = cmdMiss(args);
     else if (args.command === "经验") result = cmdExperience(args);
     else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
+    result = executionResult(args.command, result, args);
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else {
       const lines = Array.isArray(result.lines) ? result.lines as string[] : [];
       console.log(lines.length ? lines.join("\n") : JSON.stringify(result, null, 2));
     }
-    return result.ok === false ? 1 : 0;
+    return (args.command === "评审" || result.recipe === "review-only") && typeof result.exitCode === "number" ? result.exitCode : result.ok === false ? 1 : 0;
   } catch (error) {
     const data = error instanceof LoopError ? error.data : {};
-    const result = { ok: false, command: args.command, dryRun: args.dryRun, error: (error as Error).message, ...data };
+    const result = executionResult(args.command, { ok: false, command: args.command, dryRun: args.dryRun, error: (error as Error).message, ...data }, args);
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else console.error(`loop: ${(error as Error).message}`);
-    return 1;
+    return error instanceof PlanError ? 3 : args.command === "评审" ? 2 : 1;
   }
 }
 

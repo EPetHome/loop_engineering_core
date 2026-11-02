@@ -11,7 +11,7 @@ import type { AcceptanceRecord } from "./acceptance-core.ts";
 import type { RoundRecord, AcceptRunRecord } from "./core.ts";
 import type { QueueAcceptance } from "./pipeline-core.ts";
 
-export const REASON_CATEGORIES = ["需要你决定", "返修到上限", "环境", "方法", "超时", "返修后没改动", "输入变化", "授权待答复", "内部错误", "其他"] as const;
+export const REASON_CATEGORIES = ["需要你决定", "返修到上限", "环境", "方法", "超时", "返修后没改动", "输入变化", "授权待答复", "内部错误", "已停止", "其他"] as const;
 export type ReasonCategory = typeof REASON_CATEGORIES[number];
 export interface EventReason { category: ReasonCategory; text: string }
 export type EventStatus = "started" | "needs-decision" | "paused" | "repair-limit" | "done" | "failed" | "resumed" | "queue";
@@ -27,14 +27,17 @@ export interface LoopEvent {
   status: EventStatus; reason: EventReason; evidence: Evidence; detail: Record<string, unknown>;
 }
 export interface PhaseRecord {
+  /** 状态及会话的批次归属；不能只用默认目录名认领。 */
+  batchFile?: string;
   phase: "running" | "reviewing" | "paused" | "done" | "failed";
   status: EventStatus | "running"; category: ReasonCategory; text: string; since: string; updatedAt: string;
   round: number; repairs: number; next?: NextAction; evidence: Evidence; detail: Record<string, unknown>;
-  session?: { host: string; id: string; pid?: number; processStarted?: string; log?: string };
+  session?: { host: string; id: string; pid?: number; processStarted?: string; runId?: string; log?: string };
 }
 
 /** 映射只针对 Loop 原因短句；命令已经给出的 FailureKind 优先，绝不分析日志猜分类。 */
 const reasonRules: [RegExp, ReasonCategory][] = [
+  [/^已停止(?:$|[：；])/, "已停止"],
   [/开发方需要你决定|对验收标准有异议/, "需要你决定"],
   [/达到返修上限|已到 .*轮上限/, "返修到上限"],
   [/等你授权|要你授权|\[授权\].*(?:未答复|还没答复|没通过)/, "授权待答复"],
@@ -67,11 +70,20 @@ export const phasePath = (dir: string, stage: string | null): string => join(dir
 export const batchInfoPath = (dir: string): string => join(dir, "batch.info.json");
 export const pipelineRoot = (): string => join(homedir(), ".pi-autoreview", "pipelines");
 
+/** 解析、启动、查询和停止使用同一套默认名称与状态目录。 */
+export function batchLocation(raw: Record<string, unknown>, planDir: string): { name: string; recipe: string; dir: string } {
+  const recipe = String(raw.recipe ?? "develop");
+  const name = typeof raw.name === "string" ? raw.name.trim() : recipe === "review-only" ? "只评审" : "未命名批次";
+  const dir = raw.dir === undefined ? join(pipelineRoot(), name.replace(/[/\\:*?"<>|\s]+/g, "_")) : resolve(planDir, String(raw.dir).trim());
+  return { name, recipe, dir };
+}
+
 export function batchInfo(file: string, cwd: string, dir?: string): BatchInfo {
   const raw = readJson<any>(file) ?? {};
-  const target = dir ?? (raw.dir ? resolve(dirname(file), raw.dir) : join(pipelineRoot(), String(raw.name ?? "未命名批次").replace(/[/\\:*?"<>|\s]+/g, "_")));
+  const location = batchLocation(raw, dirname(file));
+  const target = dir ?? location.dir;
   const previous = readJson<BatchInfo>(batchInfoPath(target));
-  const batch = { file: canonicalBatchFile(file), name: raw.name ?? previous?.batch.name ?? "未命名批次", recipe: raw.recipe ?? previous?.batch.recipe ?? "develop" };
+  const batch = { file: canonicalBatchFile(file), name: location.name, recipe: location.recipe };
   return { project: previous?.batch.file === batch.file ? previous.project : resolve(findProjectRoot(cwd) ?? cwd), batch, dir: resolve(target),
     stages: Object.entries(raw.stages ?? {}).map(([stage, value]: [string, any]) => {
       const old = previous?.batch.file === batch.file ? previous.stages.find((item) => item.stage === stage) : undefined;
@@ -98,14 +110,14 @@ function ownerDead(owner: Owner): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
 }
 /** 完整锁身份通过硬链接原子发布；回收者同样串行，不按年龄接管。 */
-export function eventLock(path = join(eventsRoot(), ".lock")): () => void {
+export function eventLock(path = join(eventsRoot(), ".lock"), waitMs = 15_000): () => void {
   const root = dirname(path), token = randomUUID();
   mkdirSync(root, { recursive: true });
   const mine: Owner = { pid: process.pid, started: processStartTime(process.pid), token };
   if (!mine.started) throw new Error("无法确认事件锁进程启动时间");
   const temp = join(root, `lock-${token}.tmp`), reclaim = `${path}.reclaim`;
   writeFileSync(temp, JSON.stringify(mine), { flag: "wx", mode: 0o600 });
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + waitMs;
   try {
     for (;;) {
       try { linkSync(temp, path); return () => { if (readJson<Owner>(path)?.token === token) rmSync(path); }; }
@@ -124,6 +136,7 @@ export function eventLock(path = join(eventsRoot(), ".lock")): () => void {
           if (owner?.started && ownerDead(owner) && readJson<Owner>(reclaim)?.token === owner.token) rmSync(reclaim);
         }
       }
+      if (!existsSync(path)) continue;
       if (Date.now() >= deadline) throw new Error("等待事件锁超时");
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
@@ -153,7 +166,7 @@ export function pushEvent(info: BatchInfo, stage: string | null, status: EventSt
     if (!Number.isSafeInteger(state.seq) || state.seq < 0 || !state.last || typeof state.last !== "object") throw new Error("事件序号记录损坏，未重置");
     // 队列通知不改变批次/段的完成代次；生命周期只与上一次真实转换比对。
     const key = `${stage === null ? "@batch" : `stage:${stage}`}${status === "queue" ? ":queue" : ""}`;
-    const critical = status === "done" ? { scope: detail.scope, commit: detail.commit, commits: detail.commits, completion: detail.completion }
+    const critical = status === "done" ? { scope: detail.scope, commit: detail.commit, commits: detail.commits, completion: detail.completion, recipe: detail.recipe, report: detail.report }
       : status === "queue" ? { queueStatus: detail.queueStatus, position: detail.position, returnCount: detail.returnCount, reason: detail.reason } : detail;
     const signature = JSON.stringify(stable([status, reason, critical]));
     if (state.last[key] === signature && status !== "resumed") return;
@@ -188,7 +201,7 @@ export function writePhase(info: BatchInfo, stage: string | null, phase: PhaseRe
   try {
     recordBatchInfo(info);
     const path = phasePath(info.dir, stage), previous = readJson<PhaseRecord>(path), now = new Date().toISOString();
-    const next: PhaseRecord = { status: phase === "done" || phase === "failed" || phase === "paused" ? phase : "running", category: "其他", text: "", round: 0, repairs: 0, evidence: {}, detail: {}, ...options, phase,
+    const next: PhaseRecord = { status: phase === "done" || phase === "failed" || phase === "paused" ? phase : "running", category: "其他", text: "", round: 0, repairs: 0, evidence: {}, detail: {}, ...options, phase, batchFile: canonicalBatchFile(info.batch.file),
       since: previous?.phase === phase && previous.text === (options.text ?? "") ? previous.since : now, updatedAt: now };
     next.evidence = absoluteEvidence(next.evidence);
     writeJsonAtomic(path, next); return next;
@@ -234,7 +247,7 @@ export function observeStage(options: {
   if (options.via) detail.via = options.via;
   const batchPhase = readJson<PhaseRecord>(phasePath(dir, null));
   if (!options.replay && options.phase !== "done" && options.phase !== "paused" && (!batchPhase || ["done", "failed"].includes(batchPhase.phase))) writePhase(info, null, "running");
-  writePhase(info, stage, options.phase, { status, ...reason, round: state.rounds.length, repairs: state.repairs, session: options.session, evidence, detail,
+  writePhase(info, stage, options.phase, { status, ...reason, round: state.rounds.length, repairs: state.repairs, session: { ...options.session, runId: options.session.runId ?? env.AUTOREVIEW_LAUNCH_ID }, evidence, detail,
     ...(options.phase === "paused" ? { next: "send" } : {}) });
   if (!file || options.replay || options.phase === "reviewing" || options.phase === "done") return;
   if (status === "started" && previous?.session?.id === options.session.id) return;
