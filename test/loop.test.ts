@@ -1,7 +1,7 @@
 /** bin/loop 的开工、启动、状态、合入；测试仓库、worktree 和 methods.json 都建在系统临时目录。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import test, { after } from "node:test";
 import { parsePlan, stageScript } from "../pipeline.ts";
 import { readMethodsRecord, recordGateTree } from "../methods.ts";
 import { commitAll } from "../workspace.ts";
+import { queueDir, readMergeQueue } from "../merge-queue.ts";
 import { createChildExec } from "../hosts/review-hook.ts";
 import { changedSince, outOfScope } from "../scope.ts";
 
@@ -661,7 +662,7 @@ test("单段启动写入现有流水线状态，loop 状态能读到阶段、轮
   assert.match(String(entry.summary), /单段批次\/甲\.md$/);
 });
 
-test("A5 串行两段同一个 worktree：每段完成后程序提交，甲的完成资格保留", () => {
+test("A5 串行两段同一个 worktree：中间逐段提交，结束压成一个，甲的完成资格保留", async () => {
   const f = fixture();
   const plan = {
     name: "串行批次", branch: "feat/串行",
@@ -678,7 +679,10 @@ test("A5 串行两段同一个 worktree：每段完成后程序提交，甲的�
   const started = loop(f.repo, ["启动", f.batch, "--launcher", "background", "--json"]);
   assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
   assert.equal(jsonOf(started).ok, true);
-  assert.equal(git(f.worktree, ["rev-list", "--count", "main..HEAD"]), "2", "两段各一次提交");
+  assert.equal(git(f.worktree, ["rev-list", "--count", "main..HEAD"]), "1", "批次结束整体压成一个提交");
+  assert.match(String(jsonOf(started).stdout), /甲 完成提交：[\s\S]*乙 完成提交：/, "运行中仍然每段提交");
+  const history = git(f.worktree, ["for-each-ref", "--format=%(refname)", "refs/loop/batches/"]);
+  assert.match(history, /pre-squash\/1/); assert.equal(git(f.worktree, ["rev-list", "--count", `main..${history}`]), "2", "两个中间提交仍可回放");
   const log = git(f.worktree, ["log", "--format=%s%n%b", "main..HEAD"]);
   assert.match(log, /feat: 串行/);
   assert.match(log, /批次：串行批次/);
@@ -687,6 +691,10 @@ test("A5 串行两段同一个 worktree：每段完成后程序提交，甲的�
   const status = JSON.parse(readFileSync(join(f.root, "pipeline", "甲.status.json"), "utf8"));
   assert.equal(status.event, "done");
   assert.ok(status.readyEpoch, "提交后甲的完成资格仍然有效");
+  const dir = queueDir(f.repo), deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && (readMergeQueue(f.repo)?.entries[0]?.status !== "ready" || existsSync(join(dir, "worker.lock")) || readdirSync(dir).some((name) => /^executor-.*\.json$/.test(name)))) await new Promise((done) => setTimeout(done, 20));
+  assert.equal(readMergeQueue(f.repo)?.entries[0]?.status, "ready");
+  assert.ok(!existsSync(join(dir, "worker.lock"))); assert.ok(!readdirSync(dir).some((name) => /^executor-.*\.json$/.test(name)), "队列执行器已释放");
 });
 
 test("启动前发现工作区分支和批次不一致就停下", () => {

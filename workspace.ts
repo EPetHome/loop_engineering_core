@@ -1,5 +1,6 @@
 /** 批次分支和工作区的 git 操作；只做本地提交与合并，不推送。 */
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { loadProjectLayout } from "./config.ts";
 
@@ -87,10 +88,7 @@ export function commitAll(cwd: string, branch: string, batchName: string, stage:
   const add = gitResult(repoRoot, ["add", "-A"]);
   if (add.status !== 0) throw new Error(`git add 失败：${(add.stderr || add.stdout).trim().slice(-ERROR_TAIL)}`);
   // 声明的本机文件不进仓库：即使目标分支漏了忽略规则，也不能被自动提交带进去。
-  const project = loadProjectLayout(cwd);
-  const localPaths = project.layout.localFiles
-    .map((local) => relative(repoRoot, resolve(project.root, local)))
-    .filter((rel) => rel && !rel.startsWith(".."));
+  const localPaths = localFilePaths(cwd);
   for (const rel of localPaths) {
     const reset = gitResult(repoRoot, ["reset", "-q", "--", rel]);
     if (reset.status !== 0) throw new Error(`git reset 本机文件失败（${rel}）：${(reset.stderr || reset.stdout).trim().slice(-ERROR_TAIL)}`);
@@ -104,6 +102,15 @@ export function commitAll(cwd: string, branch: string, batchName: string, stage:
   const commit = gitResult(repoRoot, ["commit", "-m", message]);
   if (commit.status !== 0) throw new Error(`git commit 失败：${(commit.stderr || commit.stdout).trim().slice(-ERROR_TAIL)}`);
   return { committed: true, branch, commit: gitText(repoRoot, ["rev-parse", "HEAD"]) };
+}
+
+/** 与 commitAll 共用本机文件排除口径，路径相对 Git 顶层。 */
+export function localFilePaths(cwd: string): string[] {
+  const repoRoot = gitText(cwd, ["rev-parse", "--show-toplevel"]);
+  const project = loadProjectLayout(cwd);
+  // macOS 的 /var → /private/var 等目录别名不能让本机文件被误判到仓库外。
+  return project.layout.localFiles.map((local) => relative(realpathSync(repoRoot), resolve(realpathSync(project.root), local)))
+    .filter((rel) => rel && rel !== ".." && !rel.startsWith("../"));
 }
 
 export const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;

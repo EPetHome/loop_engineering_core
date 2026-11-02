@@ -49,9 +49,10 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
   const pipelineDir = join(root, "pipeline");
   mkdirSync(repo); mkdirSync(home);
   const oldHome = process.env.HOME;
-  const oldResources = process.env.AUTOREVIEW_RESOURCE_ROOT;
+  const oldResources = process.env.AUTOREVIEW_RESOURCE_ROOT, oldQueueRoot = process.env.AUTOREVIEW_MERGE_QUEUE_ROOT;
   process.env.HOME = home;
   process.env.AUTOREVIEW_RESOURCE_ROOT = join(home, ".pi-autoreview", "resources");
+  process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = join(root, "queues");
   // 交付总表在 HOME 下；HOME 已固定到夹具目录，测试不会碰真实的 ~/.pi-autoreview/交付记录.md。
   const ledgerFile = join(home, ".pi-autoreview", "交付记录.md");
   // 流水线环境变量：只有指定了段名才设置，测完恢复。
@@ -179,6 +180,16 @@ function harness(options: { empty?: boolean; restored?: Record<string, unknown>;
     async close() {
       await event("session_shutdown", { reason: "quit" }).catch(() => {});
       for (let i = 0; i < 12; i += 1) await nextTurn();
+      if (existsSync(join(root, "queues"))) {
+        const queue = readMergeQueue(repo);
+        if (queue) {
+          const busy = () => existsSync(join(queue.dir, "worker.lock")) || readdirSync(queue.dir).some((file) => /^executor-[0-9a-f-]+\.json$/.test(file));
+          const deadline = Date.now() + 15_000;
+          while (busy() && Date.now() < deadline) await new Promise((done) => setTimeout(done, 25));
+          assert.ok(!busy(), "释放队列执行器与已登记触发器后再删除临时仓库");
+        }
+      }
+      if (oldQueueRoot === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = oldQueueRoot;
       if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
       if (oldResources === undefined) delete process.env.AUTOREVIEW_RESOURCE_ROOT; else process.env.AUTOREVIEW_RESOURCE_ROOT = oldResources;
       pipelineEnv.forEach((key, index) => {
@@ -2200,13 +2211,14 @@ test("G17 Ponytail 未加载只在启动与完成总结提醒，不改变完成�
   });
 });
 
-test("合入队列：Pi 真正完成发布边界自动进队；不提交开发空间", async () => {
+test("合入队列：Pi 完成提交后自动进队，压缩不触发评审，恢复保留完成资格", async () => {
   const h = harness({ stage: "甲" });
   try {
     h.write(".autoreview.json", JSON.stringify({ gate: { cmd: "true", timeoutMin: 1 } }));
     h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
     const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json");
     writeFileSync(file, JSON.stringify({ stages: { 甲: {} } })); h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+    h.git("branch", "-m", "feat/pi-batch");
     const original = h.git("rev-parse", "HEAD"), branch = h.git("branch", "--show-current");
     registerQueueBatch(runtime, { name: "Pi完成", file, dir: h.pipelineDir, project: runtime, release: "release", steps: [["甲"]],
       stages: [{ name: "甲", cwd: h.repo, branch, start: "true" }] });
@@ -2215,8 +2227,13 @@ test("合入队列：Pi 真正完成发布边界自动进队；不提交开发�
       await h.event("session_start"); await h.begin("单段需求"); h.write("file.txt", "reviewed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
       await until(() => readMergeQueue(runtime)?.entries[0]?.status === "ready", "Pi 完成自动进队并通过门禁");
       await until(() => !existsSync(join(queueDir(runtime), "worker.lock")), "队列释放执行锁");
-      assert.equal(h.git("rev-parse", "HEAD"), original, "队列不提交开发分支");
-      assert.match(h.git("status", "--porcelain"), /file\.txt/);
+      assert.notEqual(h.git("rev-parse", "HEAD"), original, "完成后由程序提交开发分支");
+      assert.equal(h.git("rev-list", "--count", `${original}..HEAD`), "1"); assert.equal(h.git("status", "--porcelain"), "");
+      const calls = h.inputs.length, epoch = JSON.parse(readFileSync(statusPath(h.pipelineDir, "甲"), "utf8")).readyEpoch;
+      h.reviewer = () => { throw new Error("压缩不能启动新评审"); };
+      await h.event("agent_settled"); await h.event("session_shutdown"); await h.event("session_start");
+      assert.equal(h.state().phase, "done", h.summary()); assert.equal(h.inputs.length, calls);
+      assert.equal(JSON.parse(readFileSync(statusPath(h.pipelineDir, "甲"), "utf8")).readyEpoch, epoch);
     } finally { if (old === undefined) delete process.env.AUTOREVIEW_BATCH_FILE; else process.env.AUTOREVIEW_BATCH_FILE = old; }
   } finally { await h.close(); }
 });
@@ -2229,6 +2246,7 @@ test("自动 A9：Pi 共用入口识别本批已测提交和完整树，不再�
     h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
     const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json"); writeFileSync(file, JSON.stringify({ stages: { 甲: {} } }));
     h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+    h.git("branch", "-m", "feat/pi-fallback");
     registerQueueBatch(runtime, { name: "Pi兜底", file, dir: h.pipelineDir, project: runtime, release: "release", steps: [["甲"]], stages: [{ name: "甲", cwd: h.repo, branch: h.git("branch", "--show-current"), start: "true" }] });
     process.env.AUTOREVIEW_BATCH_FILE = file;
     await h.event("session_start"); await h.begin(); h.write("file.txt", "reviewed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
@@ -2252,6 +2270,7 @@ test("返修1：Pi 历史未知验收经过 A9 兜底仍不授予自动合入资
     h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
     const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json"); writeFileSync(file, JSON.stringify({ stages: { 甲: {} } }));
     h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+    h.git("branch", "-m", "feat/pi-legacy");
     registerQueueBatch(runtime, { name: "Pi历史未知", file, dir: h.pipelineDir, project: runtime, release: "release", steps: [["甲"]], stages: [{ name: "甲", cwd: h.repo, branch: h.git("branch", "--show-current"), start: "true" }] });
     process.env.AUTOREVIEW_BATCH_FILE = file;
     await h.event("session_start"); await h.begin(); h.write("file.txt", "reviewed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
@@ -2263,7 +2282,7 @@ test("返修1：Pi 历史未知验收经过 A9 兜底仍不授予自动合入资
     h.git("reset", "--hard", entry.result!); const calls = h.inputs.length; h.reviewer = () => { throw new Error("不该再次静态评审"); };
     await h.command("review"); await h.terminal(); assert.equal(h.state().phase, "done", h.summary()); assert.equal(h.inputs.length, calls);
     await until(() => readMergeQueue(runtime)!.entries.length === 2 && Boolean(readMergeQueue(runtime)!.entries[1].notified) && !existsSync(join(queueDir(runtime), "worker.lock")), "未知结论停在可合入");
-    const next = readMergeQueue(runtime)!.entries[1]; assert.equal(next.status, "ready"); assert.equal(next.qualification[0].acceptance, undefined); assert.match(next.reason!, /缺少验收结论/);
+    const next = readMergeQueue(runtime)!.entries[1]; assert.equal(next.status, "ready"); assert.equal(next.qualification[0].acceptance, undefined); assert.match(next.reason!, /等待用户执行 loop 合入/);
     assert.equal(spawnSync("git", ["rev-parse", "HEAD"], { cwd: runtime, encoding: "utf8" }).stdout.trim(), entry.base);
     assert.match(h.summary(), /历史队列缺少验收结论/);
   } finally { if (old === undefined) delete process.env.AUTOREVIEW_BATCH_FILE; else process.env.AUTOREVIEW_BATCH_FILE = old; await h.close(); }

@@ -30,6 +30,15 @@ const ACC_ENV = {
   AUTOREVIEW_CRITERIA_CMD: fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url)),
 };
 
+async function waitQueueIdle(repo: string): Promise<void> {
+  const queue = readMergeQueue(repo);
+  if (!queue) return;
+  const busy = () => existsSync(join(queue.dir, "worker.lock")) || readdirSync(queue.dir).some((file) => /^executor-[0-9a-f-]+\.json$/.test(file));
+  const deadline = Date.now() + 15_000;
+  while (busy() && Date.now() < deadline) await sleep(30);
+  assert.ok(!busy(), "队列执行器与已登记触发器全部释放后才能删除临时仓库");
+}
+
 interface RunOptions {
   mode?: string;
   env?: Record<string, string>;
@@ -145,6 +154,7 @@ test("合入队列：Hook 完成自动进队；机器返修保留需求、授权
     h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
     const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json"), dir = join(h.root, "pipeline");
     writeFileSync(file, JSON.stringify({ stages: { 甲: {} } })); h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+    h.git("branch", "-m", "feat/hook-batch");
     registerQueueBatch(runtime, { name: "Hook完成", file, dir, project: runtime, release: "release", steps: [["甲"]],
       stages: [{ name: "甲", cwd: h.repo, branch: h.git("branch", "--show-current"), start: "true" }] });
     const env = { AUTOREVIEW_MERGE_QUEUE_ROOT: process.env.AUTOREVIEW_MERGE_QUEUE_ROOT!, AUTOREVIEW_BATCH_FILE: file, AUTOREVIEW_PIPELINE_DIR: dir, AUTOREVIEW_STAGE: "甲" };
@@ -167,6 +177,7 @@ test("合入队列：Hook 完成自动进队；机器返修保留需求、授权
     await wait(() => readMergeQueue(runtime)?.entries.at(-1)?.status === "ready");
     await wait(() => !existsSync(join(queueDir(runtime), "worker.lock")));
   } finally {
+    await waitQueueIdle(h.repo);
     if (old === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = old;
     h.close();
   }
@@ -181,11 +192,16 @@ test("自动 A9：Claude/Codex Hook 共用入口不重复评审队列测过的�
       h.git("add", ".autoreview.json"); h.git("commit", "-qm", "gate config");
       const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json"), dir = join(h.root, "pipeline"); writeFileSync(file, JSON.stringify({ stages: { 甲: {} } }));
       h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+      h.git("branch", "-m", `feat/${host}-fallback`);
       registerQueueBatch(runtime, { name: "Hook兜底", file, dir, project: runtime, release: "release", steps: [["甲"]], stages: [{ name: "甲", cwd: h.repo, branch: h.git("branch", "--show-current"), start: "true" }] });
       const env = { AUTOREVIEW_HOST: host, AUTOREVIEW_MERGE_QUEUE_ROOT: process.env.AUTOREVIEW_MERGE_QUEUE_ROOT!, AUTOREVIEW_BATCH_FILE: file, AUTOREVIEW_PIPELINE_DIR: dir, AUTOREVIEW_STAGE: "甲" };
       h.run(h.event("UserPromptSubmit", { prompt: "原任务" }), { env }); h.write("file.txt", "reviewed\n"); h.run(h.delivered(), { env });
       await wait(() => readMergeQueue(runtime)?.entries[0]?.status === "ready" && !existsSync(join(queueDir(runtime), "worker.lock")));
       const queue = readMergeQueue(runtime)!, entry = queue.entries[0]; assert.deepEqual(entry.qualification[0].acceptance, { failed: [], partial: [], manual: [] });
+      const completedEpoch = h.readState(host).queueReadyEpoch, completedRounds = h.readState(host).rounds.length;
+      h.run(h.delivered(), { env, mode: "fail" });
+      assert.equal(h.readState(host).phase, "done", h.summary(host)); assert.equal(h.readState(host).rounds.length, completedRounds, "压缩后没有新评审");
+      assert.equal(h.readState(host).queueReadyEpoch, completedEpoch, "压缩保留原完成资格");
       await mergeQueuedBatch(runtime, queue.batches[0], false, (candidate, save) => applyQueuedResult(runtime, "release", candidate, save));
       h.git("reset", "--hard", entry.result!);
       const before = h.readState(host).reviewSnapshots.length;
@@ -193,7 +209,7 @@ test("自动 A9：Claude/Codex Hook 共用入口不重复评审队列测过的�
       assert.equal(h.readState(host).phase, "done", h.summary(host)); assert.equal(h.readState(host).reviewSnapshots.length, before, "没有新评审调用/快照");
       assert.match(h.summary(host), /不再评审：工作区提交和树与本批合入队列测过的合并结果完全相同/);
       await wait(() => !existsSync(join(queueDir(runtime), "worker.lock"))); assert.equal(readMergeQueue(runtime)!.entries.length, 1);
-    } finally { if (old === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = old; h.close(); }
+    } finally { await waitQueueIdle(h.repo); if (old === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = old; h.close(); }
   });
 });
 
@@ -206,6 +222,7 @@ test("返修1：Hook 历史部分验证缺少队列结论时，A9 兜底及再�
       h.git("add", ".autoreview.json"); h.git("commit", "-qm", "acceptance config");
       const runtime = join(h.root, "runtime"), file = join(h.root, "batch.json"), dir = join(h.root, "pipeline"); writeFileSync(file, JSON.stringify({ stages: { 甲: {} } }));
       h.git("worktree", "add", "-b", "release", runtime, "HEAD");
+      h.git("branch", "-m", `feat/${host}-legacy`);
       registerQueueBatch(runtime, { name: "历史未知", file, dir, project: runtime, release: "release", steps: [["甲"]], stages: [{ name: "甲", cwd: h.repo, branch: h.git("branch", "--show-current"), start: "true" }] });
       const env = { ...ACC_ENV, FAKE_ACC_UNKNOWN: "A1", AUTOREVIEW_HOST: host, AUTOREVIEW_MERGE_QUEUE_ROOT: process.env.AUTOREVIEW_MERGE_QUEUE_ROOT!, AUTOREVIEW_BATCH_FILE: file, AUTOREVIEW_PIPELINE_DIR: dir, AUTOREVIEW_STAGE: "甲" };
       h.run(h.event("UserPromptSubmit", { prompt: "原任务\n## 验收标准\nA1. 操作：检查第一项\n    预期：通过\nA2. 操作：检查第二项\n    预期：通过" }), { env });
@@ -225,11 +242,11 @@ test("返修1：Hook 历史部分验证缺少队列结论时，A9 兜底及再�
         assert.equal(h.readState(host).rounds.at(-1).acceptance, undefined);
         await wait(() => readMergeQueue(runtime)!.entries.length === count && Boolean(readMergeQueue(runtime)!.entries.at(-1)?.notified) && !existsSync(join(queueDir(runtime), "worker.lock")));
         const entry = readMergeQueue(runtime)!.entries.at(-1)!;
-        assert.equal(entry.status, "ready"); assert.equal(entry.qualification[0].acceptance, undefined); assert.match(entry.reason!, /缺少验收结论/);
+        assert.equal(entry.status, "ready"); assert.equal(entry.qualification[0].acceptance, undefined); assert.match(entry.reason!, /等待用户执行 loop 合入/);
         assert.equal(spawnSync("git", ["rev-parse", "HEAD"], { cwd: runtime, encoding: "utf8" }).stdout.trim(), base);
       }
       assert.match(h.summary(host), /历史队列缺少验收结论/); assert.match(readFileSync(h.ledger, "utf8"), /验收结论 部分验证：历史队列缺少验收结论/);
-    } finally { if (old === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = old; h.close(); }
+    } finally { await waitQueueIdle(h.repo); if (old === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = old; h.close(); }
   });
 });
 

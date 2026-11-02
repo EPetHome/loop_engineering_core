@@ -26,9 +26,9 @@ import { appendLedgerRecord, deliveryLedgerPath, pendingItems, projectRootOf, re
 import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
 import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
-import { queueStageEvent } from "../merge-queue.ts";
+import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "../merge-queue.ts";
 import { bindHookInputBridge, bridgeRepairSequence } from "./inbox-bridge.ts";
-import { inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
+import { completionChecks, inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
@@ -684,7 +684,9 @@ function reportQueueStage(ctx: HookContext, state: HookState, event: "started" |
   const pid = Number(process.env.AUTOREVIEW_DEV_PID) || process.ppid;
   const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
     inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
-    event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined, sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0,
+    event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined,
+    ...(event === "done" ? { candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance) } : {}),
+    sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0,
     ...(event === "done" ? { acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}) };
   const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
   if (dir && stage) bindHookInputBridge(dir, stage, status, { socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
@@ -879,6 +881,11 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   }
   // 暂停状态不自动评审，等你再提交消息（UserPromptSubmit 解除，与 pi 扩展一致）。
   if (state.phase === "paused" && !state.resumeAfterInputChange) return undefined;
+  if (state.phase === "done" && !state.resumeAfterInputChange && queueCommittedResult(ctx.workDir,
+    await createGitEvidence(ctx.exec, ctx.workDir).snapshot(), process.env, state.queueReadyEpoch)) {
+    releaseHookExperience(ctx, state.experienceActivity?.turn);
+    return undefined;
+  }
   if (marker === "none" && !state.resumeAfterInputChange) {
     const baseline = checkedFingerprint(state);
     if (!baseline) return undefined;
@@ -999,8 +1006,8 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       await writeSummary(ctx, state, "完成");
       state.queueReadyEpoch = randomUUID(); saveStateFile(ctx.paths.state, state);
       reportQueueStage(ctx, state, "done");
-      const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`;
-      await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}`, ctx.exec);
+      const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`, submission = queueCommitNotice(ctx.workDir);
+      await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}${submission ? `\n${submission}` : ""}`, ctx.exec);
       checkUserInputs();
       releaseHookExperience(ctx, state.experienceActivity?.turn, true);
       return userOutput(ctx, outcome.hint && `自动评审${done}。${outcome.hint}`);

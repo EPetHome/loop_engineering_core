@@ -67,7 +67,9 @@ registerHooks({resolve(specifier,context,next){const result=next(specifier,conte
 function assertCard(text: string): void {
   assert.ok(text.split("\n").length <= 6, text);
   for (const rule of PRODUCTION_RULES) assert.ok(text.includes(join(ROOT, rule.file)), rule.file);
-  assert.match(text, /合入走 bin\/loop 合入（合入队列），不要在会话里手动 git 合并/);
+  assert.match(text, /完成后由程序提交并记录，推不推由用户决定/);
+  assert.match(text, /合入只由用户执行 bin\/loop 合入（合入队列），不要在会话里手动 git 合并/);
+  assert.doesNotMatch(text, /merge\.auto|由程序自动合入/);
 }
 
 test("A1 两宿主范围外三类动作各 20 次，零输出且未加载校验/评审模块；记录进程耗时中位数", (t) => {

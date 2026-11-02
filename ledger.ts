@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripCriteriaSection, type AcceptanceRecord } from "./acceptance-core.ts";
 import type { QueueAcceptance } from "./pipeline-core.ts";
+import type { BatchCommit } from "./commit-batch.ts";
 
 export const LEDGER_FILE = "交付记录.md";
 
@@ -136,6 +137,18 @@ export function appendMergeRecord(record: { project: string; batch: string; entr
     marker, `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
     `- 已合入 ${record.commit}`, "- [ ] 已回写原单",
     ...record.manual.map((item) => `- [ ] ${oneLine(item.id, 120)} 人工：${oneLine(item.text, 1000)}${item.detail ? `；${oneLine(item.detail, 500)}` : ""}`), "",
+  ].join("\n"), path);
+}
+
+/** 批次完成的提交记录独立追加；不覆盖各段的原始交付记录。 */
+export function appendBatchCommitRecord(record: { project: string; batch: string; entry: string; file: string; commits: BatchCommit[];
+  conclusions: string[]; pending: { id: string; text: string; detail: string }[] }, path = deliveryLedgerPath()): string {
+  return appendSegment([
+    `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 批次-${oneLine(record.entry, 200)}`,
+    `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
+    ...record.commits.flatMap((item) => [`- 已提交 ${item.branch} ${item.commit}`, ...item.preSquash.map((ref) => `- 中间历史：${ref}`)]),
+    ...record.conclusions.map((line) => `- ${oneLine(line, 2000)}`),
+    "- [ ] 已回写原单", ...record.pending.map((item) => `- [ ] ${oneLine(item.id, 120)} 待验：${oneLine(item.text, 1000)}；${oneLine(item.detail, 500)}`), "",
   ].join("\n"), path);
 }
 

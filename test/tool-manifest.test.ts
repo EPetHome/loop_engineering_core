@@ -258,6 +258,6 @@ test("一致性检查覆盖 helper 字段读取方式：新增报缺项，删除
   const removed = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace(`${needle}\n`, "") });
   assert.ok(!removed.has("release"), "helper 和属性访问都删除后，字段应离开比较集合");
   assert.ok(differences(removed, doc).extra.includes("release"), "删除字段应报为清单多项");
-  const mergeAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace("auto: data.auto === true", "auto: data.auto === true, probe: data.probe === true") });
+  const mergeAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace('if (["auto", "push"].some((key) => key in data))', 'if (data.probe || ["auto", "push"].some((key) => key in data))') });
   assert.ok(differences(mergeAdded, doc).missing.includes("merge.probe"), "merge 子字段新增同样应报清单缺项");
 });

@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inboxPath, readJson, writeStageStatus } from "../pipeline-core.ts";
+import { workingTree } from "../commit-batch.ts";
 
 const mode = process.argv[2] ?? "fix";
 const link = { dir: process.env.AUTOREVIEW_PIPELINE_DIR, stage: process.env.AUTOREVIEW_STAGE };
@@ -22,7 +23,7 @@ const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)
 const log = (what) => appendFileSync(join(link.dir, `${link.stage}.events.log`), `${Date.now()} ${what}\n`);
 let inbox = 0;
 const report = (event, extra = {}) => {
-  if (mode !== "silent") writeStageStatus(link, { sessionId: `fake-${link.stage}`, summary: "", event, inbox, ...(event === "done" ? { readyEpoch: randomUUID() } : {}), ...extra });
+  if (mode !== "silent") writeStageStatus(link, { sessionId: `fake-${link.stage}`, summary: "", event, inbox, ...(event === "done" ? { readyEpoch: randomUUID(), ...(process.env.AUTOREVIEW_BATCH_FILE ? { candidate: workingTree(process.cwd(), link.dir).tree } : {}) } : {}), ...extra });
 };
 
 log("launched");

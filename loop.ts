@@ -3,7 +3,7 @@
  * loop.ts — bin/loop 的实现：开工、启动、状态、合入、清理。
  *
  * 所有子命令支持 --dry-run（只核对、只打印，不改文件或分支）和 --json（标准输出一个 JSON 对象）。
- * 手动命令只做本地操作；队列仅按 merge.push 授权推送。开发方不提交，段完成时由流水线按分支名生成提交说明。
+ * 只有显式「推送」操作 origin；合入/撤回仍只做本地操作。开发方不提交。
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -18,7 +18,7 @@ import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
 import { registerMiss } from "./misses.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
-import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch, withdrawQueuedBatch, scopeOverlapWarnings, type QueueEntry } from "./merge-queue.ts";
+import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch, pushQueueBatch, withdrawQueuedBatch, scopeOverlapWarnings, type QueueEntry } from "./merge-queue.ts";
 import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
 import { parsePlan, type Plan } from "./pipeline.ts";
 import { readJson, statusPath } from "./pipeline-core.ts";
@@ -653,7 +653,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     // 外部/非 git 段沿用原行为，不把它们接入 git 合入队列。
     if (stages.every((stage) => stage.branch && worktrees(repo.root).some((item) => item.path === gitResult(stage.cwd, ["rev-parse", "--show-toplevel"]).stdout.trim()))) {
       registerQueueBatch(repo.root, { name: opened.plan.name, file: opened.path, dir: opened.plan.dir, project: repo.projectRoot,
-        release: repo.layout.release, stages, steps: opened.plan.steps });
+        release: repo.layout.release, stages, steps: opened.plan.steps, e2e: Boolean(opened.plan.e2e) });
     }
   }
   const start = batchCommand("启动", docs.batchPath);
@@ -1109,10 +1109,23 @@ export function cmdExperience(args: ParsedArgs): Record<string, unknown> {
   return { ok: true, command: "经验", action, project: root, dryRun: args.dryRun, candidates, lines };
 }
 
+function cmdPush(args: ParsedArgs): Record<string, unknown> {
+  if (!args.batch || args.rest.length) throw new LoopError("用法：loop 推送 <批次.json> [--dry-run] [--json]");
+  const file = resolve(args.batch);
+  const location = gitResult(dirname(file), ["rev-parse", "--show-toplevel"]);
+  const repo = repoOf(location.status === 0 ? dirname(file) : process.cwd());
+  const batch = registeredQueueBatch(repo.root, file);
+  if (!batch) throw new LoopError("本批未用 loop 开工登记，不能推送");
+  const commits = pushQueueBatch(repo.root, batch, args.dryRun);
+  return { ok: true, command: "推送", dryRun: args.dryRun, remote: "origin", commits, pushed: !args.dryRun,
+    lines: commits.map((item) => `${args.dryRun ? "将推送" : "已推送"} ${item.branch} ${item.commit} → origin；不推 release，不强推`) };
+}
+
 const USAGE = `用法：
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
   loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
   loop 状态 [<批次.json>] [--dry-run] [--json]
+  loop 推送 <批次.json> [--dry-run] [--json]
   loop 合入 <批次.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]
@@ -1138,6 +1151,7 @@ async function main(): Promise<number> {
     if (args.command === "开工") result = await cmdOpen(args);
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
+    else if (args.command === "推送") result = cmdPush(args);
     else if (args.command === "合入") result = await cmdMerge(args);
     else if (args.command === "撤回") result = await cmdWithdraw(args);
     else if (args.command === "清理") result = cmdCleanup(args);

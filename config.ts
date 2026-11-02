@@ -217,14 +217,14 @@ export function parseMethodsConfig(raw: unknown, root: string): MethodsConfig | 
   return { paths, ...(selfCheck ? { selfCheck } : {}), ...(probe ? { probe } : {}) };
 }
 
-/** 只从运行版配置读取授权，不信任批次候选打开的开关。 */
+/** 兼容旧配置：已停用的字段只提醒，不再授予发布或推送权限。 */
 export interface MergeConfig { auto: boolean; push: boolean }
 export function parseMergeConfig(raw: unknown): MergeConfig {
   if (raw === undefined) return { auto: false, push: false };
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 merge 必须是 JSON 对象`);
   const data = raw as Record<string, unknown>;
-  for (const key of ["auto", "push"]) if (data[key] !== undefined && typeof data[key] !== "boolean") throw new Error(`${MARKER_FILE} 的 merge.${key} 必须是 boolean`);
-  return { auto: data.auto === true, push: data.push === true };
+  if (["auto", "push"].some((key) => key in data)) console.error("merge.auto / merge.push 已停用，合入由用户执行 loop 合入");
+  return { auto: false, push: false };
 }
 export function loadMergeConfig(cwd: string): MergeConfig {
   const root = findProjectRoot(cwd);
