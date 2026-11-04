@@ -8,8 +8,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 import { createServer } from "node:net";
+import { batchInfo, writePhase } from "../events.ts";
 import {
-  buildRepairMessage, DEFAULT_PI, dispatchBatches, parseOwner, parsePlan, piCommand, PlanError, preflight, routeFailures,
+  buildRepairMessage, DEFAULT_PI, dispatchBatches, launchTerminal, parseOwner, parsePlan, piCommand, PlanError, preflight, routeFailures,
   runPipeline, stageScript, type PipelineIO, type Plan,
 } from "../pipeline.ts";
 
@@ -255,7 +256,7 @@ test("P8 同一仓库的两段逐个派，不同仓库同时派", async (t) => {
   });
 });
 
-test("P9 段暂停时提醒你并接着等；段一直不报状态时提醒检查启动命令", async (t) => {
+test("P9 段暂停时提醒并接着等；从未报状态则在时限内判启动失败",  async (t) => {
   await t.test("甲先暂停、你处理好后完成：提醒一次，流水线照常走完", async () => {
     const s = scene({ stages: { 甲: { mode: "pause" }, 乙: {} } });
     try {
@@ -263,15 +264,15 @@ test("P9 段暂停时提醒你并接着等；段一直不报状态时提醒检�
       assert.equal(s.notes.filter((note) => /甲 暂停（开发方需要你决定），在它的窗口里处理/.test(note)).length, 1);
     } finally { s.close(); }
   });
-  await t.test("段不报状态：提醒加载 autoreview.ts", async () => {
+  await t.test("段不报状态：明确没有启动并结束等待", async () => {
     const s = scene({ stages: { 甲: { mode: "silent" } }, criteria: CRITERIA.replace("[乙]", "[甲]") });
     try {
-      const running = runPipeline(s.plan, io(s, 200));
-      for (let i = 0; i < 100 && !s.notes.some((note) => note.includes("还没收到「甲」的状态")); i += 1) await new Promise((r) => setTimeout(r, 20));
-      assert.ok(s.notes.some((note) => /还没收到「甲」的状态，确认它的启动命令加载了 autoreview\.ts/.test(note)));
-      // 补一个完成状态让流水线收尾，不留挂起的等待。
-      writeFileSync(join(s.plan.dir, "甲.status.json"), JSON.stringify({ stage: "甲", seq: 1, event: "done", readyEpoch: "fixture-ready", inbox: 0, sessionId: "x", summary: "", updatedAt: "" }));
-      assert.equal(await running, 0);
+      const started = Date.now();
+      assert.equal(await runPipeline(s.plan, io(s, 200)), 1);
+      assert.ok(Date.now() - started < 5000);
+      assert.ok(s.notes.some((note) => /甲 没有启动.*处理办法.*autoreview\.ts/.test(note)));
+      assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "甲.status.json"), "utf8")).event, "startup-failed");
+      assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "甲.phase.json"), "utf8")).phase, "failed");
     } finally { s.close(); }
   });
 });
@@ -617,6 +618,121 @@ test("P 流水线准备和段会话共用准备前确定的开工依据", async 
     assert.match(prepared, /^[a-f0-9]{40}$/);
     assert.equal(readFileSync(startFile, "utf8"), prepared, "启动脚本拿到准备使用的同一份开工依据");
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
+});
+
+test("本批 A9：未执行段命令在时限内发失败事件；loop 状态不再显示运行中", async () => {
+  const s = scene({ stages: { 甲: {} }, criteria: CRITERIA.replace("[乙]", "[甲]") });
+  const oldHome = process.env.HOME, oldPA = process.env.LOOP_PA_CONFIG;
+  process.env.HOME = s.root; process.env.LOOP_PA_CONFIG = join(s.root, "pa.json");
+  try {
+    const file = join(s.root, "batch.json"), stage = s.plan.stages.get("甲")!;
+    writeFileSync(file, JSON.stringify({ name: s.plan.name, dir: s.plan.dir, startupTimeoutSec: 1, stages: { 甲: { start: stage.start, cwd: stage.cwd } } }));
+    s.plan.file = file;
+    writeFileSync(process.env.LOOP_PA_CONFIG!, JSON.stringify({ pa: { eventsDir: join(s.root, "events"), localNotify: false } }));
+    assert.equal(await runPipeline(s.plan, { ...io(s, 80), launch: () => {} }), 1);
+    const rows = (await import("node:fs")).readdirSync(join(s.root, "events")).flatMap((name) => readFileSync(join(s.root, "events", name), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
+    const failed = rows.find((row) => row.stage === "甲" && row.status === "failed");
+    assert.match(failed.reason.text, /甲 没有启动/); assert.match(failed.detail.action, /处理办法/);
+    const status = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["状态", file, "--dry-run", "--json"], { cwd: stage.cwd, env: process.env, encoding: "utf8" });
+    assert.equal(status.status, 0, status.stdout + status.stderr);
+    const entry = JSON.parse(status.stdout).stages[0]; assert.equal(entry.event, "startup-failed"); assert.notEqual(entry.phase, "运行中"); assert.match(entry.pauseReason, /甲 没有启动/);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldPA === undefined) delete process.env.LOOP_PA_CONFIG; else process.env.LOOP_PA_CONFIG = oldPA;
+    s.close();
+  }
+});
+
+test("返修2：并行派发失败时收束所有静默段，已报状态或已有会话的段原样保留", async (t) => {
+  for (const second of ["silent", "started", "paused", "done", "phase-only"]) await t.test(second, async () => {
+    const s = scene({ stages: { 甲: {}, 乙: {} } });
+    const oldHome = process.env.HOME, oldPA = process.env.LOOP_PA_CONFIG;
+    process.env.HOME = s.root; process.env.LOOP_PA_CONFIG = join(s.root, "pa.json");
+    try {
+      const file = join(s.root, "batch.json");
+      writeFileSync(file, JSON.stringify({ name: s.plan.name, dir: s.plan.dir, stages: Object.fromEntries([...s.plan.stages].map(([name, stage]) => [name, { start: stage.start, cwd: stage.cwd }])) }));
+      s.plan.file = file;
+      writeFileSync(process.env.LOOP_PA_CONFIG!, JSON.stringify({ pa: { eventsDir: join(s.root, "events"), localNotify: false } }));
+      let originalStatus: string | undefined, originalPhase: string | undefined;
+      const launched: string[] = [];
+      const started = Date.now();
+      const code = await runPipeline(s.plan, { ...io(s, 100), launch: (stage) => {
+        launched.push(stage.name);
+        if (stage.name !== "乙" || second === "silent") return;
+        const phase = second === "paused" ? "paused" : second === "done" ? "done" : "running";
+        writePhase(batchInfo(file, stage.cwd, s.plan.dir), stage.name, phase, { session: { host: "pi", id: "already-started" }, text: "真实会话状态" });
+        originalPhase = readFileSync(join(s.plan.dir, "乙.phase.json"), "utf8");
+        if (second !== "phase-only") {
+          writeFileSync(join(s.plan.dir, "乙.status.json"), JSON.stringify({ stage: "乙", sessionId: "already-started", event: second, readyEpoch: second === "done" ? "ready" : undefined, seq: 1, inbox: 0, summary: "", pauseReason: second === "paused" ? "等用户答复" : undefined }));
+          originalStatus = readFileSync(join(s.plan.dir, "乙.status.json"), "utf8");
+        }
+      } });
+      assert.equal(code, 1); assert.ok(Date.now() - started < 5000, "失败收尾有界"); assert.deepEqual(launched, ["甲", "乙"]);
+      const rows = (await import("node:fs")).readdirSync(join(s.root, "events")).flatMap((name) => readFileSync(join(s.root, "events", name), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
+      for (const name of second === "silent" ? ["甲", "乙"] : ["甲"]) {
+        assert.equal(JSON.parse(readFileSync(join(s.plan.dir, `${name}.status.json`), "utf8")).event, "startup-failed");
+        assert.equal(JSON.parse(readFileSync(join(s.plan.dir, `${name}.phase.json`), "utf8")).phase, "failed");
+        assert.ok(rows.some((row) => row.stage === name && row.status === "failed" && row.reason.text.includes("没有启动")), `${name} 必须有失败事件`);
+        assert.ok(s.notes.some((note) => note.includes(`${name} 没有启动`) && note.includes("处理办法")), `${name} 必须有通知`);
+      }
+      if (second === "silent") {
+        const status = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["状态", file, "--dry-run", "--json"], { cwd: s.plan.stages.get("甲")!.cwd, env: process.env, encoding: "utf8" });
+        assert.equal(status.status, 0, status.stdout + status.stderr);
+        const entries = JSON.parse(status.stdout).stages;
+        assert.equal(entries.length, 2);
+        for (const entry of entries) { assert.equal(entry.event, "startup-failed"); assert.notEqual(entry.phase, "运行中"); }
+      } else {
+        assert.equal(readFileSync(join(s.plan.dir, "乙.phase.json"), "utf8"), originalPhase);
+        assert.equal(existsSync(join(s.plan.dir, "乙.status.json")), originalStatus !== undefined);
+        if (originalStatus) assert.equal(readFileSync(join(s.plan.dir, "乙.status.json"), "utf8"), originalStatus);
+        assert.equal(rows.some((row) => row.stage === "乙" && row.status === "failed"), false, "不得覆盖已启动段的真实状态");
+      }
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      if (oldPA === undefined) delete process.env.LOOP_PA_CONFIG; else process.env.LOOP_PA_CONFIG = oldPA;
+      s.close();
+    }
+  });
+});
+
+test("返修2：只先报 phase 的真实会话不误判未启动，也不误报第 0 条返修", async () => {
+  const s = scene({ stages: { 甲: {}, 乙: {} } });
+  try {
+    const code = await runPipeline(s.plan, { ...io(s, 100), launch: (stage) => {
+      if (stage.name === "甲") writeFileSync(join(s.plan.dir, "甲.phase.json"), JSON.stringify({ phase: "running", session: { host: "pi", id: "real-session" } }));
+    } });
+    assert.equal(code, 1); assert.equal(existsSync(join(s.plan.dir, "甲.status.json")), false);
+    assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "甲.phase.json"), "utf8")).session.id, "real-session");
+    assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "乙.status.json"), "utf8")).event, "startup-failed");
+    assert.equal(s.notes.some((note) => note.includes("第 0 条返修")), false);
+    assert.equal(s.notes.some((note) => note.includes("甲 没有启动")), false);
+  } finally { s.close(); }
+});
+
+test("本批 A10：Terminal 替身只输入短文件路径，超过 1024 字节的中文启动命令完整执行", async () => {
+  const root = gitRepo(tempDir()), oldHome = process.env.HOME;
+  process.env.HOME = root;
+  try {
+    const name = "中文段", payload = "中文完整参数".repeat(400), seen = join(root, "seen.json"), file = join(root, "batch.json");
+    const code = `const f=require('node:fs'),p=require('node:path');f.writeFileSync(${JSON.stringify(seen)},JSON.stringify({stage:process.env.AUTOREVIEW_STAGE,payload:process.env.PAYLOAD}));f.writeFileSync(p.join(process.env.AUTOREVIEW_PIPELINE_DIR,process.env.AUTOREVIEW_STAGE+'.status.json'),JSON.stringify({stage:process.env.AUTOREVIEW_STAGE,sessionId:'terminal',event:'done',readyEpoch:'terminal-ready',seq:1,inbox:0,summary:''}));`;
+    const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+    const raw = { name: "长启动", dir: join(root, "pipeline"), stages: { [name]: { cwd: root, start: `PAYLOAD=${quote(payload)} ${quote(process.execPath)} -e ${quote(code)}` } } };
+    writeFileSync(file, JSON.stringify(raw));
+    const plan = parsePlan(raw, root, {}, { batchFile: file });
+    assert.ok(Buffer.byteLength(stageScript(plan, plan.stages.get(name)!)) > 1024);
+    let typed = "", wrapper = "";
+    const terminal = launchTerminal(plan, ((_command: string, args: string[]) => {
+      const encoded = /^tell application "Terminal" to do script "(.*)"$/.exec(args[1])![1];
+      typed = JSON.parse(`"${encoded}"`); assert.ok(Buffer.byteLength(typed) < 1024);
+      wrapper = /\/bin\/sh '([^']+)'/.exec(typed)![1];
+      return spawnSync("/bin/sh", ["-c", typed], { encoding: "utf8", timeout: 10_000 });
+    }) as typeof spawnSync);
+    const notes: string[] = [];
+    assert.equal(await runPipeline(plan, { launch: terminal, notify: (text) => notes.push(text), log: () => {}, pollMs: 20, silenceMs: 2000 }), 0, notes.join("\n"));
+    assert.ok(typed); assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { stage: name, payload });
+    assert.equal(existsSync(wrapper), false, "启动凭据和脚本已按身份释放");
+    assert.equal(JSON.parse(readFileSync(join(plan.dir, `${name}.status.json`), "utf8")).event, "done");
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
 });
 
 test("P 并行段一段启动失败：收束另一段的等待，不杀已启动会话", async () => {

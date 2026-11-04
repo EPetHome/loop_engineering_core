@@ -1,0 +1,13 @@
+{
+  "name": "配置核对与卡住通知",
+  "branch": "fix/preflight-and-block-notice",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
+  "stages": {
+    "开发": {
+      "prompt": "../../prompt/提示词-配置核对与卡住通知.md",
+      "workspace": "配置核对与卡住通知",
+      "scope": { "deny": ["docs/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    }
+  },
+  "steps": [["开发"]]
+}

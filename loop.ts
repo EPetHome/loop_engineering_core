@@ -15,6 +15,7 @@ import { remapBatchReferences } from "./batch-refs.ts";
 import { findProjectRoot, loadProjectLayout, resolveProjectConfig, workspacePath, type ProjectLayout } from "./config.ts";
 import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
+import { checkBatchConfiguration, rehearseBatch } from "./preflight.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
 import { registerMiss } from "./misses.ts";
 import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
@@ -155,6 +156,8 @@ interface BatchPlan {
   branch?: string;
   /** 开工要创建或切换的工作区。 */
   workspaces: WorkspaceUse[];
+  /** 这些工作区开工时才会复制的本机文件；前置引用核对只读其有效来源。 */
+  localFileCopies: { source: string; target: string }[];
   /** 段里显式写了 cwd 的本仓库 worktree：不创建，但同样核对脏改动和分支。 */
   checks: WorkspaceUse[];
   stages: Map<string, { branch?: string; workspace?: string; cwd: string; prompt?: string }>;
@@ -183,7 +186,7 @@ export function loadBatch(repo: Repo, path: string, options: { warn?: (message: 
   const raw = readBatch(absolute);
   const planDir = dirname(absolute);
   const recipe = parseRecipe(raw.recipe);
-  if (recipe === "review-only") return { raw, path: absolute, planDir, plan: parsePlan(raw, planDir, options.env ?? process.env, { batchFile: absolute }), workspaces: [], checks: [], stages: new Map() };
+  if (recipe === "review-only") return { raw, path: absolute, planDir, plan: parsePlan(raw, planDir, options.env ?? process.env, { batchFile: absolute }), workspaces: [], localFileCopies: [], checks: [], stages: new Map() };
   const normalized = normalizedRaw(repo, raw);
   const plan = parsePlan(normalized, planDir, options.env ?? process.env, { batchFile: absolute, projectRoot: repo.projectRoot, warn: options.warn });
   const branch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
@@ -219,7 +222,10 @@ export function loadBatch(repo: Repo, path: string, options: { warn?: (message: 
       existing.stages.push(name);
     } else byPath.set(key, { name: workspace, path: key, branch: stageBranch ?? "", explicit: false, stages: [name], exists: existsSync(key), registered: false });
   }
-  return { raw, path: absolute, planDir, plan, ...(branch ? { branch } : {}), workspaces: [...byPath.values()], checks: [...checksByPath.values()], stages };
+  const localFileCopies = [...byPath.values()].flatMap((workspace) => repo.layout.localFiles.map((path) => ({
+    source: resolve(repo.projectRoot, path), target: resolve(workspace.path, relative(repo.root, repo.projectRoot), path),
+  })));
+  return { raw, path: absolute, planDir, plan, ...(branch ? { branch } : {}), workspaces: [...byPath.values()], localFileCopies, checks: [...checksByPath.values()], stages };
 }
 
 const branchOfStage = (batch: BatchPlan, stage: string): string | undefined => batch.stages.get(stage)?.branch ?? batch.branch;
@@ -322,7 +328,11 @@ function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): 
   if (dirInside && dir !== resolve(repo.root) && dir !== resolve(repo.projectRoot)) {
     for (const file of filesUnder(dir)) candidates.add(resolve(file));
   }
-  for (const stage of batch.plan.stages.values()) if (stage.prompt) candidates.add(resolve(stage.prompt));
+  for (const stage of batch.plan.stages.values()) {
+    if (stage.prompt) candidates.add(resolve(stage.prompt));
+    const guide = resolveProjectConfig(findProjectRoot(existsSync(stage.cwd) ? stage.cwd : repo.projectRoot), stage.configOverrides).acceptance?.guide;
+    if (guide) candidates.add(resolve(guide));
+  }
   if (batch.plan.acceptance) candidates.add(resolve(batch.plan.acceptance.criteriaFile));
 
   const byPath = new Map(changes.map((change) => [change.path, change]));
@@ -631,6 +641,9 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     }
     branchOwners.set(workspace.branch, workspace.path);
   }
+  const configurationChecks = checkBatchConfiguration(batch.plan, repo.projectRoot, { localFileCopies: batch.localFileCopies });
+  const configFailures = configurationChecks.filter((check) => !check.ok);
+  if (configFailures.length) throw new LoopError(`配置核对失败：\n${configFailures.map((check) => `${check.name}：${check.detail}`).join("\n")}`, { configurationChecks });
   // 先只核对，任何一项不过都不建 worktree、不切分支。
   const runtimeChanges = checkRuntime(repo);
   checkIgnored(repo, repo.layout);
@@ -698,6 +711,11 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   } else {
     lines.push("批次文档：没有需要搬的文件");
   }
+  const rehearsalPlan = args.dryRun ? batch.plan : loadBatch(repo, docs.batchPath, { env: reviewEnv(args) }).plan;
+  const rehearsal = await rehearseBatch(rehearsalPlan, { dryRun: args.dryRun });
+  const rehearsalLines = rehearsal.map((check) => `开工空跑 · ${check.name}：${check.ok ? "完成" : "失败"}；${check.detail}`);
+  lines.push(...rehearsalLines);
+  if (rehearsal.some((check) => !check.ok)) throw new LoopError(`开工空跑未通过，未派发开发方：\n${rehearsalLines.join("\n")}`, { rehearsal, configurationChecks });
   let methods: Record<string, unknown>;
   if (!primary) {
     methods = { skipped: false, changed: ["没有可用的开发空间"], written: false };
@@ -706,7 +724,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     methods = { skipped: false, changed: ["开发空间尚未建立"], written: false, planned: true };
     lines.push("方法自测：开发空间尚未建立，开工后执行");
   } else {
-    const overrides = [...batch.plan.stages.values()].find((stage) => stage.cwd === primary)?.configOverrides;
+    const overrides = [...rehearsalPlan.stages.values()].find((stage) => stage.cwd === primary)?.configOverrides;
     const run = runMethodsSelfTest(primary, { loopRoot: LOOP_ROOT, recheck: args.recheck, dryRun: args.dryRun, env: reviewEnv(args), overrides });
     methods = methodsSummary(run);
     lines.push(...methodsLines(run));
@@ -726,7 +744,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
   return { ok: true, command: "开工", dryRun: args.dryRun, effectiveConfig, repo: repo.root, release: repo.layout.release,
     batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
-    uncommitted, warnings,
+    uncommitted, warnings, configurationChecks, rehearsal,
     batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
       files: docs.files, restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
     methods, startCommand: start, statusCommand: status, mergeCommand: merge, lines };

@@ -4,7 +4,8 @@
  * 路径一律相对项目根，按目录前缀匹配；deny 优先。没有写 scope 时不做越界检查。
  */
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { join, matchesGlob, relative, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { gitBlobHash, type Exec } from "./git.ts";
 
 export interface StageScope {
@@ -57,6 +58,28 @@ export const outOfScope = (paths: string[], scope: StageScope): string[] =>
   paths.filter((path) => !inScope(path, scope));
 
 const pathsFromNul = (text: string): string[] => text.split("\0").filter(Boolean);
+
+/** 核对项目稳定规则中明确的「改 X 必须同步改 Y」声明；不推断未声明的业务依赖。 */
+export function missingSyncScope(root: string, scope: StageScope): { source: string; missing: string[]; rule: string }[] {
+  const listed = spawnSync("git", ["-c", "core.quotePath=false", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root, encoding: "utf8" });
+  if (listed.status !== 0) throw new Error(`无法核对同步范围：${listed.stderr || listed.error || "git ls-files 失败"}`);
+  const files = [...new Set(pathsFromNul(listed.stdout))];
+  const result: { source: string; missing: string[]; rule: string }[] = [];
+  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+    const path = join(root, name);
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf8");
+    const pattern = /改\s*[`「]?([^\s`「」]+)[`」]?\s*必须同步改\s*[`「]?([^\s`「」。；;，,]+)[`」]?/g;
+    for (const match of text.matchAll(pattern)) {
+      const source = prefix(match[1], `${name} 同步源`), target = prefix(match[2], `${name} 同步目标`);
+      const triggers = files.filter((file) => matchesGlob(file, source) && inScope(file, scope));
+      if (!triggers.length) continue;
+      const missing = files.filter((file) => matchesGlob(file, target) && !inScope(file, scope));
+      if (missing.length) result.push({ source: name, missing: missing.sort(), rule: match[0] });
+    }
+  }
+  return result;
+}
 
 /** 从批次文件里取某一段的 scope；没有批次文件、没写段或没写 scope 时返回 undefined。 */
 export function loadStageScope(batchFile: string | undefined, stage: string | undefined): StageScope | undefined {

@@ -4,6 +4,7 @@ import { loadProjectLayout } from "./config.ts";
 import { loadConfig } from "./hosts/review-hook.ts";
 import { loadBatch } from "./loop.ts";
 import { gitText } from "./workspace.ts";
+import { checkBatchConfiguration } from "./preflight.ts";
 
 export async function validateProductionFile(file: { path: string; kind: string; root: string }): Promise<string[]> {
   const warnings: string[] = []; // Hook 提醒走结构化上下文，不把迁移提示写到 stderr。
@@ -21,7 +22,9 @@ export async function validateProductionFile(file: { path: string; kind: string;
       if (stage.prompt && !existsSync(stage.prompt)) missing.add(stage.prompt);
       if (stage.ponytail && !existsSync(stage.ponytail.extension)) missing.add(stage.ponytail.extension);
     }
-    return [...warnings, ...[...missing].map((path) => `尚未找到：${path}`)];
+    const mismatches = checkBatchConfiguration(batch.plan, file.root, { localFileCopies: batch.localFileCopies }).filter((check) => !check.ok)
+      .map((check) => check.name.endsWith("的验收说明引用") && /ENOENT/.test(check.detail) ? `尚未找到：${check.detail}` : `${check.name}：${check.detail}`);
+    return [...warnings, ...[...missing].map((path) => `尚未找到：${path}`), ...mismatches];
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     // parsePlan 自身会读取验收标准；生产中的文件可以稍后再写，不伪造文件通过校验。

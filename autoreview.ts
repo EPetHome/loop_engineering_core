@@ -15,6 +15,8 @@ import {
 } from "./core.ts";
 import { createGitEvidence, GitReadError, type Exec, type ExecResult } from "./git.ts";
 import { acceptanceTodos } from "./onboarding.ts";
+import { auditLoopConfig, loopConfigMark } from "./config-audit.ts";
+import { developerQuestion, pauseAction, pauseText, preservePause } from "./blockers.ts";
 import { experienceInjection, experienceSession, experienceTodos } from "./experience.ts";
 import { finishExperience } from "./experience-draft.ts";
 import {
@@ -251,6 +253,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       unresolvedMustFix, changedFiles, gitStatusShort, notes,
       criteria: state.criteria, grants: state.grants, paRelays: state.paRelays, unresolvedAcceptance: state.unresolvedAcceptance, todos, acceptRun: state.acceptRun, newCommits,
       sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
+      loopConfigChanges: state.loopConfigChanges, pauseDetail: state.pauseDetail, blockerHistory: state.blockerHistory,
       ponytailMissing, materialCleanup: state.materialCleanup,
       ledger: state.phase === "done" && state.ledger
         ? { path: state.ledger.path, pending: state.ledger.pending, failed: state.ledger.failed } : undefined,
@@ -269,11 +272,18 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     state.phase = "paused";
     state.pauseReason = reason;
     state.pauseFailureKind = failureKind;
-    state.pauseHint = hint;
+    state.pauseHint = hint ?? pauseAction(reason);
+    state.pauseDetail = { reason, ...(notes ? { error: notes } : {}), question: developerQuestion(lastAssistantText(ctx.sessionManager.getEntries())), action: state.pauseHint };
     state.unresolvedMustFix = unresolvedMustFix;
     state.awaitingRepair = false;
     state.awaitingInbox = undefined;
     const errors: string[] = [];
+    try {
+      auditLoopConfig(state, ctx.cwd);
+      const path = preservePause(dataDir(ctx), state.pauseDetail);
+      state.pauseDetail.evidence = path;
+      (state.blockerHistory ??= []).push(path);
+    } catch (error) { errors.push(`暂停原文保存失败：${errorText(error)}`); }
     try { saveState(life); } catch (error) { errors.push(`状态保存失败：${errorText(error)}`); }
     reportStage(ctx, "paused", { pauseReason: reason });
     try { updateStatus(ctx, life); } catch (error) { errors.push(`状态栏更新失败：${errorText(error)}`); }
@@ -281,13 +291,12 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       await writeSummary(ctx, "暂停", life, reason, unresolvedMustFix, changedFiles, notes, signal);
     } catch (error) { errors.push(`总结写入失败：${errorText(error)}`); }
     if (!live(life, signal)) return;
-    const question = reason === "开发方需要你决定" ? `\n${lastAssistantText(ctx.sessionManager.getEntries())}` : "";
-    await notifyUser(ctx, `${basename(ctx.cwd)}：暂停（${reason}）${errors.length ? `；${errors.join("；")}` : ""}${question}`, "warning", life, signal, hint);
+    await notifyUser(ctx, `${basename(ctx.cwd)}：暂停（${reason}）${errors.length ? `；${errors.join("；")}` : ""}\n${pauseText(state.pauseDetail)}`, "warning", life, signal);
   };
   const pauseForError = async (ctx: ExtensionContext, error: unknown, life: Lifecycle, signal?: AbortSignal): Promise<void> => {
     if (!live(life, signal)) return;
     const reason = error instanceof GitReadError ? error.message : "评审失败";
-    await pause(ctx, reason, life, state.unresolvedMustFix, undefined, `扩展内部错误：${errorText(error)}`, signal);
+    await pause(ctx, reason, life, state.unresolvedMustFix, undefined, `扩展内部错误：${error instanceof Error ? error.stack ?? error.message : String(error)}`, signal, pauseAction("内部错误"));
   };
 
   /** 取证异常保持 unknown；只有明确非 git/无提交才关闭，手动评审可重探 unknown。 */
@@ -1202,6 +1211,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         state.baselineUntracked = snap.untracked.map(({ path }) => path);
         state.baselineUntrackedDetails = snap.untracked.map((item) => ({ ...item }));
         state.baselineFingerprint = snap.fingerprint;
+        state.loopConfigMark = loopConfigMark(ctx.cwd);
         saveState(life);
       }
       if (state.enabled && prompt !== undefined) {

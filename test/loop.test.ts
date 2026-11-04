@@ -29,11 +29,12 @@ function head(): void {
   roots.push(root);
   const bin = join(root, "bin"); mkdirSync(bin);
   writeFileSync(join(bin, "osascript"), "#!/bin/sh\nexit 0\n"); chmodSync(join(bin, "osascript"), 0o755);
-  const pi = join(root, "pi"); writeFileSync(pi, "#!/bin/sh\nexit 0\n"); chmodSync(pi, 0o755);
+  const pi = join(root, "pi"); writeFileSync(pi, "#!/bin/sh\nprintf '## 结论：通过\\n## 必修\\n无\\n## 小问题\\n无\\n## 需求疑问\\n无\\n## 上轮必修复查\\n无\\n'\nexit 0\n"); chmodSync(pi, 0o755);
   for (const name of ["permission.ts", "ponytail.js", "autoreview.ts"]) writeFileSync(join(root, name), "");
   envSet("HOME", join(root, "home")); mkdirSync(join(root, "home"));
   envSet("AUTOREVIEW_PROJECTS_ROOT", join(root, "projects"));
   envSet("PI_BIN", pi);
+  envSet("AUTOREVIEW_REVIEWER_CMD", fileURLToPath(new URL("./fake-reviewer.mjs", import.meta.url)));
   envSet("PI_NODE_BIN", dirname(process.execPath));
   envSet("PERMISSION_EXTENSION", join(root, "permission.ts"));
   envSet("PONYTAIL_EXTENSION", join(root, "ponytail.js"));

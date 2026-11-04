@@ -69,6 +69,8 @@ export type RoundRecord = ParsedReview & {
   snapshot?: string;
   /** 本轮评审失败时的错误摘要。 */
   failed?: string;
+  /** 各次失败调用的完整原文；文件唯一，不被重试或下一轮覆盖。 */
+  reviewLogs?: string[];
   /** 本轮的验收结果（配了 acceptance 时）。 */
   acceptance?: AcceptanceRecord;
   /** 本轮的门禁结果（配了 gate 时）。 */
@@ -149,6 +151,9 @@ export interface SummaryInput {
   sourceChanges?: { path: string; at: string }[];
   /** 拿不到文件列表时的说明（如「来源有变化（第 3 版）」）。 */
   sourceChangeNote?: string;
+  loopConfigChanges?: import("./config-audit.ts").ConfigChange[];
+  pauseDetail?: import("./blockers.ts").PauseDetail;
+  blockerHistory?: string[];
   /** 本次完成已登记的交付总表；只在状态为完成时写进总结开头。 */
   ledger?: { path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
   /** 完成后的运行材料瘦身结果；删除失败仅提示。 */
@@ -385,6 +390,8 @@ export function renderSummary(input: SummaryInput): string {
   }
   if (input.newCommits) lines.push(`- 开发方新增提交：${input.newCommits} 个（基线之后，只记录不评判）`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
+  if (input.status === "暂停" && input.pauseDetail?.question) lines.push("## 开发方的问题原文", input.pauseDetail.question);
+  if (input.blockerHistory?.length) lines.push("## 历次暂停原始现场（保留）", ...input.blockerHistory.map((path) => `- ${path}`));
   if (input.paRelays?.length) lines.push("## PA 转达来源", ...relaySourceLines(input.paRelays));
   const sourceChanges = input.sourceChanges ?? [];
   if (sourceChanges.length > 0 || input.sourceChangeNote) {
@@ -392,6 +399,7 @@ export function renderSummary(input: SummaryInput): string {
     if (sourceChanges.length > 0) lines.push(...sourceChanges.map((change) => `- ${change.path}（${change.at}）`));
     else lines.push(input.sourceChangeNote!);
   }
+  for (const change of input.loopConfigChanges ?? []) lines.push(`- Loop 配置被修改：${change.path}；字段：${change.fields.join("、")}（${change.at}）`);
   if (input.todos && input.todos.length > 0) {
     lines.push("## 需要你做的事");
     lines.push(...input.todos.map((todo, index) => `${index + 1}. ${todo}`));
@@ -432,6 +440,7 @@ export function renderSummary(input: SummaryInput): string {
     bullets(round.recheck);
     if (round.note) lines.push(`提示：${round.note}`);
     if (round.failed) lines.push(`错误：${round.failed}`);
+    if (round.reviewLogs?.length) lines.push("评审错误原文：", ...round.reviewLogs.map((path) => `- ${path}`));
     if (round.gate) lines.push(...renderGateLines(round.gate));
     if (round.acceptance) lines.push(...renderAcceptanceLines(round.acceptance));
   }

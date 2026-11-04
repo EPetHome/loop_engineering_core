@@ -73,7 +73,9 @@ test("O4 下一步指向配置与 Loop 手册；部分验证仍列出人工验�
   const tool = blockerHint(record({ blocker: "缺工具" }), "/proj/sub", acceptance);
   assert.ok(tool.startsWith(`在 /proj/sub 里按 ${GUIDE_DOC}「${BROWSER_SECTION}」`));
   assert.match(blockerHint(record({ blocker: "验收方", escalated: true }), "/proj", acceptance), /已换强模型重验，仍然不行/);
-  assert.match(blockerHint(record({ blocker: "其他" }), "/proj", acceptance), /环境问题/);
+  const unknown = blockerHint(record({ blocker: "其他", items: [{ id: "A1", text: "操作：a", verdict: "无法验证", detail: "原始原因：缺少离线样本" }] }), "/proj", acceptance);
+  assert.match(unknown, /A1：原始原因：缺少离线样本/);
+  assert.doesNotMatch(unknown, /多半是环境问题|数据库、测试账号/);
   const partial = record({ verdict: "部分验证", items: [
     { id: "A1", text: "操作：a", verdict: "通过", detail: "" },
     { id: "A2", text: "操作：b\n预期：c", verdict: "无法验证", detail: "原因：标准含糊", cause: "其他" },

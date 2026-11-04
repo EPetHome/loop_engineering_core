@@ -2490,6 +2490,58 @@ test("PA A5/A7：单段只在程序提交后发整批 done；接收目录只读�
   });
 });
 
+test("配置核对 A3：运行中改 Loop 配置不判业务越界，总结单独列字段", async (t) => {
+  const h = harness({ stage: "甲" }), pa = paFixture(h, t);
+  try {
+    const batch = JSON.parse(readFileSync(pa.file, "utf8")); batch.stages.甲.scope = { allow: ["file.txt"] }; writeFileSync(pa.file, JSON.stringify(batch));
+    h.write(".autoreview.json", JSON.stringify({ maxRepairs: 4 })); h.git("add", ".autoreview.json"); h.git("commit", "-qm", "initial config");
+    await h.event("session_start"); await h.begin();
+    h.write(".autoreview.json", JSON.stringify({ maxRepairs: 3 })); h.write("file.txt", "changed\n");
+    h.assistant(); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "done", h.state().pauseReason); assert.equal(h.state().repairs, 0);
+    assert.match(h.summary(), /Loop 配置被修改：.*字段：maxRepairs/);
+    assert.doesNotMatch(h.summary(), /未评审（越界改动）/);
+  } finally { await h.close(); }
+});
+
+test("配置核对 A6/A7：评审异常和开发方问题同时到达会话、系统通知及事件，下一轮仍保留原文", async (t) => {
+  const h = harness({ stage: "甲" }), pa = paFixture(h, t);
+  try {
+    writeFileSync(pa.config, JSON.stringify({ pa: { eventsDir: pa.events, localNotify: true } }));
+    const original = `INTERNAL_ERROR_BEGIN ${"完整原文".repeat(150)} INTERNAL_ERROR_END`;
+    const question = "接口应返回 404 还是空列表？\n请确认再继续。";
+    h.reviewer = () => { throw new Error(original); };
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "changed\n"); h.assistant(question);
+    await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "paused");
+    const notice = h.notifications.at(-1)!; assert.ok(notice.includes(original)); assert.ok(notice.includes(question)); assert.match(notice, /需要你做/);
+    const osascript = h.calls.filter((call) => call.command === "osascript").at(-1)!;
+    assert.ok(osascript.args.join(" ").includes(original)); assert.ok(osascript.args.join(" ").includes("接口应返回 404 还是空列表？"));
+    const event = pa.rows().at(-1); assert.equal(event.reason.category, "内部错误"); assert.ok(event.detail.error.includes(original)); assert.equal(event.detail.question, question);
+    const evidence = event.evidence.blocker, bytes = readFileSync(evidence, "utf8"); assert.ok(bytes.includes(original));
+    h.reviewer = () => result(PASS); await h.begin("继续"); h.assistant(); await h.event("agent_settled");
+    await until(() => h.state().phase === "done", "下一轮正常完成");
+    assert.equal(readFileSync(evidence, "utf8"), bytes); assert.ok(h.summary().includes(evidence));
+  } finally { await h.close(); }
+});
+
+test("配置核对 A8：全部无法验证的具体原因出现在暂停信息，不再猜环境", async () => {
+  const h = harness(), old = process.env.FAKE_ACC_UNKNOWN, oldTester = process.env.AUTOREVIEW_ACCEPTANCE_CMD;
+  process.env.FAKE_ACC_UNKNOWN = "A1,A2"; process.env.AUTOREVIEW_ACCEPTANCE_CMD = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
+  try {
+    h.write(".autoreview.json", JSON.stringify({ acceptance: {} }));
+    await h.event("session_start"); await h.begin("需求\n## 验收标准\nA1. 操作：甲\n    预期：ok\nA2. 操作：乙\n    预期：ok");
+    h.write("file.txt", "changed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    assert.equal(h.state().phase, "paused");
+    const notice = h.notifications.at(-1)!; assert.match(notice, /A1：.*标准写得含糊/); assert.match(notice, /A2：.*标准写得含糊/);
+    assert.doesNotMatch(notice, /多半是环境问题|数据库、测试账号/);
+  } finally {
+    if (old === undefined) delete process.env.FAKE_ACC_UNKNOWN; else process.env.FAKE_ACC_UNKNOWN = old;
+    if (oldTester === undefined) delete process.env.AUTOREVIEW_ACCEPTANCE_CMD; else process.env.AUTOREVIEW_ACCEPTANCE_CMD = oldTester;
+    await h.close();
+  }
+});
+
 test("扩展加载时撤掉一次性启动回报身份，自定义 start 的子进程不能再回报失败", async () => {
   const key = "AUTOREVIEW_PIPELINE_LAUNCH_TOKEN";
   const old = process.env[key];

@@ -7,7 +7,10 @@
  * exec、状态读写、总结、进度等副作用全部通过参数注入；调用方负责把 outcome 变成
  * pi 的返修消息或宿主的 block JSON。
  */
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { auditLoopConfig, type ConfigAudit } from "./config-audit.ts";
+import type { PauseDetail } from "./blockers.ts";
 import { acceptanceRunDir, runAcceptanceStage, type AcceptanceState } from "./acceptance.ts";
 import {
   authorizationLine, buildAcceptanceRepairMessage, formatCriteria, formatFailedItems, renderAcceptanceForReview, type AcceptanceRecord,
@@ -37,7 +40,7 @@ export { DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_MAX_REPAIRS, DEFAULT_TIMEOUT_M
 /** 取消正在进行的评审时使用的固定原因。 */
 export const INTERRUPTED = "评审被中断（会话关闭或重载）";
 
-export interface ReviewState extends AcceptanceState, PreparationState {
+export interface ReviewState extends AcceptanceState, PreparationState, ConfigAudit {
   /** 独立经验起草的输入指纹与软失败；不参与完成资格。 */
   experienceDraft?: { signature: string; error?: string };
   inputsFingerprint?: string;
@@ -75,6 +78,8 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   pauseFailureKind?: FailureKind;
   /** 暂停时给你看的下一步（写进总结「需要你做的事」），恢复时清掉。 */
   pauseHint?: string;
+  pauseDetail?: PauseDetail;
+  blockerHistory?: string[];
   unresolvedMustFix?: string;
   /** 最近一次验收没通过的条目（暂停时写进总结）。 */
   unresolvedAcceptance?: string;
@@ -191,7 +196,7 @@ export function nowStamp(): string {
 }
 
 /** 缺省评审调用：测试命令优先，否则走 pi CLI（与 pi 扩展 6.8 相同）。 */
-function defaultCallReviewer(deps: ReviewDeps) {
+export function defaultCallReviewer(deps: ReviewDeps) {
   const { config, exec, cwd, signal } = deps;
   return async (reviewerSessionId: string, round: number, timeoutMs: number, inputPath: string): Promise<ExecResult> => {
     if (config.reviewerCmd) {
@@ -204,7 +209,7 @@ function defaultCallReviewer(deps: ReviewDeps) {
       "--tools", "read,grep,find,ls,bash", "-e", PERMISSION_EXT,
       "--append-system-prompt", REVIEW_PROMPT_PATH, `@${inputPath}`,
     ];
-    return exec(PI_BIN, args, { cwd, timeout: timeoutMs, signal, role: "评审" });
+    return exec(deps.env?.PI_BIN || PI_BIN, args, { cwd, timeout: timeoutMs, signal, role: "评审" });
   };
 }
 
@@ -261,7 +266,8 @@ async function scopeStep(
     : state.baselineUntrackedDetails;
   const baselineUntracked = (details ?? []).map((item) => ({ ...item, path: toProject(item.path) }));
   const files = await changedSince(deps.exec, projectRoot, base, { signal: deps.signal, baselineUntracked });
-  const outside = outOfScope(files, scope);
+  // Loop 自己的配置单独审计，不算业务越界；只豁免这个确切路径，不豁免其他点文件。
+  const outside = outOfScope(files.filter((path) => resolve(projectRoot, path) !== resolve(projectRoot, ".autoreview.json")), scope);
   if (outside.length === 0) return undefined;
   const record: GateRecord = {
     command: "越界检查（批次 scope）",
@@ -533,6 +539,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
   let parsed: ParsedReview | undefined;
   let lastError = "";
+  const reviewLogs: string[] = [];
   let timedOut = false;
   for (let attempt = 1; attempt <= 2 && !parsed; attempt += 1) {
     // 必需验收在静态评审后执行，给它保留配置预算。
@@ -546,13 +553,15 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
       break;
     }
     const attemptTimeout = remaining;
+    let rawOutput = "";
     try {
       const result = await callReviewer(reviewerSessionId, deps.round, attemptTimeout, inputPath);
+      rawOutput = `${result.stdout}\n${result.stderr}`;
       live();
       if (result.killed) {
         timedOut = true;
         lastError = `第 ${attempt} 次评审超时或被终止（退出码 ${result.code}）`;
-      } else if (result.code !== 0) lastError = `第 ${attempt} 次评审退出码 ${result.code}：${tail(result.stderr, 300)}`;
+      } else if (result.code !== 0) lastError = `第 ${attempt} 次评审退出码 ${result.code}：${rawOutput}`;
       else if (!result.stdout.trim()) lastError = `第 ${attempt} 次评审输出为空`;
       else {
         const outcome = parseReview(result.stdout);
@@ -561,9 +570,13 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
       }
     } catch (error) {
       live();
-      lastError = `第 ${attempt} 次评审调用失败：${tail(errorText(error), 300)}`;
+      rawOutput = error instanceof Error ? error.stack ?? error.message : String(error);
+      lastError = `第 ${attempt} 次评审调用失败：${rawOutput}`;
     }
     if (!parsed) {
+      try { reviewLogs.push(deps.writeInput(`review-error-${deps.devSessionId}-r${deps.round}-a${attempt}-${randomUUID()}.log`, rawOutput || lastError)); }
+      catch (error) { lastError += `\n错误原文写盘失败：${errorText(error)}`; }
+
       live();
       deps.onProgress?.(`自动评审中（第 ${deps.round} 轮，重试 ${attempt}）`);
     }
@@ -573,7 +586,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     round: deps.round, startedAt, durationMs: now() - startedTs,
     conclusion: parsed?.conclusion ?? "", mustFixRaw: parsed?.mustFixRaw ?? "",
     mustFix: parsed?.mustFix ?? [], minor: parsed?.minor ?? [], questions: parsed?.questions ?? [],
-    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, gate, snapshot,
+    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, gate, snapshot, ...(reviewLogs.length ? { reviewLogs } : {}),
   };
   state.rounds.push(record);
   const after = await git.snapshot();
@@ -628,6 +641,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
 /** 准备和自动恢复有自己的有限预算；不进入用户接管路径，不清零业务计数。 */
 export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
+  auditLoopConfig(deps.state, deps.cwd);
   if (deps.sink === "report") {
     // 复用同一评审调用/解析/预算；不运行项目方法、不采用开发队列资格。
     return runOneReviewRound({ ...deps, config: { ...deps.config, maxRepairs: 0, gate: undefined, acceptance: undefined, preparation: undefined } });

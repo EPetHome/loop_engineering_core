@@ -9,7 +9,6 @@ import test from "node:test";
 import { EXT_DIR, PROJECT_CONFIG_ENV } from "../config.ts";
 import { readMethodsRecord } from "../methods.ts";
 import { sourceInputsProblem } from "../project-context.ts";
-import { shellQuote } from "../workspace.ts";
 
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "loop-config-launch-")));
@@ -41,7 +40,11 @@ const command = JSON.parse('"' + match[1] + '"');
 const env = { ...process.env };
 delete env.AUTOREVIEW_REVIEW_TIMEOUT_MIN;
 delete env.AUTOREVIEW_REVIEWER_CMD;
-fs.appendFileSync(${JSON.stringify(windows)}, JSON.stringify({ command, inheritedTimeout: env.AUTOREVIEW_REVIEW_TIMEOUT_MIN ?? null }) + '\\n');
+const wrapper = /^\\/bin\\/sh '([^']+)'$/.exec(command);
+const body = wrapper ? fs.readFileSync(wrapper[1], 'utf8') : '';
+const request = /'--payload' '([^']+)'/.exec(body);
+const script = request ? JSON.parse(fs.readFileSync(request[1], 'utf8')).script : command;
+fs.appendFileSync(${JSON.stringify(windows)}, JSON.stringify({ command, script, inheritedTimeout: env.AUTOREVIEW_REVIEW_TIMEOUT_MIN ?? null }) + '\\n');
 const run = spawnSync('/bin/sh', ['-c', command], { env, encoding:'utf8', timeout:30000 });
 process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
 process.exit(run.status ?? 1);
@@ -136,7 +139,8 @@ test("返修 2：入口预算跨 Terminal 环境断点传递，文件 90 和缺�
       assert.equal(windows.length, 2);
       for (const window of windows) {
         assert.equal(window.inheritedTimeout, null, "替身 Terminal 没有继承入口的预算变量");
-        assert.ok(window.command.includes(shellQuote("AUTOREVIEW_REVIEW_TIMEOUT_MIN='120'").slice(1, -1)), "窗口内脚本显式携带预算");
+        assert.ok(Buffer.byteLength(window.command) < 1024, "Terminal 只输入短文件路径");
+        assert.ok(window.script.includes("AUTOREVIEW_REVIEW_TIMEOUT_MIN='120'"), "完整启动文件显式携带预算");
       }
     } finally { f.close(); }
   }

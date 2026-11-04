@@ -38,6 +38,8 @@ export interface PhaseRecord {
 /** 映射只针对 Loop 原因短句；命令已经给出的 FailureKind 优先，绝不分析日志猜分类。 */
 const reasonRules: [RegExp, ReasonCategory][] = [
   [/^已停止(?:$|[：；])/, "已停止"],
+  [/^(?:扩展内部错误|自动评审内部错误|流水线内部错误|评审失败)/, "内部错误"],
+  [/没有启动/, "方法"],
   [/开发方需要你决定|对验收标准有异议/, "需要你决定"],
   [/达到返修上限|已到 .*轮上限/, "返修到上限"],
   [/等你授权|要你授权|\[授权\].*(?:未答复|还没答复|没通过)/, "授权待答复"],
@@ -222,7 +224,7 @@ export function reportUncommittedBatch(info: BatchInfo, record?: AcceptanceRecor
 /** 两个宿主的开始/评审/暂停/恢复/完成共用。段 done 只记 phase，由提交成功的程序发事件。 */
 export function observeStage(options: {
   cwd: string; summary: string; session: NonNullable<PhaseRecord["session"]>;
-  phase: PhaseRecord["phase"]; state: { rounds: RoundRecord[]; repairs: number; pauseReason?: string; unresolvedMustFix?: string; unresolvedAcceptance?: string; acceptRun?: AcceptRunRecord; queueReviewedAcceptance?: QueueAcceptance | null };
+  phase: PhaseRecord["phase"]; state: { rounds: RoundRecord[]; repairs: number; pauseReason?: string; unresolvedMustFix?: string; unresolvedAcceptance?: string; acceptRun?: AcceptRunRecord; queueReviewedAcceptance?: QueueAcceptance | null; pauseDetail?: import("./blockers.ts").PauseDetail };
   reason?: string; failureKind?: FailureKind; question?: string; via?: "user" | "auto"; replay?: boolean; env?: NodeJS.ProcessEnv;
 }): void {
   try {
@@ -237,10 +239,18 @@ export function observeStage(options: {
     ...(state.acceptRun?.logPath ? { log: state.acceptRun.logPath } : {}), ...(round?.snapshot ? { review: round.snapshot } : {}), ...(options.session.log ? { session: options.session.log } : {}) };
   const detail: Record<string, unknown> = options.phase === "done" ? completionDetail(round, state.queueReviewedAcceptance) : { round: state.rounds.length, repairs: state.repairs };
   if (options.failureKind) detail.failureKind = options.failureKind;
-  if (options.phase === "paused") detail.next = "send";
+  if (options.phase === "paused") {
+    detail.next = "send";
+    if (state.pauseDetail) {
+      if (state.pauseDetail.error) detail.error = state.pauseDetail.error;
+      if (state.pauseDetail.question) detail.question = state.pauseDetail.question;
+      detail.action = state.pauseDetail.action;
+      if (state.pauseDetail.evidence) evidence.blocker = state.pauseDetail.evidence;
+    }
+  }
   if (status === "repair-limit") detail.mustFix = state.unresolvedMustFix || state.unresolvedAcceptance || round?.mustFixRaw || round?.gate?.outputTail || "";
   if (status === "needs-decision") {
-    detail.question = options.question ?? (options.replay ? previous?.detail.question : "") ?? "";
+    detail.question = detail.question ?? options.question ?? (options.replay ? previous?.detail.question : "") ?? "";
     const choices = String(detail.question).split(/\r?\n/).filter((line) => /^\s*(?:[A-Z]|\d+)[.、)）]\s*\S/.test(line));
     if (choices.length) detail.options = choices;
   }

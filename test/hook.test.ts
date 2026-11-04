@@ -738,7 +738,40 @@ test("H4 返修后 stop_hook_active=true 再交付：通过，放行并通知", 
   } finally { h.close(); }
 });
 
-test("H5 上限 / 评审失败两次 / 评审改了工作区：放行并暂停", async (t) => {
+test("本批 A6/A7：Hook 内部评审错误和提问原文同时保留，恢复后现场不被覆盖", async (t) => {
+  for (const host of ["claude", "codex"]) await t.test(host, () => {
+    const h = fixture();
+    try {
+      const original = `HOOK_ERROR_BEGIN ${"完整原文".repeat(120)} HOOK_ERROR_END`, question = "应返回空列表还是 404？\n请确认。";
+      const reviewer = join(h.root, "broken-reviewer.mjs");
+      writeFileSync(reviewer, `#!${process.execPath}\nprocess.stderr.write(${JSON.stringify(original)}); process.exitCode=1;\n`); chmodSync(reviewer, 0o755);
+      const file = join(h.root, "batch.json"), dir = join(h.root, "pipeline"), config = join(h.root, "pa.json"), events = join(h.root, "events");
+      writeFileSync(file, JSON.stringify({ name: "错误通知", dir, stages: { 甲: { cwd: h.repo, start: "fake" } } }));
+      writeFileSync(config, JSON.stringify({ pa: { eventsDir: events, localNotify: true } }));
+      const env = { AUTOREVIEW_HOST: host, LOOP_PA_CONFIG: config, AUTOREVIEW_BATCH_FILE: file, AUTOREVIEW_PIPELINE_DIR: dir, AUTOREVIEW_STAGE: "甲", AUTOREVIEW_REVIEWER_CMD: reviewer };
+      h.run(h.event("UserPromptSubmit", { prompt: "需求" }), { env }); h.write("file.txt", "changed\n");
+      const failed = h.run(h.event("Stop", { last_assistant_message: question }), { env });
+      assert.equal(h.readState(host).phase, "paused");
+      if (host === "claude") { const message = JSON.parse(failed.stdout).systemMessage; assert.ok(message.includes(original)); assert.ok(message.includes(question)); }
+      assert.ok(h.notifications().includes(original)); assert.ok(h.notifications().includes("应返回空列表还是 404？"));
+      const rows = readdirSync(events).flatMap((name) => readFileSync(join(events, name), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
+      const paused = rows.at(-1); assert.equal(paused.reason.category, "内部错误"); assert.ok(paused.detail.error.includes(original)); assert.equal(paused.detail.question, question);
+      const path = paused.evidence.blocker, bytes = readFileSync(path, "utf8");
+      const restored = { ...env, AUTOREVIEW_REVIEWER_CMD: FAKE };
+      h.run(h.event("UserPromptSubmit", { prompt: "继续" }), { env: restored }); h.run(h.delivered(), { env: restored });
+      assert.equal(h.readState(host).phase, "done"); assert.equal(readFileSync(path, "utf8"), bytes); assert.ok(h.summary(host).includes(path));
+    } finally { h.close(); }
+  });
+});
+
+function assertPauseOutput(result: { stdout: string }, reason: RegExp): void {
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.decision, undefined, "暂停不伪造成产品返修 block");
+  assert.match(output.systemMessage, reason);
+  assert.match(output.systemMessage, /卡在哪：[\s\S]*需要你做：[\s\S]*原始现场：/);
+}
+
+test("H5 上限 / 评审失败两次 / 评审改了工作区：放行并暂停",  async (t) => {
   await t.test("达到返修上限", () => {
     const h = fixture({ marker: JSON.stringify({ maxRepairs: 1 }) });
     try {
@@ -748,7 +781,7 @@ test("H5 上限 / 评审失败两次 / 评审改了工作区：放行并暂停",
       assert.equal(JSON.parse(first.stdout).decision, "block");
       h.write("file.txt", "base\nA\nB\n");
       const second = h.run(h.delivered(), { mode: "always-fix" });
-      assert.equal(second.stdout, "");
+      assertPauseOutput(second, /达到返修上限/);
       const state = h.readState();
       assert.equal(state.phase, "paused");
       assert.equal(state.pauseReason, "达到返修上限");
@@ -763,7 +796,7 @@ test("H5 上限 / 评审失败两次 / 评审改了工作区：放行并暂停",
       h.run(h.event("SessionStart"));
       h.write("file.txt", "base\nA\n");
       const res = h.run(h.delivered(), { mode: "fail" });
-      assert.equal(res.stdout, "");
+      assertPauseOutput(res, /评审失败[\s\S]*fake reviewer: 故意失败/);
       const state = h.readState();
       assert.equal(state.phase, "paused");
       assert.equal(state.pauseReason, "评审失败");
@@ -781,7 +814,7 @@ test("H5 上限 / 评审失败两次 / 评审改了工作区：放行并暂停",
       h.run(h.event("SessionStart"));
       h.write("file.txt", "base\nA\n");
       const res = h.run(h.delivered(), { mode: "modify" });
-      assert.equal(res.stdout, "");
+      assertPauseOutput(res, /评审改动了工作区/);
       const state = h.readState();
       assert.equal(state.phase, "paused");
       assert.equal(state.pauseReason, "评审改动了工作区");
@@ -814,7 +847,7 @@ test("H7 Hook 内部抛错：退出 0，stdout 为空或合法 JSON，状态记�
   try {
     const res = h.run(h.event("SessionStart"));
     assert.equal(res.code, 0);
-    assert.equal(res.stdout, "");
+    assertPauseOutput(res, /Hook 异常：[\s\S]*无法解析 .autoreview.json/);
     assert.match(res.stderr, /autoreview hook 内部错误/);
     const state = h.readState();
     assert.equal(state.phase, "paused");
@@ -970,7 +1003,7 @@ test("H 补充（新规则）：无标记按指纹决定评审/不动作/暂停"
     try {
       h.run(h.event("SessionStart"));
       const res = h.run(h.event("Stop", { last_assistant_message: "卡住了\n【需要你决定】" }));
-      assert.equal(res.stdout, "");
+      assertPauseOutput(res, /开发方的问题原文：[\s\S]*卡住了/);
       assert.equal(h.readState().pauseReason, "开发方需要你决定");
       assert.match(h.notifications(), /暂停（开发方需要你决定）/);
     } finally { h.close(); }
@@ -1076,7 +1109,7 @@ test("H 返修 3：状态文件损坏时暂停、不评审、保留损坏证据"
     writeFileSync(h.statePath(), "{ 这不是 JSON");
     h.write("file.txt", "base\nA\n");
     const res = h.run(h.delivered(), { mode: "always-fix" });
-    assert.equal(res.stdout, "");
+    assertPauseOutput(res, /状态文件无法使用/);
     assert.ok(!existsSync(join(h.root, "fake", "calls.log")), "损坏状态不应触发评审");
     const state = h.readState();
     assert.equal(state.phase, "paused");
@@ -1094,7 +1127,7 @@ test("H 返修 4：完成总结与未交付提醒的 git 取证失败都改为�
       h.run(h.event("SessionStart"));
       h.write("file.txt", "base\nA\n");
       const res = h.run(h.delivered(), { mode: "pass", env: { FAKE_GIT_FAIL: "status" } });
-      assert.equal(res.stdout, "");
+      assertPauseOutput(res, /自动评审内部错误/);
       const state = h.readState();
       assert.equal(state.phase, "paused");
       assert.equal(state.pauseReason, "自动评审内部错误");
@@ -1353,7 +1386,7 @@ test("H11 自动验收：先静态评审再验收，失败按证据打回，标�
         assert.equal(JSON.parse(h.run(h.delivered(), { env }).stdout).decision, "block", `第 ${i} 次打回`);
       }
       h.write("file.txt", "base\nTRY 5\n");
-      assert.equal(h.run(h.delivered(), { env }).stdout, "");
+      assertPauseOutput(h.run(h.delivered(), { env }), /达到返修上限/);
       const state = h.readState();
       assert.equal(state.pauseReason, "达到返修上限");
       assert.equal(state.repairs, 4);
@@ -1389,7 +1422,7 @@ test("H11 自动验收：先静态评审再验收，失败按证据打回，标�
       h.run(h.event("SessionStart"), { env });
       h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env });
       h.write("file.txt", "base\nTODO\n");
-      assert.equal(h.run(h.delivered(), { env }).stdout, "");
+      assertPauseOutput(h.run(h.delivered(), { env }), /验收期间工作区变了/);
       assert.equal(h.readState().pauseReason, "验收期间工作区变了");
       assert.match(h.summary(), /## 验收期间变化的工作区文件\n- tester-touched\.txt/);
       assert.equal(reviewerCalls(h), 1);
@@ -1651,7 +1684,7 @@ test("H15 补充：gate 配置非法或超出一轮总预算 → 暂停并说明
   const h = fixture({ marker: JSON.stringify({ gate: { timeoutMin: 5 } }) });
   try {
     h.write("file.txt", "base\nCHANGE\n");
-    assert.equal(h.run(h.delivered()).stdout, "");
+    assertPauseOutput(h.run(h.delivered()), /gate.cmd 必须写/);
     assert.equal(h.readState().phase, "paused");
     assert.match(h.summary(), /gate\.cmd 必须写/);
     assert.ok(!existsSync(join(h.root, "fake", "calls.log")));
@@ -1699,7 +1732,7 @@ test("H17 [授权] 条目：没答复先停下问你；只认你亲手打的「�
 
     h.write("file.txt", "base\nTODO\n");
     const asked = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
-    assert.match(asked.systemMessage, /^自动评审暂停（等你授权（A2））。验收标准里有要你授权的条目：A2（操作：用正式账号同步）。同意就回复「同意授权：A2」/);
+    assert.match(asked.systemMessage, /^自动评审暂停（等你授权（A2））。[\s\S]*需要你做：验收标准里有要你授权的条目：A2（操作：用正式账号同步）。同意就回复「同意授权：A2」/);
     assert.equal(h.readState().pauseReason, "等你授权（A2）");
     assert.ok(!existsSync(join(h.root, "fake", "acc-calls.log")), "没答复前不验收");
     assert.match(h.summary(), /## 需要你做的事\n1\. 验收标准里有要你授权的条目/);

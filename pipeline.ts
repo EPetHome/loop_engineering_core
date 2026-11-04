@@ -13,7 +13,7 @@
  * 写 start 时原样执行，那条命令里的 pi 必须加载 autoreview.ts。开任何窗口之前先做开跑前检查，有一项不过就不开跑。
  */
 import { randomUUID } from "node:crypto";
-import { beginBatchRun, startBatchProcess, type BatchRun } from "./launch.ts";
+import { beginBatchRun, startBatchProcess, terminalStageCommand, type BatchRun } from "./launch.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -24,10 +24,11 @@ import {
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
-import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, workspacePath, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
+import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, stageAcceptance, workspacePath, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
 import { batchInfo, batchLocation, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
+import { preservePause } from "./blockers.ts";
 import { mergePAGrants, readPAGrants } from "./pa-records.ts";
 import type { FailureKind } from "./failure.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
@@ -55,7 +56,7 @@ const snapshotRef = async (cwd: string, signal?: AbortSignal): Promise<string | 
   try { return (await createGitEvidence(createChildExec(), cwd, signal).snapshot()).ref; } catch { return undefined; }
 };
 const BROWSER_TOOL = join(EXT_DIR, "acceptance-tools", "browser.mjs");
-/** 段开窗后这么久还没报状态，提醒你检查启动命令有没有加载 autoreview.ts。 */
+/** 段派发后这么久还没报状态，判为没有启动并停止等待。 */
 const SILENCE_MS = 3 * 60_000;
 
 export interface PiOptions {
@@ -116,6 +117,7 @@ export interface Plan {
   prepare?: string;
   acceptance?: AcceptancePlan;
   maxParallel?: number;
+  startupTimeoutSec?: number;
   /** 本次实际读取并命中当前标准的 PA 授权编号。 */
   paGrantsUsed?: string[];
 }
@@ -213,8 +215,11 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
       : planDir;
     const branch = value.branch === undefined ? batchBranch : text(value.branch, `stages.${stage}.branch`);
     let scope;
-    try { scope = parseStageScope(value.scope, `计划文件的 stages.${stage}.scope`); }
-    catch (error) { throw new PlanError((error as Error).message); }
+    try {
+      scope = parseStageScope(value.scope, `计划文件的 stages.${stage}.scope`);
+      stageAcceptance(value.acceptance, undefined, planDir, env);
+    } catch (error) { throw new PlanError(`stages.${stage}：${(error as Error).message}`); }
+    const identity = options.batchFile ? { batchFile: resolve(options.batchFile), stage } : {};
     if ((value.prompt === undefined) === (value.start === undefined)) {
       throw new PlanError(`stages.${stage} 要写 prompt（提示词文件，推荐）或 start（自己的启动命令），两个只能写一个`);
     }
@@ -222,12 +227,12 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
       const prompt = resolve(planDir, text(value.prompt, `stages.${stage}.prompt`));
       const pi = piOptions(value, `stages.${stage}`, planPi, planDir);
       stages.set(stage, { name: stage, start: piCommand(name, stage, prompt, pi, cwd), cwd, prompt,
-        configOverrides: captureProjectConfigOverrides(projectConfigOverridesFromArgs(pi.args), env),
+        configOverrides: { ...captureProjectConfigOverrides(projectConfigOverridesFromArgs(pi.args), env), ...identity },
         ...(pi.ponytail ? { ponytail: pi.ponytail } : {}), ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}),
         ...(scope ? { scope } : {}) });
     } else {
       stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd,
-        configOverrides: captureProjectConfigOverrides({}, env),
+        configOverrides: { ...captureProjectConfigOverrides({}, env), ...identity },
         ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}), ...(scope ? { scope } : {}) });
     }
   }
@@ -286,7 +291,9 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
   }
   const maxParallel = raw.maxParallel ?? 2;
   if (!Number.isSafeInteger(maxParallel) || (maxParallel as number) < 1) throw new PlanError("maxParallel 必须是正整数");
-  return { recipe, name, dir, stages, steps, prepare, acceptance, maxParallel: maxParallel as number,
+  const startupTimeoutSec = raw.startupTimeoutSec ?? SILENCE_MS / 1000;
+  if (!Number.isSafeInteger(startupTimeoutSec) || (startupTimeoutSec as number) < 1) throw new PlanError("startupTimeoutSec 必须是正整数秒数");
+  return { recipe, name, dir, stages, steps, prepare, acceptance, maxParallel: maxParallel as number, startupTimeoutSec: startupTimeoutSec as number,
     ...(batchBranch ? { branch: batchBranch } : {}), ...(options.batchFile ? { file: resolve(options.batchFile) } : {}) };
 }
 
@@ -423,7 +430,7 @@ class StageStartupFailure extends Error {
 }
 
 export interface PipelineIO {
-  launch: (stage: StagePlan, script: string) => void;
+  launch: (stage: StagePlan, script: string) => void | (() => void);
   notify: (message: string) => void;
   log: (message: string) => void;
   pollMs: number;
@@ -442,7 +449,7 @@ function pipelineEvent(plan: Plan, phase: PhaseRecord["phase"], status: "started
   try {
     detail = { ...detail, paGrantsUsed: plan.paGrantsUsed ?? [] };
     const info = pipelineInfo(plan), reason = eventReason(text, failureKind), evidence = { summary: resolve(plan.dir, "report.md"),
-      ...(typeof detail.log === "string" ? { log: detail.log } : {}), ...(typeof detail.acceptance === "string" ? { acceptance: detail.acceptance } : {}) };
+      ...(typeof detail.log === "string" ? { log: detail.log } : {}), ...(typeof detail.acceptance === "string" ? { acceptance: detail.acceptance } : {}), ...(typeof detail.blocker === "string" ? { blocker: detail.blocker } : {}) };
     writePhase(info, null, phase, { status, ...reason, evidence, detail,
       ...(detail.next ? { next: detail.next as NextAction } : {}), session: { host: "pipeline", id: plan.name, pid: process.pid, processStarted: processStartTime(process.pid), runId: plan.runId } });
     if (plan.file) pushEvent(info, null, status, reason, evidence, detail);
@@ -511,6 +518,14 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
       try { submitted = Boolean(queueBatchComplete(plan.stages.values().next().value!.cwd, plan.file, acceptancePassed, acceptanceRecord, acceptanceEpoch, run)?.length); }
       catch (error) { code = 2; line = `完成后进合入队列失败：${(error as Error).message}；成果与段资格保留，修复后 --from 验收 重试`; }
     }
+    let blocker: string | undefined;
+    if (code !== 0) {
+      try {
+        blocker = preservePause(plan.dir, { reason: line, ...(/内部错误/.test(line) ? { error: line } : {}),
+          action: "请按上述具体原因检查本批配置与报告；处理后按当前段状态选择继续原会话或续跑，已启动的会话和成果保留。" });
+        report.push(`- 原始暂停现场：${blocker}`);
+      } catch (error) { io.log(`暂停原文保存失败：${String(error)}`); }
+    }
     report.push("", `## 结果`, line);
     writeFileSync(resolve(plan.dir, "report.md"), `${report.join("\n")}\n`);
     writeFileSync(resolve(plan.dir, "pipeline.finished"), `${code}\n`);
@@ -518,7 +533,7 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
       const status = detail.status ?? (code === 2 ? "paused" : /轮上限/.test(line) ? "repair-limit" : "failed");
       pipelineEvent(plan, status === "failed" ? "failed" : "paused", status, line, { exitCode: code, round: activeRound,
         ...(status !== "failed" ? { next: detail.next ?? "manual" } : {}), ...(detail.failureKind ? { failureKind: detail.failureKind } : {}),
-        ...(detail.log ? { log: detail.log } : {}), ...(acceptanceRecord ? { acceptance: acceptanceRecord.runDir } : {}),
+        ...(detail.log ? { log: detail.log } : {}), ...(blocker ? { blocker } : {}), ...(acceptanceRecord ? { acceptance: acceptanceRecord.runDir } : {}),
         ...(status === "repair-limit" ? { mustFix: acceptanceRecord ? formatFailedItems(acceptanceRecord) : line } : {}) }, detail.failureKind);
     } else if (!submitted) reportUncommittedBatch(pipelineInfo(plan), acceptanceRecord, plan.paGrantsUsed);
     // submitted 的 done phase / 事件只由提交模块发布，不能用退出码 0 补造终态。
@@ -554,21 +569,46 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
     return finish(2, `开跑前检查没通过：${failed.map((check) => `${check.name}（${check.detail}）`).join("；")}`, { next: failed.every((check) => check.name === "整批验收的 [授权] 条目都已答复") ? "grant" : "manual" });
   }
 
+  const confirmedStarts = new Set<string>(), startupFailures = new Set<string>();
+  const startupConfirmed = (stage: string, status = readJson<StageStatus>(statusPath(plan.dir, stage))): boolean => {
+    if (confirmedStarts.has(stage)) return true;
+    if (status?.event === "startup-failed") return false;
+    if (status && status.seq > 0 && status.inbox >= 0) return true;
+    // 会话先写 phase 再写接力状态；这段窗口里也不能覆盖真实会话的状态。
+    return Boolean(readJson<PhaseRecord>(phasePath(plan.dir, stage))?.session?.id);
+  };
+  const recordStartupFailure = (stage: string, text: string, timeoutMs?: number): boolean => {
+    if (startupFailures.has(stage)) return true;
+    const previous = readJson<StageStatus>(statusPath(plan.dir, stage));
+    if (startupConfirmed(stage, previous)) return false;
+    const info = pipelineInfo(plan), reason = eventReason(text), detail = { exitCode: 1, next: "manual", action: text,
+      ...(timeoutMs === undefined ? {} : { startupTimeoutMs: timeoutMs }) };
+    writeJsonAtomic(statusPath(plan.dir, stage), { ...previous, stage, sessionId: previous?.sessionId ?? "", summary: previous?.summary ?? "", event: "startup-failed",
+      seq: previous?.event === "startup-failed" ? previous.seq : (previous?.seq ?? 0) + 1,
+      inbox: previous?.inbox ?? 0, pauseReason: text, updatedAt: new Date().toISOString() });
+    writePhase(info, stage, "failed", { status: "failed", ...reason, next: "manual", detail, evidence: previous?.summary ? { summary: previous.summary } : {} });
+    if (plan.file) pushEvent(info, stage, "failed", reason, {}, detail);
+    startupFailures.add(stage);
+    io.notify(`流水线 ${plan.name}：${text}`);
+    return true;
+  };
+
   /** 等某一段出现「派发之后」的完成或没改动；暂停时提醒你，接着等你在它的窗口里处理。 */
   const waitStage = async (stage: string, afterSeq: number, inboxSeq = 0, signal = options.signal): Promise<StageStatus> => {
     const started = Date.now();
     let notifiedPause = 0;
-    let warnedSilence = false;
+    let reported = false;
+    let warnedRepair = false;
     for (;;) {
       signal?.throwIfAborted();
       const status = readJson<StageStatus>(statusPath(plan.dir, stage));
       if (status && status.seq > afterSeq && status.inbox >= inboxSeq) {
+        reported = true;
         if (status.event === "startup-failed") {
-          const info = pipelineInfo(plan), reason = eventReason(`启动失败：${status.pauseReason ?? "启动入口失败，没有启动会话"}`), detail = { exitCode: 1 };
-          writePhase(info, stage, "failed", { status: "failed", ...reason, evidence: status.summary ? { summary: status.summary } : {}, detail });
-          if (plan.file) pushEvent(info, stage, "failed", reason, {}, detail);
+          recordStartupFailure(stage, `${stage} 启动失败：${status.pauseReason ?? "启动入口失败，没有启动会话"}`);
           throw new StageStartupFailure(stage, status.pauseReason ?? "启动入口失败，没有启动会话");
         }
+        confirmedStarts.add(stage);
         if (status.event === "done" && !status.readyEpoch) return { ...status, event: "paused", pauseReason: "旧完成记录没有资格身份，请用当前扩展重新检查" };
         if (status.event === "done" || status.event === "no-change") return status;
         if (status.event === "paused" && notifiedPause !== status.seq) {
@@ -576,9 +616,16 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
           io.notify(`流水线 ${plan.name}：${stage} 暂停（${status.pauseReason ?? "原因见它的总结"}），在它的窗口里处理，流水线会接着等`);
         }
       }
-      if (!status && !warnedSilence && Date.now() - started > io.silenceMs) {
-        warnedSilence = true;
-        io.notify(`流水线 ${plan.name}：还没收到「${stage}」的状态，确认它的启动命令加载了 autoreview.ts（-e …/autoreview.ts）`);
+      if (!reported && Date.now() - started >= io.silenceMs) {
+        if (inboxSeq === 0) {
+          const text = `${stage} 没有启动：派发后 ${io.silenceMs / 1000} 秒内未收到本次状态。处理办法：检查该段终端的启动输出，确认命令完整执行并加载 autoreview.ts；修正启动命令后重新启动该段，已启动的其他开发会话保留。`;
+          if (recordStartupFailure(stage, text, io.silenceMs)) throw new StageStartupFailure(stage, text);
+          reported = true; // 写状态之前已确认会话启动，保留真实现场继续等待。
+          confirmedStarts.add(stage);
+        } else if (!warnedRepair) {
+          warnedRepair = true;
+          io.notify(`流水线 ${plan.name}：${stage} 尚未确认接收第 ${inboxSeq} 条返修。请检查原会话是否仍在运行及收件通道；返修记录和业务计数保留。`);
+        }
       }
       await sleep(io.pollMs, undefined, { signal });
     }
@@ -638,22 +685,46 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
           const invalidAfter = readiness(completed).invalid;
           if (invalidAfter.length) return finish(2, `上游段资格已失效：${invalidAfter.join("、")}；未启动下游`);
           io.log(`第 ${index + 1} 步：启动 ${batch.join("、")}`);
-          for (const stage of batch) {
-            const info = pipelineInfo(plan), current = plan.stages.get(stage)!;
-            writePhase(info, stage, "running");
-            if (plan.file) pushEvent(info, stage, "started", eventReason(), {}, { recipe: info.batch.recipe, ...(current.prompt ? { prompt: current.prompt } : {}) });
-            io.launch(current, stageScript(plan, current));
-          }
+          const releases: (() => void)[] = [];
+          const dispatched = new Set<string>();
+          let waits: Promise<StageStatus>[] = [];
           let statuses: StageStatus[];
           const startupAbort = new AbortController();
           const waitSignal = options.signal ? AbortSignal.any([options.signal, startupAbort.signal]) : startupAbort.signal;
-          try { statuses = await Promise.all(batch.map((stage) => waitStage(stage, 0, 0, waitSignal))); }
-          catch (error) {
-            // 一段启动失败就收束同批其他等待；只停编排轮询，不杀已经启动的开发会话。
-            startupAbort.abort();
-            if (error instanceof StageStartupFailure) return finish(1, `段 ${error.stage} 启动失败：${error.message}；未启动下游`);
-            throw error;
+          try {
+            for (const stage of batch) {
+              const info = pipelineInfo(plan), current = plan.stages.get(stage)!;
+              writePhase(info, stage, "running");
+              if (plan.file) pushEvent(info, stage, "started", eventReason(), {}, { recipe: info.batch.recipe, ...(current.prompt ? { prompt: current.prompt } : {}) });
+              dispatched.add(stage);
+              try {
+                const release = io.launch(current, stageScript(plan, current));
+                if (typeof release === "function") releases.push(release);
+              } catch (error) {
+                const text = `启动失败：${String(error)}`;
+                recordStartupFailure(stage, `${stage} ${text}`);
+                throw new StageStartupFailure(stage, text);
+              }
+            }
+            waits = batch.map((stage) => waitStage(stage, 0, 0, waitSignal));
+            statuses = await Promise.all(waits);
           }
+          catch (error) {
+            // 先停止并确认所有轮询退出，再逐段收束未确认启动的派发；不杀会话、不覆盖真实状态。
+            startupAbort.abort();
+            await Promise.allSettled(waits);
+            if (error instanceof StageStartupFailure) {
+              for (const stage of dispatched) {
+                if (startupFailures.has(stage) || startupConfirmed(stage)) continue;
+                const status = readJson<StageStatus>(statusPath(plan.dir, stage));
+                recordStartupFailure(stage, status?.event === "startup-failed"
+                  ? `${stage} 启动失败：${status.pauseReason ?? "启动入口失败，没有启动会话"}`
+                  : `${stage} 没有启动确认：同批 ${error.stage} 启动失败后，编排已停止，尚未收到该段的本次状态。处理办法：检查该段终端和启动输出，确认是否已经执行；未执行时修正命令后重新启动该段，已启动会话保留。`);
+              }
+              return finish(1, `段 ${error.stage} 启动失败：${error.message}；未启动下游`);
+            }
+            throw error;
+          } finally { for (const release of releases) release(); }
           if (statuses.some((status) => status.event !== "done")) return finish(2, "段未取得当前完成资格，未启动下游");
           for (const stage of batch) {
             const current = plan.stages.get(stage)!;
@@ -819,11 +890,15 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
 }
 
 /** macOS：开一个终端窗口跑脚本。 */
-function launchTerminal(plan: Plan) {
-  return (stage: StagePlan, script: string): void => {
-    const command = [process.execPath, join(EXT_DIR, "launch.ts"), JSON.stringify(pipelineInfo(plan)), stage.name, stage.cwd, script].map(shellQuote).join(" ");
-    const escaped = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    spawnSync("osascript", ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", "tell application \"Terminal\" to activate"]);
+export function launchTerminal(plan: Plan, execute: typeof spawnSync = spawnSync) {
+  return (stage: StagePlan, script: string): (() => void) => {
+    const launch = terminalStageCommand(pipelineInfo(plan), stage.name, stage.cwd, script);
+    try {
+      const escaped = launch.command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const result = execute("osascript", ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", "tell application \"Terminal\" to activate"], { encoding: "utf8", timeout: 15_000 });
+      if (result.error || result.status !== 0) throw new Error(`Terminal 启动失败：${result.error ?? result.stderr ?? result.status}`);
+      return launch.release;
+    } catch (error) { launch.release(); throw error; }
   };
 }
 
@@ -875,7 +950,7 @@ async function main(): Promise<void> {
     notify: notifySystem,
     log: (message) => console.log(`[流水线] ${message}`),
     pollMs: pollMs(process.env, 2000),
-    silenceMs: SILENCE_MS,
+    silenceMs: (plan.startupTimeoutSec ?? SILENCE_MS / 1000) * 1000,
   }, { fromAcceptance: ["验收", "e2e"].includes(flag("--from") ?? ""), signal: controller.signal }); // 兼容旧命令行值。
   } finally { for (const signal of signals) process.off(signal, cancel); }
   console.log(`报告：${resolve(plan.dir, "report.md")}`);

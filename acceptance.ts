@@ -957,6 +957,43 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   return { kind: "judged", record };
 }
 
+/** 开工空跑重置：复用真实启动/就绪/reset/cleanup，不调用验收方、不生成业务通过结论。 */
+export async function probeAcceptanceReset(deps: AcceptanceDeps): Promise<{ ok: boolean; detail: string }> {
+  const { config, runDir } = deps;
+  if (!config.reset) return { ok: true, detail: "跳过：未配置 acceptance.reset" };
+  mkdirSync(runDir, { recursive: true });
+  const logPath = join(runDir, "system.log");
+  writeFileSync(logPath, "");
+  const resource = createRunResource(`preflight:${deps.devSessionId}`, undefined, deps.procsFile);
+  deps = { ...deps, resource };
+  let system: RunningSystem | undefined, failure = "";
+  const cleanup: string[] = [];
+  try {
+    if (config.start) {
+      if (config.readyUrl && await portBusy(new URL(config.readyUrl))) throw new Error(`端口 ${config.readyUrl} 已被占用，未启动或重置`);
+      system = startSystem(deps, logPath);
+      const notReady = await waitReady(deps, system, logPath);
+      if (notReady) throw new Error(notReady);
+    }
+    failure = await runReset(deps, "，开工空跑");
+    if (system?.exitInfo()) failure ||= "重置期间被测系统退出；reset 只应重置数据，不应停止服务";
+  } catch (error) { failure = errorText(error); }
+  finally {
+    try { await system?.stop(); } catch (error) { cleanup.push(`服务释放未确认：${errorText(error)}`); }
+    try {
+      if (config.cleanup) {
+        const result = await runReset({ ...deps, signal: undefined }, "，空跑释放资源", true);
+        if (result) cleanup.push(`cleanup 失败：${result}`);
+      }
+    } catch (error) { cleanup.push(`cleanup 失败：${errorText(error)}`); }
+    finally { releaseRunResource(resource); }
+    if (resource.status !== "released") cleanup.push(resourceLine(resource));
+  }
+  const output = readIfExists(resetLogOf(runDir)) ?? readIfExists(logPath) ?? "";
+  return { ok: !failure && !cleanup.length, detail: [failure || "重置通过", ...cleanup,
+    `$ ${config.reset}`, output, `日志：${runDir}`, ...(failure || cleanup.length ? ["检查 acceptance.reset 的命令、依赖与测试数据权限；修好后重新执行 loop 开工，不要派发开发方。"] : [])].join("\n") };
+}
+
 /** 运行目录：~/.pi-autoreview/<项目>/acceptance/<会话>/r<轮次>。 */
 export function acceptanceRunDir(baseDir: string, round: number): string {
   return join(baseDir, `r${round}`);
