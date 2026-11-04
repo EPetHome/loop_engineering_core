@@ -99,6 +99,93 @@ function jsonOf(run: { stdout: string; stderr: string }): Record<string, unknown
 
 const count = (path: string): number => existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").length : 0;
 
+test("单一入口 A1/A4：开工、启动 JSON 显示文件和 flag 预算", () => {
+  const f = fixture();
+  const marker = join(f.repo, ".autoreview.json");
+  const original = JSON.parse(readFileSync(marker, "utf8"));
+  writeFileSync(marker, JSON.stringify({ ...original, reviewTimeoutMin: 90, gate: { cmd: "true", timeoutMin: 20 }, acceptance: { timeoutMin: 60 } }));
+  git(f.repo, ["add", ".autoreview.json"]); git(f.repo, ["commit", "-qm", "budget"]);
+  for (const command of ["开工", "启动"]) {
+    if (command === "启动") assert.equal(loop(f.repo, ["开工", f.batch, "--json"]).status, 0);
+    for (const flags of [[], ["--autoreview-review-timeout-min", "120"]]) {
+      const run = loop(f.repo, [command, f.batch, "--dry-run", "--json", ...flags]);
+      assert.equal(run.status, 0, run.stderr || run.stdout);
+      assert.deepEqual((jsonOf(run).effectiveConfig as any).reviewTimeoutMin,
+        flags.length ? { value: 120, source: "flag" } : { value: 90, source: "file" });
+    }
+    if (command === "开工") assert.ok(!existsSync(f.worktree));
+  }
+});
+
+test("单一入口：批次 Pi 参数参与提前校验，JSON 取实际段配置而非运行版旧值", () => {
+  const f = fixture();
+  writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify({ gate: { cmd: "true", timeoutMin: 20 }, acceptance: { timeoutMin: 60 } }));
+  const batch = JSON.parse(readFileSync(f.batch, "utf8"));
+  batch.pi = { args: ["--autoreview-review-timeout-min", "120"] };
+  writeFileSync(f.batch, JSON.stringify(batch));
+  git(f.repo, ["add", ".autoreview.json", "batch.json"]); git(f.repo, ["commit", "-qm", "explicit budget"]);
+  for (const flags of [["--dry-run"], []]) {
+    const opened = loop(f.repo, ["开工", f.batch, "--json", ...flags]);
+    assert.equal(opened.status, 0, opened.stdout || opened.stderr);
+    assert.deepEqual((jsonOf(opened).effectiveConfig as any).reviewTimeoutMin, { value: 120, source: "flag" });
+  }
+  const started = loop(f.repo, ["启动", f.batch, "--dry-run", "--json"]);
+  assert.equal(started.status, 0, started.stdout || started.stderr);
+  assert.deepEqual((jsonOf(started).effectiveConfig as any).stages.甲.reviewTimeoutMin, { value: 120, source: "flag" });
+
+  const separate = fixture();
+  assert.equal(loop(separate.repo, ["开工", separate.batch, "--json"]).status, 0);
+  const marker = join(separate.worktree, ".autoreview.json"), config = JSON.parse(readFileSync(marker, "utf8"));
+  writeFileSync(marker, JSON.stringify({ ...config, reviewTimeoutMin: 90 }));
+  const actual = loop(separate.repo, ["启动", separate.batch, "--dry-run", "--json"]);
+  assert.equal(actual.status, 0, actual.stdout || actual.stderr);
+  assert.deepEqual((jsonOf(actual).effectiveConfig as any).reviewTimeoutMin, { value: 90, source: "file" });
+});
+
+test("单一入口：启动的显式预算实际传到替身会话，不只改变 JSON", () => {
+  const f = fixture();
+  const seen = join(f.root, "timeout.txt");
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(seen)}, process.env.AUTOREVIEW_REVIEW_TIMEOUT_MIN)`;
+  writeFileSync(f.batch, JSON.stringify({ name: "预算透传", stages: { 甲: { cwd: f.repo, start: `'${process.execPath}' -e '${script.replace(/'/g, "'\\''")}'` } } }));
+  const run = loop(f.repo, ["启动", f.batch, "--json", "--autoreview-review-timeout-min", "120"]);
+  assert.equal(run.status, 0, run.stdout || run.stderr);
+  assert.equal(readFileSync(seen, "utf8"), "120");
+});
+
+test("单一入口 A5/A6：配置预算不足时开工/启动及预览均无副作用", () => {
+  const f = fixture();
+  const marker = join(f.repo, ".autoreview.json");
+  const original = JSON.parse(readFileSync(marker, "utf8"));
+  writeFileSync(marker, JSON.stringify({ ...original, gate: { cmd: "true", timeoutMin: 20 }, acceptance: { timeoutMin: 60 } }));
+  const branch = git(f.repo, ["branch", "--show-current"]), branches = git(f.repo, ["for-each-ref", "refs/heads"]);
+  const trees = git(f.repo, ["worktree", "list", "--porcelain"]), files = git(f.repo, ["status", "--porcelain"]);
+  const launched = join(f.root, "launched");
+  writeFileSync(process.env.PI_BIN!, `#!/bin/sh\ntouch '${launched}'\n`);
+  for (const command of ["开工", "启动"]) for (const dry of [[], ["--dry-run"]]) {
+    const run = loop(f.repo, [command, f.batch, ...dry, "--json"]);
+    assert.notEqual(run.status, 0);
+    assert.equal(jsonOf(run).error, ".autoreview.json 的 acceptance.timeoutMin（60）必须小于一轮总预算 reviewTimeoutMin（60）");
+    assert.ok(!existsSync(f.worktree)); assert.ok(!existsSync(launched));
+    assert.equal(git(f.repo, ["branch", "--show-current"]), branch);
+    assert.equal(git(f.repo, ["for-each-ref", "refs/heads"]), branches);
+    assert.equal(git(f.repo, ["worktree", "list", "--porcelain"]), trees);
+    assert.equal(git(f.repo, ["status", "--porcelain"]), files);
+    assert.ok(!existsSync(join(f.root, "projects")), "配置失败时不执行方法自测");
+  }
+});
+
+test("单一入口 A7：开发 pi 与原入口逐字相同，含空格参数和 -- 后参数原样透传", () => {
+  const f = fixture();
+  const prompt = join(f.repo, "prompt.md");
+  const args = ["--cwd", f.repo, "--dry-run", prompt, "--", "--autoreview-review-timeout-min", "120", "--name", "含 空格的名称"];
+  const direct = spawnSync(join(LOOP_ROOT, "bin/pi-dev"), args, { cwd: f.repo, env: process.env, encoding: "utf8" });
+  const wrapped = loop(f.repo, ["开发", "pi", ...args]);
+  assert.equal(direct.status, 0, direct.stderr); assert.equal(wrapped.status, 0, wrapped.stderr);
+  assert.equal(wrapped.stdout, direct.stdout);
+  const invalid = loop(f.repo, ["开发", "unknown", "--dry-run"]);
+  assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /pi\|claude\|codex/);
+});
+
 test("A1 开工建 worktree 和分支；启动命令经过 bin/pi-dev 并加载权限扩展、autoreview、Ponytail", () => {
   const f = fixture();
   const opened = jsonOf(loop(f.repo, ["开工", f.batch, "--json"]));

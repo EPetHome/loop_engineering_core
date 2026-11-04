@@ -55,7 +55,7 @@ test("P1 兼容旧批次：相对路径、默认步骤与目录、标签去掉�
     assert.equal(plan.acceptance!.acceptance.reset, "sh reset.sh");
     const serial = parsePlan({ name: "s", stages: { 甲: { start: "a" }, 乙: { start: "b" } }, steps: ["甲", ["乙"]] }, root, {});
     assert.deepEqual(serial.steps, [["甲"], ["乙"]], "字符串和数组都能写一步");
-    assert.match(stageScript(serial, serial.stages.get("乙")!), /^cd '.*' && export AUTOREVIEW_PIPELINE_DIR='.*' AUTOREVIEW_STAGE='乙' AUTOREVIEW_PIPELINE_LAUNCH=1 AUTOREVIEW_PIPELINE_LAUNCH_TOKEN='[^']+' && b$/);
+    assert.match(stageScript(serial, serial.stages.get("乙")!), /^cd '.*' && export AUTOREVIEW_PIPELINE_DIR='.*' AUTOREVIEW_STAGE='乙' AUTOREVIEW_PIPELINE_LAUNCH=1 AUTOREVIEW_PIPELINE_LAUNCH_TOKEN='[^']+' AUTOREVIEW_REVIEW_TIMEOUT_MIN='' AUTOREVIEW_REVIEWER_CMD='' && b$/);
     writeFileSync(join(root, "prompt.md"), "做");
     const prompted = parsePlan({ name: "p", stages: { 甲: { prompt: "prompt.md" } }, steps: [["甲"]] }, root, {});
     assert.match(stageScript(prompted, prompted.stages.get("甲")!), /AUTOREVIEW_PIPELINE_LAUNCH_TOKEN='[^']+'/);

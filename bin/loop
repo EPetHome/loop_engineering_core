@@ -2,4 +2,15 @@
 # Loop 工具：开工、启动、状态、合入、清理。实现见 ../loop.ts。
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 开发参数由原入口解析，不能经过 loop.ts 的选项解析器。
+if [[ "${1:-}" == "开发" ]]; then
+  shift
+  host="${1:-}"
+  [[ $# -eq 0 ]] || shift
+  case "$host" in
+    pi) exec "$here/bin/pi-dev" "$@" ;;
+    claude|codex) exec "$here/bin/loop-dev" "$host" "$@" ;;
+    *) echo '用法：loop 开发 <pi|claude|codex> [原开发入口参数…]' >&2; exit 2 ;;
+  esac
+fi
 exec node "$here/loop.ts" "$@"

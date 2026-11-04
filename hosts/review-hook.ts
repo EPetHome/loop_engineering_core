@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "../acceptance-core.ts";
 import {
-  checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, MARKER_FILE, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
+  findProjectRoot, HERMES_BIN, MARKER_FILE, resolveProjectConfig,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { batchInfo, observeStage } from "../events.ts";
@@ -37,7 +37,6 @@ import { completionChecks, inboxPath, queueAcceptance, readJson, statusPath, typ
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
-import { parsePreparation } from "../preparation.ts";
 import { isRegisteredSource, loadContext, projectRootHash, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
@@ -46,8 +45,6 @@ import {
 } from "../review.ts";
 
 const INTERRUPTED = "评审被中断（宿主超时或中断）";
-/** Stop Hook 内部评审保护时长上限（分钟）；默认与 pi 扩展一致。 */
-const DEFAULT_TIMEOUT_ENV = "AUTOREVIEW_REVIEW_TIMEOUT_MIN";
 
 import { detectHost, type HookEvent } from "./hook.ts";
 
@@ -216,21 +213,8 @@ export function devProjectRoot(env: NodeJS.ProcessEnv = process.env): string | u
 
 /** 读 .autoreview.json（可以是 {}）；可选字段非法时抛错，由统一收口记暂停。 */
 export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): ReviewConfig {
-  const data = readMarker(root);
-  const envTimeout = Number.parseInt(env[DEFAULT_TIMEOUT_ENV] ?? "", 10);
-  const config: ReviewConfig = {
-    maxRepairs: nonNegativeInt(data, "maxRepairs", DEFAULT_MAX_REPAIRS),
-    reviewerModel: nonEmptyString(data, "reviewerModel", DEFAULT_MODEL),
-    reviewerThinking: nonEmptyString(data, "reviewerThinking", DEFAULT_THINKING),
-    reviewTimeoutMin: Number.isFinite(envTimeout) && envTimeout > 0
-      ? envTimeout : nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN),
-    reviewerCmd: env.AUTOREVIEW_REVIEWER_CMD?.trim() ?? "",
-  };
-  const acceptance = parseAcceptanceConfig(data.acceptance, root, env);
-  const gate = parseGateConfig(data.gate);
-  checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
-  const preparation = parsePreparation(data.preparation, root);
-  return { ...config, configurationHash: configurationHash(data), ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}) };
+  const { raw, effectiveConfig, methods, context, ...config } = resolveProjectConfig(root, { env });
+  return config;
 }
 
 /** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */

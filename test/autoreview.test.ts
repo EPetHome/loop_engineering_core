@@ -1000,6 +1000,40 @@ test("G12 验收命令期间互斥；关闭记为中断，恢复时提示 /accep
   });
 });
 
+test("单一入口 A2/A3/A4：Pi 文件预算 90 与显式覆盖均用于真实评审调用的超时参数", async (t) => {
+  for (const flagged of [false, true]) await t.test(flagged ? "flag 120 补足默认预算" : "文件 90 不被默认 flag 遮盖", async () => {
+    const h = harness({ stage: "甲", flags: { "autoreview-reviewer-cmd": "", ...(flagged ? { "autoreview-review-timeout-min": "120" } : {}) } });
+    const vars = { AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)), FAKE_STATE_DIR: join(h.root, "fake") };
+    const old = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try {
+      h.write(".autoreview.json", JSON.stringify({
+        ...(!flagged ? { reviewTimeoutMin: 90 } : {}), maxRepairs: 2, reviewerModel: "file/model", reviewerThinking: "high", reviewerCmd: "/fake-reviewer",
+        gate: { cmd: "true", timeoutMin: 20 }, acceptance: { timeoutMin: 60 },
+        preparation: { check: "true" }, context: { sources: [{ path: "file.txt", role: "code" }] },
+      }));
+      await h.event("session_start");
+      await h.begin("完成需求\n## 验收标准\nA1. 操作：运行替身命令\n    预期：成功");
+      h.write("file.txt", "candidate\n"); h.assistant();
+      await h.event("agent_settled"); await h.terminal();
+      assert.equal(h.state().phase, "done", h.summary());
+      const call = h.calls.find((call) => call.command === "/fake-reviewer");
+      assert.ok(call, "触发了一轮评审");
+      const budget = (flagged ? 120 : 90) * 60_000;
+      // 既有规则为自动验收预留 60 分钟；评审调用使用总预算减预留、减本轮已耗时。
+      const reviewerBudget = budget - 60 * 60_000;
+      assert.ok(call.options.timeout! > reviewerBudget - 30_000 && call.options.timeout! <= reviewerBudget, `整轮 ${budget} ms，预留验收后应为 ${reviewerBudget} ms，实际 ${call.options.timeout}`);
+      assert.doesNotMatch(h.summary(), /必须小于一轮总预算/);
+      assert.equal((h.state() as any).rounds[0].acceptance.verdict, "通过");
+      const published = JSON.parse(readFileSync(statusPath(h.pipelineDir, "甲"), "utf8"));
+      assert.equal(published.configOverrides.reviewTimeoutMin, flagged ? "120" : "", "真实 Pi 扩展发布完成时携带原始显式覆盖");
+    } finally {
+      await h.close();
+      for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  });
+});
+
 test("G11 pi 扩展的后置验收：先静态评审、再验收，标准只认用户消息", async (t) => {
   const accEnv = (root: string, extra: Record<string, string> = {}) => ({
     AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),

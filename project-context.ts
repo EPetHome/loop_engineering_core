@@ -4,7 +4,8 @@ import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, 
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findProjectRoot, readMarker } from "./config.ts";
+import { CONTEXT_IGNORED as ignored, findProjectRoot, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
+export { parseContext } from "./config.ts";
 import { readJson, writeJsonAtomic } from "./pipeline-core.ts";
 import { reapRunResources } from "./resources.ts";
 import { processStartTime } from "./procs.ts";
@@ -21,50 +22,18 @@ export interface ContextChange { path: string; kind: "added" | "modified" | "del
 export interface ContextResult { snapshot: ContextSnapshot; changed: boolean; changes: ContextChange[]; affected: string[]; path: string; text: string }
 
 const digest = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
-const roles = new Set(["rules", "requirement", "design", "guide", "code"]);
-const ignored = /(^|[/\\])(?:\.git|node_modules|target|dist|\.venv|\.aws|\.ssh|\.pi-autoreview|logs?|temp)(?:[/\\]|$)|(^|[/\\])(?:\.env(?:\..*)?|auth\.json|credentials(?:\..*)?)$/;
 const textFile = /\.(?:md|txt|ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|vue|json|yaml|yml|toml|sh|sql)$/;
 
-export function parseContext(raw: unknown, configRoot: string): ContextConfig | undefined {
-  if (raw === undefined) return undefined;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("context 必须是对象");
-  const data = raw as Record<string, unknown>;
-  if (data.root !== undefined && (typeof data.root !== "string" || !data.root.trim())) throw new Error("context.root 必须是非空路径");
-  const root = resolve(configRoot, (data.root as string) ?? ".");
-  if (!Array.isArray(data.sources) || !data.sources.length) throw new Error("context.sources 必须明确列出来源");
-  const sources: Source[] = data.sources.map((raw, index) => {
-    const source = typeof raw === "string" ? { path: raw, role: "guide" } : raw;
-    if (!source || typeof source !== "object" || typeof source.path !== "string" || !source.path.trim()) throw new Error(`context.sources[${index}] 缺少 path`);
-    const path = relative(root, resolve(root, source.path));
-    if (!path || isAbsolute(source.path) || path.startsWith("..") || ignored.test(path)) throw new Error(`context 来源越界或属于排除区域：${source.path}`);
-    const role = source.role ?? "guide";
-    if (!roles.has(role)) throw new Error(`context.sources[${index}].role 无效`);
-    const id = source.id ?? path;
-    if (typeof id !== "string" || !id.trim()) throw new Error("context 来源 id 必须是非空字符串");
-    const dependsOn = source.dependsOn ?? [];
-    if (!Array.isArray(dependsOn) || dependsOn.some((v) => typeof v !== "string")) throw new Error("context.dependsOn 必须是来源 id 数组");
-    if (source.optional !== undefined && typeof source.optional !== "boolean") throw new Error("context.optional 必须是布尔值");
-    return { id, path, role: role as Role, dependsOn, optional: source.optional === true };
-  });
-  const ids = new Set(sources.map((s) => s.id));
-  if (ids.size !== sources.length || sources.some((s) => s.dependsOn.some((id) => !ids.has(id)))) throw new Error("context 来源 id 重复或依赖不存在");
-  const maxChars = data.maxChars ?? 12000, intervalSec = data.intervalSec ?? 0;
-  if (!Number.isSafeInteger(maxChars) || (maxChars as number) < 1000 || (maxChars as number) > 100000) throw new Error("context.maxChars 必须在 1000—100000 之间");
-  if (!Number.isSafeInteger(intervalSec) || (intervalSec as number) < 0 || ((intervalSec as number) > 0 && (intervalSec as number) < 30)) throw new Error("context.intervalSec 必须为 0 或不小于 30 的整数");
-  return { root, sources, maxChars: maxChars as number, intervalSec: intervalSec as number };
-}
-
-export function loadContext(cwd: string): ContextConfig | undefined {
-  const root = findProjectRoot(cwd);
-  return root ? parseContext(readMarker(root).context, root) : undefined;
+export function loadContext(cwd: string, overrides: ProjectConfigOverrides = {}): ContextConfig | undefined {
+  return resolveProjectConfig(findProjectRoot(cwd), overrides).context;
 }
 
 /**
  * 消费完成资格时重新读取实际来源。只有缺失或配置被移除才阻塞（配置错误）；
  * 内容变化换用新版本继续，由调用方更新记录并写进总结。
  */
-export function sourceInputsProblem(cwd: string, expected?: string): string | undefined {
-  const config = loadContext(cwd);
+export function sourceInputsProblem(cwd: string, expected?: string, overrides: ProjectConfigOverrides = {}): string | undefined {
+  const config = loadContext(cwd, overrides);
   if (!config) return expected ? "上游来源配置已移除，需要重新确认输入" : undefined;
   const current = refreshContext(config).snapshot;
   if (current.missing.length) return `上游来源缺失：${current.missing.join("、")}`;

@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "./acceptance-core.ts";
-import { checkRoundBudget, configurationHash, findProjectRoot, readMarker, parseAcceptanceConfig, parseGateConfig, loadAcceptanceConfig, loadGateConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
+import { captureProjectConfigOverrides, findProjectRoot, resolveProjectConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import {
   acceptRunLabel, classifyMarker, conventionText, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
 } from "./core.ts";
@@ -28,15 +28,15 @@ import { batchInfo, observeStage } from "./events.ts";
 import { consumeRelay } from "./pa.ts";
 import { hasRelayHeader, rememberPAInput, relayMessage, wordRecords } from "./pa-records.ts";
 import { systemNotify } from "./notify.ts";
-import { loadPreparation, parsePreparation, runPreparation } from "./preparation.ts";
+import { runPreparation } from "./preparation.ts";
 import { methodEnv } from "./method-env.ts";
 import { createChildExec, expandFileRefs } from "./hosts/review-hook.ts";
 import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "./materials.ts";
-import { isRegisteredSource, loadContext, recordProjectOutcome, recordSourceChange, refreshContext, type ContextConfig, type ContextResult } from "./project-context.ts";
+import { isRegisteredSource, recordProjectOutcome, recordSourceChange, refreshContext, type ContextConfig, type ContextResult } from "./project-context.ts";
 import {
-  DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, INTERRUPTED,
+  INTERRUPTED,
   checkedFingerprint, errorText, lastAcceptance, newReviewState, nowStamp, runReviewRound, sourcesOnlyWorkspaceChange, tail,
   type ReviewConfig, type ReviewState,
 } from "./review.ts";
@@ -145,13 +145,13 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   const summaryPath = (ctx: ExtensionContext): string => join(dataDir(ctx), `${ctx.sessionManager.getSessionId()}.md`);
   const procsPath = (ctx: ExtensionContext): string => join(dataDir(ctx), `${ctx.sessionManager.getSessionId()}.procs.json`);
   /** .autoreview.json 的 acceptance 一节；配置非法时抛错（评审路径里会变成暂停）。 */
-  const acceptanceConfig = (ctx: ExtensionContext): AcceptanceConfig | undefined => loadAcceptanceConfig(ctx.cwd);
+  const acceptanceConfig = (ctx: ExtensionContext): AcceptanceConfig | undefined => projectConfig(ctx).acceptance;
   /** 只用于注入约定和取标准：配置非法时当作没配，错误留给评审路径报。 */
   const acceptanceEnabled = (ctx: ExtensionContext): boolean => {
     try { return acceptanceConfig(ctx) !== undefined; } catch { return false; }
   };
   /** .autoreview.json 的 gate 一节；配置非法时抛错（评审路径里会变成暂停）。 */
-  const gateConfig = (ctx: ExtensionContext): GateConfig | undefined => loadGateConfig(ctx.cwd);
+  const gateConfig = (ctx: ExtensionContext): GateConfig | undefined => projectConfig(ctx).gate;
   /** 只用于注入约定：配置非法时当作没配，错误留给评审路径报。 */
   const gateCommand = (ctx: ExtensionContext): string | undefined => {
     try { return gateConfig(ctx)?.cmd; } catch { return undefined; }
@@ -188,7 +188,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     try {
       const status = {
         sessionId: ctx.sessionManager.getSessionId(), host: "pi", pid: process.pid, processStarted: processStartTime(process.pid),
-        summary: summaryPath(ctx), event, ...(event === "done" ? { readyEpoch: state.readyEpoch, candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
+        summary: summaryPath(ctx), event, configOverrides: captureProjectConfigOverrides(projectOverrides()), ...(event === "done" ? { readyEpoch: state.readyEpoch, candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
       };
       writeStageStatus(pipelineLink, status);
       queueStageEvent({ cwd: ctx.cwd, file: process.env.AUTOREVIEW_BATCH_FILE, stage: pipelineLink.stage, status });
@@ -312,20 +312,19 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     return false;
   };
 
+  const projectOverrides = () => ({
+    maxRepairs: flagString(pi, "autoreview-max-repairs", ""),
+    reviewerModel: flagString(pi, "autoreview-reviewer-model", ""),
+    reviewerThinking: flagString(pi, "autoreview-reviewer-thinking", ""),
+    reviewTimeoutMin: flagString(pi, "autoreview-review-timeout-min", ""),
+    reviewerCmd: flagString(pi, "autoreview-reviewer-cmd", ""),
+  });
+  const projectConfig = (ctx: Pick<ExtensionContext, "cwd">) => resolveProjectConfig(findProjectRoot(ctx.cwd), projectOverrides());
+  const loadContext = (cwd: string) => projectConfig({ cwd }).context;
+  const loadPreparation = (cwd: string) => projectConfig({ cwd }).preparation;
   const currentConfig = (ctx: ExtensionContext): ReviewConfig => {
-    const config: ReviewConfig = {
-      maxRepairs: positiveInt(flagString(pi, "autoreview-max-repairs", String(DEFAULT_MAX_REPAIRS)), DEFAULT_MAX_REPAIRS),
-      reviewerModel: flagString(pi, "autoreview-reviewer-model", DEFAULT_MODEL),
-      reviewerThinking: flagString(pi, "autoreview-reviewer-thinking", DEFAULT_THINKING),
-      reviewTimeoutMin: positiveInt(flagString(pi, "autoreview-review-timeout-min", String(DEFAULT_TIMEOUT_MIN)), DEFAULT_TIMEOUT_MIN),
-      reviewerCmd: flagString(pi, "autoreview-reviewer-cmd", ""),
-    };
-    const root = findProjectRoot(ctx.cwd);
-    const marker = root ? readMarker(root) : {};
-    const acceptance = root ? parseAcceptanceConfig(marker.acceptance, root) : undefined;
-    const gate = parseGateConfig(marker.gate);
-    checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
-    return { ...config, ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), preparation: root ? parsePreparation(marker.preparation, root) : undefined, configurationHash: configurationHash(marker) };
+    const { raw, effectiveConfig, methods, context, ...config } = projectConfig(ctx);
+    return config;
   };
 
   const acceptCommand = (): string => flagString(pi, "autoreview-accept-cmd", "");
@@ -880,10 +879,10 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     }
   };
 
-  pi.registerFlag("autoreview-max-repairs", { type: "string", default: String(DEFAULT_MAX_REPAIRS), description: "自动评审返修上限" });
-  pi.registerFlag("autoreview-reviewer-model", { type: "string", default: DEFAULT_MODEL, description: "评审模型" });
-  pi.registerFlag("autoreview-reviewer-thinking", { type: "string", default: DEFAULT_THINKING, description: "评审思考档位" });
-  pi.registerFlag("autoreview-review-timeout-min", { type: "string", default: String(DEFAULT_TIMEOUT_MIN), description: "单次评审保护时长（分钟）" });
+  pi.registerFlag("autoreview-max-repairs", { type: "string", default: "", description: "自动评审返修上限" });
+  pi.registerFlag("autoreview-reviewer-model", { type: "string", default: "", description: "评审模型" });
+  pi.registerFlag("autoreview-reviewer-thinking", { type: "string", default: "", description: "评审思考档位" });
+  pi.registerFlag("autoreview-review-timeout-min", { type: "string", default: "", description: "单次评审保护时长（分钟）" });
   pi.registerFlag("autoreview-reviewer-cmd", { type: "string", default: "", description: "仅测试：外部评审命令" });
   pi.registerFlag("autoreview-accept-cmd", { type: "string", default: "", description: "评审完成后执行的验收命令（在项目目录用 /bin/sh -c 执行，退出码 0 为通过）" });
   pi.registerFlag("autoreview-accept-mode", { type: "string", default: "required", description: "后置命令用途：required（默认，通过后才接力）或 advisory（只记录附加检查）" });

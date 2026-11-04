@@ -5,24 +5,26 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractCriteria } from "./acceptance-core.ts";
-import { findProjectRoot, nonEmptyString, nonNegativeInt, readMarker } from "./config.ts";
+import { findProjectRoot, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
 import { batchInfo, eventReason, pushEvent, writePhase, type BatchInfo } from "./events.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { beginBatchRun } from "./launch.ts";
 import type { ReviewPlan } from "./pipeline.ts";
 import { processStartTime, readProcs, reapProcs } from "./procs.ts";
-import { DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN, errorText, newReviewState, runReviewRound, type ReviewDeps, type ReviewOutcome } from "./review.ts";
+import { DEFAULT_MODEL, errorText, newReviewState, runReviewRound, type ReviewDeps, type ReviewOutcome } from "./review.ts";
 import { gitResult, gitText } from "./workspace.ts";
 
 export async function runReviewOnly(review: ReviewPlan, options: {
-  file?: string; name?: string; dir?: string; dryRun?: boolean;
+  file?: string; name?: string; dir?: string; dryRun?: boolean; configOverrides?: ProjectConfigOverrides;
   callReviewer?: ReviewDeps["callReviewer"]; now?: () => number;
 } = {}): Promise<Record<string, unknown>> {
+  const initialConfig = resolveProjectConfig(findProjectRoot(review.repo), options.configOverrides);
   if (options.dryRun) {
     const base = revision(review.repo, review.base), head = revision(review.repo, review.head);
     for (const file of [review.requirement, review.criteria, review.note]) if (file) readFileSync(file, "utf8");
-    return { ok: true, command: "评审", recipe: "review-only", dryRun: true, base, head, lines: [`只读预览：评审 ${base} → ${head}；不建 worktree、不调用评审`] };
+    return { ok: true, command: "评审", recipe: "review-only", dryRun: true, base, head, effectiveConfig: initialConfig.effectiveConfig, lines: [`只读预览：评审 ${base} → ${head}；不建 worktree、不调用评审`] };
   }
+  let effectiveConfig = initialConfig.effectiveConfig;
   const id = randomUUID(), started = Date.now();
   const dir = join(homedir(), ".pi-autoreview", "reports", id);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -62,13 +64,12 @@ export async function runReviewOnly(review: ReviewPlan, options: {
     checkedGit(review.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", checkout, head]);
     files = checkedGit(checkout, ["diff", "--name-only", "-z", base, head, "--"]).split("\0").filter(Boolean);
     const root = findProjectRoot(checkout);
-    const config = root ? readMarker(root) : {};
-    model = nonEmptyString(config, "reviewerModel", DEFAULT_MODEL);
-    const timeout = Number.parseInt(process.env.AUTOREVIEW_REVIEW_TIMEOUT_MIN ?? "", 10);
+    const { raw, effectiveConfig: resolvedEffectiveConfig, methods, context, ...config } = resolveProjectConfig(root, options.configOverrides);
+    effectiveConfig = resolvedEffectiveConfig;
+    model = config.reviewerModel;
     outcome = await runReviewRound({
       sink: "report", cwd: checkout, devSessionId: id, round: 1, state, deliveryNote: note,
-      config: { maxRepairs: 0, reviewerModel: model, reviewerThinking: nonEmptyString(config, "reviewerThinking", DEFAULT_THINKING),
-        reviewTimeoutMin: timeout > 0 ? timeout : nonNegativeInt(config, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN), reviewerCmd: process.env.AUTOREVIEW_REVIEWER_CMD?.trim() ?? "" },
+      config: { ...config, maxRepairs: 0 },
       exec: createChildExec(procs), procsFile: procs, env: {}, signal: controller.signal,
       checkLive: () => controller.signal.throwIfAborted(), callReviewer: options.callReviewer, now: options.now,
       writeInput: (name, text) => { const path = join(dir, name); writeFileSync(path, text); return path; }, saveState: () => {},
@@ -99,7 +100,7 @@ export async function runReviewOnly(review: ReviewPlan, options: {
     repo: resolve(review.repo), baseline: base, candidate: head, files, mustFix: parsed?.mustFix ?? [], mustFixRaw: parsed?.mustFixRaw ?? "",
     suggestions: parsed?.minor ?? [], questions: parsed?.questions ?? [], conclusion: failure ? "评审失败" : parsed?.conclusion,
     model, durationMs: Date.now() - started, exitCode, report, reportJson: json,
-    reason: eventReason(failure), record: outcome?.record ?? state.rounds.at(-1) ?? null };
+    effectiveConfig, reason: eventReason(failure), record: outcome?.record ?? state.rounds.at(-1) ?? null };
   writeFileSync(json, `${JSON.stringify(result, null, 2)}\n`);
   writeFileSync(report, ["# 只评审报告", `基线：${base ?? review.base}`, `候选：${head ?? review.head}`, `模型：${model}`, `耗时：${result.durationMs} ms`,
     `结论：${result.conclusion ?? "评审失败"}`, failure ? `评审失败：${failure}` : "", "\n## 改动文件", ...files.map((file) => `- ${file}`),

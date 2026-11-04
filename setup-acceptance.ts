@@ -10,9 +10,8 @@ import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { checkRoundBudget, MARKER_FILE, parseAcceptanceConfig, parseGateConfig } from "./config.ts";
+import { MARKER_FILE, resolveProjectConfig } from "./config.ts";
 import { BLOCK_END, BLOCK_START, blockChanges, blockVersion, conventionTarget, copyNotice, GUIDE_DOC, olderConventionCopies, readBlock, type BlockChanges } from "./onboarding.ts";
-import { DEFAULT_TIMEOUT_MIN } from "./review.ts";
 
 export interface Detection {
   kind: "命令行" | "网页或接口" | "看不出来";
@@ -172,12 +171,7 @@ export async function planSetup(root: string, host?: string): Promise<Plan> {
   if (!statSync(root).isDirectory()) throw new Error(`不是目录：${root}`);
   const detection = detectProject(root, await freePort());
   const configPath = join(root, MARKER_FILE);
-  let data: Record<string, unknown> = {};
-  if (existsSync(configPath)) {
-    const parsed = readJson(configPath);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${configPath} 不是合法的 JSON 对象，先修好再跑`);
-    data = parsed;
-  }
+  const data = resolveProjectConfig(existsSync(configPath) ? root : undefined).raw;
   let config: string | undefined;
   let configAction: string;
   if (data.acceptance !== undefined) {
@@ -185,8 +179,7 @@ export async function planSetup(root: string, host?: string): Promise<Plan> {
   } else {
     const next = { ...data, acceptance: detection.acceptance };
     // 写之前按程序的规则校验一遍，保证写进去的配置一定能用。
-    const timeout = typeof data.reviewTimeoutMin === "number" ? data.reviewTimeoutMin : DEFAULT_TIMEOUT_MIN;
-    checkRoundBudget(timeout, parseAcceptanceConfig(next.acceptance, root, {}), parseGateConfig(data.gate));
+    resolveProjectConfig(root, { marker: next });
     config = `${JSON.stringify(next, null, 2)}\n`;
     configAction = existsSync(configPath) ? "加上 acceptance 一节（其他字段保留）" : "新建";
   }

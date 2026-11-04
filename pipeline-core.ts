@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join, resolve } from "node:path";
 import type { AcceptanceRecord } from "./acceptance-core.ts";
 import type { Snapshot } from "./git.ts";
+import { captureProjectConfigOverrides, type ProjectConfigOverrides } from "./config.ts";
 
 export interface QueueAcceptanceItem { id: string; text: string; detail: string }
 /** 明确的空数组表示未配置验收或全部通过；缺字段的历史 done 不授予自动合入资格。 */
@@ -71,6 +72,8 @@ export interface StageStatus {
   checks?: { gate: string; review: string; acceptance: string };
   /** 此资格所依据的冻结来源版本；消费者在接力边界核对实际文件。 */
   sourceInputs?: string;
+  /** 此段实际使用的显式评审覆盖；消费者复核来源时不能改用自身进程的默认预算。 */
+  configOverrides?: ProjectConfigOverrides;
   /** 每写一次加 1；编排程序据此认出「派发之后的新事件」。 */
   seq: number;
   /** 已经收下的最后一条收件箱序号。 */
@@ -126,7 +129,7 @@ export function writeStageStatus(link: StageLink, status: Omit<StageStatus, "sta
   const path = statusPath(link.dir, link.stage);
   const previous = readJson<StageStatus>(path);
   const batchFile = status.batchFile ?? process.env.AUTOREVIEW_BATCH_FILE;
-  const next: StageStatus = { ...status, ...(batchFile ? { batchFile: resolve(batchFile) } : {}), runId: status.runId ?? process.env.AUTOREVIEW_LAUNCH_ID, stage: link.stage, seq: (previous?.seq ?? 0) + 1, updatedAt: new Date().toISOString() };
+  const next: StageStatus = { ...status, configOverrides: captureProjectConfigOverrides(status.configOverrides), ...(batchFile ? { batchFile: resolve(batchFile) } : {}), runId: status.runId ?? process.env.AUTOREVIEW_LAUNCH_ID, stage: link.stage, seq: (previous?.seq ?? 0) + 1, updatedAt: new Date().toISOString() };
   writeJsonAtomic(path, next);
   return next;
 }
