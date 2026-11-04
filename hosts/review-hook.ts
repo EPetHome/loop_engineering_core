@@ -29,6 +29,8 @@ import type { FailureKind } from "../failure.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
 import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle } from "../ledger.ts";
 import { acceptanceTodos } from "../onboarding.ts";
+import { auditLoopConfig, loopConfigMark } from "../config-audit.ts";
+import { developerQuestion, pauseAction, pauseText, preservePause } from "../blockers.ts";
 import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
 import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "../merge-queue.ts";
@@ -80,6 +82,7 @@ interface HookContext {
   configError?: string;
   permissionMode?: string;
   transcript?: string;
+  lastReply?: string;
 }
 
 /**
@@ -471,6 +474,7 @@ async function writeSummary(
     status, pauseReason, rounds: state.rounds, repairs: state.repairs,
     unresolvedMustFix: state.unresolvedMustFix, changedFiles, gitStatusShort, notes, newCommits,
     sourceChanges: state.sourceChanges, sourceChangeNote: state.sourceChangeNote,
+    loopConfigChanges: state.loopConfigChanges, pauseDetail: state.pauseDetail, blockerHistory: state.blockerHistory,
     ledger: state.phase === "done" && state.ledger
       ? { path: state.ledger.path, pending: state.ledger.pending, failed: state.ledger.failed } : undefined,
   });
@@ -522,7 +526,14 @@ async function pause(
   state.phase = "paused";
   state.pauseReason = reason;
   state.pauseFailureKind = failureKind;
-  state.pauseHint = hint;
+  state.pauseHint = hint ?? pauseAction(reason);
+  state.pauseDetail = { reason, ...(notes ? { error: notes } : {}), question: developerQuestion(question ?? ctx.lastReply), action: state.pauseHint };
+  try {
+    auditLoopConfig(state, ctx.workDir);
+    const path = preservePause(ctx.paths.dir, state.pauseDetail);
+    state.pauseDetail.evidence = path;
+    (state.blockerHistory ??= []).push(path);
+  } catch (error) { process.stderr.write(`暂停原文保存失败：${errorText(error)}\n`); }
   state.awaitingRepair = false;
   try { saveStateFile(ctx.paths.state, state); } catch (error) {
     process.stderr.write(`autoreview hook: 状态保存失败：${errorText(error)}\n`);
@@ -531,8 +542,7 @@ async function pause(
     process.stderr.write(`autoreview hook: 总结写入失败：${errorText(error)}\n`);
   }
   observe(ctx, state, "paused", { question });
-  // Claude Code 里下一步走 systemMessage；其他宿主只有系统通知，就把下一步带上。
-  await notify(`${basename(ctx.workDir)}：暂停（${reason}）${hint && ctx.host !== "claude" ? `。${hint}` : ""}${question ? `\n${question}` : ""}`, ctx.exec);
+  await notify(`${basename(ctx.workDir)}：暂停（${reason}）\n${pauseText(state.pauseDetail)}`, ctx.exec);
 }
 
 /** 没有活进程持锁时，清掉上一个 Hook 被杀后留下的子进程。 */
@@ -777,6 +787,7 @@ async function userPromptSubmit(ctx: HookContext, event: HookEvent): Promise<str
   if (state.baseline === undefined && state.requirement?.trim() && !lockAlive(ctx.paths.lock)) {
     const snap = await createGitEvidence(ctx.exec, ctx.workDir).snapshot();
     state.baseline = snap.ref; state.baselineUntracked = snap.untracked.map(({ path }) => path); state.baselineFingerprint = snap.fingerprint;
+    state.loopConfigMark = loopConfigMark(ctx.workDir);
     saveStateFile(ctx.paths.state, state);
   }
   const contextConfig = loadContext(ctx.workDir);
@@ -855,11 +866,12 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   if (queuedRepair && prepared === undefined) return JSON.stringify({ decision: "block", reason: queuedRepair });
   // 原生通道可能不触发 UserPromptSubmit；首次 Stop 仅确认收件，按发送前的基线评审修复。
   const text = lastAssistantMessage(event);
+  ctx.lastReply = text;
   const marker = classifyMarker(text);
   if (marker === "decision") {
     if (state.phase === "paused") return undefined;
     await pause(ctx, state, "开发方需要你决定", undefined, undefined, undefined, undefined, text);
-    return undefined;
+    return userOutput(ctx, `自动评审暂停（${state.pauseReason}）。\n${pauseText(state.pauseDetail!)}`);
   }
   // 暂停状态不自动评审，等你再提交消息（UserPromptSubmit 解除，与 pi 扩展一致）。
   if (state.phase === "paused" && !state.resumeAfterInputChange) return undefined;
@@ -998,7 +1010,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
     if (outcome.kind === "paused") {
       const reason = outcome.reason ?? "评审失败";
       await pause(ctx, state, reason, outcome.changedFiles, outcome.notes, outcome.hint, outcome.failureKind);
-      return userOutput(ctx, outcome.hint && `自动评审暂停（${reason}）。${outcome.hint}`);
+      return userOutput(ctx, `自动评审暂停（${state.pauseReason}）。\n${pauseText(state.pauseDetail!)}`);
     }
     state.phase = "idle";
     saveStateFile(ctx.paths.state, state);
@@ -1059,8 +1071,8 @@ async function dispatch(event: HookEvent): Promise<string | undefined> {
 }
 
 /** 异常收口：开发会话才记暂停、写总结、尽力通知，然后放行（退出 0）。 */
-async function recover(event: HookEvent, error: unknown): Promise<undefined> {
-  const detail = errorText(error);
+async function recover(event: HookEvent, error: unknown): Promise<string | undefined> {
+  const detail = error instanceof Error ? error.stack ?? error.message : String(error);
   process.stderr.write(`autoreview hook 内部错误：${detail}\n`);
   const root = devProjectRoot();
   if (!root) return undefined;
@@ -1068,16 +1080,16 @@ async function recover(event: HookEvent, error: unknown): Promise<undefined> {
   const sessionId = sessionIdOf(event);
   const ctx: HookContext = {
     host, configRoot: root, workDir: root, promptDir: resolve(event.cwd?.trim() || process.cwd()),
-    sessionId, paths: hookPaths(root, host, sessionId), exec: childExec,
+    sessionId, paths: hookPaths(root, host, sessionId), exec: childExec, lastReply: lastAssistantMessage(event),
     config: { maxRepairs: DEFAULT_MAX_REPAIRS, reviewerModel: DEFAULT_MODEL, reviewerThinking: DEFAULT_THINKING, reviewTimeoutMin: DEFAULT_TIMEOUT_MIN, reviewerCmd: "" },
   };
   const state = loadStateFileForRecovery(ctx.paths.state);
   if (!existsSync(join(root, MARKER_FILE))) {
     await pause(ctx, state, "项目配置不可用", undefined, `项目配置不可用（AUTOREVIEW_DEV_ROOT=${root}）：${join(root, MARKER_FILE)} 不存在`);
   } else {
-    await pause(ctx, state, "自动评审内部错误", undefined, `Hook 异常：${tail(detail, 300)}`);
+    await pause(ctx, state, "自动评审内部错误", undefined, `Hook 异常：${detail}`);
   }
-  return undefined;
+  return userOutput(ctx, `自动评审暂停（${state.pauseReason}）。\n${pauseText(state.pauseDetail!)}`);
 }
 
 export async function handleReviewEvent(event: HookEvent): Promise<string | undefined> {

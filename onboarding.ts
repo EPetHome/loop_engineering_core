@@ -23,7 +23,7 @@ const RESUME = "再给开发方发一条消息继续";
 export function blockerHint(record: AcceptanceRecord, workDir: string, acceptance: AcceptanceConfig): string {
   switch (record.blocker) {
     case "系统被关掉":
-      return `被测系统在验收途中被关掉了，多半是验收方自己关的（或重置命令重启了服务），不是开发方的问题，这一轮作废、没有打回开发方。`
+      return `被测系统在验收途中退出，本轮按「不是开发方的问题」暂停（现有证据不足以归责开发方），这一轮作废、没有打回开发方。请核对 system.log、退出记录和重置命令，不猜测是谁关掉了服务。`
         + `需要干净数据的项目请在 ${configFile(acceptance)} 配置 acceptance.reset（只重置数据、不重启服务，写法见 ${GUIDE_DOC}「${CONFIG_SECTION}」）；${RESUME}，会重新验收`;
     case "数据不干净":
       return acceptance.reset
@@ -38,7 +38,8 @@ export function blockerHint(record: AcceptanceRecord, workDir: string, acceptanc
     case "验收方":
       return `验收方没按要求留证据或输出格式不对${record.escalated ? "（已换强模型重验，仍然不行）" : ""}，原因见总结；${RESUME}，会重新验收`;
     default:
-      return `全部标准都没能验证，多半是环境问题（数据库、测试账号等）或标准写得含糊：修好环境，或给开发方发一条带「## 验收标准」的新消息；${RESUME}`;
+      return [`验收方逐条原因：${record.items.filter((item) => item.verdict === "无法验证").map((item) => `${item.id}：${item.detail || "未提供原因"}`).join("；") || record.reason || "未提供原因，需核对原始报告"}`,
+        `请按这些原因处理；原因不足时先核对 ${record.runDir} 的原始报告与证据，不预判是环境或标准问题；${RESUME}`].join("\n");
   }
 }
 

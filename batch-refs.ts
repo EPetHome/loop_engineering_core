@@ -55,6 +55,11 @@ export function remapBatchReferences(
       const stage = value as Record<string, unknown>;
       if (stage.cwd !== undefined) stage.cwd = originalPath(stage.cwd);
       if (stage.prompt !== undefined) stage.prompt = remap(stage.prompt);
+      if (stage.acceptance && typeof stage.acceptance === "object" && !Array.isArray(stage.acceptance)) {
+        const acceptance = stage.acceptance as Record<string, unknown>;
+        if (acceptance.guide !== undefined) acceptance.guide = remap(acceptance.guide);
+        if (Array.isArray(acceptance.logs)) acceptance.logs = acceptance.logs.map(originalPath);
+      }
       remapPonytail(stage);
     }
   }

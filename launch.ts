@@ -1,5 +1,7 @@
 /** 正式启动组及运行代次：候选 spawn 不能覆盖已经取得运行权的活动身份。 */
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,11 +117,34 @@ export async function runBatchCommand(info: BatchInfo, stage: string | null, com
   });
 }
 
+/** Terminal 只输入短脚本路径；完整命令与身份通过私有文件传递，不经过终端行缓冲。 */
+export function terminalStageCommand(info: BatchInfo, stage: string, cwd: string, script: string): { command: string; release: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "loop-terminal-")), token = randomUUID();
+  const file = join(root, "payload.json"), wrapper = join(root, "start.sh");
+  const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+  const release = () => rmSync(root, { recursive: true, force: true });
+  try {
+    writeFileSync(file, JSON.stringify({ info, stage, cwd, script, token, root }), { mode: 0o600 });
+    writeFileSync(wrapper, `#!/bin/sh\nexec ${[process.execPath, fileURLToPath(import.meta.url), "--payload", file, token].map(quote).join(" ")}\n`, { mode: 0o700 });
+    const command = `/bin/sh ${quote(wrapper)}`;
+    if (Buffer.byteLength(command) >= 1024) throw new Error("系统临时目录路径过长，无法安全派发 Terminal 短命令");
+    return { command, release };
+  } catch (error) { release(); throw error; }
+}
+
 /** Terminal 只打开窗口；窗口内仍由同一启动器建立独立组，绝不结束终端自己的组。 */
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [raw, stage, cwd, script] = process.argv.slice(2);
+  let [raw, stage, cwd, script] = process.argv.slice(2);
   try {
-    const info = JSON.parse(raw) as BatchInfo;
+    let info: BatchInfo;
+    if (raw === "--payload") {
+      const file = stage, token = cwd;
+      const payload = JSON.parse(readFileSync(file, "utf8"));
+      if (!token || payload.token !== token || resolve(file) !== join(payload.root, "payload.json")) throw new Error("Terminal 启动文件身份不匹配，未执行或删除");
+      ({ info, stage, cwd, script } = payload);
+      // 只删除持有随机凭据的这一份生成物；不按名称/年龄扫描系统临时目录。
+      rmSync(payload.root, { recursive: true });
+    } else info = JSON.parse(raw) as BatchInfo;
     if (!info.batch?.file || !info.dir || !stage || !cwd || !script) throw new Error("缺少批次启动身份");
     void runBatchCommand(info, stage, "/bin/sh", ["-c", script], { cwd, capture: false })
       .then((result) => { process.exitCode = result.status; })

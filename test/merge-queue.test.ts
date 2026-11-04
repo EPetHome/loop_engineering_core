@@ -32,7 +32,7 @@ import { hookInputBridgeAvailable, inputBridgePath, inputStatePath, repairText }
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const LOOP = join(ROOT, "loop.ts");
-const keys = ["HOME", "PATH", "LOOP_PA_CONFIG", "AUTOREVIEW_MERGE_QUEUE_ROOT", "AUTOREVIEW_MERGE_QUEUE_LAUNCHER", "AUTOREVIEW_RESOURCE_ROOT", "AUTOREVIEW_PROJECTS_ROOT", "PI_BIN", "PI_NODE_BIN", "LOOP_DIR", "PERMISSION_EXTENSION", "PONYTAIL_EXTENSION", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"];
+const keys = ["HOME", "PATH", "LOOP_PA_CONFIG", "AUTOREVIEW_MERGE_QUEUE_ROOT", "AUTOREVIEW_MERGE_QUEUE_LAUNCHER", "AUTOREVIEW_RESOURCE_ROOT", "AUTOREVIEW_PROJECTS_ROOT", "AUTOREVIEW_REVIEWER_CMD", "PI_BIN", "PI_NODE_BIN", "LOOP_DIR", "PERMISSION_EXTENSION", "PONYTAIL_EXTENSION", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"];
 function fixture(count = 2, openCount = count) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "loop-merge-queue-"))), repo = join(root, "repo");
   const saved = keys.map((key) => process.env[key]);
@@ -52,6 +52,7 @@ const old=JSON.parse(fs.readFileSync(p,'utf8')); fs.writeFileSync(p,JSON.stringi
   const env = {
     HOME: home, PATH: `${bin}:${process.env.PATH}`, AUTOREVIEW_MERGE_QUEUE_ROOT: join(root, "queues"), AUTOREVIEW_MERGE_QUEUE_LAUNCHER: "background",
     AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"), AUTOREVIEW_PROJECTS_ROOT: join(root, "projects"), PI_BIN: fakePi,
+    AUTOREVIEW_REVIEWER_CMD: join(ROOT, "test", "fake-reviewer.mjs"),
     PI_NODE_BIN: dirname(process.execPath), LOOP_DIR: ROOT, PERMISSION_EXTENSION: join(root, "permission.ts"), PONYTAIL_EXTENSION: join(root, "ponytail.js"),
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
   };
@@ -648,7 +649,9 @@ test("配置返修 2：原 Pi 退出后队列失败，经独立 Terminal 恢复�
       const batch = f.batches[0], marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8"));
       writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify({ ...marker, gate: { ...marker.gate, timeoutMin: 20 }, acceptance: { timeoutMin: 60 } }));
       const raw = JSON.parse(readFileSync(batch.file, "utf8"));
-      raw.pi = { ponytail: false, ...(explicit ? { args: ["--autoreview-review-timeout-min", "150", "--autoreview-reviewer-model", "chosen/model with space", "--autoreview-reviewer-thinking", "high", "--autoreview-max-repairs", "7", "--autoreview-reviewer-cmd", "/fake/reviewer's command"] } : {}) };
+      const reviewer = join(f.root, "reviewer's command");
+      writeFileSync(reviewer, "#!/bin/sh\nprintf '## 结论：通过\\n## 必修\\n无\\n## 小问题\\n无\\n## 需求疑问\\n无\\n'\n"); chmodSync(reviewer, 0o755);
+      raw.pi = { ponytail: false, ...(explicit ? { args: ["--autoreview-review-timeout-min", "150", "--autoreview-reviewer-model", "chosen/model with space", "--autoreview-reviewer-thinking", "high", "--autoreview-max-repairs", "7", "--autoreview-reviewer-cmd", reviewer] } : {}) };
       writeFileSync(batch.file, JSON.stringify(raw));
       f.git(f.repo, "add", ".autoreview.json", "batch-0.json"); f.git(f.repo, "commit", "-qm", "configure launch budget");
       assert.equal(f.cli("开工", batch.file, "--autoreview-review-timeout-min", "120").ok, true);

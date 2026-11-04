@@ -411,6 +411,9 @@ export interface ProjectConfigOverrides {
   reviewTimeoutMin?: string | number;
   reviewerCmd?: string;
   env?: NodeJS.ProcessEnv;
+  /** 段级验收覆盖；显式身份优先于进程环境，避免编排器误读其他段。 */
+  batchFile?: string;
+  stage?: string;
   /** 接入工具校验尚未落盘的候选配置；不写入文件。 */
   marker?: Record<string, unknown>;
 }
@@ -447,6 +450,7 @@ export function captureProjectConfigOverrides(overrides: ProjectConfigOverrides 
   return {
     maxRepairs: overrides.maxRepairs, reviewerModel: overrides.reviewerModel, reviewerThinking: overrides.reviewerThinking,
     reviewTimeoutMin: overrides.reviewTimeoutMin, reviewerCmd: overrides.reviewerCmd,
+    batchFile: overrides.batchFile ?? source.AUTOREVIEW_BATCH_FILE, stage: overrides.stage ?? source.AUTOREVIEW_STAGE,
     env: Object.fromEntries(PROJECT_CONFIG_ENV.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])),
   };
 }
@@ -456,6 +460,26 @@ export interface ResolvedProjectConfig extends ReviewConfig {
   context?: ContextConfig;
   raw: Record<string, unknown>;
   effectiveConfig: { reviewTimeoutMin: { value: number; source: ConfigSource } };
+}
+
+/** 段级 acceptance 与项目配置同类型；路径按批次文件解析，未写字段继承项目值。 */
+export function stageAcceptance(raw: unknown, base: AcceptanceConfig | undefined, batchDir: string, env: NodeJS.ProcessEnv = process.env): AcceptanceConfig | undefined {
+  if (raw === undefined) return base;
+  const parsed = parseAcceptanceConfig(raw, batchDir, env)!;
+  if (!base) return parsed;
+  const fields = new Set(Object.keys(raw as Record<string, unknown>));
+  return { ...base, ...Object.fromEntries(Object.entries(parsed).filter(([key]) => fields.has(key))) };
+}
+
+function batchStageAcceptance(overrides: ProjectConfigOverrides, env: NodeJS.ProcessEnv): { raw?: unknown; dir: string } | undefined {
+  const file = overrides.batchFile ?? env.AUTOREVIEW_BATCH_FILE, stage = overrides.stage ?? env.AUTOREVIEW_STAGE;
+  if (!file || !stage) return undefined;
+  let batch: Record<string, unknown>;
+  try { batch = object(JSON.parse(readFileSync(file, "utf8")), `批次文件 ${file}`); }
+  catch (error) { throw new Error(`无法读取批次文件 ${file}：${errorText(error)}`); }
+  const stages = object(batch.stages, "批次文件的 stages");
+  const value = object(stages[stage], `批次文件的 stages.${stage}`);
+  return { raw: value.acceptance, dir: dirname(resolve(file)) };
 }
 
 /** root 是标记文件所在目录；undefined 表示尚未接入，使用默认配置。每次读取，不缓存旧值。 */
@@ -479,7 +503,8 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
     reviewTimeoutMin = nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN);
   }
   const configRoot = root ?? process.cwd();
-  const acceptance = parseAcceptanceConfig(data.acceptance, configRoot, env);
+  const stage = batchStageAcceptance(overrides, env);
+  const acceptance = stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
   const gate = parseGateConfig(data.gate);
   const preparation = parsePreparation(data.preparation, configRoot);
   const methods = parseMethodsConfig(data.methods, configRoot);
@@ -493,7 +518,7 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
     reviewerCmd: overrides.reviewerCmd?.trim() || env.AUTOREVIEW_REVIEWER_CMD?.trim() || nonEmptyString(data, "reviewerCmd", ""),
     ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}),
     ...(methods ? { methods } : {}), ...(context ? { context } : {}),
-    configurationHash: configurationHash(data), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
+    configurationHash: configurationHash(stage?.raw === undefined ? data : { project: data, stageAcceptance: stage.raw }), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
   };
 }
 
