@@ -371,7 +371,7 @@ export function renderSummary(input: SummaryInput): string {
     else {
       const pending = input.ledger.pending.length > 0
         ? `（${input.ledger.pending.map((item) => `${item.id} ${item.kind}`).join("、")}）` : "";
-      lines.push(`- 已登记到交付总表：${input.ledger.path}；待回写原单${pending}`);
+      lines.push(`- 已登记到交付总表：${input.ledger.path}${pending}`);
     }
   }
   lines.push(`- 项目：${input.cwd}`);

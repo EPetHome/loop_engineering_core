@@ -24,7 +24,7 @@ import {
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
-import { EXT_DIR, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, workspacePath, type AcceptanceConfig } from "./config.ts";
+import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, workspacePath, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
 import { batchInfo, batchLocation, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
@@ -32,7 +32,7 @@ import { mergePAGrants, readPAGrants } from "./pa-records.ts";
 import type { FailureKind } from "./failure.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { createGitEvidence } from "./git.ts";
-import { blockerHint } from "./onboarding.ts";
+import { blockerHint, browserHint } from "./onboarding.ts";
 import {
   inboxPath, PIPELINE_DIR_ENV, PIPELINE_LAUNCH_ENV, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, readJson, STAGE_ENV, statusPath, writeJsonAtomic,
   type InboxMessage, type StageStatus,
@@ -74,6 +74,8 @@ export interface StagePlan {
   ponytail?: PiOptions["ponytail"];
   workspace?: string;
   branch?: string;
+  /** 本段显式评审参数及配置环境快照；准备、窗口和资格读取使用同一份覆盖。 */
+  configOverrides?: ProjectConfigOverrides;
   /** 流水线启动前确定的开工依据；准备和会话都用它，避免脏工作区各取一次快照。 */
   baseline?: string;
   /** 本段允许/禁止修改的路径前缀；没写不做越界检查。 */
@@ -220,10 +222,12 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
       const prompt = resolve(planDir, text(value.prompt, `stages.${stage}.prompt`));
       const pi = piOptions(value, `stages.${stage}`, planPi, planDir);
       stages.set(stage, { name: stage, start: piCommand(name, stage, prompt, pi, cwd), cwd, prompt,
+        configOverrides: captureProjectConfigOverrides(projectConfigOverridesFromArgs(pi.args), env),
         ...(pi.ponytail ? { ponytail: pi.ponytail } : {}), ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}),
         ...(scope ? { scope } : {}) });
     } else {
       stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd,
+        configOverrides: captureProjectConfigOverrides({}, env),
         ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}), ...(scope ? { scope } : {}) });
     }
   }
@@ -353,6 +357,10 @@ export async function preflight(plan: Plan, options: { fromAcceptance?: boolean;
       add(`${stage.name} 的目录`, isDir(stage.cwd), stage.cwd);
       const head = isDir(stage.cwd) && spawnSync("git", ["-C", stage.cwd, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).status === 0;
       add(`${stage.name} 的目录是有提交的 git 仓库`, head, head ? stage.cwd : "自动评审只在有提交的 git 仓库里工作");
+      try {
+        resolveProjectConfig(findProjectRoot(stage.cwd), stage.configOverrides);
+        add(`${stage.name} 的项目配置`, true, "配置与轮次预算有效");
+      } catch (error) { add(`${stage.name} 的项目配置`, false, (error as Error).message); }
       if (stage.prompt) add(`${stage.name} 的提示词`, existsSync(stage.prompt), stage.prompt);
       if (stage.ponytail) add(`${stage.name} 的 Ponytail 原生扩展`, existsSync(stage.ponytail.extension), `${stage.ponytail.extension}；声明模式 ${stage.ponytail.mode}`);
     }
@@ -385,7 +393,7 @@ export async function preflight(plan: Plan, options: { fromAcceptance?: boolean;
     }
     if (acceptance.items.some((item) => !isManualCriterion(item.text) && NEEDS_BROWSER.test(item.text))) {
       const found = isDir(acceptance.workDir) && env.playwright(acceptance.workDir);
-      add("Playwright（整批验收要操作网页）", found, found ? "找到了" : `找不到：在 ${acceptance.workDir} 里执行接入手册的【块 3】`);
+      add("Playwright（整批验收要操作网页）", found, found ? "找到了" : `找不到：${browserHint(acceptance.workDir)}`);
     }
   }
   return checks;
@@ -403,7 +411,10 @@ export function stageScript(plan: Plan, stage: StagePlan): string {
   const baseline = stage.baseline ? ` AUTOREVIEW_BASE_REV=${shellQuote(stage.baseline)}` : "";
   // 所有段入口都持有一份启动身份：prompt 由 pi-dev 撤掉，自定义 start 由 autoreview 扩展加载时撤掉。
   const token = ` ${PIPELINE_LAUNCH_TOKEN_ENV}=${shellQuote(randomUUID())}`;
-  return `cd ${shellQuote(stage.cwd)} && export ${PIPELINE_DIR_ENV}=${shellQuote(plan.dir)} ${STAGE_ENV}=${shellQuote(stage.name)} ${PIPELINE_LAUNCH_ENV}=1${batch}${baseline}${token} && ${stage.start}`;
+  // Terminal 可能早已运行，不能依赖它继承当前编排进程的环境；空值也显式写出以屏蔽旧窗口环境。
+  const configEnv = stage.configOverrides?.env;
+  const config = configEnv ? PROJECT_CONFIG_ENV.map((key) => ` ${key}=${shellQuote(configEnv[key] ?? "")}`).join("") : "";
+  return `cd ${shellQuote(stage.cwd)} && export ${PIPELINE_DIR_ENV}=${shellQuote(plan.dir)} ${STAGE_ENV}=${shellQuote(stage.name)} ${PIPELINE_LAUNCH_ENV}=1${batch}${baseline}${token}${config} && ${stage.start}`;
 }
 
 class StageStartupFailure extends Error {
@@ -478,7 +489,7 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
         || (status.inbox ?? 0) < (message?.seq ?? 0)) invalid.push(name);
       else {
         try {
-          if (inspectSources && sourceInputsProblem(plan.stages.get(name)!.cwd, status.sourceInputs)) { invalid.push(name); continue; }
+          if (inspectSources && sourceInputsProblem(plan.stages.get(name)!.cwd, status.sourceInputs, status.configOverrides ?? plan.stages.get(name)!.configOverrides)) { invalid.push(name); continue; }
           epochs.push([name, status.sessionId, status.readyEpoch, status.inbox ?? 0]);
         } catch { invalid.push(name); } // 无法读取真实来源时不能只相信旧 done。
       }
@@ -605,13 +616,13 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
             const stage = plan.stages.get(name)!;
             stage.baseline = await snapshotRef(stage.cwd, options.signal);
             if (!stage.baseline) return `${name}：无法读取开工依据`;
-            const context = loadContext(stage.cwd);
+            const context = loadContext(stage.cwd, stage.configOverrides);
             if (context) {
               const source = refreshContext(context);
               report.push(`- ${name} 来源版本 ${source.snapshot.revision}：${source.path}`);
               if (source.snapshot.missing.length) return `${name} 缺少来源：${source.snapshot.missing.join("、")}`;
             }
-            const config = loadPreparation(stage.cwd);
+            const config = loadPreparation(stage.cwd, stage.configOverrides);
             if (!config) return undefined;
             const file = resolve(plan.dir, `${fileSafe(name)}.preparation.json`);
             const state = readJson<PreparationState>(file) ?? {};

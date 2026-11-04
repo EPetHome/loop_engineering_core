@@ -10,7 +10,7 @@ import { mkdtempSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync,
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PI_BIN, PERMISSION_EXT } from "./config.ts";
+import { PI_BIN, PERMISSION_EXT, projectConfigOverridesFromArgs, type ProjectConfigOverrides } from "./config.ts";
 import { currentMethodsFingerprint, recordPermissionCheck } from "./methods.ts";
 import { PIPELINE_DIR_ENV, PIPELINE_LAUNCH_TOKEN_ENV, STAGE_ENV, writeStageStatus } from "./pipeline-core.ts";
 import { batchInfo, eventReason, pushEvent, writePhase } from "./events.ts";
@@ -27,7 +27,10 @@ const readJson = (path: string): Record<string, unknown> | undefined => {
   } catch { return undefined; }
 };
 
-function argsOf(argv: string[]): { cwd: string; loopRoot: string; pi: string; permission: string; trust: TrustMode } {
+function argsOf(argv: string[]): { cwd: string; loopRoot: string; pi: string; permission: string; trust: TrustMode; overrides: ProjectConfigOverrides } {
+  const separator = argv.indexOf("--");
+  const overrides = projectConfigOverridesFromArgs(separator < 0 ? [] : argv.slice(separator + 1));
+  argv = separator < 0 ? argv : argv.slice(0, separator);
   const value = (name: string): string | undefined => {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : undefined;
@@ -39,7 +42,7 @@ function argsOf(argv: string[]): { cwd: string; loopRoot: string; pi: string; pe
     loopRoot: resolve(value("--loop-root") ?? dirname(fileURLToPath(import.meta.url))),
     pi: value("--pi") ?? PI_BIN,
     permission: value("--permission") ?? PERMISSION_EXT,
-    trust,
+    trust, overrides,
   };
 }
 
@@ -277,7 +280,7 @@ function fail(reason: string): number {
 
 async function main(): Promise<number> {
   const args = argsOf(process.argv.slice(2));
-  const { fingerprint, components, record } = currentMethodsFingerprint(args.cwd, args.loopRoot);
+  const { fingerprint, components, record } = currentMethodsFingerprint(args.cwd, args.loopRoot, process.env, args.overrides);
   if (record?.permissionFingerprint === fingerprint) return 0;
 
   const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve(process.env.PI_CODING_AGENT_DIR) : join(homedir(), ".pi", "agent");

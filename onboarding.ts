@@ -1,131 +1,16 @@
-/**
- * onboarding.ts — 接入自动验收：接入手册（README-验收标准.md）里的复制块、项目里的目标文件、
- * 写法段是缺失还是过期、给用户的「把【块 N】复制到 <完整路径>」提示和「需要你做的事」清单。
- * 宿主 Hook、pi 扩展和接入命令共用；块的内容只在接入手册里维护一份。
- */
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+/** 接入与验收的下一步提示；规则只在 Loop 仓库维护，不读取项目规则副本。 */
+import { join } from "node:path";
 import { handOverParts, isManualCriterion, type AcceptanceRecord, type Criteria } from "./acceptance-core.ts";
 import { EXT_DIR, MARKER_FILE, type AcceptanceConfig } from "./config.ts";
+import { shellQuote } from "./workspace.ts";
 
 export const GUIDE_DOC = join(EXT_DIR, "README-验收标准.md");
-export const SETUP_SCRIPT = join(EXT_DIR, "setup-acceptance.ts");
+const LOOP_BIN = join(EXT_DIR, "bin", "loop");
+export const CONFIG_SECTION = "可选配置：被测系统怎么启动";
+export const BROWSER_SECTION = "可选配置：浏览器工具";
 
-export type BlockId = 1 | 2 | 3;
-/** 写法段的起止标记；起始标记带版本号。 */
-export const BLOCK_START = /<!--\s*autoreview:acceptance\s+v(\d+)/;
-export const BLOCK_END = "<!-- /autoreview:acceptance -->";
-/** 标记出现之前手抄的旧写法段（只有标题，没有版本），算第 0 版。 */
-const LEGACY_HEADING = /^##\s*起草需求时写验收标准（自动验收）\s*$/m;
-
-/** 取接入手册里「## 【块 N】」标题后的第一个代码块（不含围栏）。 */
-export function extractBlock(doc: string, id: BlockId): string | undefined {
-  const lines = doc.split(/\r?\n/);
-  const heading = lines.findIndex((line) => line.startsWith(`## 【块 ${id}】`));
-  if (heading < 0) return undefined;
-  const open = lines.findIndex((line, index) => index > heading && /^(`{3,})/.test(line));
-  if (open < 0) return undefined;
-  const fence = /^(`{3,})/.exec(lines[open])![1];
-  const close = lines.findIndex((line, index) => index > open && line.trim() === fence);
-  return close < 0 ? undefined : lines.slice(open + 1, close).join("\n");
-}
-
-export function readBlock(id: BlockId): string {
-  const block = extractBlock(readFileSync(GUIDE_DOC, "utf8"), id);
-  if (block === undefined) throw new Error(`接入手册里找不到【块 ${id}】：${GUIDE_DOC}`);
-  return block;
-}
-
-/** 文本里写法段的版本：有标记取标记上的版本，只有旧标题算 0，都没有返回 undefined。 */
-export function blockVersion(text: string): number | undefined {
-  const marked = BLOCK_START.exec(text);
-  if (marked) return Number(marked[1]);
-  return LEGACY_HEADING.test(text) ? 0 : undefined;
-}
-
-export interface BlockChanges { from: number; to: number; added: string[]; removed: string[] }
-
-/** 按行比较被替换的块，保留条款原文及重复行数量；忽略标记/标题里单纯的版本号变化。 */
-export function blockChanges(before: string, after: string): BlockChanges {
-  const lines = (text: string): string[] => text.split(/\r?\n/).filter((line) => line.trim() && !BLOCK_START.test(line) && line.trim() !== BLOCK_END);
-  const old = lines(before), next = lines(after);
-  const key = (line: string): string => line.replace(/^(## 起草需求时写验收标准（自动验收) v\d+(）)$/, "$1$2");
-  const unmatched = (source: string[], target: string[]): string[] => {
-    const counts = new Map<string, number>();
-    for (const line of target) counts.set(key(line), (counts.get(key(line)) ?? 0) + 1);
-    return source.filter((line) => {
-      const count = counts.get(key(line)) ?? 0;
-      if (!count) return true;
-      counts.set(key(line), count - 1);
-      return false;
-    });
-  };
-  return { from: blockVersion(before) ?? 0, to: blockVersion(after) ?? 0, added: unmatched(next, old), removed: unmatched(old, next) };
-}
-
-/** 同仓库其他工作区里的旧版可变手册，只读列出，不扫描或修改其他项目。 */
-export function olderConventionCopies(root: string, latest: number): string[] {
-  try {
-    const git = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: 5000 });
-    const top = git(["rev-parse", "--show-toplevel"]), trees = git(["worktree", "list", "--porcelain", "-z"]);
-    if (top.status !== 0 || trees.status !== 0) return [];
-    const project = realpathSync(root), subdir = relative(realpathSync(top.stdout.trim()), project);
-    const paths: string[] = [];
-    for (const record of trees.stdout.split("\0")) {
-      if (!record.startsWith("worktree ")) continue;
-      const other = resolve(record.slice("worktree ".length), subdir);
-      if (other === project) continue;
-      const file = conventionTarget(other, "pi");
-      try {
-        const version = blockVersion(readFileSync(file, "utf8"));
-        if (version !== undefined && version < latest) paths.push(file);
-      } catch { /* 未检出/无副本时跳过。 */ }
-    }
-    return paths;
-  } catch { return []; }
-}
-
-export type HostKind = "claude" | "codex" | "pi" | string;
-
-/** 可变流程说明有独立入口；接入和升级永不改写常驻 AGENTS.md / CLAUDE.md。 */
-export function conventionTarget(root: string, host: HostKind): string {
-  return join(root, ".autoreview", "CONVENTIONS.md");
-}
-
-export interface ConventionStatus {
-  file: string;
-  status: "缺失" | "旧版" | "最新";
-  version?: number;
-  latest: number;
-}
-
-export function conventionStatus(root: string, host: HostKind): ConventionStatus {
-  const file = conventionTarget(root, host);
-  const latest = blockVersion(readBlock(1)) ?? 0;
-  const version = existsSync(file) ? blockVersion(readFileSync(file, "utf8")) : undefined;
-  const status = version === undefined ? "缺失" : version < latest ? "旧版" : "最新";
-  return { file, status, version, latest };
-}
-
-/** 「把接入手册的【块 N】复制到 <目标>，然后 …」；块 3 是在目录里执行。 */
-export function copyNotice(id: BlockId, target: string, then = "", project?: string): string {
-  const action = id === 3
-    ? `在 ${target} 里执行 ${GUIDE_DOC} 的【块 3】（安装 Playwright 和 Chromium）`
-    : `把 ${GUIDE_DOC} 的【块 ${id}】复制到 ${target}`;
-  const setup = project && id !== 3 ? `。也可以直接跑：node ${SETUP_SCRIPT} ${project}` : "";
-  return `${action}${then ? `，然后${then}` : ""}${setup}`;
-}
-
-/** 写法段缺失或过期时的提醒；最新时返回 undefined。 */
-export function conventionNotice(root: string, host: HostKind): string | undefined {
-  const status = conventionStatus(root, host);
-  if (status.status === "最新") return undefined;
-  if (status.status === "缺失") {
-    return `自动验收：可变流程说明尚未准备。${copyNotice(1, status.file, "保持 AGENTS.md 和 CLAUDE.md 不变", root)}`;
-  }
-  return `自动验收：${status.file} 里的「验收标准」写法是旧版（v${status.version}，最新 v${status.latest}）。`
-    + `把 ${GUIDE_DOC} 的【块 1】整段替换进去（从标记到标记）。也可以直接跑：node ${SETUP_SCRIPT} ${root}`;
+export function browserHint(workDir: string, then = ""): string {
+  return `在 ${workDir} 里按 ${GUIDE_DOC}「${BROWSER_SECTION}」安装 Playwright 和 Chromium${then ? `，然后${then}` : ""}`;
 }
 
 export function configFile(acceptance: AcceptanceConfig): string {
@@ -134,20 +19,20 @@ export function configFile(acceptance: AcceptanceConfig): string {
 
 const RESUME = "再给开发方发一条消息继续";
 
-/** 无法验收时给你的下一步：按卡住的原因指到具体的块和文件。 */
+/** 无法验收时给你的下一步：指向项目配置或 Loop 仓库里的说明。 */
 export function blockerHint(record: AcceptanceRecord, workDir: string, acceptance: AcceptanceConfig): string {
   switch (record.blocker) {
     case "系统被关掉":
       return `被测系统在验收途中被关掉了，多半是验收方自己关的（或重置命令重启了服务），不是开发方的问题，这一轮作废、没有打回开发方。`
-        + `需要干净数据的项目请在 ${configFile(acceptance)} 配置 acceptance.reset（只重置数据、不重启服务，写法见 ${GUIDE_DOC} 的【块 2】）；${RESUME}，会重新验收`;
+        + `需要干净数据的项目请在 ${configFile(acceptance)} 配置 acceptance.reset（只重置数据、不重启服务，写法见 ${GUIDE_DOC}「${CONFIG_SECTION}」）；${RESUME}，会重新验收`;
     case "数据不干净":
       return acceptance.reset
         ? `配置的 acceptance.reset 没能把数据恢复到初始状态（见总结里验收方给的原因）：检查 ${configFile(acceptance)} 里的重置命令，${RESUME}`
-        : `验收需要干净的初始数据，但 ${configFile(acceptance)} 没有配置 acceptance.reset：按 ${GUIDE_DOC} 的【块 2】加上重置命令（只重置数据、不重启服务），${RESUME}`;
+        : `验收需要干净的初始数据，但 ${configFile(acceptance)} 没有配置 acceptance.reset：按 ${GUIDE_DOC}「${CONFIG_SECTION}」加上重置命令（只重置数据、不重启服务），${RESUME}`;
     case "没配启动":
-      return copyNotice(2, configFile(acceptance), `改好启动命令和端口，${RESUME}`, acceptance.root);
+      return `在 ${configFile(acceptance)} 配置 acceptance.start 和就绪地址/端口（见 ${GUIDE_DOC}「${CONFIG_SECTION}」），${RESUME}。需要探测配置可执行：${shellQuote(LOOP_BIN)} 接入 ${shellQuote(acceptance.root)}（已有 acceptance 保留，需按说明补全）`;
     case "缺工具":
-      return copyNotice(3, workDir, RESUME);
+      return browserHint(workDir, RESUME);
     case "验收方模型断线":
       return `验收方模型断线或挂住，不是被测系统超时或崩溃；已有证据和补报告结果已保留在 ${record.runDir}。恢复模型连接后${RESUME}，会重新验收`;
     case "验收方":
@@ -165,14 +50,14 @@ export function manualHint(record: AcceptanceRecord | undefined): string | undef
 
 export interface TodoInput {
   acceptance?: AcceptanceConfig;
-  host: HostKind;
+  host: string;
   phase: string;
   pauseHint?: string;
   criteria?: Criteria;
   lastAcceptance?: AcceptanceRecord;
 }
 
-/** 总结开头「需要你做的事」：暂停时怎么继续、要人工验收的条目、自动起草的标准、写法段缺失或过期。 */
+/** 总结开头「需要你做的事」：暂停的下一步、人工验收、自动起草的标准。 */
 export function acceptanceTodos(input: TodoInput): string[] {
   const todos: string[] = [];
   if (input.phase === "paused" && input.pauseHint) todos.push(input.pauseHint);
@@ -188,9 +73,5 @@ export function acceptanceTodos(input: TodoInput): string[] {
   if (input.criteria?.source === "自动起草") {
     todos.push("验收标准是自动起草的（见下面「验收标准」一节）：不满意就给开发方发一条带「## 验收标准」的消息替换");
   }
-  try {
-    const notice = conventionNotice(input.acceptance.root, input.host);
-    if (notice) todos.push(notice.replace(/^自动验收：/, ""));
-  } catch { /* 接入手册读不到时不提醒 */ }
   return todos;
 }

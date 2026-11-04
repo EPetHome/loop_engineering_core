@@ -84,7 +84,7 @@ if [[ $dry -eq 0 ]]; then
   node_bin="${PI_NODE_BIN}/node"
   [[ -x "${node_bin}" ]] || node_bin="$(command -v node)"
   "${node_bin}" "${LOOP_DIR}/permission-check.ts" --cwd "${cwd}" --loop-root "${LOOP_DIR}" \
-    --pi "${PI_BIN}" --permission "${PERMISSION_EXT}" --trust "${trust}"
+    --pi "${PI_BIN}" --permission "${PERMISSION_EXT}" --trust "${trust}" -- ${extra[@]+"${extra[@]}"}
   # 启动回报身份只属于本次 pi-dev；启动后的子进程不能再改父段状态。
   unset AUTOREVIEW_PIPELINE_LAUNCH_TOKEN
 fi

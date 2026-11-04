@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { findProjectRoot, parseGateConfig, parseMethodsConfig, readMarker, type GateConfig, type MethodsConfig } from "./config.ts";
+import { findProjectRoot, resolveProjectConfig, type MethodsConfig, type ProjectConfigOverrides } from "./config.ts";
 import { writeJsonAtomic } from "./pipeline-core.ts";
 import { projectDataDir } from "./project-context.ts";
 import { currentTree, gitResult, isClean } from "./workspace.ts";
@@ -35,7 +35,7 @@ export interface MethodsRecord {
   permissionCheckedAt?: string;
 }
 
-export interface MethodsOptions { recheck?: boolean; dryRun?: boolean; loopRoot: string; env?: NodeJS.ProcessEnv }
+export interface MethodsOptions { recheck?: boolean; dryRun?: boolean; loopRoot: string; env?: NodeJS.ProcessEnv; overrides?: ProjectConfigOverrides }
 
 export const methodsRecordPath = (root: string, env: NodeJS.ProcessEnv = process.env): string =>
   join(projectDataDir(root, env), "methods.json");
@@ -90,8 +90,7 @@ export function methodFiles(root: string, methods: MethodsConfig | undefined): M
   return [...unique.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function configHash(root: string): string {
-  const raw = existsSync(join(root, ".autoreview.json")) ? readMarker(root) : {};
+function configHash(raw: Record<string, unknown>): string {
   return hash(JSON.stringify({ methods: raw.methods ?? null, gate: raw.gate ?? null }));
 }
 
@@ -102,13 +101,14 @@ function probe(root: string, command: string, dryRun: boolean): ProbeResult {
   return { command, exitCode: res.status ?? 1, hash: hash(`${res.status ?? 1}\n${output}`) };
 }
 
-export function methodsComponents(root: string, loopRoot: string, options: { dryRun?: boolean } = {}): MethodsComponents {
-  const methods = parseMethodsConfig(existsSync(join(root, ".autoreview.json")) ? readMarker(root).methods : undefined, root);
+export function methodsComponents(root: string, loopRoot: string, options: { dryRun?: boolean; env?: NodeJS.ProcessEnv; overrides?: ProjectConfigOverrides } = {}): MethodsComponents {
+  const config = resolveProjectConfig(findProjectRoot(root), { env: options.env, ...options.overrides });
+  const methods = config.methods;
   const probeConfig = methods?.probe;
   return {
     loopVersion: loopVersion(loopRoot),
     files: methodFiles(root, methods),
-    config: configHash(root),
+    config: configHash(config.raw),
     ...(probeConfig ? { probe: probe(root, probeConfig, options.dryRun === true) } : {}),
   };
 }
@@ -157,7 +157,7 @@ export interface MethodsRunResult {
 export function runMethodsSelfTest(root: string, options: MethodsOptions): MethodsRunResult {
   const env = options.env ?? process.env;
   const previous = readMethodsRecord(root, env);
-  const current = methodsComponents(root, options.loopRoot, { dryRun: options.dryRun });
+  const current = methodsComponents(root, options.loopRoot, { dryRun: options.dryRun, env, overrides: options.overrides });
   const fingerprint = methodsFingerprint(current);
   const unchanged = previous?.fingerprint === fingerprint;
   if (unchanged && !options.recheck) {
@@ -172,27 +172,27 @@ export function runMethodsSelfTest(root: string, options: MethodsOptions): Metho
   if (options.dryRun) {
     return { skipped: false, changed: changes, fingerprint, record, written: false };
   }
-  const methods = parseMethodsConfig(existsSync(join(root, ".autoreview.json")) ? readMarker(root).methods : undefined, root);
+  const methods = resolveProjectConfig(findProjectRoot(root), { env, ...options.overrides }).methods;
   if (methods?.selfCheck) {
     const result = runCommand(root, methods.selfCheck, 10 * 60_000);
     if (!result.ok) throw new Error(`方法自测未通过（${methods.selfCheck}，退出码 ${result.code}）：${tail(result.output)}`);
     record.components = current;
     const check = { command: methods.selfCheck, passed: true, output: result.output };
-    const baseline = baselineGate(root, env, options.recheck === true);
+    const baseline = baselineGate(root, env, options.recheck === true, options.overrides);
     if (baseline?.tree) record.gateTrees = [baseline.tree, ...record.gateTrees.filter((tree) => tree !== baseline.tree)].slice(0, 50);
     writeJsonAtomic(methodsRecordPath(root, env), record);
     return { skipped: false, changed: changes, fingerprint, selfCheck: check, ...(baseline ? { baseline } : {}), record, written: true };
   }
-  const baseline = baselineGate(root, env, options.recheck === true);
+  const baseline = baselineGate(root, env, options.recheck === true, options.overrides);
   if (baseline?.tree) record.gateTrees = [baseline.tree, ...record.gateTrees.filter((tree) => tree !== baseline.tree)].slice(0, 50);
   writeJsonAtomic(methodsRecordPath(root, env), record);
   return { skipped: false, changed: changes, fingerprint, ...(baseline ? { baseline } : {}), record, written: true };
 }
 
 /** 基线空跑：开工依据的树已经在缓存里就跳过；否则跑一次门禁，通过后由调用方写进记录。 */
-function baselineGate(root: string, env: NodeJS.ProcessEnv, force = false): { tree: string; cached: boolean; passed?: boolean; output?: string } | undefined {
+function baselineGate(root: string, env: NodeJS.ProcessEnv, force = false, overrides: ProjectConfigOverrides = {}): { tree: string; cached: boolean; passed?: boolean; output?: string } | undefined {
   if (!existsSync(join(root, ".autoreview.json"))) return undefined;
-  const gate = parseGateConfig(readMarker(root).gate) as GateConfig | undefined;
+  const gate = resolveProjectConfig(root, { env, ...overrides }).gate;
   if (!gate) return undefined;
   const tree = currentTree(root);
   const previous = readMethodsRecord(root, env);
@@ -204,8 +204,8 @@ function baselineGate(root: string, env: NodeJS.ProcessEnv, force = false): { tr
 }
 
 /** 当前方法指纹；启动入口的权限检查也用它判断是否跳过。 */
-export function currentMethodsFingerprint(root: string, loopRoot: string, env: NodeJS.ProcessEnv = process.env): { fingerprint: string; components: MethodsComponents; record?: MethodsRecord } {
-  const components = methodsComponents(root, loopRoot);
+export function currentMethodsFingerprint(root: string, loopRoot: string, env: NodeJS.ProcessEnv = process.env, overrides: ProjectConfigOverrides = {}): { fingerprint: string; components: MethodsComponents; record?: MethodsRecord } {
+  const components = methodsComponents(root, loopRoot, { env, overrides });
   const fingerprint = methodsFingerprint(components);
   return { fingerprint, components, record: readMethodsRecord(root, env) };
 }

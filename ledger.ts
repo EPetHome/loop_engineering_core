@@ -1,11 +1,11 @@
 /**
- * ledger.ts — 交付总表：会话完成时追加一段，宿主开会话时提醒把结果回写原单。
+ * ledger.ts — 交付总表：追加结果索引，用户直接查看 Loop 总结。
  *
- * 只追加、不覆盖；每段一次写完。这里只做记录和解析，任何失败都不改变评审/验收状态，
+ * 只追加、不覆盖；每段一次写完。这里只做记录，任何失败都不改变评审/验收状态，
  * 由调用方决定怎么提示。
  */
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripCriteriaSection, type AcceptanceRecord } from "./acceptance-core.ts";
@@ -106,7 +106,7 @@ export function appendPARelayRecord(record: { project: string; session: string; 
   return appendSegment([
     `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 ${oneLine(record.session, 200)}`,
     "- 类型：用户原话，经 PA 转达（非完成结论）",
-    ...relaySourceLines([record.source]), `- 总结：${oneLine(record.summary, 1000)}`, "- [ ] 已回写原单", "",
+    ...relaySourceLines([record.source]), `- 总结：${oneLine(record.summary, 1000)}`, "",
   ].join("\n"), path);
 }
 
@@ -123,7 +123,6 @@ export function renderLedgerRecord(record: LedgerRecord): string {
     `- 结果：${oneLine(record.result, 200)}`,
     `- 总结：${oneLine(record.summary, 1000)}`,
     ...relaySourceLines(record.paRelays),
-    "- [ ] 已回写原单",
     ...record.pending.map((item) => item.kind === "人工"
       ? `- [ ] ${oneLine(item.id, 40)} 人工`
       : `- [ ] ${oneLine(item.id, 40)} 部分验证：${oneLine(item.reason ?? "程序没能自动验证", 160)}`),
@@ -147,7 +146,7 @@ export function appendMergeRecord(record: { project: string; batch: string; entr
   return appendSegment([
     `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 批次-${oneLine(record.entry, 200)}`,
     marker, `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
-    `- 已合入 ${record.commit}`, "- [ ] 已回写原单",
+    `- 已合入 ${record.commit}`,
     ...record.manual.map((item) => `- [ ] ${oneLine(item.id, 120)} 人工：${oneLine(item.text, 1000)}${item.detail ? `；${oneLine(item.detail, 500)}` : ""}`), "",
   ].join("\n"), path);
 }
@@ -160,7 +159,7 @@ export function appendBatchCommitRecord(record: { project: string; batch: string
     `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
     ...record.commits.flatMap((item) => [`- 已提交 ${item.branch} ${item.commit}`, ...item.preSquash.map((ref) => `- 中间历史：${ref}`)]),
     ...record.conclusions.map((line) => `- ${oneLine(line, 2000)}`),
-    "- [ ] 已回写原单", ...record.pending.map((item) => `- [ ] ${oneLine(item.id, 120)} 待验：${oneLine(item.text, 1000)}；${oneLine(item.detail, 500)}`), "",
+    ...record.pending.map((item) => `- [ ] ${oneLine(item.id, 120)} 待验：${oneLine(item.text, 1000)}；${oneLine(item.detail, 500)}`), "",
   ].join("\n"), path);
 }
 
@@ -188,8 +187,7 @@ export function appendMissRecord(record: MissLedgerRecord, path = deliveryLedger
     `- 发现方式：${oneLine(record.discovery, Infinity)}`,
     `- 总结：${oneLine(record.summary, Infinity)}`,
     `- 快照：${record.snapshot ?? "null（历史轮次缺少可复原快照）"}`,
-    `- 案例草稿：${record.draft}`,
-    "- [ ] 已回写原单", "",
+    `- 案例草稿：${record.draft}`, "",
   ].join("\n");
   return appendSegment(text, path);
 }
@@ -199,82 +197,4 @@ function appendSegment(text: string, path: string): string {
   // 每段自带结尾空行：O_APPEND 单次写入就能保证段间分隔，两个会话同时完成也不会粘在一起。
   appendFileSync(path, `${text}\n`, { mode: 0o600 });
   return path;
-}
-
-/**
- * SessionStart 用：读取失败、不是普通文件或明显过大就跳过提醒。
- * 本地文件读取受 SessionStart 时限约束，这里再做一个便宜的耗时兜底。
- */
-export function readLedgerForReminder(path = deliveryLedgerPath(), maxBytes = 8 * 1024 * 1024): string | undefined {
-  const started = Date.now();
-  try {
-    const info = statSync(path);
-    if (!info.isFile() || info.size > maxBytes) return undefined;
-    const text = readFileSync(path, "utf8");
-    return Date.now() - started > 1000 ? undefined : text;
-  } catch { return undefined; }
-}
-
-export interface LedgerSegment {
-  at: string;
-  project: string;
-  session: string;
-  writeback: "checked" | "unchecked" | "none";
-}
-
-function writebackState(line: string): "checked" | "unchecked" | undefined {
-  const match = /^\s*-\s*\[([^\]]*)\]\s*已回写原单/.exec(line);
-  if (!match) return undefined;
-  return /^[xX✓]$/.test(match[1].trim()) ? "checked" : "unchecked";
-}
-
-/** 解析总表里的段；格式不认识的段直接跳过，不影响其他段。 */
-export function parseLedger(text: string): LedgerSegment[] {
-  const segments: LedgerSegment[] = [];
-  const lines = text.split(/\r?\n/);
-  let current: LedgerSegment | undefined;
-  const finish = (): void => {
-    if (current) segments.push(current);
-    current = undefined;
-  };
-  for (const line of lines) {
-    if (/^##(?!#)\s/.test(line)) {
-      finish();
-      const rest = line.replace(/^##\s+/, "");
-      const parts = rest.split(" · ");
-      if (parts.length < 3) continue;
-      const sessionPart = parts[parts.length - 1];
-      const session = /^会话\s+(.+)$/.exec(sessionPart)?.[1]?.trim();
-      if (!session) continue;
-      current = {
-        at: parts[0].trim(),
-        project: parts.slice(1, -1).join(" · ").trim(),
-        session,
-        writeback: "none",
-      };
-      continue;
-    }
-    if (!current) continue;
-    const state = writebackState(line);
-    if (state && current.writeback === "none") current.writeback = state;
-  }
-  finish();
-  return segments;
-}
-
-/** 同一会话只看最后一段；返回本项目还有几个会话的最后一段没勾「已回写原单」。 */
-export function pendingWritebackCount(text: string, project: string): number {
-  const target = canonical(project);
-  const last = new Map<string, LedgerSegment>();
-  for (const segment of parseLedger(text)) {
-    if (canonical(segment.project) !== target) continue;
-    last.set(segment.session, segment);
-  }
-  return [...last.values()].filter((segment) => segment.writeback === "unchecked").length;
-}
-
-export function writebackReminder(text: string, project: string, path = deliveryLedgerPath()): string | undefined {
-  const count = pendingWritebackCount(text, project);
-  if (count === 0) return undefined;
-  return `交付总表里本项目有 ${count} 段待回写原单：${path}。按 .autoreview/CONVENTIONS.md「收尾回写」处理。`;
 }

@@ -18,12 +18,11 @@
     ├── CLAUDE.md                      只有一行 @AGENTS.md
     ├── .autoreview.json.示例          复制成 .autoreview.json，替换占位符；进仓库
     ├── .autoreview/
-    │   ├── methods/                   项目固定方法，只写一份，进仓库
-    │   │   ├── README.md              方法说明
-    │   │   ├── self-check.sh          方法自测；占位符没替换就报方法错误
-    │   │   ├── gate.sh                门禁命令（替换示例）
-    │   │   └── prepare.sh             准备检查与恢复（替换示例）
-    │   └── CONVENTIONS.md             接入后由 setup-acceptance.ts 写入【块 1】
+    │   └── methods/                   项目固定方法，只写一份，进仓库
+    │       ├── README.md              方法说明
+    │       ├── self-check.sh          方法自测；占位符没替换就报方法错误
+    │       ├── gate.sh                门禁命令（替换示例）
+    │       └── prepare.sh             准备检查与恢复（替换示例）
     ├── .gitignore.示例                本机忽略规则示例；复制到 .git/info/exclude，不提交验收环境
     ├── deploy/acceptance/             分支专属、只在本机：隔离验收环境（localFiles 声明）
     │   ├── start.sh
@@ -105,9 +104,9 @@
 ⑩ 归档：提示词标题下写「✅ 已执行」，移进 xx/；主线图留一行
 ```
 
-多段整批验收写在 `批次.json` 的 `acceptance`：`workDir`、`criteria`、`maxRounds` 与验收配置直接平铺；字段及默认值见 [工具清单](../工具清单.md)「批次.json 字段」。各段完成后可用 `pipeline.ts <批次.json> --from 验收` 续跑。
+多段整批验收写在 `批次.json` 的 `acceptance`：`workDir`、`criteria`、`maxRounds` 与验收配置直接平铺；字段及默认值见 [工具清单](../工具清单.md)「批次.json 字段」。整批暂停且编排已退出时，用 `bin/loop 续跑 <批次.json> --id <新编号> --json` 续跑；各段完成后从整批验收接续。
 
-批次目录里不再放门禁、棘轮、启动脚本或 `.autoreview.json` 副本。每批只写 `批次.json` 和结果；提示词在 `docs/prompt/`，由 `批次.json` 的 `stages.<段>.prompt` 引用。门禁和准备来自 `.autoreview/methods/`，启动统一经过 `bin/pi-dev`。模板里的 `deploy/acceptance/` 骨架随仓库交付；接入时把 `.gitignore.示例` 的内容复制到项目的 `.git/info/exclude`（或项目自己的 `.gitignore`），让真实本机文件只在本地存在。
+批次目录里不再放门禁、棘轮、启动脚本或 `.autoreview.json` 副本。每批只写 `批次.json` 和结果；提示词在 `docs/prompt/`，由 `批次.json` 的 `stages.<段>.prompt` 引用。门禁和准备来自 `.autoreview/methods/`，启动统一用 `bin/loop 启动`；临时单会话用 `bin/loop 开发 <pi|claude|codex>`。模板里的 `deploy/acceptance/` 骨架随仓库交付；接入时将 `.gitignore.示例` 的忽略项写入项目 `.git/info/exclude`（或项目自己的 `.gitignore`），让真实本机文件只在本地存在。
 
 ## 规则分四层
 
@@ -118,7 +117,7 @@
 3. 外部文档：写法规则看 loop 的 `README-验收标准.md`，工具和字段看 `工具清单.md`；项目自己的选择（模型、工具组合、批次分支命名）看 `docs/prompt/启动说明.md`。
 4. 提示词和 `批次.json`：每批一份。loop 会自动往 Pi 的系统提示里追加开发约定。
 
-## 改 loop 时对照哪里
+## 内部实现：改 loop 时对照哪里
 
 | 改 loop 的哪一块 | 对照模板的哪里 | 相关缺口 |
 |---|---|---|
@@ -137,12 +136,12 @@
 
 本模板展示职责与目录，不自动迁移 Promate 或其他项目。项目维护者仍需确认实际发布分支、测试库隔离、准备/恢复/释放脚本和来源范围。机器可读段状态、交付索引和原始证据由 Loop 生成；合入发布分支、生产数据备份和业务核销继续按各项目授权。
 
-自动归档只写交付索引，业务基线的语义调整仍由维护者依据证据处理。模板是结构样板，不是空脚本也能通过的运行成品；占位符未替换时，`bin/loop 开工` 会在方法自测阶段报 `AUTOREVIEW_FAILURE=method` 并列出未替换的占位符，不会空跑通过。
+结果直接看 Loop 总结和交付总表，不要求协调方另抄结果或更新原单；人工与部分验证项的勾选只记录实际验过的结果。自动归档只写交付索引，业务基线的语义调整仍由维护者依据证据处理。模板是结构样板，不是空脚本也能通过的运行成品；占位符未替换时，`bin/loop 开工` 会在方法自测阶段报 `AUTOREVIEW_FAILURE=method` 并列出未替换的占位符，不会空跑通过。
 
 ## 本次迭代的管理入口
 
 - `AGENTS.md`：稳定职责与来源链接，普通准备、归档和定时刷新不写它。
-- `.autoreview/CONVENTIONS.md`：可变任务/验收写法，由接入命令维护。
+- 任务与验收写法：只在 Loop 仓库的 `README-验收标准.md` 维护，运行时注入或按需指路。`bin/loop 接入 <项目目录>` 只处理 `.autoreview.json`，不读写项目规则副本和稳定规则；已有旧副本由用户另行决定。
 - `.autoreview/methods/`：项目固定方法，只写一份；门禁、棘轮、准备、自测都在这里。
 - `批次.json`：每批参数；字段见 [工具清单.md](../工具清单.md) 的「批次.json 字段」。
 - `context.sources`：项目维护者声明需求、方案、方法和源码位置；`changes.jsonl` 记录增删改与受影响依赖，`contents/<SHA>` 留内容版本。

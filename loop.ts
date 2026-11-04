@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { remapBatchReferences } from "./batch-refs.ts";
-import { findProjectRoot, loadProjectLayout, workspacePath, type ProjectLayout } from "./config.ts";
+import { findProjectRoot, loadProjectLayout, resolveProjectConfig, workspacePath, type ProjectLayout } from "./config.ts";
 import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { cleanupMaterialHistory } from "./materials.ts";
@@ -44,7 +44,7 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
+interface ParsedArgs { reviewTimeoutMin?: string; base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
@@ -54,6 +54,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--all") result.all = true;
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
+    else if (arg === "--autoreview-review-timeout-min") {
+      const value = argv[++i];
+      if (!value || value.startsWith("--") || result.reviewTimeoutMin !== undefined) throw new LoopError(`${arg} 需要一个值且不能重复`);
+      result.reviewTimeoutMin = value;
+    }
     else if (arg === "--apply") result.apply = true;
     else if (["--base", "--head", "--requirement", "--criteria", "--note"].includes(arg)) {
       const key = arg.slice(2) as "base" | "head" | "requirement" | "criteria" | "note";
@@ -88,6 +93,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.reviewTimeoutMin !== undefined && !["开工", "启动"].includes(result.command ?? "")) throw new LoopError("--autoreview-review-timeout-min 只用于 loop 开工/启动");
   if (result.stage !== undefined && !["送话", "停止"].includes(result.command ?? "")) throw new LoopError("--stage 只用于 loop 送话/停止");
   if ((result.textFile !== undefined || result.wait !== undefined) && result.command !== "送话") throw new LoopError("--text-file、--wait 只用于 loop 送话");
   if ([result.base, result.head, result.requirement, result.criteria, result.note].some((value) => value !== undefined) && result.command !== "评审") throw new LoopError("--base、--head、--requirement、--criteria、--note 只用于 loop 评审");
@@ -172,14 +178,14 @@ function normalizedRaw(repo: Repo, raw: Record<string, unknown>): Record<string,
   return copy;
 }
 
-export function loadBatch(repo: Repo, path: string, options: { warn?: (message: string) => void } = {}): BatchPlan {
+export function loadBatch(repo: Repo, path: string, options: { warn?: (message: string) => void; env?: NodeJS.ProcessEnv } = {}): BatchPlan {
   const absolute = resolve(path);
   const raw = readBatch(absolute);
   const planDir = dirname(absolute);
   const recipe = parseRecipe(raw.recipe);
-  if (recipe === "review-only") return { raw, path: absolute, planDir, plan: parsePlan(raw, planDir, process.env, { batchFile: absolute }), workspaces: [], checks: [], stages: new Map() };
+  if (recipe === "review-only") return { raw, path: absolute, planDir, plan: parsePlan(raw, planDir, options.env ?? process.env, { batchFile: absolute }), workspaces: [], checks: [], stages: new Map() };
   const normalized = normalizedRaw(repo, raw);
-  const plan = parsePlan(normalized, planDir, process.env, { batchFile: absolute, projectRoot: repo.projectRoot, warn: options.warn });
+  const plan = parsePlan(normalized, planDir, options.env ?? process.env, { batchFile: absolute, projectRoot: repo.projectRoot, warn: options.warn });
   const branch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
   const stages = new Map<string, { branch?: string; workspace?: string; cwd: string; prompt?: string }>();
   const byPath = new Map<string, WorkspaceUse>();
@@ -585,10 +591,32 @@ function methodsLines(result: MethodsRunResult): string[] {
   return lines;
 }
 
+/** 显式预算覆盖随子进程传递；不修改调用者的全局环境。 */
+function reviewEnv(args: ParsedArgs): NodeJS.ProcessEnv {
+  return args.reviewTimeoutMin === undefined ? process.env
+    : { ...process.env, AUTOREVIEW_REVIEW_TIMEOUT_MIN: args.reviewTimeoutMin };
+}
+
+/** 在任何工作区/分支/会话副作用前校验运行版及所有已有段目录。 */
+function batchEffectiveConfig(repo: Repo, batch: BatchPlan, args: ParsedArgs) {
+  const root = findProjectRoot(repo.projectRoot);
+  const stages: Record<string, ReturnType<typeof resolveProjectConfig>["effectiveConfig"]> = {};
+  for (const stage of batch.plan.stages.values()) {
+    // 段的 Pi flag 高于入口传递的环境覆盖，与实际宿主的优先级相同。
+    const overrides = { ...stage.configOverrides, reviewTimeoutMin: stage.configOverrides?.reviewTimeoutMin ?? args.reviewTimeoutMin };
+    const runtime = resolveProjectConfig(root, overrides);
+    const config = existsSync(stage.cwd) ? resolveProjectConfig(findProjectRoot(stage.cwd), overrides) : runtime;
+    stages[stage.name] = config.effectiveConfig;
+  }
+  const primary = Object.values(stages)[0] ?? resolveProjectConfig(root, { reviewTimeoutMin: args.reviewTimeoutMin }).effectiveConfig;
+  return { ...primary, stages };
+}
+
 async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   if (!args.batch) throw new LoopError("用法：loop 开工 <批次.json> [--dry-run] [--json] [--recheck]");
   const repo = repoOf(process.cwd());
-  const batch = loadBatch(repo, args.batch);
+  const batch = loadBatch(repo, args.batch, { env: reviewEnv(args) });
+  const effectiveConfig = batchEffectiveConfig(repo, batch, args);
   if (!batch.branch && ![...batch.stages.values()].some((stage) => stage.branch)) throw new LoopError("批次.json 的 branch 必须写 <类型>/<描述>");
   const branchOwners = new Map<string, string>();
   for (const workspace of [...batch.workspaces, ...batch.checks]) {
@@ -678,12 +706,13 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     methods = { skipped: false, changed: ["开发空间尚未建立"], written: false, planned: true };
     lines.push("方法自测：开发空间尚未建立，开工后执行");
   } else {
-    const run = runMethodsSelfTest(primary, { loopRoot: LOOP_ROOT, recheck: args.recheck, dryRun: args.dryRun, env: process.env });
+    const overrides = [...batch.plan.stages.values()].find((stage) => stage.cwd === primary)?.configOverrides;
+    const run = runMethodsSelfTest(primary, { loopRoot: LOOP_ROOT, recheck: args.recheck, dryRun: args.dryRun, env: reviewEnv(args), overrides });
     methods = methodsSummary(run);
     lines.push(...methodsLines(run));
   }
   if (!args.dryRun) {
-    const opened = loadBatch(repo, docs.batchPath);
+    const opened = loadBatch(repo, docs.batchPath, { env: reviewEnv(args) });
     const stages = [...opened.plan.stages.values()].map((stage) => ({ ...stage, branch: branchOfStage(opened, stage.name) ?? "" }));
     // 外部/非 git 段沿用原行为，不把它们接入 git 合入队列。
     if (stages.every((stage) => stage.branch && worktrees(repo.root).some((item) => item.path === gitResult(stage.cwd, ["rev-parse", "--show-toplevel"]).stdout.trim()))) {
@@ -695,7 +724,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   const status = batchCommand("状态", docs.batchPath);
   const merge = batchCommand("合入", docs.batchPath);
   lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
-  return { ok: true, command: "开工", dryRun: args.dryRun, repo: repo.root, release: repo.layout.release,
+  return { ok: true, command: "开工", dryRun: args.dryRun, effectiveConfig, repo: repo.root, release: repo.layout.release,
     batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
     uncommitted, warnings,
     batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
@@ -713,19 +742,21 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
   const file = resolve(args.batch), raw = readBatch(file);
   if (parseRecipe(raw.recipe) === "review-only") {
     const plan = parsePlan(raw, dirname(file), process.env, { batchFile: file });
-    if (args.dryRun) return { ...await runReviewOnly(plan.review!, { file, name: plan.name, dir: plan.dir, dryRun: true }), command: "启动", mode: "review-only" };
+    const effectiveConfig = resolveProjectConfig(findProjectRoot(plan.review!.repo), { reviewTimeoutMin: args.reviewTimeoutMin }).effectiveConfig;
+    if (args.dryRun) return { ...await runReviewOnly(plan.review!, { file, name: plan.name, dir: plan.dir, dryRun: true, configOverrides: { reviewTimeoutMin: args.reviewTimeoutMin } }), command: "启动", mode: "review-only", effectiveConfig };
     const info = batchInfo(file, plan.review!.repo, plan.dir);
     try {
-      const res = await runBatchCommand(info, null, process.execPath, [join(LOOP_ROOT, "review-only.ts"), file], { cwd: process.cwd(), capture: true });
+      const res = await runBatchCommand(info, null, process.execPath, [join(LOOP_ROOT, "review-only.ts"), file], { cwd: process.cwd(), capture: true, env: reviewEnv(args) });
       if (!res.stdout.trim()) throw new Error(String(res.error ?? res.stderr));
-      return { ...JSON.parse(res.stdout), command: "启动", mode: "review-only" };
+      return { ...JSON.parse(res.stdout), command: "启动", mode: "review-only", ...(args.reviewTimeoutMin !== undefined ? { effectiveConfig } : {}) };
     } catch (error) {
       const text = `评审启动失败：${String(error)}`;
       return { ok: false, command: "启动", mode: "review-only", recipe: "review-only", exitCode: 2, reason: eventReason(text), error: text, lines: [text] };
     }
   }
   const repo = repoOf(process.cwd());
-  const batch = loadBatch(repo, args.batch);
+  const batch = loadBatch(repo, args.batch, { env: reviewEnv(args) });
+  const effectiveConfig = batchEffectiveConfig(repo, batch, args);
   const names = batch.plan.steps.flat();
   for (const [name, stage] of batch.plan.stages) {
     const branch = batch.stages.get(name)?.branch;
@@ -747,40 +778,41 @@ async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
   };
   if (names.length === 1) {
     const stage = batch.plan.stages.get(names[0])!;
-    const command = stage.start;
+    const command = args.reviewTimeoutMin === undefined ? stage.start
+      : `AUTOREVIEW_REVIEW_TIMEOUT_MIN=${shellQuote(args.reviewTimeoutMin)} ${stage.start}`;
     if (args.dryRun) {
       let printed = command;
       if (stage.prompt) {
         const res = spawnSync("/bin/sh", ["-c", command], { cwd: stage.cwd, encoding: "utf8",
-          env: { ...process.env, PI_DEV_DRY_RUN: "1", AUTOREVIEW_PIPELINE_DIR: batch.plan.dir,
+          env: { ...reviewEnv(args), PI_DEV_DRY_RUN: "1", AUTOREVIEW_PIPELINE_DIR: batch.plan.dir,
             AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
         if (res.status !== 0) throw new LoopError(`生成启动命令失败：${(res.stderr || res.stdout).trim().slice(-500)}`);
         printed = res.stdout.trim();
       }
       const lines = [`启动：${command}`, ...(printed !== command ? [`经过 pi-dev 的实际命令：${printed}`] : [])];
-      return { ok: true, command: "启动", dryRun: true, mode: "single", stage: stage.name, cwd: stage.cwd, startCommand: command, commands: [printed], lines };
+      return { ok: true, command: "启动", dryRun: true, effectiveConfig, mode: "single", stage: stage.name, cwd: stage.cwd, startCommand: command, commands: [printed], lines };
     }
     started();
     const res = await runBatchCommand(info, stage.name, "/bin/sh", ["-c", command], { cwd: stage.cwd, capture: args.json,
-      env: { ...process.env, AUTOREVIEW_PIPELINE_DIR: batch.plan.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
+      env: { ...reviewEnv(args), AUTOREVIEW_PIPELINE_DIR: batch.plan.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
     const phase = readJson<PhaseRecord>(phasePath(batch.plan.dir, stage.name));
     if ((res.status ?? 1) !== 0 && (!phase || phase.phase === "failed") && phase?.category !== "已停止") {
       const reason = eventReason(`启动失败：${res.error ?? `退出码 ${res.status}`}`), detail = { exitCode: res.status ?? 1 };
       writePhase(info, null, "failed", { status: "failed", ...reason, detail });
       pushEvent(info, null, "failed", reason, {}, detail);
     }
-    return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, mode: "single", stage: stage.name, cwd: stage.cwd,
+    return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, effectiveConfig, mode: "single", stage: stage.name, cwd: stage.cwd,
       exitCode: res.status, ...(args.json ? { stdout: res.stdout, stderr: res.stderr } : {}), lines: [`启动：${command}`] };
   }
   const argv = [process.execPath, PIPELINE, batch.path, "--project-root", repo.projectRoot, "--default-workspace", "dev分支",
     ...(args.launcher ? ["--launcher", args.launcher] : [])];
   if (args.dryRun) {
     const command = commandString(argv);
-    return { ok: true, command: "启动", dryRun: true, mode: "pipeline", stages: names, commands: [command], lines: [`流水线：${command}`] };
+    return { ok: true, command: "启动", dryRun: true, effectiveConfig, mode: "pipeline", stages: names, commands: [command], lines: [`流水线：${command}`] };
   }
   // 多段由真正取得运行锁的 pipeline 发布 started；父入口不能抢先覆盖活动批次。
-  const res = await runBatchCommand(info, null, argv[0], argv.slice(1), { cwd: repo.root, capture: args.json });
-  return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, mode: "pipeline", stages: names,
+  const res = await runBatchCommand(info, null, argv[0], argv.slice(1), { cwd: repo.root, capture: args.json, env: reviewEnv(args) });
+  return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, effectiveConfig, mode: "pipeline", stages: names,
     exitCode: res.status, ...(args.json ? { stdout: res.stdout, stderr: res.stderr } : {}),
     lines: [`流水线已结束（退出码 ${res.status}）：${names.join("、")}`] };
 }
@@ -1219,6 +1251,8 @@ function executionResult(command: string | undefined, result: Record<string, unk
 }
 
 const USAGE = `用法：
+  bin/loop 接入 <项目目录> [--yes] [--dry-run]
+  bin/loop 开发 <pi|claude|codex> [开发参数…]
   loop 评审 --base <提交或分支> --head <提交或分支> [--requirement 文件] [--criteria 文件] [--note 文件] [--json]
   loop 停止 <批次.json> [--stage <段>] [--dry-run] --json
   loop 开工 <批次.json> [--dry-run] [--json] [--recheck]

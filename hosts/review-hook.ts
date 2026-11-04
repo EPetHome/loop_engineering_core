@@ -6,9 +6,9 @@
  *     暂停或评审中断后再提交即恢复自动评审
  *   Stop → 交付标记触发评审；有必修用 {"decision":"block","reason":…} 打回原会话
  *
- * 只有用 bin/loop-dev 启动的会话才是开发会话：启动器设置 AUTOREVIEW_DEV_ROOT=<项目根>，
+ * 只有用 bin/loop 开发 启动的会话才是开发会话：启动器设置 AUTOREVIEW_DEV_ROOT=<项目根>，
  * Hook 只认这个变量，项目根也不随会话中途 cd 改变。没有变量的直接会话不注入评审约定、
- * 不记录评审状态、不评审或暂停；保留 SessionStart 待回写提醒。生产指路由轻入口单独处理。
+ * 不记录评审状态、不评审或暂停。生产指路由轻入口单独处理。
  * 任何异常都只暂停并放行（退出 0），绝不卡宿主、绝不输出非法 JSON。
  */
 import { randomUUID } from "node:crypto";
@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "../acceptance-core.ts";
 import {
-  checkRoundBudget, configurationHash, findProjectRoot, HERMES_BIN, MARKER_FILE, nonEmptyString, nonNegativeInt, parseAcceptanceConfig, parseGateConfig, readMarker,
+  findProjectRoot, HERMES_BIN, MARKER_FILE, resolveProjectConfig,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { batchInfo, observeStage } from "../events.ts";
@@ -27,8 +27,8 @@ import { hasRelayHeader, rememberPAInput } from "../pa-records.ts";
 import { systemNotify } from "../notify.ts";
 import type { FailureKind } from "../failure.ts";
 import { createGitEvidence, type Exec, type ExecResult } from "../git.ts";
-import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, readLedgerForReminder, resultLine, taskTitle, writebackReminder } from "../ledger.ts";
-import { acceptanceTodos, conventionNotice } from "../onboarding.ts";
+import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle } from "../ledger.ts";
+import { acceptanceTodos } from "../onboarding.ts";
 import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
 import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "../merge-queue.ts";
@@ -37,7 +37,6 @@ import { completionChecks, inboxPath, queueAcceptance, readJson, statusPath, typ
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
-import { parsePreparation } from "../preparation.ts";
 import { isRegisteredSource, loadContext, projectRootHash, recordProjectOutcome, recordSourceChange, refreshContext } from "../project-context.ts";
 import {
   DEFAULT_MAX_REPAIRS, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MIN,
@@ -46,8 +45,6 @@ import {
 } from "../review.ts";
 
 const INTERRUPTED = "评审被中断（宿主超时或中断）";
-/** Stop Hook 内部评审保护时长上限（分钟）；默认与 pi 扩展一致。 */
-const DEFAULT_TIMEOUT_ENV = "AUTOREVIEW_REVIEW_TIMEOUT_MIN";
 
 import { detectHost, type HookEvent } from "./hook.ts";
 
@@ -57,8 +54,6 @@ export interface HookState extends ReviewState {
   experienceActivity?: HookExperienceActivity;
   /** 本进程最近一次往交付总表写的段：同一完成态不重复追加，总结里的总表路径与它一致。 */
   ledger?: { session: string; path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
-  /** 本会话已经注入过待回写提醒（同一会话只注入一次）。 */
-  ledgerNoticed?: boolean;
 }
 
 export interface HookPaths {
@@ -216,21 +211,8 @@ export function devProjectRoot(env: NodeJS.ProcessEnv = process.env): string | u
 
 /** 读 .autoreview.json（可以是 {}）；可选字段非法时抛错，由统一收口记暂停。 */
 export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): ReviewConfig {
-  const data = readMarker(root);
-  const envTimeout = Number.parseInt(env[DEFAULT_TIMEOUT_ENV] ?? "", 10);
-  const config: ReviewConfig = {
-    maxRepairs: nonNegativeInt(data, "maxRepairs", DEFAULT_MAX_REPAIRS),
-    reviewerModel: nonEmptyString(data, "reviewerModel", DEFAULT_MODEL),
-    reviewerThinking: nonEmptyString(data, "reviewerThinking", DEFAULT_THINKING),
-    reviewTimeoutMin: Number.isFinite(envTimeout) && envTimeout > 0
-      ? envTimeout : nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN),
-    reviewerCmd: env.AUTOREVIEW_REVIEWER_CMD?.trim() ?? "",
-  };
-  const acceptance = parseAcceptanceConfig(data.acceptance, root, env);
-  const gate = parseGateConfig(data.gate);
-  checkRoundBudget(config.reviewTimeoutMin, acceptance, gate);
-  const preparation = parsePreparation(data.preparation, root);
-  return { ...config, configurationHash: configurationHash(data), ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}) };
+  const { raw, effectiveConfig, methods, context, ...config } = resolveProjectConfig(root, { env });
+  return config;
 }
 
 /** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */
@@ -579,33 +561,7 @@ async function sessionStart(ctx: HookContext): Promise<string | undefined> {
     saveStateFile(ctx.paths.state, state);
     return contextOutput(ctx, "SessionStart", repository ? "仓库还没有提交，自动评审已关闭" : "不是 git 仓库，自动评审已关闭");
   }
-  // 开了验收但项目里没有（或是旧版）验收标准写法：每个会话提醒一次「复制【块 1】到哪」。
-  let notice: string | undefined;
-  if (ctx.config.acceptance && !state.conventionNoticed) {
-    try { notice = conventionNotice(ctx.config.acceptance.root, ctx.host); } catch { notice = undefined; }
-    if (notice) {
-      state.conventionNoticed = true;
-      if (ctx.host !== "claude") await notify(notice, ctx.exec, 3000);
-    }
-  }
-  // 本项目有未回写的段才追加一句；读取失败、格式不认识或超时就跳过，不报错、不拦截。
-  // 提醒同时进 additionalContext（协调方 AI 要看到）和 systemMessage（人能看到；Codex 只有通知）。
-  const reminder = state.ledgerNoticed ? undefined : ledgerReminder(ctx);
-  if (reminder) {
-    state.ledgerNoticed = true;
-    notice = notice ? `${notice}\n${reminder}` : reminder;
-    if (ctx.host !== "claude") await notify(reminder, ctx.exec, 3000);
-  }
-  saveStateFile(ctx.paths.state, state);
-  return contextOutput(ctx, "SessionStart", reminder ? `${conventionFor(ctx)}\n${reminder}` : conventionFor(ctx), notice);
-}
-
-/** SessionStart 的待回写提醒：只看本项目，失败一律当作没有提醒。 */
-function ledgerReminder(ctx: HookContext): string | undefined {
-  try {
-    const text = readLedgerForReminder();
-    return text === undefined ? undefined : writebackReminder(text, projectRootOf(ctx.workDir));
-  } catch { return undefined; }
+  return contextOutput(ctx, "SessionStart", conventionFor(ctx));
 }
 
 /**
@@ -1063,20 +1019,6 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
   }
 }
 
-/** 没有 AUTOREVIEW_DEV_ROOT 的直接会话：只允许 SessionStart 的待回写提醒，其他一律不动作。 */
-function passiveSessionStart(event: HookEvent, host: string, workDir: string): string | undefined {
-  if (event.hook_event_name !== "SessionStart") return undefined;
-  let reminder: string | undefined;
-  try {
-    const text = readLedgerForReminder();
-    reminder = text === undefined ? undefined : writebackReminder(text, projectRootOf(workDir));
-  } catch { reminder = undefined; }
-  if (!reminder) return undefined;
-  const output: Record<string, unknown> = { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: reminder } };
-  if (host === "claude") output.systemMessage = reminder;
-  return JSON.stringify(output);
-}
-
 /** 开发会话的项目根不可用：按项目配置不可用暂停，不留“内部错误”的误导。 */
 async function configUnavailable(ctx: HookContext): Promise<string | undefined> {
   const detail = ctx.configError ?? "项目配置不可用";
@@ -1090,8 +1032,8 @@ async function dispatch(event: HookEvent): Promise<string | undefined> {
   const host = detectHost(event), sessionId = sessionIdOf(event);
   const eventCwd = resolve(event.cwd?.trim() || process.cwd());
   const root = devProjectRoot();
-  // 不是 bin/loop-dev 启动的会话：评审相关的事一律不做，只保留总表待回写提醒。
-  if (!root) return passiveSessionStart(event, host, eventCwd);
+  // 直接打开的会话不注入开发约定、不读取总表，也不记录评审状态。
+  if (!root) return undefined;
   const paths = hookPaths(root, host, sessionId), kind = event.hook_event_name;
   const marker = join(root, MARKER_FILE);
   let config: ReviewConfig = { maxRepairs: DEFAULT_MAX_REPAIRS, reviewerModel: DEFAULT_MODEL, reviewerThinking: DEFAULT_THINKING, reviewTimeoutMin: DEFAULT_TIMEOUT_MIN, reviewerCmd: "" };

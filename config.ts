@@ -1,14 +1,21 @@
 /**
- * config.ts — .autoreview.json 的查找与字段校验，宿主 Hook 和 pi 扩展共用。
- *
- * 评审字段由宿主 Hook 读（pi 扩展用 flag）；gate、acceptance 两节两边都从这里读，
- * 只有写了 gate 的项目才跑门禁，只有写了 acceptance 的项目才做自动验收。
+ * config.ts — 项目配置的唯一读取、字段解析与预算校验入口。
+ * 显式 flag / 环境变量 → .autoreview.json → 默认值；各宿主共用。
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { PreparationConfig } from "./preparation.ts";
+import type { ContextConfig } from "./project-context.ts";
+import type { ReviewConfig } from "./review.ts";
+
+export const DEFAULT_MODEL = "openai-codex/gpt-6-astra";
+export const DEFAULT_THINKING = "xhigh";
+/** 门禁、验收打回和评审打回共用。 */
+export const DEFAULT_MAX_REPAIRS = 4;
+export const DEFAULT_TIMEOUT_MIN = 60;
 
 /** 本仓库根目录：提示词、验收工具、测试命令的相对路径都按它解析。 */
 export const EXT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -322,14 +329,182 @@ export function checkRoundBudget(reviewTimeoutMin: number, acceptance: Acceptanc
   }
 }
 
-/** pi 扩展用：从 cwd 向上找 .autoreview.json，只取 acceptance 一节。 */
-export function loadAcceptanceConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): AcceptanceConfig | undefined {
-  const root = findProjectRoot(cwd);
-  return root ? parseAcceptanceConfig(readMarker(root).acceptance, root, env) : undefined;
+const object = (raw: unknown, label: string): Record<string, unknown> => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} 必须是对象`);
+  return raw as Record<string, unknown>;
+};
+const string = (raw: unknown, label: string): string => {
+  if (typeof raw !== "string" || !raw.trim()) throw new Error(`${label} 必须是非空字符串`);
+  return raw.trim();
+};
+const number = (raw: unknown, fallback: number, label: string, min = 0): number => {
+  const value = raw ?? fallback;
+  if (!Number.isSafeInteger(value) || (value as number) < min) throw new Error(`${label} 必须是大于等于 ${min} 的整数`);
+  return value as number;
+};
+
+export function parsePreparation(raw: unknown, root: string): PreparationConfig | undefined {
+  if (raw === undefined) return undefined;
+  const data = object(raw, "preparation");
+  let repair: PreparationConfig["repair"];
+  if (data.repair !== undefined) {
+    const r = object(data.repair, "preparation.repair");
+    if (!Array.isArray(r.paths) || !r.paths.length) throw new Error("preparation.repair.paths 必须列出允许修改的项目文件或目录");
+    const paths = r.paths.map((value) => {
+      const path = string(value, "preparation.repair.paths");
+      const rel = relative(resolve(root), resolve(root, path));
+      if (isAbsolute(path) || !rel || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+        || /(^|[/\\])(AGENTS\.md|CLAUDE\.md|\.git|\.autoreview\.json)([/\\]|$)/.test(path)) {
+        throw new Error(`preparation.repair.paths 不能越出项目、指向整个项目或稳定规则：${path}`);
+      }
+      return rel;
+    });
+    repair = { model: string(r.model, "preparation.repair.model"), thinking: string(r.thinking ?? "high", "preparation.repair.thinking"), paths,
+      ...(r.ponytail !== undefined ? { ponytail: resolve(root, string(r.ponytail, "preparation.repair.ponytail")) } : {}) };
+  }
+  return {
+    root: resolve(root), check: string(data.check, "preparation.check"),
+    recover: data.recover === undefined ? undefined : string(data.recover, "preparation.recover"),
+    timeoutMin: number(data.timeoutMin, 10, "preparation.timeoutMin", 1),
+    maxRecoveries: number(data.maxRecoveries, 1, "preparation.maxRecoveries"),
+    maxRepairs: number(data.maxRepairs, 1, "preparation.maxRepairs"), repair,
+  };
 }
 
-/** pi 扩展用：从 cwd 向上找 .autoreview.json，只取 gate 一节。 */
-export function loadGateConfig(cwd: string): GateConfig | undefined {
+const contextRoles = new Set(["rules", "requirement", "design", "guide", "code"]);
+export const CONTEXT_IGNORED = /(^|[/\\])(?:\.git|node_modules|target|dist|\.venv|\.aws|\.ssh|\.pi-autoreview|logs?|temp)(?:[/\\]|$)|(^|[/\\])(?:\.env(?:\..*)?|auth\.json|credentials(?:\..*)?)$/;
+
+export function parseContext(raw: unknown, configRoot: string): ContextConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("context 必须是对象");
+  const data = raw as Record<string, unknown>;
+  if (data.root !== undefined && (typeof data.root !== "string" || !data.root.trim())) throw new Error("context.root 必须是非空路径");
+  const root = resolve(configRoot, (data.root as string) ?? ".");
+  if (!Array.isArray(data.sources) || !data.sources.length) throw new Error("context.sources 必须明确列出来源");
+  const sources: ContextConfig["sources"] = data.sources.map((raw, index) => {
+    const source = typeof raw === "string" ? { path: raw, role: "guide" } : raw;
+    if (!source || typeof source !== "object" || typeof source.path !== "string" || !source.path.trim()) throw new Error(`context.sources[${index}] 缺少 path`);
+    const path = relative(root, resolve(root, source.path));
+    if (!path || isAbsolute(source.path) || path.startsWith("..") || CONTEXT_IGNORED.test(path)) throw new Error(`context 来源越界或属于排除区域：${source.path}`);
+    const role = source.role ?? "guide";
+    if (!contextRoles.has(role)) throw new Error(`context.sources[${index}].role 无效`);
+    const id = source.id ?? path;
+    if (typeof id !== "string" || !id.trim()) throw new Error("context 来源 id 必须是非空字符串");
+    const dependsOn = source.dependsOn ?? [];
+    if (!Array.isArray(dependsOn) || dependsOn.some((v) => typeof v !== "string")) throw new Error("context.dependsOn 必须是来源 id 数组");
+    if (source.optional !== undefined && typeof source.optional !== "boolean") throw new Error("context.optional 必须是布尔值");
+    return { id, path, role: role as ContextConfig["sources"][number]["role"], dependsOn, optional: source.optional === true };
+  });
+  const ids = new Set(sources.map((s) => s.id));
+  if (ids.size !== sources.length || sources.some((s) => s.dependsOn.some((id) => !ids.has(id)))) throw new Error("context 来源 id 重复或依赖不存在");
+  const maxChars = data.maxChars ?? 12000, intervalSec = data.intervalSec ?? 0;
+  if (!Number.isSafeInteger(maxChars) || (maxChars as number) < 1000 || (maxChars as number) > 100000) throw new Error("context.maxChars 必须在 1000—100000 之间");
+  if (!Number.isSafeInteger(intervalSec) || (intervalSec as number) < 0 || ((intervalSec as number) > 0 && (intervalSec as number) < 30)) throw new Error("context.intervalSec 必须为 0 或不小于 30 的整数");
+  return { root, sources, maxChars: maxChars as number, intervalSec: intervalSec as number };
+}
+
+export type ConfigSource = "flag" | "env" | "file" | "default";
+export interface ProjectConfigOverrides {
+  maxRepairs?: string | number;
+  reviewerModel?: string;
+  reviewerThinking?: string;
+  reviewTimeoutMin?: string | number;
+  reviewerCmd?: string;
+  env?: NodeJS.ProcessEnv;
+  /** 接入工具校验尚未落盘的候选配置；不写入文件。 */
+  marker?: Record<string, unknown>;
+}
+const PROJECT_CONFIG_FLAGS = {
+  "--autoreview-max-repairs": "maxRepairs",
+  "--autoreview-reviewer-model": "reviewerModel",
+  "--autoreview-reviewer-thinking": "reviewerThinking",
+  "--autoreview-review-timeout-min": "reviewTimeoutMin",
+  "--autoreview-reviewer-cmd": "reviewerCmd",
+} as const;
+
+/** 只提取 Loop 评审参数；其他 Pi 参数原样留给宿主，字段校验仍由 resolveProjectConfig 负责。 */
+export function projectConfigOverridesFromArgs(args: string[]): ProjectConfigOverrides {
+  const overrides: ProjectConfigOverrides = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const [flag, ...inline] = args[index].split("=");
+    if (!Object.hasOwn(PROJECT_CONFIG_FLAGS, flag)) continue;
+    const value = inline.length ? inline.join("=") : args[++index];
+    if (value === undefined || value.startsWith("--")) throw new Error(`${flag} 需要一个值`);
+    overrides[PROJECT_CONFIG_FLAGS[flag as keyof typeof PROJECT_CONFIG_FLAGS]] = value;
+  }
+  return overrides;
+}
+
+/** 恢复原会话时只重放原始 flag；空值清除启动模板里的旧 flag，不把环境/文件值升级为 flag。 */
+export function projectConfigArgs(overrides: ProjectConfigOverrides): string[] {
+  return Object.entries(PROJECT_CONFIG_FLAGS).flatMap(([flag, key]) => [flag, String(overrides[key] ?? "")]);
+}
+
+/** 只携带影响项目配置的环境，不把 HOME、凭证等整个进程环境写入段状态。 */
+export const PROJECT_CONFIG_ENV = ["AUTOREVIEW_REVIEW_TIMEOUT_MIN", "AUTOREVIEW_REVIEWER_CMD"] as const;
+export function captureProjectConfigOverrides(overrides: ProjectConfigOverrides = {}, env: NodeJS.ProcessEnv = process.env): ProjectConfigOverrides {
+  const source = overrides.env ?? env;
+  return {
+    maxRepairs: overrides.maxRepairs, reviewerModel: overrides.reviewerModel, reviewerThinking: overrides.reviewerThinking,
+    reviewTimeoutMin: overrides.reviewTimeoutMin, reviewerCmd: overrides.reviewerCmd,
+    env: Object.fromEntries(PROJECT_CONFIG_ENV.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])),
+  };
+}
+
+export interface ResolvedProjectConfig extends ReviewConfig {
+  methods?: MethodsConfig;
+  context?: ContextConfig;
+  raw: Record<string, unknown>;
+  effectiveConfig: { reviewTimeoutMin: { value: number; source: ConfigSource } };
+}
+
+/** root 是标记文件所在目录；undefined 表示尚未接入，使用默认配置。每次读取，不缓存旧值。 */
+export function resolveProjectConfig(root: string | undefined, overrides: ProjectConfigOverrides = {}): ResolvedProjectConfig {
+  const data = overrides.marker ?? (root ? readMarker(root) : {});
+  const env = overrides.env ?? process.env;
+  const explicit = (value: string | number | undefined): value is string | number => value !== undefined && value !== "";
+  const intFlag = (value: string | number, flag: string): number => {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`--${flag} 必须是非负整数`);
+    return parsed;
+  };
+  const envTimeout = Number.parseInt(env.AUTOREVIEW_REVIEW_TIMEOUT_MIN ?? "", 10);
+  let source: ConfigSource, reviewTimeoutMin: number;
+  if (explicit(overrides.reviewTimeoutMin)) {
+    source = "flag"; reviewTimeoutMin = intFlag(overrides.reviewTimeoutMin, "autoreview-review-timeout-min");
+  } else if (Number.isFinite(envTimeout) && envTimeout > 0) {
+    source = "env"; reviewTimeoutMin = envTimeout;
+  } else {
+    source = data.reviewTimeoutMin !== undefined ? "file" : "default";
+    reviewTimeoutMin = nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN);
+  }
+  const configRoot = root ?? process.cwd();
+  const acceptance = parseAcceptanceConfig(data.acceptance, configRoot, env);
+  const gate = parseGateConfig(data.gate);
+  const preparation = parsePreparation(data.preparation, configRoot);
+  const methods = parseMethodsConfig(data.methods, configRoot);
+  const context = parseContext(data.context, configRoot);
+  checkRoundBudget(reviewTimeoutMin, acceptance, gate);
+  return {
+    maxRepairs: explicit(overrides.maxRepairs) ? intFlag(overrides.maxRepairs, "autoreview-max-repairs") : nonNegativeInt(data, "maxRepairs", DEFAULT_MAX_REPAIRS),
+    reviewerModel: overrides.reviewerModel?.trim() || nonEmptyString(data, "reviewerModel", DEFAULT_MODEL),
+    reviewerThinking: overrides.reviewerThinking?.trim() || nonEmptyString(data, "reviewerThinking", DEFAULT_THINKING),
+    reviewTimeoutMin,
+    reviewerCmd: overrides.reviewerCmd?.trim() || env.AUTOREVIEW_REVIEWER_CMD?.trim() || nonEmptyString(data, "reviewerCmd", ""),
+    ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}),
+    ...(methods ? { methods } : {}), ...(context ? { context } : {}),
+    configurationHash: configurationHash(data), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
+  };
+}
+
+/** 兼容入口：仍通过完整配置解析和预算校验。 */
+export function loadAcceptanceConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): AcceptanceConfig | undefined {
   const root = findProjectRoot(cwd);
-  return root ? parseGateConfig(readMarker(root).gate) : undefined;
+  return resolveProjectConfig(root, { env }).acceptance;
+}
+
+/** 兼容入口：仍通过完整配置解析和预算校验。 */
+export function loadGateConfig(cwd: string, overrides: ProjectConfigOverrides = {}): GateConfig | undefined {
+  const root = findProjectRoot(cwd);
+  return resolveProjectConfig(root, overrides).gate;
 }

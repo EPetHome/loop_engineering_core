@@ -99,6 +99,14 @@ else if (args[0] === 'plugin') {
     assert.equal(launched.devRoot, realpathSync(cwd), "启动进程把项目根传给宿主和 Hook");
     const config = '{"maxRepairs":2}\n';
     writeFileSync(join(cwd, ".autoreview.json"), config);
+    // 单一入口 A8（同时覆盖 codex）：同一替身宿主/插件，包装前后命令逐字相同。
+    for (const host of ["claude", "codex"]) {
+      const args = [host, "--cwd", cwd, "--dry-run", "--session", "exact-id", "--", "--model", "chosen model"];
+      const direct = spawnSync(join(EXT_DIR, "bin/loop-dev"), args, { cwd, env, encoding: "utf8" });
+      const wrapped = spawnSync(join(EXT_DIR, "bin/loop"), ["开发", ...args], { cwd, env, encoding: "utf8" });
+      assert.equal(direct.status, 0, direct.stderr); assert.equal(wrapped.status, 0, wrapped.stderr);
+      assert.equal(wrapped.stdout, direct.stdout, `${host} 的宿主参数与输出原样透传`);
+    }
     result = run(["codex", task, "--init", "--session", "exact-id"]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(join(cwd, ".autoreview.json"), "utf8"), config);

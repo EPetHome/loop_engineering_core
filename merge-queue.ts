@@ -5,7 +5,7 @@ import { appendFileSync, closeSync, cpSync, existsSync, linkSync, lstatSync, mkd
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadGateConfig, loadProjectLayout } from "./config.ts";
+import { loadGateConfig, loadProjectLayout, PROJECT_CONFIG_ENV, projectConfigArgs, type ProjectConfigOverrides } from "./config.ts";
 import { commitBatch, workingTree, type BatchCommit } from "./commit-batch.ts";
 import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, reportUncommittedBatch, writePhase, type BatchInfo, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
@@ -29,6 +29,7 @@ const overlaps = (a: string, b: string): boolean => within(a, b) || within(b, a)
 
 export interface QueueStage {
   name: string; cwd: string; branch: string; start: string; prompt?: string; scope?: StageScope;
+  configOverrides?: ProjectConfigOverrides;
 }
 export interface QueueBatch {
   id: string; name: string; file: string; dir: string; project: string; release: string;
@@ -259,11 +260,17 @@ function qualifications(batch: QueueBatch): Qualification[] | undefined {
     const inbox = readJson<InboxMessage>(inboxPath(batch.dir, stage.name));
     if (status?.event !== "done" || !status.readyEpoch || status.inbox < (inbox?.seq ?? 0)) return undefined;
     // 队列只检查来源仍存在，不刷新项目索引或改写开发状态。
-    const context = loadContext(stage.cwd);
+    const context = loadContext(stage.cwd, status.configOverrides ?? stage.configOverrides);
     if ((!context && status.sourceInputs) || context?.sources.some((source) => !source.optional && !existsSync(resolve(context.root, source.path)))) return undefined;
     result.push({ stage: stage.name, session: status.sessionId, epoch: status.readyEpoch, inbox: status.inbox, sourceInputs: status.sourceInputs, ...(status.acceptance ? { acceptance: status.acceptance } : {}) });
   }
   return result;
+}
+/** 队列只补齐配置读取覆盖，不改变门禁/合入规则；优先取开发会话实际记录的覆盖。 */
+function loadQueueGateConfig(cwd: string, batch: QueueBatch) {
+  const primary = batch.stages[0];
+  const status = readJson<StageStatus>(statusPath(batch.dir, primary.name));
+  return loadGateConfig(cwd, status?.configOverrides ?? primary.configOverrides);
 }
 function enqueue(dir: string, batchId: string, requireAcceptance: boolean, integration?: QueueAcceptance, integrationEpoch?: string, expectedIntegrationEpoch = false, run?: QueuePipelineRun): BatchCommit[] | undefined {
   return publication(dir, () => change(dir, (state) => {
@@ -759,6 +766,12 @@ function returnToDeveloper(state: MergeQueue, batch: QueueBatch, entry: QueueEnt
   update(state.dir, entry.id, { status: "returning", reason, conflicts: entry.conflicts, deliveries, returnCount: count, autoStopped: stop, conflictKind: entry.conflictKind });
   if (stop) notify(state, entry, `${entry.name}：${reason}`);
 }
+/** 恢复环境以该段实际记录为准；显式空值屏蔽旧 Terminal/执行器环境，不改变 flag 的优先级。 */
+function developerConfigEnv(overrides: ProjectConfigOverrides | undefined): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  if (overrides?.env) for (const key of PROJECT_CONFIG_ENV) env[key] = overrides.env[key] ?? "";
+  return env;
+}
 function resumeDelivery(state: MergeQueue, batch: QueueBatch, entry: QueueEntry, delivery: Delivery): void {
   const status = readJson<StageStatus>(statusPath(batch.dir, delivery.stage));
   if (!status?.sessionId) throw new Error(`找不到 ${delivery.stage} 的原开发会话，收件箱已保留，未新建会话`);
@@ -770,8 +783,9 @@ function resumeDelivery(state: MergeQueue, batch: QueueBatch, entry: QueueEntry,
   const argv = [fileURLToPath(import.meta.url), "session", state.dir, entry.id, delivery.stage];
   if ((process.env.AUTOREVIEW_MERGE_QUEUE_LAUNCHER ?? (process.platform === "darwin" ? "terminal" : "background")) === "terminal") {
     // 与流水线相同的 Terminal 入口：恢复原会话 ID，而不是在无 TTY 的日志管道里启动交互式 Pi。
-    const env = ["PATH", "HOME", "AUTOREVIEW_MERGE_QUEUE_ROOT", "LOOP_DIR", "PI_BIN", "PI_NODE_BIN", "PERMISSION_EXTENSION", "PONYTAIL_EXTENSION"]
-      .filter((key) => process.env[key] !== undefined).map((key) => `${key}=${shellQuote(process.env[key]!)}`).join(" ");
+    const configEnv = developerConfigEnv(status.configOverrides ?? batch.stages.find((stage) => stage.name === delivery.stage)?.configOverrides);
+    const env = ["PATH", "HOME", "AUTOREVIEW_MERGE_QUEUE_ROOT", "LOOP_DIR", "PI_BIN", "PI_NODE_BIN", "PERMISSION_EXTENSION", "PONYTAIL_EXTENSION", ...PROJECT_CONFIG_ENV]
+      .filter((key) => configEnv[key] !== undefined).map((key) => `${key}=${shellQuote(configEnv[key]!)}`).join(" ");
     const script = `${env} ${[process.execPath, ...argv].map(shellQuote).join(" ")}`;
     const result = spawnSync("osascript", ["-e", `tell application "Terminal" to do script ${JSON.stringify(script)}`], { timeout: 15_000 });
     if (result.status !== 0) throw new Error("无法恢复原会话的终端，收件箱已保留");
@@ -788,10 +802,18 @@ async function runDeveloperSession(state: MergeQueue, entry: QueueEntry, stageNa
   const status = readJson<StageStatus>(statusPath(batch.dir, delivery.stage));
   if (!status?.sessionId || status.inbox >= delivery.seq || (status.pid && status.processStarted && processStartTime(status.pid) === status.processStarted)) return;
   const stage = batch.stages.find((item) => item.name === delivery.stage)!;
+  const overrides = status.configOverrides ?? stage.configOverrides;
   let command: string;
   if (status.host && status.host !== "pi") command = [join(HERE, "bin", "loop-dev"), status.host, "--cwd", stage.cwd, "--session", status.sessionId, join(state.dir, `${entry.id}-${delivery.stage.replace(/[^\w\u4e00-\u9fff-]/g, "_")}.repair.md`)].map(shellQuote).join(" ");
-  else if (stage.prompt) command = stage.start.replace(shellQuote(stage.prompt), `--session ${shellQuote(status.sessionId)}`);
-  else command = [join(HERE, "bin", "pi-dev"), "--cwd", stage.cwd, "--session", status.sessionId].map(shellQuote).join(" ");
+  else {
+    command = stage.prompt ? stage.start.replace(shellQuote(stage.prompt), `--session ${shellQuote(status.sessionId)}`)
+      : [join(HERE, "bin", "pi-dev"), "--cwd", stage.cwd, "--session", status.sessionId].map(shellQuote).join(" ");
+    if (overrides) {
+      // prompt 段的 start 由 piCommand 生成；已有追加参数时沿用其 --，原会话的 flag 最后重放。
+      const separator = command.includes(` ${shellQuote("--")} `) ? "" : ` ${shellQuote("--")}`;
+      command += `${separator} ${projectConfigArgs(overrides).map(shellQuote).join(" ")}`;
+    }
+  }
   if (status.host && status.host !== "pi") {
     const prompt = join(state.dir, `${entry.id}-${delivery.stage.replace(/[^\w\u4e00-\u9fff-]/g, "_")}.repair.md`);
     writeFileSync(prompt, delivery.message);
@@ -800,7 +822,7 @@ async function runDeveloperSession(state: MergeQueue, entry: QueueEntry, stageNa
     if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) return;
     // 返回 Promise 前同步建立并登记新组；发布锁只保护派发，不等待开发会话结束。
     return runBatchCommand(batchEventInfo(batch), stage.name, process.execPath, [join(HERE, "session-command.ts"), command], { cwd: stage.cwd, capture: false, env: {
-      ...process.env, AUTOREVIEW_PIPELINE_DIR: batch.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.file,
+      ...developerConfigEnv(overrides), AUTOREVIEW_PIPELINE_DIR: batch.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.file,
       AUTOREVIEW_PIPELINE_LAUNCH: "", AUTOREVIEW_PIPELINE_LAUNCH_TOKEN: "",
     } });
   });
@@ -857,7 +879,7 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
       const problem = qualificationProblem(state, batch, entry);
       if (problem) { update(state.dir, entry.id, { status: "blocked", reason: problem }); continue; }
       if (entry.status === "ready") {
-        if (gitText(state.repo, ["rev-parse", `refs/heads/${batch.release}`]) === entry.base && entry.runtimeGate === hash(loadGateConfig(batch.project))) {
+        if (gitText(state.repo, ["rev-parse", `refs/heads/${batch.release}`]) === entry.base && entry.runtimeGate === hash(loadQueueGateConfig(batch.project, batch))) {
           if (!entry.notified) { notify(state, entry); update(state.dir, entry.id, { notified: true }); }
           return; // 默认保持旧行为：停在可合入，后续批次不提前测。
         }
@@ -885,7 +907,7 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
       update(state.dir, entry.id, { result: entry.result, tree: entry.tree });
       const workDir = resolve(state.workspace, relative(state.repo, batch.project));
       copyTestLocalFiles(state, batch, workDir);
-      const gate = loadGateConfig(workDir) ?? loadGateConfig(batch.project);
+      const gate = loadQueueGateConfig(workDir, batch) ?? loadQueueGateConfig(batch.project, batch);
       if (!gate) throw new Error("项目没有配置 gate，不能宣布可合入；请配置项目门禁后再次触发队列");
       const { createChildExec } = await import("./hosts/review-hook.ts");
       if (load(state.dir).batches.find((item) => item.id === batch.id)?.stopped) continue;
@@ -899,7 +921,7 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
       let result;
       try {
         entry.log = join(state.dir, `${entry.id}-a${entry.attempt}.gate.log`);
-        entry.runtimeGate = hash(loadGateConfig(batch.project));
+        entry.runtimeGate = hash(loadQueueGateConfig(batch.project, batch));
         update(state.dir, entry.id, { log: entry.log, runtimeGate: entry.runtimeGate, gate });
         writeFileSync(entry.log, "");
         result = await createChildExec(procs)("/bin/sh", ["-c", managedShell(gate.cmd, resource)], { cwd: workDir, timeout: gate.timeoutMin * 60_000, signal: gateSignal, role: "合入队列门禁", onOutput: (chunk) => appendFileSync(entry.log!, chunk),
@@ -927,7 +949,7 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
       }
       const latestProblem = qualificationProblem(state, batch, entry);
       if (latestProblem) { update(state.dir, entry.id, { status: "blocked", reason: latestProblem }); continue; }
-      if (gitText(state.repo, ["rev-parse", `refs/heads/${batch.release}`]) !== base || entry.runtimeGate !== hash(loadGateConfig(batch.project))) { update(state.dir, entry.id, { status: "pending", reason: "发布分支或门禁配置已经变化，自动重新测试" }); continue; }
+      if (gitText(state.repo, ["rev-parse", `refs/heads/${batch.release}`]) !== base || entry.runtimeGate !== hash(loadQueueGateConfig(batch.project, batch))) { update(state.dir, entry.id, { status: "pending", reason: "发布分支或门禁配置已经变化，自动重新测试" }); continue; }
       update(state.dir, entry.id, { status: "ready", reason: "门禁通过，等待用户执行 loop 合入" });
     }
   } catch (error) {
@@ -971,7 +993,7 @@ function mergeLocked(state: MergeQueue, batch: QueueBatch, dryRun: boolean,
         if (problem) { save({ status: "blocked", reason: problem }); throw new Error(problem); }
         const latestHead = gitText(state.repo, ["rev-parse", `refs/heads/${batch.release}`]);
         const stale = latestHead !== current.base ? "发布分支已经变化"
-          : current.runtimeGate && current.runtimeGate !== hash(loadGateConfig(batch.project)) ? "门禁配置已经变化" : undefined;
+          : current.runtimeGate && current.runtimeGate !== hash(loadQueueGateConfig(batch.project, batch)) ? "门禁配置已经变化" : undefined;
         if (stale) { save({ status: "pending", notified: false, reason: `${stale}，尚未发布，自动重新测试` }); throw new Error(`${stale}，已安排自动重新测试`); }
         if (automatic) {
           save({ status: "ready", automatic: false, notified: false, pushRequested: false, runtimePublication: "prepared", reason: "自动合入已停用，等待用户执行 loop 合入" });
@@ -986,7 +1008,7 @@ function mergeLocked(state: MergeQueue, batch: QueueBatch, dryRun: boolean,
     if (!["pending", "testing", "ready"].includes(entry.status)) throw new Error(`本批还不可合入：${entry.status}；${entry.reason ?? "等待原会话完成检查"}`);
     const head = gitText(state.repo, ["rev-parse", `refs/heads/${batch.release}`]);
     const stale = entry.base && entry.base !== head ? "发布分支已经变化"
-      : entry.runtimeGate && entry.runtimeGate !== hash(loadGateConfig(batch.project)) ? "门禁配置已经变化" : undefined;
+      : entry.runtimeGate && entry.runtimeGate !== hash(loadQueueGateConfig(batch.project, batch)) ? "门禁配置已经变化" : undefined;
     if (stale) {
       if (!dryRun) update(state.dir, entry.id, { status: "pending", notified: false, reason: `${stale}，自动重新测试` });
       throw new Error(`${stale}，本次不合入，已安排自动重新测试`);

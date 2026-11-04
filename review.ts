@@ -33,11 +33,7 @@ import { isRegisteredSource, loadContext, recordSourceChange, refreshContext, ty
 
 export { PI_BIN, PERMISSION_EXT };
 export const REVIEW_PROMPT_PATH = join(EXT_DIR, "review-prompt.md");
-export const DEFAULT_MODEL = "openai-codex/gpt-6-astra";
-export const DEFAULT_THINKING = "xhigh";
-/** 门禁、验收打回和评审打回共用。 */
-export const DEFAULT_MAX_REPAIRS = 4;
-export const DEFAULT_TIMEOUT_MIN = 60;
+export { DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_MAX_REPAIRS, DEFAULT_TIMEOUT_MIN } from "./config.ts";
 /** 取消正在进行的评审时使用的固定原因。 */
 export const INTERRUPTED = "评审被中断（会话关闭或重载）";
 
@@ -79,8 +75,6 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   pauseFailureKind?: FailureKind;
   /** 暂停时给你看的下一步（写进总结「需要你做的事」），恢复时清掉。 */
   pauseHint?: string;
-  /** 本会话已经提醒过写法段缺失或过期（每个会话只提醒一次）。 */
-  conventionNoticed?: boolean;
   unresolvedMustFix?: string;
   /** 最近一次验收没通过的条目（暂停时写进总结）。 */
   unresolvedAcceptance?: string;
@@ -651,7 +645,7 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   deps = { ...deps, checkInputs: executionInputs };
   deps.checkLive?.();
   const initialChange = executionInputs(); if (initialChange) return initialChange;
-  const contextConfig = loadContext(deps.cwd);
+  const contextConfig = loadContext(deps.cwd, deps.config);
   if (contextConfig) {
     const context = refreshContext(contextConfig, `${deps.state.requirement ?? ""}\n${deps.deliveryNote}`);
     if (context.snapshot.missing.length) return { kind: "paused", reason: `上游来源缺失：${context.snapshot.missing.join("、")}` };

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { renderSummary } from "../core.ts";
 import { createGitEvidence, type Exec } from "../git.ts";
-import { appendLedgerRecord, pendingWritebackCount, projectRootOf } from "../ledger.ts";
+import { appendLedgerRecord, projectRootOf } from "../ledger.ts";
 import { materialSession, recordMaterialSession } from "../materials.ts";
 import { newReviewState, runReviewRound } from "../review.ts";
 import { changedSince } from "../scope.ts";
@@ -117,7 +117,8 @@ test("A1/A3/A4/A5：完整原始字节、忽略排除、Loop 版本、追加漏�
   const ledger = readFileSync(h.ledger, "utf8"); assert.ok(ledger.startsWith(oldLedger));
   assert.match(ledger.slice(oldLedger.length), /类型：漏网[\s\S]*轮次：1[\s\S]*问题：丢失撤权检查 需要修复/);
   assert.ok(ledger.includes(h.repo)); assert.ok(ledger.includes("会话 claude-capture"));
-  assert.equal(pendingWritebackCount(ledger, h.repo), 1);
+  assert.doesNotMatch(ledger, /已回写原单/);
+  assert.equal((ledger.match(/^## /gm) ?? []).length, 2);
   assert.deepEqual(readFileSync(persisted.file), stateBefore); assert.deepEqual(readFileSync(persisted.summary), summaryBefore);
   const cleanup = h.cli("清理", "--json"); assert.equal(cleanup.status, 0, cleanup.stderr + cleanup.stdout);
   const plan = JSON.parse(cleanup.stdout);

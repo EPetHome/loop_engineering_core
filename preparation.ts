@@ -1,7 +1,8 @@
 /** 项目拥有准备方法；Loop 只执行有效方法、有限恢复和必要的方法修复。 */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import { EXT_DIR, findProjectRoot, PI_BIN, readMarker } from "./config.ts";
+import { join, resolve } from "node:path";
+import { EXT_DIR, findProjectRoot, PI_BIN, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
+export { parsePreparation } from "./config.ts";
 import { classifyFailure, type FailureKind } from "./failure.ts";
 import { createRunResource, managedShell, releaseRunResource, resourceLine } from "./resources.ts";
 import { createGitEvidence, type Exec } from "./git.ts";
@@ -27,51 +28,8 @@ export interface PreparationResult {
   log: string;
 }
 
-const object = (raw: unknown, label: string): Record<string, unknown> => {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} 必须是对象`);
-  return raw as Record<string, unknown>;
-};
-const string = (raw: unknown, label: string): string => {
-  if (typeof raw !== "string" || !raw.trim()) throw new Error(`${label} 必须是非空字符串`);
-  return raw.trim();
-};
-const number = (raw: unknown, fallback: number, label: string, min = 0): number => {
-  const value = raw ?? fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < min) throw new Error(`${label} 必须是大于等于 ${min} 的整数`);
-  return value as number;
-};
-
-export function parsePreparation(raw: unknown, root: string): PreparationConfig | undefined {
-  if (raw === undefined) return undefined;
-  const data = object(raw, "preparation");
-  let repair: PreparationConfig["repair"];
-  if (data.repair !== undefined) {
-    const r = object(data.repair, "preparation.repair");
-    if (!Array.isArray(r.paths) || !r.paths.length) throw new Error("preparation.repair.paths 必须列出允许修改的项目文件或目录");
-    const paths = r.paths.map((value) => {
-      const path = string(value, "preparation.repair.paths");
-      const rel = relative(resolve(root), resolve(root, path));
-      if (isAbsolute(path) || !rel || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-        || /(^|[/\\])(AGENTS\.md|CLAUDE\.md|\.git|\.autoreview\.json)([/\\]|$)/.test(path)) {
-        throw new Error(`preparation.repair.paths 不能越出项目、指向整个项目或稳定规则：${path}`);
-      }
-      return rel;
-    });
-    repair = { model: string(r.model, "preparation.repair.model"), thinking: string(r.thinking ?? "high", "preparation.repair.thinking"), paths,
-      ...(r.ponytail !== undefined ? { ponytail: resolve(root, string(r.ponytail, "preparation.repair.ponytail")) } : {}) };
-  }
-  return {
-    root: resolve(root), check: string(data.check, "preparation.check"),
-    recover: data.recover === undefined ? undefined : string(data.recover, "preparation.recover"),
-    timeoutMin: number(data.timeoutMin, 10, "preparation.timeoutMin", 1),
-    maxRecoveries: number(data.maxRecoveries, 1, "preparation.maxRecoveries"),
-    maxRepairs: number(data.maxRepairs, 1, "preparation.maxRepairs"), repair,
-  };
-}
-
-export function loadPreparation(cwd: string): PreparationConfig | undefined {
-  const root = findProjectRoot(cwd);
-  return root ? parsePreparation(readMarker(root).preparation, root) : undefined;
+export function loadPreparation(cwd: string, overrides: ProjectConfigOverrides = {}): PreparationConfig | undefined {
+  return resolveProjectConfig(findProjectRoot(cwd), overrides).preparation;
 }
 
 export interface PreparationDeps {

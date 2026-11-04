@@ -387,9 +387,9 @@ test("A14 提示词里的输出格式示例能被解析器原样解析（改提�
   assert.ok(drafter.ok);
   if (drafter.ok) assert.deepEqual(drafter.items.map((item) => item.id), ["A1", "A2"]);
   const guide = readFileSync(new URL("../README-验收标准.md", import.meta.url), "utf8");
-  const snippet = /````markdown\n([\s\S]*?)\n````/.exec(guide)?.[1] ?? "";
-  assert.ok(snippet.includes("## 验收标准"), "README-验收标准.md 里要有可复制的追加段");
-  assert.deepEqual(extractCriteria(snippet)?.map((item) => item.id), ["A1", "A2", "A3", "A4"], "追加段里的示例格式能被程序取到");
+  const snippet = /```markdown\n([\s\S]*?)\n```/.exec(guide)?.[1] ?? "";
+  assert.ok(snippet.includes("## 验收标准"), "Loop 写法手册里要有验收标准示例，不再是项目追加段");
+  assert.deepEqual(extractCriteria(snippet)?.map((item) => item.id), ["A1", "A2", "A3", "A4"], "写法示例能被现有解析器取到");
 });
 
 test("A15 弱模型常见写法：粗体编号、粗体字段名、三级标题条目、粗体异议都能认", () => {
@@ -635,7 +635,7 @@ test("A25 没配 reset、验收方报「数据不是初始状态」：无法验�
     assert.equal(stage.record.verdict, "无法验收");
     assert.equal(stage.record.blocker, "数据不干净");
     assert.match(readFileSync(join(stage.record.runDir, "input.md"), "utf8"), /程序没有配置数据重置[\s\S]*数据不是初始状态/);
-    assert.match(blockerHint(stage.record, h.work, h.config), /没有配置 acceptance\.reset[\s\S]*【块 2】/);
+    assert.match(blockerHint(stage.record, h.work, h.config), /没有配置 acceptance\.reset[\s\S]*可选配置：被测系统怎么启动/);
     const withReset = parseAcceptanceConfig({ reset: "true" }, h.work, process.env)!;
     assert.match(blockerHint(stage.record, h.work, withReset), /没能把数据恢复到初始状态/);
   } finally { h.close(); }

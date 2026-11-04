@@ -69,7 +69,7 @@ function assertCard(text: string): void {
   for (const rule of PRODUCTION_RULES) assert.ok(text.includes(join(ROOT, rule.file)), rule.file);
   assert.match(text, /完成后由程序提交并记录，推不推由用户决定/);
   assert.match(text, /合入只由用户执行 bin\/loop 合入（合入队列），不要在会话里手动 git 合并/);
-  assert.doesNotMatch(text, /merge\.auto|由程序自动合入/);
+  assert.doesNotMatch(text, /merge\.auto|由程序自动合入|复制到项目|\.autoreview\/CONVENTIONS\.md|收尾回写/);
 }
 
 test("A1 两宿主范围外三类动作各 20 次，零输出且未加载校验/评审模块；记录进程耗时中位数", (t) => {

@@ -8,11 +8,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
-import { queueBatchComplete, queueBatchRecheck, queueDir, queueReviewedResult, queueStageEvent as realQueueStageEvent, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
+import { mergeQueuedBatch, queueBatchComplete, queueBatchRecheck, queueDir, queueReviewedResult, queueStageEvent as realQueueStageEvent, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
 import { inboxPath, queueAcceptance, readJson, statusPath, writeJsonAtomic, type InboxMessage, type StageStatus, type QueueAcceptance } from "../pipeline-core.ts";
 import { processStartTime } from "../procs.ts";
 import { parsePlan, runPipeline } from "../pipeline.ts";
-import { parseMergeConfig } from "../config.ts";
+import { captureProjectConfigOverrides, parseMergeConfig } from "../config.ts";
+import { loadContext, refreshContext } from "../project-context.ts";
 import { workingTree } from "../commit-batch.ts";
 import { createGitEvidence } from "../git.ts";
 import { childExec } from "../hosts/review-hook.ts";
@@ -178,6 +179,31 @@ async function fakeAcceptance<T>(f: ReturnType<typeof fixture>, action: (state: 
   try { return await action(values.FAKE_STATE_DIR); }
   finally { for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
 }
+
+test("返修 1：资格复核和独立队列门禁使用原段覆盖，仍拒绝不足预算", async () => {
+  const f = fixture(1);
+  try {
+    const batch = f.batches[0], marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8"));
+    const configured = { ...marker, gate: { ...marker.gate, timeoutMin: 20 }, acceptance: { timeoutMin: 60 }, context: { sources: ["prompt.md"] } };
+    writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify(configured));
+    f.git(f.repo, "add", ".autoreview.json"); f.git(f.repo, "commit", "-qm", "budget configuration");
+    f.write(0, ".autoreview.json", JSON.stringify(configured));
+    f.write(0, "src/a.txt", "reviewed\n");
+    const overrides = captureProjectConfigOverrides({ reviewTimeoutMin: "120" }, {});
+    const sourceInputs = refreshContext(loadContext(batch.cwd, overrides)!).snapshot.inputsFingerprint;
+    queueStageEvent({ cwd: batch.cwd, file: batch.file, stage: "甲", status: { sessionId: "config-overrides", host: "pi", event: "done", readyEpoch: "config-ready", summary: "", inbox: 0,
+      configOverrides: overrides, sourceInputs, acceptance: queueAcceptance() } });
+    await f.ready(0);
+    assert.equal(f.queue().entries[0].gate?.timeoutMin, 20, "独立队列执行器实际读取门禁并通过");
+    const registration = f.queue().batches[0];
+    const readOnly = () => mergeQueuedBatch(f.repo, registration, true, () => assert.fail("只读核对不能发布"));
+    assert.equal((await readOnly()).status, "ready");
+    const path = statusPath(batch.dir, "甲"), status = readJson<StageStatus>(path)!;
+    writeJsonAtomic(path, { ...status, configOverrides: captureProjectConfigOverrides({ reviewTimeoutMin: "60" }, {}) });
+    await assert.rejects(readOnly(), /必须小于一轮总预算/);
+    writeJsonAtomic(path, status);
+  } finally { await f.close(); }
+});
 
 test("兼容旧队列开关：只读归一化，保留 integrationEpoch 和其他历史材料", async () => {
   const f = fixture(1);
@@ -610,6 +636,63 @@ test("A6 门禁输出随失败退回，不通知可合入；关闭的开发窗�
     assert.deepEqual(f.devEvidence(f.batches[0].cwd), before);
     assert.equal(f.git(f.queue().workspace, "status", "--porcelain"), "");
   } finally { await f.close(); }
+});
+
+test("配置返修 2：原 Pi 退出后队列失败，经独立 Terminal 恢复原会话并沿用实际覆盖", async (t) => {
+  for (const explicit of [false, true]) await t.test(explicit ? "原段 flag 高于入口环境，含已有 -- 参数" : "入口 120 不在 stage.start 中", async () => {
+    const f = fixture(1, 0), log = join(f.root, "config-launches"), windows = join(f.root, "resume-windows.jsonl");
+    const vars = { FAKE_CONFIG_LOG: log, FAKE_CONFIG_QUEUE: "1" };
+    const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try {
+      const batch = f.batches[0], marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8"));
+      writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify({ ...marker, gate: { ...marker.gate, timeoutMin: 20 }, acceptance: { timeoutMin: 60 } }));
+      const raw = JSON.parse(readFileSync(batch.file, "utf8"));
+      raw.pi = { ponytail: false, ...(explicit ? { args: ["--autoreview-review-timeout-min", "150", "--autoreview-reviewer-model", "chosen/model with space", "--autoreview-reviewer-thinking", "high", "--autoreview-max-repairs", "7", "--autoreview-reviewer-cmd", "/fake/reviewer's command"] } : {}) };
+      writeFileSync(batch.file, JSON.stringify(raw));
+      f.git(f.repo, "add", ".autoreview.json", "batch-0.json"); f.git(f.repo, "commit", "-qm", "configure launch budget");
+      assert.equal(f.cli("开工", batch.file, "--autoreview-review-timeout-min", "120").ok, true);
+      process.env.PI_BIN = join(ROOT, "test/fake-config-pi.mjs");
+      process.env.AUTOREVIEW_MERGE_QUEUE_LAUNCHER = "terminal";
+      writeFileSync(join(f.root, "bin", "osascript"), `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const match = /tell application "Terminal" to do script ("(?:\\\\.|[^"\\\\])*")/.exec(process.argv.slice(2).join('\\n'));
+if (!match) process.exit(0);
+const command = JSON.parse(match[1]), env = {...process.env};
+delete env.AUTOREVIEW_REVIEW_TIMEOUT_MIN; delete env.AUTOREVIEW_REVIEWER_CMD;
+fs.appendFileSync(${JSON.stringify(windows)}, JSON.stringify({command, inheritedTimeout:env.AUTOREVIEW_REVIEW_TIMEOUT_MIN ?? null}) + '\\n');
+const result = cp.spawnSync('/bin/sh', ['-c', command], {env, encoding:'utf8', timeout:10000});
+process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || ''); process.exit(result.status ?? 1);
+`);
+      chmodSync(join(f.root, "bin", "osascript"), 0o755);
+      f.mode("fail-hold-queue-only"); f.write(0, "src/a.txt", "candidate\n");
+      const initialRun = f.cli("启动", batch.file, "--autoreview-review-timeout-min", "120");
+      assert.equal(initialRun.code, 0, JSON.stringify(initialRun));
+      const original = readJson<any>(join(log, "甲.json"))!;
+      assert.equal(original.resumed, false); assert.equal(original.effectiveConfig.reviewTimeoutMin.value, explicit ? 150 : 120);
+      assert.notEqual(processStartTime(original.pid), original.processStarted, "原开发进程已退出后才放行队列失败");
+      await f.until(() => f.queue().entries[0]?.status === "testing");
+      const candidate = f.devEvidence(batch.cwd);
+      writeFileSync(join(f.root, "release"), "allow failed queue gate after developer exit");
+      await f.until(() => existsSync(windows), "已派发独立恢复窗口");
+      await f.until(() => readJson<any>(join(log, "甲.json"))?.resumed === true, "权限检查通过，替身原会话实际进入返修");
+      await f.idle();
+      const restored = readJson<any>(join(log, "甲.json"))!, status = readJson<StageStatus>(statusPath(batch.dir, "甲"))!;
+      assert.equal(restored.sessionId, original.sessionId); assert.notEqual(restored.pid, original.pid);
+      assert.equal(restored.args[restored.args.indexOf("--session") + 1], original.sessionId);
+      assert.ok(!restored.args.some((arg: string) => arg.startsWith("@")), "恢复不重新发送需求");
+      assert.deepEqual(restored.effectiveConfig, original.effectiveConfig); assert.deepEqual(restored.review, original.review);
+      assert.equal(status.sessionId, original.sessionId); assert.equal(status.event, "started"); assert.equal(status.inbox, 1);
+      assert.deepEqual(f.devEvidence(batch.cwd), candidate, "恢复不替开发方改候选");
+      assert.equal(readFileSync(join(log, "history.jsonl"), "utf8").trim().split("\n").length, 2);
+      const window = JSON.parse(readFileSync(windows, "utf8").trim());
+      assert.equal(window.inheritedTimeout, null); assert.ok(window.command.includes("AUTOREVIEW_REVIEW_TIMEOUT_MIN='120'"));
+      assert.equal(f.queue().entries[0].status, "returned");
+    } finally {
+      await f.close();
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  });
 });
 
 test("A7 杀掉测试执行器后按登记释放孤儿门禁并恢复；不丢批次、不自动或重复合入", async () => {

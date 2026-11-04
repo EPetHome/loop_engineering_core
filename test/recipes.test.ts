@@ -91,6 +91,29 @@ test("A2 recipe review-only 不需开工：启动产生 started/done 和报告�
   } finally { f.close(); }
 });
 
+test("单一入口 A3：只评审从候选配置读取 90 分钟，仍不运行门禁/准备/验收", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify({
+      maxRepairs: 2, reviewerModel: "file/model", reviewerThinking: "high", reviewTimeoutMin: 90,
+      gate: { cmd: "exit 99", timeoutMin: 20 }, acceptance: { start: "exit 99", timeoutMin: 60 }, preparation: { check: "exit 99" },
+    }));
+    f.git(f.repo, "add", ".autoreview.json"); f.git(f.repo, "commit", "-qm", "budget");
+    const head = f.git(f.repo, "rev-parse", "HEAD");
+    await withEnv(f.env, async () => {
+      let called = false;
+      const run = await runReviewOnly({ repo: f.repo, base: f.base, head }, { now: () => 0,
+        callReviewer: async (_session, _round, timeout) => {
+          called = true; assert.equal(timeout, 90 * 60_000);
+          return { code: 0, killed: false, stderr: "", stdout: "## 结论：通过\n## 必修\n无\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n" };
+        },
+      });
+      assert.ok(called); assert.equal(run.exitCode, 0); assert.equal(run.model, "file/model");
+      assert.deepEqual((run.effectiveConfig as any).reviewTimeoutMin, { value: 90, source: "file" });
+    });
+  } finally { f.close(); }
+});
+
 test("A3 替身真实超时：复用预算/释放，退出 2，失败报告和 failed 事件", async () => {
   const f = fixture();
   try {

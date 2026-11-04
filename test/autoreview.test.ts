@@ -1000,6 +1000,40 @@ test("G12 验收命令期间互斥；关闭记为中断，恢复时提示 /accep
   });
 });
 
+test("单一入口 A2/A3/A4：Pi 文件预算 90 与显式覆盖均用于真实评审调用的超时参数", async (t) => {
+  for (const flagged of [false, true]) await t.test(flagged ? "flag 120 补足默认预算" : "文件 90 不被默认 flag 遮盖", async () => {
+    const h = harness({ stage: "甲", flags: { "autoreview-reviewer-cmd": "", ...(flagged ? { "autoreview-review-timeout-min": "120" } : {}) } });
+    const vars = { AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)), FAKE_STATE_DIR: join(h.root, "fake") };
+    const old = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, vars);
+    try {
+      h.write(".autoreview.json", JSON.stringify({
+        ...(!flagged ? { reviewTimeoutMin: 90 } : {}), maxRepairs: 2, reviewerModel: "file/model", reviewerThinking: "high", reviewerCmd: "/fake-reviewer",
+        gate: { cmd: "true", timeoutMin: 20 }, acceptance: { timeoutMin: 60 },
+        preparation: { check: "true" }, context: { sources: [{ path: "file.txt", role: "code" }] },
+      }));
+      await h.event("session_start");
+      await h.begin("完成需求\n## 验收标准\nA1. 操作：运行替身命令\n    预期：成功");
+      h.write("file.txt", "candidate\n"); h.assistant();
+      await h.event("agent_settled"); await h.terminal();
+      assert.equal(h.state().phase, "done", h.summary());
+      const call = h.calls.find((call) => call.command === "/fake-reviewer");
+      assert.ok(call, "触发了一轮评审");
+      const budget = (flagged ? 120 : 90) * 60_000;
+      // 既有规则为自动验收预留 60 分钟；评审调用使用总预算减预留、减本轮已耗时。
+      const reviewerBudget = budget - 60 * 60_000;
+      assert.ok(call.options.timeout! > reviewerBudget - 30_000 && call.options.timeout! <= reviewerBudget, `整轮 ${budget} ms，预留验收后应为 ${reviewerBudget} ms，实际 ${call.options.timeout}`);
+      assert.doesNotMatch(h.summary(), /必须小于一轮总预算/);
+      assert.equal((h.state() as any).rounds[0].acceptance.verdict, "通过");
+      const published = JSON.parse(readFileSync(statusPath(h.pipelineDir, "甲"), "utf8"));
+      assert.equal(published.configOverrides.reviewTimeoutMin, flagged ? "120" : "", "真实 Pi 扩展发布完成时携带原始显式覆盖");
+    } finally {
+      await h.close();
+      for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  });
+});
+
 test("G11 pi 扩展的后置验收：先静态评审、再验收，标准只认用户消息", async (t) => {
   const accEnv = (root: string, extra: Record<string, string> = {}) => ({
     AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),
@@ -1065,7 +1099,7 @@ test("G11 pi 扩展的后置验收：先静态评审、再验收，标准只认�
   });
 });
 
-test("G12 pi 的接入提示：写法段缺失提醒一次；没配启动暂停并指到【块 2】；部分验证完成时列出人工验收", async (t) => {
+test("G12/A1/A2 Pi 使用当前运行时约定，不提醒或修改项目副本；环境阻塞与人工项仍提示", async (t) => {
   const accEnv = (root: string, extra: Record<string, string> = {}) => ({
     AUTOREVIEW_ACCEPTANCE_CMD: fileURLToPath(new URL("./fake-tester.mjs", import.meta.url)),
     AUTOREVIEW_CRITERIA_CMD: fileURLToPath(new URL("./fake-drafter.mjs", import.meta.url)),
@@ -1080,20 +1114,32 @@ test("G12 pi 的接入提示：写法段缺失提醒一次；没配启动暂停�
   };
   const requirement = "做待办\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜";
 
-  await t.test("开会话提醒复制【块 1】到 AGENTS.md，恢复会话不再重复", async () => {
+  for (const legacy of [true, false]) await t.test(legacy ? "A1 v6 副本完成一轮后字节不变且没有升级提醒" : "A2 无副本也注入当前开发约定和验收写法", async () => {
     const h = harness();
     try {
-      writeFileSync(join(h.repo, ".autoreview.json"), JSON.stringify({ acceptance: {} }));
-      await h.event("session_start");
-      const notices = () => h.notifications.filter((text) => text.includes("【块 1】"));
-      assert.equal(notices().length, 1);
-      assert.ok(notices()[0].includes(join(h.repo, ".autoreview", "CONVENTIONS.md")));
-      await h.event("session_start");
-      assert.equal(notices().length, 1, "状态里记着提醒过，同一会话不再提醒");
+      await withEnv(accEnv(h.root), async () => {
+        h.write(".autoreview.json", JSON.stringify({ acceptance: {} }));
+        const copy = join(h.repo, ".autoreview", "CONVENTIONS.md");
+        const bytes = Buffer.from("<!-- autoreview:acceptance v6 -->\r\nLEGACY_COPY_MUST_NOT_BE_INJECTED\r\n<!-- /autoreview:acceptance -->\r\n");
+        if (legacy) { mkdirSync(join(h.repo, ".autoreview")); writeFileSync(copy, bytes); }
+        await h.event("session_start");
+        const options: { appendSystemPrompt?: string } = {};
+        await h.event("before_agent_start", { prompt: requirement, systemPromptOptions: options });
+        assert.equal(options.appendSystemPrompt, conventionText({ acceptance: true }));
+        assert.ok(options.appendSystemPrompt.includes(CONVENTION));
+        assert.ok(options.appendSystemPrompt.includes(ACCEPTANCE_CONVENTION));
+        assert.doesNotMatch(options.appendSystemPrompt, /LEGACY_COPY_MUST_NOT_BE_INJECTED/);
+        h.write("file.txt", "changed\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+        assert.equal(h.state().phase, "done"); assert.equal(h.inputs.length, 1);
+        assert.doesNotMatch(h.summary(), /写法是旧版|替换.*块|CONVENTIONS|可变流程说明尚未准备/);
+        assert.doesNotMatch(h.notifications.join("\n"), /【块 1】|写法是旧版|CONVENTIONS/);
+        if (legacy) assert.deepEqual(readFileSync(copy), bytes);
+        else assert.equal(existsSync(copy), false);
+      });
     } finally { await h.close(); }
   });
 
-  await t.test("没配启动连不上 → 暂停，界面里写明复制【块 2】到 .autoreview.json，不打回开发方", async () => {
+  await t.test("没配启动连不上 → 暂停，界面里指明 .autoreview.json 和启动配置说明，不打回开发方", async () => {
     const h = harness();
     try {
       await withEnv(accEnv(h.root, { FAKE_ACC_MODE: "unreachable" }), async () => {
@@ -1103,8 +1149,8 @@ test("G12 pi 的接入提示：写法段缺失提醒一次；没配启动暂停�
         h.assistant("做完了"); await h.event("agent_settled"); await h.terminal();
         assert.equal(h.state().phase, "paused");
         assert.equal(h.messages.length, 0, "不打回开发方");
-        assert.ok(h.notifications.some((text) => text.includes("【块 2】复制到") && text.includes(join(h.repo, ".autoreview.json"))));
-        assert.match(h.summary(), /## 需要你做的事\n1\. 把 .*【块 2】/);
+        assert.ok(h.notifications.some((text) => text.includes("配置 acceptance.start") && text.includes(join(h.repo, ".autoreview.json"))));
+        assert.match(h.summary(), /## 需要你做的事\n1\. 在 .*\.autoreview\.json 配置 acceptance.start/);
       });
     } finally { await h.close(); }
   });
@@ -2097,7 +2143,7 @@ test("G16 交付总表：Pi 完成追加一段（部分验证 + 人工），总�
   };
   const requirement = "做待办\n## 验收标准\n1. 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜\n3. [人工] 操作：看新首页\n   预期：布局和文案是你想要的";
 
-  await t.test("完成写入：项目、任务、结果、总结、已回写、两条欠项；总结开头写明路径", async () => {
+  await t.test("A4 完成写入：项目、任务、结果、总结、两条欠项，无回写勾；总结开头写明路径", async () => {
     const h = harness();
     try {
       await withEnv(accEnv(h.root, { FAKE_ACC_UNKNOWN: "A1" }), async () => {
@@ -2111,10 +2157,11 @@ test("G16 交付总表：Pi 完成追加一段（部分验证 + 人工），总�
         assert.match(text, /^- 任务：做待办$/m);
         assert.match(text, /^- 结果：完成（部分验证）；评审 1 次，返修 0 次$/m);
         assert.match(text, /^- 总结：.*\/unit-dev\.md$/m);
-        assert.match(text, /^- \[ \] 已回写原单$/m);
+        assert.doesNotMatch(text, /已回写原单/);
         assert.match(text, /^- \[ \] A1 部分验证：标准写得含糊，没法判断$/m);
         assert.match(text, /^- \[ \] A3 人工$/m);
-        assert.match(h.summary(), /^# 自动评审总结\n- 已登记到交付总表：.*；待回写原单（A1 部分验证、A3 人工）$/m);
+        assert.match(h.summary(), /^# 自动评审总结\n- 已登记到交付总表：.*（A1 部分验证、A3 人工）$/m);
+        assert.doesNotMatch(h.summary(), /待回写原单/);
       });
     } finally { await h.close(); }
   });
@@ -2137,7 +2184,7 @@ test("G16 交付总表：Pi 完成追加一段（部分验证 + 人工），总�
     } finally { await h.close(); }
   });
 
-  await t.test("同一会话返修后再次完成：追加新段，旧段仍按自己的勾选算", async () => {
+  await t.test("同一会话返修后再次完成：追加新段，旧段字节保持不变", async () => {
     const h = harness();
     try {
       await withEnv(accEnv(h.root), async () => {
