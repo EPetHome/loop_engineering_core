@@ -47,6 +47,7 @@ export function remapBatchReferences(
     if (config.extension !== undefined) config.extension = remapDependency(config.extension);
   };
   const copy = structuredClone(raw);
+  if (Array.isArray(copy.issues)) copy.issues = copy.issues.map(remap);
   if (copy.dir !== undefined) copy.dir = originalPath(copy.dir);
   remapPonytail(copy.pi);
   if (copy.stages && typeof copy.stages === "object" && !Array.isArray(copy.stages)) {

@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { remapBatchReferences } from "./batch-refs.ts";
+import { issueWritebackLines, prepareIssueWritebacks } from "./issue-writeback.ts";
 import { MARKER_FILE, findProjectRoot, loadProjectLayout, resolveProjectConfig, workspacePath, type ProjectLayout } from "./config.ts";
 import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
@@ -742,21 +743,37 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     lines.push(...notes);
   }
   let docsCommit: BatchDocsCommit = { committed: false, files: [] };
-  if (docs.files.length) {
-    if (args.dryRun) {
-      lines.push(`批次文档：将搬入 ${docs.target!.path}（${docs.files.join("、")}）；项目根将恢复：${docs.files.join("、")}`);
-    } else {
-      const expected = copyBatchDocs(repo, docs.target!, docs.files, batch.path);
-      docsCommit = commitBatchDocs(docs.target!, docs.branch!, batch.plan.name, docs.files);
-      verifyCopiedDocs(docs.target!, expected);
-      restoreProjectDocs(repo, docs.files);
-      lines.push(`批次文档：${docsCommit.committed
-        ? `已提交到 ${docs.target!.path}（${docs.files.join("、")}）`
-        : `分支上已有相同内容，未建空提交（${docs.files.join("、")}）`}；项目根已恢复：${docs.files.join("、")}`);
+  const expected = !args.dryRun && docs.files.length ? copyBatchDocs(repo, docs.target!, docs.files, batch.path) : new Map<string, DocContent>();
+  const issueWrites = prepareIssueWritebacks(batch.plan.issues ?? [], repo.root, docs.target?.path, batch.plan.name, args.dryRun);
+  if (args.dryRun) {
+    if (docs.files.length) lines.push(`批次文档：将搬入 ${docs.target!.path}（${docs.files.join("、")}）；项目根将恢复：${docs.files.join("、")}`);
+  } else if (docs.files.length || issueWrites.files.length) {
+    try {
+      docsCommit = commitBatchDocs(docs.target!, docs.branch!, batch.plan.name, [...new Set([...docs.files, ...issueWrites.files])]);
+    } catch (error) {
+      if (!issueWrites.files.length) throw error;
+      // 自动回写不能让原本可开的批次失败；撤销本次状态行后，照常提交批次文档。
+      issueWrites.rollback(error);
+      if (docs.files.length) docsCommit = commitBatchDocs(docs.target!, docs.branch!, batch.plan.name, docs.files);
     }
+    for (const [rel, change] of issueWrites.changes) {
+      const copied = expected.get(rel);
+      // 问题单可兼作提示词：只承认基于搬运原文的确定状态替换，不从现有目标内容反推期望。
+      if (copied?.kind === "file" && copied.content.equals(Uint8Array.from(Buffer.from(change.before)))) {
+        expected.set(rel, { kind: "file", content: Buffer.from(change.after) });
+      }
+    }
+    verifyCopiedDocs(docs.target!, expected);
+    restoreProjectDocs(repo, docs.files);
+    lines.push(`批次文档：${docsCommit.committed
+      ? `已提交到 ${docs.target!.path}（${docsCommit.files.join("、")}）`
+      : "分支上已有相同内容，未建空提交"}；项目根已恢复：${docs.files.join("、") || "（无）"}`);
   } else {
     lines.push("批次文档：没有需要搬的文件");
   }
+  const issueLines = issueWritebackLines(issueWrites.issues);
+  lines.push(...issueLines);
+  warnings.push(...issueLines);
   const rehearsalPlan = args.dryRun ? batch.plan : loadBatch(repo, docs.batchPath, { env: reviewEnv(args) }).plan;
   if (!args.dryRun) {
     const actualChecks = checkBatchConfiguration(rehearsalPlan, repo.projectRoot);
@@ -786,7 +803,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     // 外部/非 git 段沿用原行为，不把它们接入 git 合入队列。
     if (stages.every((stage) => stage.branch && worktrees(repo.root).some((item) => item.path === gitResult(stage.cwd, ["rev-parse", "--show-toplevel"]).stdout.trim()))) {
       registerQueueBatch(repo.root, { name: opened.plan.name, file: opened.path, dir: opened.plan.dir, project: repo.projectRoot,
-        release: repo.layout.release, stages, steps: opened.plan.steps, acceptance: Boolean(opened.plan.acceptance) });
+        release: repo.layout.release, stages, steps: opened.plan.steps, acceptance: Boolean(opened.plan.acceptance), issues: issueWrites.issues });
     }
   }
   const start = batchCommand("启动", docs.batchPath);
@@ -795,9 +812,10 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
   return { ok: true, command: "开工", dryRun: args.dryRun, effectiveConfig, repo: repo.root, release: repo.layout.release,
     batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
-    uncommitted, warnings, workflows, configurationChecks, rehearsal,
+    uncommitted, warnings, workflows, configurationChecks, rehearsal, issues: issueWrites.issues,
     batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
-      files: docs.files, restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
+      files: args.dryRun ? [...new Set([...docs.files, ...issueWrites.issues.filter((issue) => issue.status === "planned").map((issue) => issue.repoPath!)])].sort() : docsCommit.files,
+      restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
     methods, startCommand: start, statusCommand: status, mergeCommand: merge, lines };
 }
 

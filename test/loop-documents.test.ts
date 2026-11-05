@@ -1,10 +1,12 @@
 /** loop／documents：按功能独立运行，夹具与状态不跨测试进程共享。 */
 /** bin/loop 的开工、启动、状态、合入；测试仓库、worktree 和 methods.json 都建在系统临时目录。 */
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { parsePlan } from "../pipeline.ts";
+import { readMergeQueue } from "../merge-queue.ts";
 import { createChildExec } from "../hosts/review-hook.ts";
 import { changedSince, outOfScope } from "../scope.ts";
 import { git, fixture, loop, jsonOf } from "./helpers/loop-fixture.ts";
@@ -71,6 +73,61 @@ test("A2 发布分支上已跟踪的提示词在项目根改过，也搬进批�
   const plan = parsePlan(JSON.parse(readFileSync(workspaceBatch, "utf8")), f.worktree, process.env,
     { projectRoot: f.repo, batchFile: workspaceBatch });
   assert.equal(plan.stages.get("甲")!.prompt, join(f.worktree, "prompt.md"), "流水线入口解析开发空间批次文件时也指向新提示词");
+});
+
+test("登记问题单兼作提示词：搬运正文与状态回写一起校验，回写失败保留正文，其他篡改仍拒绝", async (t) => {
+  for (const mode of ["正常", "add", "commit", "正文篡改"] as const) await t.test(mode, () => {
+    const f = fixture(), rel = "issues/兼作提示词.md";
+    const source = join(f.repo, rel), target = join(f.worktree, rel);
+    const original = "# 兼作提示词\n状态：修复中·测试批次\n排期：普通\n关联单：无\n\n## 问题描述\n原始正文\n\n## 环境与证据\n状态：正文里的示例，不是单头\n";
+    const moved = original.replace("原始正文", "运行版新增的待搬运正文");
+    mkdirSync(dirname(source), { recursive: true }); writeFileSync(source, original);
+    const raw = JSON.parse(readFileSync(f.batch, "utf8"));
+    raw.issues = [rel]; raw.stages.甲.prompt = rel;
+    writeFileSync(f.batch, JSON.stringify(raw, null, 2));
+    git(f.repo, ["add", "--", rel, "batch.json"]); git(f.repo, ["commit", "-qm", "issue is also the stage prompt"]);
+    const base = git(f.repo, ["rev-parse", "HEAD"]);
+    writeFileSync(source, moved);
+    if (mode !== "正常") {
+      const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const wrapper = join(f.root, "bin", "git"), once = join(f.root, "issue-write-once");
+      const command = mode === "正文篡改" ? "commit" : mode;
+      const action = mode === "正文篡改"
+        ? `'${realGit}' "$@"; code=$?; if [ "$code" -eq 0 ]; then printf '\\nBODY_TAMPERED\\n' >> '${target}'; fi; exit "$code"`
+        : "echo ISSUE_WRITE_FAILED >&2; exit 1";
+      writeFileSync(wrapper, `#!/bin/sh\ncase " $* " in\n *" ${command} "*) if [ "$PWD" = '${f.worktree}' ] && [ ! -f '${once}' ]; then : > '${once}'; ${action}; fi;;\nesac\nexec '${realGit}' "$@"\n`);
+      chmodSync(wrapper, 0o755);
+    }
+    const opened = loop(f.repo, ["开工", f.batch, "--json"]), result = jsonOf(opened);
+    if (mode === "正文篡改") {
+      assert.notEqual(opened.status, 0);
+      assert.match(String(result.error), /批次文档内容没有按原样保存/, "不能把任意正文变化当成合法状态替换");
+      assert.equal(readFileSync(source, "utf8"), moved, "校验失败不能恢复或丢弃运行版待搬运正文");
+      assert.match(readFileSync(target, "utf8"), /BODY_TAMPERED/);
+      assert.equal(readMergeQueue(f.repo), undefined, "校验失败不登记队列");
+      return;
+    }
+    assert.equal(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+    const text = readFileSync(target, "utf8");
+    if (mode === "正常") {
+      assert.match(text, /状态：已合入待验·测试批次；未验证项见本批交付总表/);
+      assert.equal(text.replace(/^状态[^\n]*/m, "状态：修复中·测试批次"), moved, "合法替换之外的全部字节保持不变");
+    } else {
+      assert.match((result.lines as string[]).join("\n"), /ISSUE_WRITE_FAILED/);
+      assert.equal(text, moved, "回写撤销后仍原样提交本批搬运的正文");
+    }
+    assert.equal(readFileSync(source, "utf8"), original, "校验通过后运行版恢复发布分支原文");
+    assert.equal(git(f.repo, ["rev-parse", "HEAD"]), base);
+    assert.equal(git(f.repo, ["status", "--porcelain"]), "");
+    assert.equal(git(f.worktree, ["status", "--porcelain"]), "");
+    assert.match(git(f.worktree, ["show", "-s", "--format=%s", "HEAD"]), /^feat: 批次文档$/);
+    assert.equal(git(f.worktree, ["show", "HEAD:" + rel]), text.trim());
+    const docs = result.batchDocs as { files: string[]; restore: string[]; committed: boolean };
+    assert.equal(docs.committed, true); assert.deepEqual(docs.files, [rel]); assert.deepEqual(docs.restore, [rel]);
+    const registered = readMergeQueue(f.repo)!.batches[0];
+    assert.equal(registered.stages[0].prompt, target, "完成校验、恢复及配置核对后，队列使用开发空间里的新提示词");
+    assert.equal(registered.issues![0].status, mode === "正常" ? "prepared" : mode === "add" ? "skipped" : "failed");
+  });
 });
 
 test("A3 开工 --dry-run 列出要搬的批次文档和要恢复的项目根文件，不改任何东西", () => {

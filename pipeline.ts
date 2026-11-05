@@ -41,6 +41,7 @@ import {
 import { DEFAULT_MODEL, DEFAULT_THINKING } from "./review.ts";
 import { loadPreparation, runPreparation, type PreparationState } from "./preparation.ts";
 import { loadContext, refreshContext, sourceInputsProblem } from "./project-context.ts";
+import { parseIssuePaths } from "./issue-writeback.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine } from "./resources.ts";
 import { methodEnv } from "./method-env.ts";
 import { parseStageScope, type StageScope } from "./scope.ts";
@@ -109,6 +110,8 @@ export interface Plan {
   name: string;
   /** 批次分支（批次.json 的 branch）；写了才在段完成时由程序提交。 */
   branch?: string;
+  /** 本批登记的问题单，按批次文件所在目录解析。回写失败不影响执行资格。 */
+  issues?: string[];
   /** 批次文件绝对路径；启动会话时交给扩展读 scope 等项目参数。 */
   file?: string;
   /** 流水线目录：状态、收件箱、验收材料、报告都在这里。 */
@@ -201,6 +204,8 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
   }
   if (raw.acceptance !== undefined && raw.e2e !== undefined) throw new PlanError("计划文件的 acceptance 和 e2e 只能写一个"); // 兼容旧字段，但不合并两套配置。
   const name = text(raw.name, "name");
+  let issues: string[];
+  try { issues = parseIssuePaths(raw.issues, planDir); } catch (error) { throw new PlanError((error as Error).message); }
   if (!isObject(raw.stages) || Object.keys(raw.stages).length === 0) throw new PlanError("计划文件的 stages 至少要有一段");
   if (raw.pi !== undefined && !isObject(raw.pi)) throw new PlanError("计划文件的 pi 必须是对象");
   const planPi = raw.pi === undefined ? DEFAULT_PI : piOptions(raw.pi, "pi", DEFAULT_PI, planDir);
@@ -296,7 +301,7 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
   if (!Number.isSafeInteger(maxParallel) || (maxParallel as number) < 1) throw new PlanError("maxParallel 必须是正整数");
   const startupTimeoutSec = raw.startupTimeoutSec ?? SILENCE_MS / 1000;
   if (!Number.isSafeInteger(startupTimeoutSec) || (startupTimeoutSec as number) < 1) throw new PlanError("startupTimeoutSec 必须是正整数秒数");
-  return { recipe, name, dir, stages, steps, prepare, acceptance, maxParallel: maxParallel as number, startupTimeoutSec: startupTimeoutSec as number,
+  return { recipe, name, dir, stages, steps, prepare, acceptance, ...(issues.length ? { issues } : {}), maxParallel: maxParallel as number, startupTimeoutSec: startupTimeoutSec as number,
     ...(batchBranch ? { branch: batchBranch } : {}), ...(options.batchFile ? { file: resolve(options.batchFile) } : {}) };
 }
 

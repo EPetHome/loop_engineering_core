@@ -142,7 +142,7 @@ export function appendLedgerRecord(record: LedgerRecord, path = deliveryLedgerPa
 }
 
 /** 合入另追加本批的收尾段，不改写并发会话已追加的正文。entry 身份用于崩溃恢复去重。 */
-export function appendMergeRecord(record: { project: string; batch: string; entry: string; commit: string; file: string; manual: { id: string; text: string; detail: string }[]; test?: string; deployment?: string }, path = deliveryLedgerPath()): string {
+export function appendMergeRecord(record: { project: string; batch: string; entry: string; commit: string; file: string; manual: { id: string; text: string; detail: string }[]; test?: string; deployment?: string; notes?: string[] }, path = deliveryLedgerPath()): string {
   const marker = `<!-- loop-merge:${record.entry} -->`;
   try { if (readFileSync(path, "utf8").includes(marker)) return path; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -150,6 +150,7 @@ export function appendMergeRecord(record: { project: string; batch: string; entr
     `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 批次-${oneLine(record.entry, 200)}`,
     marker, `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
     `- 已合入 ${record.commit}`, ...(record.test ? [`- ${oneLine(record.test, 2000)}`] : []), `- ${record.deployment ?? "部署：未开启"}`,
+    ...(record.notes ?? []).map((note) => `- ${oneLine(note, 2000)}`),
     ...record.manual.map((item) => `- [ ] ${oneLine(item.id, 120)} 人工：${oneLine(item.text, 1000)}${item.detail ? `；${oneLine(item.detail, 500)}` : ""}`), "",
   ].join("\n"), path);
 }

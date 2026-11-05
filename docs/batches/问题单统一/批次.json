@@ -1,0 +1,33 @@
+{
+  "name": "问题单统一",
+  "branch": "feat/issues-unify",
+  "pi": {
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "max"
+  },
+  "stages": {
+    "开发": {
+      "prompt": "../../prompt/提示词-问题单统一.md",
+      "workspace": "问题单统一",
+      "acceptance": {},
+      "scope": {
+        "deny": [
+          "docs/",
+          "iusses/",
+          "issues/",
+          "eval/",
+          "temp/",
+          "test/e2e.mjs",
+          "review-prompt.md",
+          ".autoreview.json",
+          "AGENTS.md"
+        ]
+      }
+    }
+  },
+  "steps": [
+    [
+      "开发"
+    ]
+  ]
+}
