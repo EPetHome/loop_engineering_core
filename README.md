@@ -1,18 +1,18 @@
 # Loop 自动评审与验收（Pi / Claude Code / Codex）
 
-> 当前执行顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整合 E2E 在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，写法规则见 [接入手册](README-验收标准.md)。接入命令只更新 `.autoreview/CONVENTIONS.md`，保持 AGENTS.md 和 CLAUDE.md 不变。
+> 开发批次准备：写提示词和 `批次.json` → `bin/loop 开工` → `bin/loop 启动`；只评审已有提交可直接用 `bin/loop 评审`，不需开工。开发会话内部顺序：准备 → 开发与定向自检 → 门禁 → 静态评审 → 必需验收 → 释放资源 → 本段可接力。整批验收在各段可接力后由流水线执行。配置与迁移见 [运行与维护](项目文档/运行与维护.md)，工具和字段见 [工具清单](工具清单.md)，写法规则见 [接入手册](README-验收标准.md)。首次接入用 `bin/loop 接入 <项目目录>`，只生成或补全 `.autoreview.json`；规则留在 Loop 仓库，运行时注入或按需指路，不同步项目副本。
 
-给 pi 开发会话加一个 `-e`：开发方写完（写不写【交付完成】都行），扩展自动让独立评审检查改动；有必修就发回**同一个**开发会话返修，最多 4 次；没有必修或到达上限就停下，弹 macOS 通知并写总结。
+用 `bin/loop 开发 pi --cwd <项目目录> <任务文件.md>` 启动开发会话：开发方写完（写不写【交付完成】都行），扩展自动让独立评审检查改动；有必修就发回**同一个**开发会话返修，最多 4 次；没有必修或到达上限就停下，弹 macOS 通知并写总结。
 
 项目的 `.autoreview.json` 里配了 `gate` 时，每轮先跑**门禁**：程序在项目目录执行一条确定性的检查命令（单测、类型检查、lint），明确属于产品失败时带着输出打回同一个会话；环境、检查方法和未定原因先暂停或有限恢复，这一轮不验收、不评审。见下面「门禁」一节。
 
 项目的 `.autoreview.json` 里配了 `acceptance` 时，静态评审没有必修后再做一次**自动验收**：程序把系统真的跑起来，由验收方（默认 ds4.1-flash）按验收标准黑盒实操、留证据，程序逐条判定；不通过就带着复现步骤和系统日志打回同一个会话。见下面「自动验收」一节。
 
-另外可以配**验收命令**（`--autoreview-accept-cmd`，和自动验收是两回事）：每次评审完成后执行一条命令（例如本仓库的 E2E），默认是必需验收，完成前不发布段 done；产品失败回原会话返修，环境与未知原因暂停。见下面「验收命令」一节。
+另外可以配**验收命令**（`--autoreview-accept-cmd`，和自动验收是两回事）：每次评审完成后执行一条命令（例如本仓库的实操验收），默认是必需验收，完成前不发布段 done；产品失败回原会话返修，环境与未知原因暂停。见下面「验收命令」一节。
 
-几段 pi 会话要**并行或串行开发、最后跑整合 e2e** 时，用**流水线**：`node /Users/Admin/Desktop/loop/pipeline.ts <计划.json>` 一条命令开窗口、等各段完成、跑 e2e，没通过的条目按 `[段名]` 退回那一段修，修完自动重跑。见下面「流水线」一节。
+几段 pi 会话要**并行或串行开发、最后跑整批验收** 时，用 `bin/loop 启动 <批次.json>`：单段直接开会话，多段交给流水线开窗口、等各段完成、跑整批验收，没通过的条目按 `[段名]` 退回那一段修，修完自动重跑。见下面「流水线与批次」一节。
 
-同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。插件只在用 `bin/loop-dev` 启动的会话里生效；直接打开的会话不评审，只在 SessionStart 收到交付总表待回写提醒。
+同一套评审规则也做成了 Claude Code / Codex 插件（`plugins/autoreview/`，本地市场 `autoreview-local`）：宿主里由 Stop Hook 调评审，有必修时用 `{"decision":"block","reason":…}` 在原会话返修。自动评审只在用 `bin/loop 开发 claude` 或 `bin/loop 开发 codex` 启动的会话里生效；直接打开的会话不评审，SessionStart 不读取交付总表、不注入提醒。两类会话都在生产 Loop 时按需收到指路和配置校验，读文件、讨论和普通开发不注入。
 
 ## Claude Code / Codex 用法
 
@@ -21,23 +21,23 @@
 ```bash
 cd /Users/Admin/Desktop/loop
 # 二选一；--init 仅在尚无配置时创建 {}，已有配置保持不变。
-bash bin/loop-dev claude --cwd /你的开发目录 --init /任务文件.md
-bash bin/loop-dev codex --cwd /你的开发目录 --init /任务文件.md
+bin/loop 开发 claude --cwd /你的开发目录 --init /任务文件.md
+bin/loop 开发 codex --cwd /你的开发目录 --init /任务文件.md
 ```
 
 也可以不传任务文件，进入后直接发送需求。任务文件相对路径按执行命令时的目录解析；`--cwd` 是开发目录。文件仍以 `@"绝对路径"` 交给宿主，里面的授权文字不能代替用户亲手授权。
 
-插件按启动方式生效：入口设置 `AUTOREVIEW_DEV_ROOT=<启动时从 --cwd 向上找到的 .autoreview.json 所在目录>`，Hook 只认这个变量。只有这样的会话才会注入开发约定、记录需求和基线、评审/返修/暂停/发通知并写状态与总结；直接打开的宿主会话这些事都不做。项目根在启动时固定，会话中途 `cd` 到别的目录不会改变它，也不会改用子目录里的 `.autoreview.json`。唯一例外是交付总表的「待回写」提醒：没有变量的会话在 SessionStart 仍按当前目录判断项目并注入这一句，不带开发约定。
+自动评审按启动方式生效：入口设置 `AUTOREVIEW_DEV_ROOT=<启动时从 --cwd 向上找到的 .autoreview.json 所在目录>`，评审只认这个变量（生产 Loop 的指路与校验不按它区分）。只有这样的会话才会注入开发约定、记录需求和基线、评审/返修/暂停/发通知并写状态与总结；直接打开的宿主会话这些事都不做。项目根在启动时固定，会话中途 `cd` 到别的目录不会改变它，也不会改用子目录里的 `.autoreview.json`。SessionStart 不读取交付总表，也不要求协调方抄写结果；生产 Loop 的辅助仅在下面列出的工具动作之后触发，不增加直接会话的开始内容。
 
-变量指向的目录不存在或里面没有 `.autoreview.json` 时，按「项目配置不可用」处理，提示和总结里会写出变量的值。旧状态文件不清理、不迁移。Pi 的 `autoreview.ts`、流水线和 `bin/pi-dev` 行为不变。
+变量指向的目录不存在或里面没有 `.autoreview.json` 时，按「项目配置不可用」处理，提示和总结里会写出变量的值。旧状态文件不清理、不迁移。Pi 扩展和批次流水线的开发行为不变。
 
 入口检查可用宿主、已有 Git 提交、Loop 配置、Pi 引擎文件以及实际启用的插件 Hook；失败就停止。Claude 使用 `--permission-mode auto`，Codex 使用 `--approve-for-me`；不修改全局权限、deny 或沙箱配置。可在 `--` 后追加宿主自己的模型、权限等参数。Codex 优先使用 PATH 中可运行的程序；失效时尝试桌面应用自带程序，也可通过 `CODEX_BIN` 指定；Claude 对应 `CLAUDE_BIN`。需要支持直接运行 TypeScript 的 Node（最低 22.18），可用 `LOOP_NODE` 指定。
 
 `--dry-run` 只核对并打印命令和启动时的 `AUTOREVIEW_DEV_ROOT`，不启动模型、不创建配置。`--session <会话ID>` 精确续接开发会话；不选择最近会话。示例：
 
 ```bash
-bash /Users/Admin/Desktop/loop/bin/loop-dev codex --cwd /你的开发目录 --init --dry-run /任务文件.md
-bash /Users/Admin/Desktop/loop/bin/loop-dev claude --cwd /你的开发目录 --session <开发会话ID>
+/Users/Admin/Desktop/loop/bin/loop 开发 codex --cwd /你的开发目录 --init --dry-run /任务文件.md
+/Users/Admin/Desktop/loop/bin/loop 开发 claude --cwd /你的开发目录 --session <开发会话ID>
 ```
 
 首次安装（当前机器已安装，无须重复）：
@@ -50,9 +50,10 @@ claude plugin install autoreview@autoreview-local
 /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin add autoreview@autoreview-local
 ```
 
-然后新开宿主会话。Codex 在会话输入框输入 `/hooks`，核对并信任 autoreview 的 SessionStart、UserPromptSubmit、Stop；安装不等于 Hook 已获信任。原生接口依据：[Claude Code Hooks](https://code.claude.com/docs/en/hooks)、[OpenAI Hooks](https://learn.chatgpt.com/docs/hooks)。这是本机插件；移动仓库或换机器时需先更新 `plugins/autoreview/hooks/hooks.json` 的 Node 和引擎路径，再更新插件并重新检查信任。
+然后新开宿主会话。Codex 在会话输入框输入 `/hooks`，核对并信任 autoreview 的 SessionStart、UserPromptSubmit、PostToolUse、Stop；安装不等于 Hook 已获信任。原生接口依据：[Claude Code Hooks](https://code.claude.com/docs/en/hooks)、[OpenAI Hooks](https://learn.chatgpt.com/docs/hooks)。这是本机插件；移动仓库或换机器时需先更新 `plugins/autoreview/hooks/hooks.json` 的 Node 和引擎路径，再更新插件并重新检查信任。
 
-- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。仍须通过 `bin/loop-dev` 启动才会进入开发会话。
+- 在项目根目录（或某个上级目录）放 `.autoreview.json`，可以是 `{}`；可选 `maxRepairs`（默认 4）、`reviewerModel`、`reviewerThinking`、`reviewTimeoutMin`、`gate`（门禁）、`acceptance`（自动验收），见下文。仍须通过 `bin/loop 开发 <claude|codex>` 启动才会进入开发会话。
+- 开工工具还读 `release`（发布分支，默认 `main`）、`workspaces`（工作区名字到路径）、`localFiles`（只在本机的文件）和 `methods`（项目方法文件 `paths`，可选 `selfCheck`、`probe`）。全部字段、类型和默认值见 [工具清单.md](工具清单.md)。
 - 开发方最后一行写【交付完成】触发评审；没有标记但有未评审改动也会触发。有必修时 Hook 把返修消息发回同一会话，最多 `maxRepairs` 次（门禁、验收打回和评审打回共用）；Codex 将返修作为续跑消息送回时，不替换需求、不清零次数。
 - 暂停（包括评审被宿主超时或中断）后，在原会话再发一条消息让开发方继续，自动评审就恢复，返修计数重新算。
 - 消息里的 `@文件` 由 Hook 展开（最多 3 个，每个 200KB 以内），需求原文和验收标准都按展开后的内容算，和 pi 一致。
@@ -60,7 +61,48 @@ claude plugin install autoreview@autoreview-local
 - Codex 首次安装后需要在 Codex 里用 `/hooks` 确认信任；未经信任时 Hook 不执行。
 - 联调可用假评审：`AUTOREVIEW_REVIEWER_CMD=/Users/Admin/Desktop/loop/test/fake-reviewer.mjs`、`FAKE_MODE=pass|pass-after-1|always-fix|fail|modify`；假验收方 / 假起草方：`AUTOREVIEW_ACCEPTANCE_CMD=…/test/fake-tester.mjs`、`AUTOREVIEW_CRITERIA_CMD=…/test/fake-drafter.mjs`。
 
-**范围**：上述入口支持单个开发会话；多段 `pipeline.ts`、`/review` 等 Pi 命令和后置 `--autoreview-accept-cmd` 仍属于 Pi 入口。Hook 的准备检查在交付后的检查开始前执行；需要开发前准备时先使用项目已有准备方法。`--init` 的 `{}` 只启用静态评审，不代表已配置门禁或自动验收。在 Loop 自身开发时，本仓库真实 E2E 仍是独立必需检查，Hook 总结完成不代表该项已通过。
+**范围**：上述入口支持单个开发会话；多段 `bin/loop 启动`、`/review` 等 Pi 命令和后置 `--autoreview-accept-cmd` 仍属于 Pi 入口。Hook 的准备检查在交付后的检查开始前执行；需要开发前准备时先使用项目已有准备方法。`--init` 的 `{}` 只启用静态评审，不代表已配置门禁或自动验收。在 Loop 自身开发时，本仓库实操验收仍是独立必需检查，Hook 总结完成不代表该项已通过。
+
+### 生产 Loop：按动作指路与即时校验
+
+Claude Code 和 Codex 共用 PostToolUse（只匹配 `Write|Edit|MultiEdit|Bash|apply_patch`，不用 `if`）；无论是否通过 `bin/loop 开发` 启动，行为相同，Pi 不在此 Hook 范围内。
+
+- 写/改 `docs/batches/**/批次.json`、项目根 `.autoreview.json`：复用 Loop 的只读解析校验；正确时静默。引用的提示词、验收标准等尚未写出时只提示「尚未找到」，不是错误。
+- 写/改 `.autoreview/methods/**`、`**/prompt/提示词-*.md`，或运行 `bin/loop`：本会话第一次给一张不超过 6 行的指路卡，指向规则所在文件/标题；未接入批次流程时附迁移位置。
+- Bash（Codex 的 `exec_command` 按 `Bash` 匹配）命令文本里出现这些写入路径时，执行后按磁盘内容校验；支持重定向、脚本和 `cd` 后的路径。不执行命令来猜路径，不扫描脚本内部的隐式写入。只读命令、普通命令和业务文件不输出，也不加载校验模块。
+- 除 `.autoreview.json` 本身外，没有项目标记的动作不触发。指路按宿主 + `session_id` 记一次；SessionStart 的 `source=compact` 清指路标记。同文件同报错在本会话不重复。
+- 指路和错误合成一条 `hookSpecificOutput.additionalContext`，不 block、不撤销写入；辅助异常静默退出 0。状态在 `~/.pi-autoreview/production-loop/`，不写项目、不改变原有 Stop 评审和返修。
+
+**合入后部署（本任务不会替你更新本机插件）**：以下命令在运行版 `/Users/Admin/Desktop/loop` 使用；先退出旧 Claude Code 会话，再更新并重新打开以重新加载插件：
+
+```bash
+cd /Users/Admin/Desktop/loop
+claude plugin marketplace update autoreview-local
+claude plugin update autoreview@autoreview-local
+claude
+```
+
+本机 Codex 没有 `plugin update`；退出旧会话后，手动重装这一个本地插件以刷新缓存，再重新打开（以下仅为部署说明，本任务不会执行）：
+
+```bash
+cd /Users/Admin/Desktop/loop
+CODEX=/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+"$CODEX" plugin remove autoreview@autoreview-local
+"$CODEX" plugin add autoreview@autoreview-local
+"$CODEX"
+```
+
+在 Codex 输入框执行 `/hooks`，重新审阅、信任变更后的 autoreview 定义（必须包含 **PostToolUse**），之后新开会话。不要把“已安装”当成“新 Hook 已信任”；若列表没有 PostToolUse，先在插件管理中更新 autoreview，再重查 `/hooks`。
+
+**真实宿主采样核对（A9，合入后人工执行）**：每个宿主从启动终端继承这个开关，默认关闭。原始输入可能含项目内容，目录只保存在本机，核对后按实际路径自行释放。
+
+```bash
+export AUTOREVIEW_PRODUCTION_SAMPLES="$(mktemp -d "${TMPDIR:-/tmp}/loop-hook-samples.XXXXXX")"
+printf '本次原始输入目录：%s\n' "$AUTOREVIEW_PRODUCTION_SAMPLES"
+# 在同一终端用 claude 或上面的 codex 绝对路径启动宿主；在你的已接入项目中操作。
+```
+
+让两个宿主各自在项目中写 `docs/batches/hook-smoke/批次.json`，内容为 `{"name":"hook-smoke"}`。预期同一条上下文里看到指路卡和 `批次文件的 stages 必须是对象`，指向 README 批次一节；再写同样错误不重复，改对后静默。打开采样目录中的 `.json` 核对：Claude Write/Edit 是 `tool_input.file_path`；Codex apply_patch 和两边 Bash 是 `tool_input.command`；两边都有 `session_id`、`cwd`。结束后在启动终端执行 `unset AUTOREVIEW_PRODUCTION_SAMPLES`。这一步未实测前，不算真实宿主装配/业务验收通过。
 
 ## 门禁（可选，建议配）
 
@@ -93,7 +135,7 @@ claude plugin install autoreview@autoreview-local
 
 ## 自动验收（可选）
 
-在 `.autoreview.json` 里加 `acceptance` 一节才开启（pi 扩展也读同一个文件）。最省事的是跑接入命令 `node /Users/Admin/Desktop/loop/setup-acceptance.ts <项目目录>`：它会看项目文件推断类型、启动命令和端口，连同【块 1】写法段一起列给你确认。所有字段都可选，`"acceptance": {}` 就是「命令行项目、默认设置」：
+在 `.autoreview.json` 里加 `acceptance` 一节才开启（pi 扩展也读同一个文件）。最省事的是跑 `bin/loop 接入 <项目目录>`：它会看项目文件推断类型、启动命令和端口，展示配置计划，确认后只写 `.autoreview.json`；已有 `acceptance` 保留不动。所有字段都可选，`"acceptance": {}` 就是「命令行项目、默认设置」：
 
 ```json
 {
@@ -123,7 +165,8 @@ claude plugin install autoreview@autoreview-local
 | `guide` | 无 | 项目操作说明文件（访问地址、测试账号等），原文交给验收方 |
 | `model` | `opencode-go/deepseek-v4.1-flash` | 验收方模型 |
 | `thinking` | 不传 | 验收方思考档位 |
-| `strongModel` | 评审模型 | 强模型：需求里没写标准时起草标准；验收方没做好时换它重验 |
+| `strongModel` | 评审模型 | 强模型：需求里没写标准时起草标准；验收方没做好时换它重验；断线后只读已有证据补报告 |
+| `idleTimeoutSec` | `300` | 验收方连续没有输出、会话记录或证据变化的秒数（正整数）；等待实测工具执行时不计模型空闲，仍受工具自身超时与整轮预算约束；系统自身日志不延长此时间 |
 | `timeoutMin` | `20` | 一轮里验收最多用多少分钟，从 `reviewTimeoutMin`（一轮总预算，默认 60）里扣，必须小于它 |
 | `env` | `{}` | 给被测系统的额外环境变量；系统还会拿到 `AUTOREVIEW_RUN_DIR`（本轮运行目录） |
 
@@ -139,6 +182,7 @@ claude plugin install autoreview@autoreview-local
 4. 配了 `reset` 时，程序先重置数据（换强模型重验前再重置，同一次格式更正保留数据和有效证据）。
 5. 验收方按标准黑盒实操，必须用运行目录里的工具留证据：`./ev A1 -- <命令>`（跑命令）、`./browser A1 步骤.json`（无头浏览器操作网页，需要 Playwright）。验收方不许启动、停止、重启被测系统，也不许自己清数据。
 6. 程序关停系统、清掉端口上验收期间起的残留进程、截取日志、扫错误，再逐条判定（见下表）。证据对不上时，在同一个验收会话里让它重做一次；还是验收方的问题，就换强模型另开会话从头重验一次。
+   程序通过即时的工具起止事件、会话中的在途提示及 `./ev` / `./browser` 的运行标记识别实测：并行批次中，某条工具结束即清除其在途状态，不必等整批 `toolResult` 落盘。排队、准备和消息落盘延迟不计入工具执行时间；超时只由 Pi / 实测工具后端处理，不从会话消息时间另造超时。等待工具期间不计模型空闲，但仍受同一份整轮预算约束；工具正常超时后照常留证据并判定，预算耗尽则按实测未完成暂停，不归为模型断线。归因在调用终止边界核对最新工具状态：预算中止先保存清理前现场，不能用上次轮询缓存或清理后的进程消失替代，避免漏掉刚完成工具后的模型断线补判。其余情况下，验收方连续 `idleTimeoutSec`（默认 5 分钟）没有新动作，或调用超时、模型断线/限流时，程序结束本次调用并冻结已有证据；另开 `strongModel` 只读会话补写报告，不重测、不 reset。补报告也受空闲时限约束，耗时计入本轮预算；剩余不足 1 分钟时不再调用，已有报告/检查点照常按证据核对，无法补判的条目写明原因。没有有效证据的条目不能通过，记「无法验证：验收方模型断线」，不算被测系统超时或崩溃。执行器资源释放故障仍会暂停，不能被补报告掩盖。
    验收途中被测系统退出时立刻停掉验收方、不再重验，按退出方式归责：被信号关掉（或正常退出、日志没错误）算「被关掉」，这一轮作废、暂停交给你，不打回开发方，关掉之后留的证据也不算数；非 0 退出或日志有错误算「崩溃」，G1 不通过、打回开发方。
 7. 不通过 → 带复现步骤、预期、实际、相关日志和证据路径回原开发会话；通过或部分验证 → 检查剩余必需验收，结束时单列人工项。静态评审在本轮验收之前，只会看到明确标注的上一轮验收记录。
 
@@ -167,17 +211,16 @@ claude plugin install autoreview@autoreview-local
 
 授权的条目由验收方执行，默认是 `acceptance.model`（ds4.1-flash）。要让强模型来做这些碰真实环境的条目，把 `acceptance.model` 改成强模型。
 
-一条链路里只有一步涉及权限时，只把这一步写成 `[授权]`，前后能自动验的照常写；能用测试账号或录下来的真实输入（事件、请求样本）代替那一步的，写成自动验的。这些规则也写进了接入手册【块 1】，准备提示词的模型照着写，但不会替你写「同意授权」。
+一条链路里只有一步涉及权限时，只把这一步写成 `[授权]`，前后能自动验的照常写；能用测试账号或录下来的真实输入（事件、请求样本）代替那一步的，写成自动验的。这些规则只在 Loop 仓库的接入手册「起草需求时写验收标准」维护，准备提示词的模型照着写，但不会替你写「同意授权」。
 
-**暂停或要你动手时，提示会写明下一步**，格式是「把接入手册的【块 N】复制到 <你项目里的完整路径>，然后……」：
+**暂停或要你动手时，提示会写明配置的完整路径、Loop 仓库里的说明和下一步**：
 
 | 情况 | 提示你做什么 |
 |---|---|
-| 项目开了验收，但 .autoreview/CONVENTIONS.md 里没有（或是旧版）写法段 | 复制【块 1】到可变写法文件，保持 AGENTS.md/CLAUDE.md 不变（每个会话提醒一次） |
-| 无法验收：没配启动 | 复制【块 2】到 `.autoreview.json`，改好启动命令和端口，再发消息继续 |
-| 无法验收：缺 Playwright | 在项目目录执行【块 3】，再发消息继续 |
-| 无法验收：被测系统被关掉 | 不是开发方的问题，这一轮作废；需要干净数据就按【块 2】配 `reset`，再发消息继续 |
-| 无法验收：数据不是初始状态 | 按【块 2】配 `reset`（配了就检查重置命令），再发消息继续 |
+| 无法验收：没配启动 | 按接入手册「可选配置：被测系统怎么启动」补全 `.autoreview.json` 的启动命令和端口，再发消息继续；首次配置可用 `bin/loop 接入` 探测 |
+| 无法验收：缺 Playwright | 按接入手册「可选配置：浏览器工具」在项目目录安装，再发消息继续 |
+| 无法验收：被测系统被关掉 | 不是开发方的问题，这一轮作废；需要干净数据就配 `acceptance.reset`，再发消息继续 |
+| 无法验收：数据不是初始状态 | 配 `acceptance.reset`（配了就检查重置命令），再发消息继续 |
 | 重置数据失败 | 检查 `acceptance.reset`（输出见 `reset.log`），再发消息继续 |
 | 无法验收：验收方没做好、全部没验证 | 原因见总结；修好环境或发新标准，再发消息继续 |
 | 端口被占用（写明哪个进程占着）、开发方对标准有异议、没有标准 | 各自写明怎么处理 |
@@ -188,86 +231,271 @@ claude plugin install autoreview@autoreview-local
 
 验收还会暂停的情况：验收期间项目里的文件变了（把运行产物加进 `.gitignore`，或让系统写到 `$AUTOREVIEW_RUN_DIR`）、起草失败。暂停后你发消息让开发方继续就恢复。
 
+总结逐条列出从证据块 `$` 行提取的实际命令（最多 3 条，每条最多 240 字）及本轮验收方新建并执行的脚本/步骤文件路径；没有执行证据时明确写未留下，不编造命令。每条「无法验证」都写具体原因。验收方原始输出保存在 `tester-<调用ID>.log`，会话记录在 `tester-sessions/`，即时工具起止记录在 `tool-events/`；Pi 的无关会话创建告警不进入暂停原因。
+
 运行材料（`system.log`、`logs/`、`evidence/`、验收方输入、`result.json`）在 `~/.pi-autoreview/<项目目录名>/acceptance/<会话>/r<轮次>/`，不写进项目。
 
-## 交付总表与收尾回写
+## 项目经验库（用户批准后写入）
 
-会话完成时（含部分验证），程序往本机共用的一份总表 `~/.pi-autoreview/交付记录.md` 追加一段：项目（Git 顶层目录）、任务、结果、总结路径、`- [ ] 已回写原单`，以及还欠的条目（部分验证、人工）。每段在同一个写入里一次写完，只追加不覆盖。总结开头写「已登记到交付总表：<路径>；待回写原单」。写入失败只提示，不影响完成状态。
+项目根（`.autoreview.json` 所在目录）的 `.autoreview/经验.md` 是已批准清单。Pi 和 Claude Code / Codex 开发会话会在动手前收到它，静态评审输入增加「对照清单」并要求命中时标出 Pxx。注入只带标题、「现象」「根因」「正确做法」三行，不带次数、证据和失效条件；没有文件时，两边提示与原来一致。每条格式：
 
-Claude Code / Codex 开新会话（SessionStart）时，如果本项目有未勾「已回写原单」的段（同一会话只看最后一段），会注入一句「交付总表里本项目有 N 段待回写原单：<路径>。按 .autoreview/CONVENTIONS.md「收尾回写」处理。」；本项目没有就什么都不注入。读取失败、格式异常或超时都跳过提醒，总表和提醒的任何问题都不暂停 Loop。Pi 开发会话不注入。
-
-回写规则随【块 1】下发到项目的 `.autoreview/CONVENTIONS.md`：协调方 AI 读完总结后逐条更新原单（已合入、部分验证、待人工、未验，不得把未验写成通过），更新完在总表里勾「已回写原单」；没有原单写「无原单」再勾；人工项的勾只在用户明确说「验过了」或之后 Loop 运行验证通过时才打。
-
-## 流水线（几段并行 / 串行 + e2e 收尾）
-
-一条命令跑完：各段开发（每段照常 开发 → 评审 → 返修）→ 全部完成后程序跑整合 e2e → 没通过的条目退回负责的那一段修 → 修完自动重跑 e2e，直到通过。只有需要你决定时才停下通知你。
-
-```bash
-PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeline.ts 计划.json
+```markdown
+## P01 提交前复核当前权限
+现象：撤权后旧操作仍提交。
+根因：复用等待前的权限状态。
+正确做法：在最终提交边界重读权限。
+出现次数：2 个不同开发会话。
+证据：总结或检查记录路径。
+失效条件：相关入口移除或专项检查覆盖。
 ```
 
-计划文件（相对路径按计划文件所在目录解析）：
+评审标出的已有经验在返修消息注明「经验 Pxx，第 N 次出现」。次数沿用不同开发会话口径：从文件的历史次数累加，同一会话反复复查不重复加一；新计数只存在本机。
+
+有必修的会话完成时，Loop 用评审模型另开一次只读调用，逐条归类为已有经验、已有候选或新候选，不复用评审会话。候选不写项目；同类出现在至少 2 个不同开发会话后，才在完成总结开头的「需要你做的事」提示。起草失败仅在总结提醒，不暂停、不改变完成结果。清单超过 30 条仍全量注入，同时提示合并或退役。
+
+用户用以下命令查看、批准或拒绝（均支持 `--dry-run` 和 `--json`；候选编号是 Cxx，批准后分配 Pxx）：
+
+```bash
+bin/loop 经验 列出 /你的项目根
+bin/loop 经验 批准 /你的项目根 C01
+bin/loop 经验 拒绝 /你的项目根 C02
+bin/loop 经验 导入 /你的项目根 /候选草稿.md
+bin/loop 经验 批准 /你的项目根 全部
+```
+
+只有显式执行「批准」才追加经验.md；开发方、评审方及自动起草不会自行写入。项目仍有进行中的开发会话（含等待返修）时不写，提示会话完成后稍后再批；完成后原会话继续开发也立即恢复阻挡，不沿用旧完成态。已完成会话的普通问答无改动时释放该回合；宿主退出时，开发启动器仅按本次随机启动身份收尾已完成且消费者已释放的会话，不清空等待返修或无法核对的记录。经验登记故障不能阻止用户标准、授权及取消版本先落盘；批准会同时核对 Hook 原生活动事实，未知状态拒绝写入。拒绝的类别会作为后续归类依据，不再提示。批准不提交、不推送，已有正文保持不变。候选、拒绝记录、复发次数和起草材料默认在 `~/.pi-autoreview/projects/<项目根哈希>/`，与来源索引共用按项目隔离的本机目录；`AUTOREVIEW_PROJECTS_ROOT` 可覆盖根目录。
+
+首批 20 条已获用户批准，但本次仅用临时项目验证，没有写 Promate。合入后，在运行版 Loop 执行以下步骤，`PROJECT` 指向目标 `.autoreview.json` 所在目录：
+
+```bash
+cd /Users/Admin/Desktop/loop
+PROJECT="/你的项目根"
+bin/loop 经验 导入 "$PROJECT" /Users/Admin/Desktop/loop/eval/经验/经验-草稿.md
+bin/loop 经验 列出 "$PROJECT"
+bin/loop 经验 批准 "$PROJECT" 全部
+```
+
+联调可用 `AUTOREVIEW_EXPERIENCE_CMD=…/test/fake-experience.mjs` 替换独立起草调用；生产默认使用已配置的评审模型和思考档位，只开放 `read,grep,find,ls`。
+
+## 交付总表：直接看结果
+
+会话完成时（含部分验证），程序往本机共用的 `~/.pi-autoreview/交付记录.md` 追加一段：项目（Git 顶层目录）、任务、结果、总结路径，以及还欠的条目（部分验证、人工）。每段一次写完，只追加不覆盖；历史段落原样保留。总结开头写明总表路径，写入失败只提示，不影响完成状态。
+
+用户直接看 Loop 总结和总表，不要求协调方更新原单。新段落只给部分验证和人工项保留未勾选框；这些勾只在用户明确说「验过了」或之后 Loop 运行验证通过时才打，不得代替用户勾人工项。Claude Code / Codex 的 SessionStart 不再读取总表或注入结果整理提醒。
+
+## 可回放快照与漏网登记（bin/loop）
+
+每轮真正开始静态评审前，Loop 在 `~/.pi-autoreview/<项目目录名>/review-snapshots/<项目与会话哈希>/r<轮次>-<随机ID>/` 保存独立快照：全仓库已跟踪文件的实际工作区字节、未跟踪内容、模式与 Git blob 哈希、同轮原始评审输入及 SHA-256、实际输入基线/候选和运行中的 Loop 提交号。子目录会话也保存全仓库；忽略的未跟踪文件不存。单个未跟踪文件超过 **256 KiB** 时只留路径、哈希等元数据，`content: null`、`missingContent` 明确说明缺口；已跟踪文件不受该上限限制。链接保存目标字符串、不跟随读取。快照属于保留类，完成后自动瘦身与 `loop 清理` 都不删；不依赖源仓库 Git 对象仍然存在。取证/写盘失败、特殊文件或未支持的子模块会在调用评审前停止，不冒充完整快照。
+
+事后发现已完成会话漏了问题，用总结中的完整开发会话 ID（Pi 原 ID；Hook 为 `claude-<ID>` / `codex-<ID>`）登记：
+
+```bash
+bin/loop 漏网 /你的项目目录 <会话ID> "问题描述" "发现方式" --dry-run --json
+bin/loop 漏网 /你的项目目录 <会话ID> "问题描述" "发现方式"
+bin/loop 漏网 /你的项目目录 <会话ID> "问题描述" "发现方式" --round 1
+```
+
+省略 `--round` 取最后一轮；命令核对当前原生会话确已完成。只在交付总表追加一整段「漏网」，并将案例草稿写到 `~/.pi-autoreview/replay-drafts/`，输出两处完整路径；不改原会话状态和总结，不重新评审、不调用模型、不自动收入 `eval/cases/`。草稿包含 `eval/README.md` 的全部必填字段，未知值为 `null`，先由用户或 Codex 核对漏网事实、位置与证据，再分配正式案例编号。历史会话没有快照、或超限文件缺内容时，明确标为不可完整回放。
+
+只用草稿和它指向的快照复原代码（目标父目录须存在，目标必须新建或为空；无需模型或源项目）：
+
+```bash
+node snapshots.ts /命令输出的案例草稿.json /新的复原目录
+```
+
+复原前校验快照/输入/内容哈希和路径，恢复原始文件字节、可执行模式与链接；不重建 `.git` 历史、不运行项目代码。缺内容或校验失败就报错，不把部分复原当成功。完整参数、JSON 字段与退出码见 [工具清单](工具清单.md)「loop 漏网」。
+
+## 配方怎么选
+
+只看任务定义里的三件事：**改不改东西、完成到哪一层、有几段**，不靠模型猜任务难度。
+
+| 任务定义 | 配方/入口 | 完成边界 |
+|---|---|---|
+| 不改东西，只检查已有提交 | 只评审：`review-only` / `loop 评审` | 只出报告，不返修、不提交、不进合入队列 |
+| 要改东西，只有一段 | 单段开发：`develop`（默认） | 开发、门禁、评审及已配置必需验收 → 已提交、已记录、问推不推 |
+| 要改东西，有多段，要做到整批 | 多段开发：`develop` + `stages/steps` | 各段检查完成 → 配置的整批验收 → 整批提交与记录 |
+
+这是三个使用配方，但 `recipe` 字段只有 `develop`、`review-only` 两个合法值；其他值退出 3 并列出合法值。不做只验收配方；推送、合入仍需用户决定，不属于自动完成。
+
+### 只评审已有改动
+
+```bash
+cd /你的仓库
+/Users/Admin/Desktop/loop/bin/loop 评审 --base main --head feat/某任务 --requirement /需求.md --criteria /标准.md --note /交付说明.md --json
+# 三个文件选项可省略；评审的是 base → head 的已提交改动，不含当前工作区未提交内容。
+```
+
+也可直接写批次后 `bin/loop 启动 /批次.json --json`，**不用先开工**：
+
+```json
+{"name":"补评审","recipe":"review-only","review":{"repo":"/你的仓库","base":"main","head":"feat/某任务","requirement":"需求.md","criteria":"标准.md"}}
+```
+
+批次中的路径相对批次文件；命令行文件路径相对当前目录。Loop 在系统临时目录分离检出 head，复用现有只读评审提示词、解析、重试和总预算，不跑门禁、准备或验收，正常、失败和可捕获中断都释放临时 worktree；原工作区的文件和索引不动。不记经验复发、不写收件箱和交付总表、不进队。
+
+报告在 `~/.pi-autoreview/reports/<ID>/report.md`、`report.json`，含基线/候选提交号、改动文件、必修原文（触发条件及后果）、建议、需求疑问、模型和耗时。JSON 另有 `exitCode/reason/report/reportJson`；退出 **0 无必修、1 有必修、2 评审失败或超时**，失败也保留报告。事件为 `started` → `done{recipe:"review-only",report}`，失败为 `failed`。这里 `done` 只表示报告产出，不表示没有必修或通过业务验收。
+
+## 流水线与批次（几段并行 / 串行 + 整批验收）
+
+正常批次只准备两份材料：提示词和 `docs/batches/<批次>/批次.json`。批次目录不再放门禁、棘轮或启动脚本；项目固定方法写一份在 `.autoreview/methods/`，启动统一用 `bin/loop 启动`。
+
+```bash
+bin/loop 开工 docs/batches/<批次>/批次.json
+bin/loop 启动 docs/batches/<批次>/批次.json   # 单段直接开；多段交给流水线
+```
+
+一份最小批次：
 
 ```json
 {
-  "name": "V2首批",
+  "name": "示例批次",
+  "branch": "feat/示例批次",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
   "stages": {
-    "甲": { "prompt": "提示词/方案二.md", "cwd": "worktree" },
-    "乙": { "prompt": "提示词/方案三.md", "cwd": "worktree/promate-frontend" }
+    "甲": { "prompt": "../../prompt/提示词-示例.md", "scope": { "allow": ["src/"] } }
   },
-  "steps": [["甲", "乙"]],
-  "prepare": "bash 联调准备.sh",
-  "e2e": {
-    "workDir": "worktree",
-    "criteria": "e2e验收标准.md",
-    "acceptance": { "start": "bash start.sh", "readyUrl": "http://127.0.0.1:38081/", "reset": "sh reset-data.sh" },
-    "maxRounds": 3
-  }
+  "steps": [["甲"]]
 }
 ```
 
-| 字段 | 作用 |
-|---|---|
-| `stages` | 每段的提示词文件 `prompt` 和启动目录 `cwd`。程序按你日常的配置生成 pi 启动命令（`--offline`、gpt-6.1-sol、max、`read,edit,write,bash`、权限扩展、`autoreview.ts`，`--name 计划名·段名` 方便认窗口），不用再写启动脚本。特殊情况可以改写 `start`（自己的启动命令，里面的 pi 必须加载 `autoreview.ts`），两个只能写一个 |
-| `pi` | 可选：改默认配置，字段 `model`、`thinking`、`tools`、`args`（追加的参数，比如 `["--autoreview-max-repairs", "2"]`）；每段也可以写同名字段单独覆盖 |
-| `maxParallel` | 同时派发上限，默认 2；同一仓库仍串行。并行项目必须声明互不冲突的端口与数据 |
-| `steps` | 先后顺序：每一步里的段并行，步与步之间串行。`[["甲","乙"]]` 并行；`["甲","乙"]` 或 `[["甲"],["乙"]]` 串行；`[["甲","乙"],["丁"]]` 混合。不写就是全部并行 |
-| `prepare` | 可选：各段都完成后、跑 e2e 前执行的联调准备（在 `e2e.workDir` 里 `sh -c`） |
-| `e2e.criteria` | 整合 e2e 的验收标准文件，每条开头标归属：`A3. [乙] 操作：…`。没标的条目没通过时停下找你 |
-| `e2e.acceptance` | 和 `.autoreview.json` 的 `acceptance` 同样的字段（启动、就绪、`reset`、日志、模型等） |
-| `e2e.maxRounds` | e2e 最多跑几轮（默认 3） |
-| `dir` | 可选：流水线目录，默认 `~/.pi-autoreview/pipelines/<name>/`，状态、收件箱、e2e 材料、报告都在这里 |
+流程：
 
-怎么跑：
+- **开工**：`loop 开工` 检查运行版停在 `release`（不要求干净），把本批的 `批次.json`、提示词和 `acceptance.criteria` 搬进批次分支并提交；无关的未提交改动原样保留并列出。然后在 worktree 中从发布分支建/切批次分支，检查并复制 `localFiles`；方法指纹未变时跳过自测，变了才执行一次项目方法自测和基线门禁。
+- **启动**：写 `prompt` 的段由 `bin/loop 启动` 统一启动 Pi（默认 gpt-6.1-sol、max、`read,edit,write,bash`、权限扩展、`autoreview.ts`、Ponytail，`--name 批次名·段名` 方便认窗口）。单段直接开会话；多段调用流水线。特殊情况仍可写 `start`（自己的启动命令，必须加载 `autoreview.ts`），与 `prompt` 二选一。
+- **串行/并行**：`steps` 的一步内并行，步与步串行；`maxParallel` 限制同时派发，同一 git 工作区仍自动排开。串行段完成后由程序按 `<类型>: <描述>` 提交，下一段以这次提交为开工依据；开发方不提交。
+- **越界检查**：段可写 `scope.allow` / `scope.deny`，门禁前发现越界文件就按产品失败打回原会话，不新增暂停点；不写不检查。
+- **项目方法变量**：准备、门禁、自动验收的启动/重置/验收命令都拿到 `AUTOREVIEW_BASE_REV`、`AUTOREVIEW_BATCH_FILE`、`AUTOREVIEW_STAGE`，项目方法自己读 `批次.json` 的参数。
+- **整批验收**：`acceptance.criteria` 的条目按 `[段名]` 归属；没通过的条目退回那一段修，修完自动重跑。验收配置字段直接平铺到批次的 `acceptance`，与 `.autoreview.json` 的 `acceptance` 同名、同类型、同默认值。旧写法 `e2e: { workDir, criteria, maxRounds, acceptance: {…} }` 仍可读，会提示改写；两种同时写是计划错误（退出码 3）。
+- **续跑**：整批暂停且原编排已退出时，用 `bin/loop 续跑 <批次.json> --id <新编号> --json`；各段已完成时从整批验收接着跑，需要授权时加 `--grant-file <用户答复.txt>`。
 
-- **开跑前检查**：开任何窗口之前，程序先查一遍（不调用模型，几秒钟）：每段的目录在不在、是不是有提交的 git 仓库、提示词文件在不在；pi、权限扩展、`autoreview.ts` 找不找得到；同一步里并行的段是不是在同一个目录；e2e 的地址现在是不是空着；标准里要操作网页时 Playwright 装没装。结果列在终端和报告里，有一项 🔴 就停下（退出码 2），一个窗口都不开。
-- **开窗口**：macOS 上每段开一个终端窗口跑它的启动命令（带上 `AUTOREVIEW_PIPELINE_DIR`、`AUTOREVIEW_STAGE` 两个环境变量），你可以看、可以插话；`--launcher background` 改成后台跑，输出写 `<流水线目录>/<段>.log`。
-- **接力**：扩展把每段的完成、暂停写进 `<段>.status.json`；一步里的段都完成才启动下一步。某段暂停时通知你，你在它的窗口里处理好，流水线接着等。启动 3 分钟还没收到某段的状态，会提醒你检查它是否加载了 `autoreview.ts`。
-- **e2e**：程序自己跑（复用自动验收：启动整合后的系统、重置数据、验收方实测、程序判定），不需要单独的开发会话。
-- **回流**：没通过的条目按 `[段名]` 写进那一段的收件箱，那一段的扩展在开发方空闲时把「【流水线 e2e 返修 · 第 N 轮】」发给它。发之前把那一段的评审起点重定到此刻，下一轮评审只看这次的返修改动；e2e 条目当作「上一轮必修」交给评审复查。同一个 git 仓库里的段一次只派一个，不同仓库的同时派。
-- **停下找你**（退出码 2）：收到返修的一段没改代码（多半回了「A3：不归我：理由」）、有没标归属或 G1/G2 系统级的条目没通过、e2e 无法验收或环境出问题、联调准备失败。处理好后用 `--from e2e` 从 e2e 接着跑（各段窗口别关）。超过 `maxRounds` 仍没通过退出码 1，全部通过退出码 0。报告在 `<流水线目录>/report.md`。
-- 只支持 pi 会话：Claude Code / Codex 的会话空闲时没法从外面唤醒。
+开跑前检查、开窗口、接力、回流、退出码（0 完成、1 超过轮数或启动入口失败、2 暂停、3 计划错误）等行为和以前一致。字段、类型、默认值、JSON 输出和会改哪些文件，统一见 [工具清单.md](工具清单.md) 的「批次.json 字段」「loop 启动」；这里不重复字段表。
 
-## 启动
+## 开工、启动、状态与合入（bin/loop）
 
-开发会话统一用 `bin/pi-dev` 启动，不要手抄 pi 命令。脚本固定了 `--offline`、关闭其他扩展与技能、权限扩展、`autoreview.ts` 和 Ponytail（`PONYTAIL_DEFAULT_MODE=full`），找不到其中任何一项就报错退出；按任务只需给提示词，其余可选：
+批次开发用 worktree 时，`bin/loop` 负责固定步骤。以下批次子命令都支持 `--dry-run`（只核对、只打印，不改文件或分支）和 `--json`（标准输出一个可解析的 JSON 对象）。完整参数、JSON 字段、退出码和会改哪些文件见 [工具清单.md](工具清单.md) 的「bin/loop」：
 
 ```bash
-/Users/Admin/Desktop/loop/bin/pi-dev --cwd <你的项目> <提示词绝对路径>
+bin/loop 开工 docs/batches/<批次>/批次.json   # 建 worktree、切批次分支、搬批次文档、复制 localFiles、按指纹自测
+bin/loop 启动 docs/batches/<批次>/批次.json   # 单段直接开会话；多段交给流水线
+bin/loop 状态 [批次.json]                     # 段状态、队列位置、测试结果、日志；恢复中断队列
+bin/loop 推送 docs/batches/<批次>/批次.json   # 用户决定后，只推批次分支到 origin；不强推
+bin/loop 合入 docs/batches/<批次>/批次.json   # 手动核对并合入测过的结果；不推送
+bin/loop 撤回 docs/batches/<批次>/批次.json   # 仅 release 仍停在本批结果时撤回；不推送
+bin/loop 停止 docs/batches/<批次>/批次.json --json  # 也可加 --stage 甲；按登记身份停止，保留成果
 ```
 
-| 选项 | 默认 |
-|---|---|
-| `--model` / `--thinking` | `openai-codex/gpt-6.1-sol` / `max` |
-| `--tools` | `read,edit,write,bash`，按任务选 |
-| `--session <开发会话id>` | 接着用同一个开发会话时精确恢复，不要用 `pi -c`（可能选到评审会话） |
-| `--name` | 会话显示名 |
-| `--dry-run` | 只打印完整命令，不启动 |
-| `-- <参数…>` | 之后的参数原样传给 pi，例如 `-- --autoreview-accept-cmd "node test/e2e.mjs"` |
+开工后，启动、状态、推送、合入命令里的批次文件路径改用开工输出中的开发空间路径；批次文件本来就在发布分支上时，原来的项目根路径也照常可用。
 
-在本仓库开发时加 `-- --autoreview-accept-cmd "node test/e2e.mjs"`，评审完成后自动跑 E2E 实操验收（见下面「验收命令」）。脚本默认加载它所在仓库的 `autoreview.ts`；在 Loop 的隔离检出里开发 Loop 自身时，用 `LOOP_DIR=/Users/Admin/Desktop/loop` 指向正在运行的那份，不要让开发中的代码评审自己。
+`开工` 要求运行版停在 `release`（默认 `main`），不要求干净；本批文档随批次分支提交，运行版里无关的未提交改动原样保留并列出。开发空间由 `.autoreview.json` 的 `workspaces` 指定，默认 `../<仓库目录名>-dev分支`，必须干净（未跟踪文件也算），也不能放在运行版目录里；`启动` 把 `AUTOREVIEW_BATCH_FILE`、`AUTOREVIEW_STAGE` 交给会话，门禁、准备和验收再带上本段 `AUTOREVIEW_BASE_REV`；`localFiles` 声明本机文件，运行版和批次分支都必须已忽略，否则开工不复制并报错；程序提交也会排除这些路径。方法自测按指纹跳过，环境变了可以用 `--recheck` 强制重跑。流水线在段完成时由程序在该段分支提交（说明 `<类型>: <描述>`，正文写批次名和段名），开发方不提交。流程终点是「已提交、已记录、问推不推」：正常完成后程序把整批（含开工的批次文档）压成一个提交，说明为 `<类型>: <批次名>`；多分支各压一次。压缩前历史保存在 `refs/loop/batches/<批次ID>/pre-squash/<序号>`，分支、提交号和引用写入交付总表，通知给出完整 `bin/loop 推送 <批次.json>` 命令。未推送时再次完成会重压；本地记录过成功推送后，在该提交之后追加，不改写已推历史。提交前后都核对通过检查的候选树；候选变化不提交，结果树不一致则恢复原分支并暂停。压缩不改变树，也不触发新评审。只有用户执行 `合入` 才更新发布分支。旧配置出现 `merge.auto / merge.push` 时提示「已停用，合入由用户执行 loop 合入」并忽略。对新开工登记的 git 批次，必须先通过下面的合入队列；不会在合入时提交、清理或重置开发空间。运行版已有未完成合并时先停下；与测过的结果重叠的未提交文件（含挡路的未跟踪/忽略文件）会阻止合入；无关的已跟踪改动及暂存状态临时保存、合入后恢复，不动用户的 stash 栈。未接入队列的旧批次保留原来的本地合并入口，不自动迁移非 git 项目。
 
-哪些角色加载 Ponytail、路径怎么固定，见 [项目文档/运行与维护.md](项目文档/运行与维护.md)「Ponytail 与 Skill」；路径变了用环境变量 `PONYTAIL_EXTENSION` 指定。流水线由程序生成启动命令，见上面「流水线」。
+**合入队列（程序执行，不需要开发会话在场）：**
+
+- 只有用 `loop 开工` 登记的本仓库独立 git worktree 批次参与。单段在开发会话确认完成后提交并自动进队；多段中间照常逐段提交，全部完成、配置的整批验收通过后才压缩并进队；没有配置整批验收时跳过它。非 git 和未登记批次行为不变。
+- 整批验收开始重验即撤销旧资格，完成结论与验收代次一起进队；重复完成事件幂等，旧代次迟到不能覆盖新结果。人工与部分验证逐条记录，不把未验写成通过。
+- 每个 Git 仓库只有一个固定的独立测试 worktree，按完成顺序一次处理一个。重置到最新 `release` 提交，合并冻结的批次候选，运行项目 `gate`；不重跑 LLM 验收。缺少门禁或资源释放未确认时不发「可合入」。
+- 候选就是完成后提交过的批次分支头，不再创建额外的「合入候选快照」。测试通过后通知「可合入」，停在队头等用户执行 `loop 合入`，发布分支与远端此时均不变。
+- 合入时再次核对发布提交、批次完成资格及候选，以及测过的提交和树；发布指针以 Git 比较交换原子更新到**那个测过的提交**，不重新计算合并。发布分支已变化则拒绝本次合入并自动重测；开发候选变化须先由原开发会话重走检查。
+- 冲突或门禁失败后先恢复干净测试工作区，再通过原段收件箱退回冲突文件、门禁输出和完整日志路径。文本冲突附上先合入的批次、改动文件与提交说明；本批完成资格中的门禁已过、合到最新发布分支才失败时标「与已合入批次冲突」，不记为本批自身缺陷。同一批第 3 次退回后无条件停止自动排队并通知用户；此后正常完成仍提交、记录，是否继续合入由用户决定。开工时显式 `scope.allow` 与进行中批次重叠只提示「建议改为串行」，不阻止开工。按段的 `scope.allow` 或独立子目录归属路由；无法唯一确定时退回最后一段并说明原因。仍开着的 Pi 会话轮询收件箱；接入队列的 Claude/Codex 使用原生会话收件通道自动接收返修：Claude 为绑定原宿主的本地认证 Unix socket，Codex 为 `queue --thread <原会话ID>`。PTY 只转发用户输入，程序不写粘贴或回车，不需要推断输入框是否为空；正常终端交互、恢复会话及未提交草稿都不关闭返修通道。关闭的窗口通过原会话 ID 恢复，不新建会话；机器返修不清零业务返修次数。多段返修完成后自动重走整批验收，合格后回到队尾。
+- 队列记录、日志和固定工作区位于 `~/.pi-autoreview/merge-queues/<Git公共目录哈希>/`。进程被杀或重启后，下次完成事件、`loop 状态` 或 `loop 合入` 会触发恢复；先按登记回收孤儿门禁，再复用测试工作区。已发布的结果不重复合入；用户合入途中中断的运行版收尾只在再次执行 `loop 合入` 时恢复；停用前留下的自动合入事务，已发布的只恢复收尾，未发布的先归还私有 stash，再安全转回「可合入」或重测，不继续自动发布。两条路径在确认未发布时都先归还私有 stash，再处理已撤销资格；无待恢复副作用的过期基线转回重测，已发布或 CAS 结果未确认的事务保留收尾责任，不盲目重发。`--dry-run` 只读，不启动或恢复执行器。
+
+Hook 原会话通道要求本地宿主支持上述原生接口，启动时先探测；只为本次 Claude 启动分配私有 socket，不修改全局配置或权限参数。交互终端复用本机已安装的 `node-pty`，路径变化可用 `AUTOREVIEW_NODE_PTY` 指定。会话认证令牌仅保存在本次启动的私有系统临时目录，退出时释放，不写入项目或流水线记录。原生消息携带随机派发凭据和返修内容，Hook 按原会话、序号识别程序来源；即使宿主包装消息或加上前缀，也不解析为用户授权或验收标准。发送前固定修复基线，准备与收件确认分离，重试和恢复不会在修复后重新取基线。没有可用通道时保留返修并报告原因；原生接口提交后若宿主尚未确认收件，状态单列“投递待确认”，不把接口写入等同于模型已接收，不绕过宿主策略，也不回退到自动提交草稿。macOS 安装若缺少 helper 执行位，只在本次队列记录目录的私有副本恢复执行位，宿主退出即释放，不修改全局包。
+
+批次完成的通知和交付总表写「已提交 <分支> <提交>」及中间历史引用，逐条列出仍未验的人工项；不自动删开发空间或分支。开发会话的提交和完整工作树与本批队列测过的结果完全相同时，共用评审入口不再评审，总结写明原因；非 git 或未登记批次不变。
+
+`loop 推送 <批次.json>` 只把本批已确认提交的分支推到 `origin`，首次成功设置上游，逐分支记下推送提交号；不推 `release`、不强推。远端分歧时保留本地提交并报告 Git 拒绝原因；`--dry-run` 只核对和打印，`--json` 输出结构化结果。合入和撤回仍不推送；Loop 自身 dev → main 仍走用户的 PR，不使用 GitHub Actions。
+
+`loop 撤回 <批次.json>` 只对已登记且已合入的批次生效：`release` 仍在本批结果时，用反向比较交换回到合入前的提交，并沿用运行版未提交改动保护；已有后续提交或批次时拒绝且通知，不动 `release`。撤回的只读检查拒绝不会留下阻塞队列的事务；实际已开始但未收尾的变更才保留「撤回待恢复」。撤回只在本地，不替你撤回远端。完整状态字段和恢复选项见 [工具清单.md](工具清单.md)「bin/loop」。
+
+## PA 对接
+
+PA（personal agent）配置在用户级 `~/.pi-autoreview/config.json`，不放进项目的 `.autoreview.json`：
+
+```json
+{ "pa": { "eventsDir": "/你的PA目录/loop-events", "localNotify": false } }
+```
+
+不写 `eventsDir` 就不推事件；`localNotify` 默认 `true`。`false` 只关桌面弹窗，仍写 stderr，不影响会话提示、Claude systemMessage、队列 `.notification.txt` 或打开终端。测试用 `LOOP_PA_CONFIG=/临时目录/pa.json`，不读写真实配置。事件目录应在 PA 的 `inbox/` **之外**。
+
+Loop 按本地日期向 `events-YYYY-MM-DD.jsonl` 追加一整行 v1 JSON：
+
+```json
+{"v":1,"seq":1,"id":"UUID","at":"2026-11-02T10:00:00.000Z","project":"/项目根","batch":{"file":"/开发空间/docs/batches/x/批次.json","name":"x","recipe":"develop"},"stage":"甲","status":"paused","reason":{"category":"环境","text":"门禁环境阻塞"},"evidence":{"summary":"/状态/总结.md","log":"/状态/gate.log"},"detail":{"round":1,"repairs":0,"failureKind":"environment","next":"send"}}
+```
+
+状态有 `started`、`needs-decision`、`paused`、`repair-limit`、`done`、`failed`、`resumed`、`queue`。整批事件 `stage:null`；暂停的 `detail.next` 为 `send`（段会话）、`resume`（整批可续跑）、`grant`（整批待授权）或 `manual`（必须电脑处理）。单段仅在程序提交成功后发整批 `done`，带 `branch`、`commit` 和检查结论；多段另有每段的 `done{scope:"段"}`。`done` 不代表已推送、已合入或人工业务验收通过。
+
+序号逐批持久化在 `~/.pi-autoreview/events/`，重启接着编，不补历史；全局锁核对 PID 加启动时间。同段相同状态与关键详情去重，恢复后可再报告暂停。追加失败不挡批次，序号仍消耗，原因在该目录的 `errors.log`。详情超过 8 KiB 时放进证据文件，事件保留绝对路径。Loop 不改名、截断或删除 PA 的日期文件，读取偏移与清理由 PA 管。
+
+查询独立于 `loop 状态`，**纯读、不恢复队列、不启动测试**：
+
+```bash
+bin/loop 查询 /开发空间/docs/batches/x/批次.json --json
+bin/loop 查询 --all --json   # 省略批次参数时同样查所有已记录批次
+```
+
+返回固定外壳 `{"v":1,"at":"…","batches":[…]}`；每批含 `project`、`batch{file,name,recipe,paGrants:[{id,at}]}`、`branch`、`commit`、`pushed`、整批 `state/pause/next`、`stages`、`queue`、`evidence`、`events{lastSeq}`。每段有 `stage/state/round/repairs/lastActivity/pause/session/evidence/paRelays`（最近 50 条已读取转达的 `{id,at}`）；完整 JSON 示例见 [工具清单「PA 对接」](工具清单.md#pa-对接)。未知提交、队列、会话为 `null`，不猜成通过。
+
+两个宿主各写 `<段>.phase.json`；整批阶段写 `batch.phase.json`，查询不解析 Markdown。原 `<段>.status.json` 的接力和合入语义不变。`loop 清理` 和完成后瘦身都保留尚未 `done/failed` 的整批证据。
+
+### PA 执行命令 JSON v1
+
+`loop 合入/推送/停止 --json` 成功、失败（含参数错误）都有 `{v:1,ok,action,reason:{category,text}}`，保留原 `command` 等扩展字段。固定字段未知或本次未执行为 `null`，不拿布尔值充当提交号：
+
+```json
+{"v":1,"ok":true,"action":"合入","release":"main","merged":"完整提交号","queueStatus":"merged","reason":{"category":"其他","text":""}}
+{"v":1,"ok":true,"action":"推送","branch":"feat/x","remote":"origin","pushed":"完整提交号","reason":{"category":"其他","text":""}}
+{"v":1,"ok":false,"action":"推送","branch":"feat/x","remote":"origin","pushed":null,"reason":{"category":"其他","text":"Git 拒绝原因"}}
+```
+
+多分支推送的 `branch/pushed` 对应第一分支，`commits[]` 逐分支列出完整记录；dry-run 的 `pushed/merged` 为 null，不表示实际执行。合入的旧兼容入口没有队列时 `queueStatus:null`。`ok` 与提交字段只是执行结果，不代表业务验收。
+
+`bin/loop 停止 /开发空间/批次.json [--stage 甲] --json` 先核对 `batch.info.json`、会话状态和启动登记的批次归属；只兼容已登记的同仓库 worktree 同位置别名，不凭名称/分支接受任意复制品。归属不匹配时不发信号、不释放资源、不覆盖状态；找不到活动身份时拒绝，不能冒充已停止。只评审省略 name 时，启动、查询和停止均使用 `只评审` 的默认目录。
+
+正式启动链在独立进程组运行编排/会话。每次 spawn 的候选身份单独留在 `launches/<ID>.json`；整批执行器取得运行权后才发布 `batch.launch.json`，登记组长、启动时间、随机标记和 `runId`，与 phase 的会话运行代次绑定。PA 续跑、整批验收恢复和原开发会话返修恢复都登记新运行；原开发会话仍使用原 `sessionId`，不重发原需求。会话恢复命令由稳定的 Node 组长等待收尾，shell/宿主切换或尚未登记时也能核对新组。恢复派发与停止撤销资格共用发布锁，停止后重取登记，避免漏掉刚恢复的组；被拒绝的重复启动不能覆盖活动身份，段派发也不覆盖仍活动的组。宿主 PID 可以不是组长，停止仍要核对它确实属于该登记组，不能结束共享终端组。
+
+前台 `loop 启动` 收到 SIGINT（Ctrl+C）、SIGTERM 或 SIGHUP 时，按**本次 spawn 的不可变身份**转发信号并等待收尾，不因后来更新的活动登记误伤另一次运行。正常取消等报告、临时 worktree 和受管子进程释放后返回；为已有外部 cleanup 留出有界预算，130 秒后仅补偿本次启动的残留组，未确认项明确报错并保留登记，不冒充完成。取消编排仍保留独立开发窗口，不再派发下游。
+
+停止命令随后核对宿主、会话、PID、启动时间及独立进程组；先停止编排防止再派发，指定段时不结束其他开发段。先给已核对宿主收尾机会，再按登记释放消费者和缓存，撤销本批队列资格为 `stopped`（已停止），迟到完成不能复活。工作区、分支、总结和证据不删；未收尾的合入/撤回事务保留并要求先恢复原事务。返回 `stopped/skipped/resources/queueStatus/reason`，不匹配身份或共享终端组不碰并列入 `skipped`；释放未确认也单列，此时 `ok:false`、退出 1。归属与活动身份核对通过后的非 dry-run 停止发 `failed`，`reason.category:"已停止"`；归属拒绝或无身份时不写已停止事件。不按端口、同名命令或进程年龄认领。
+
+### 送话、续跑与回执
+
+PA 先记账并分配编号，再从**没有 Loop 开发会话环境变量**的进程调用：
+
+```bash
+bin/loop 送话 /开发空间/批次.json --stage 甲 --id m1 --text-file /用户原话.txt --wait 30 --json
+# 文件可换成 -，从 stdin 读取；原文不 trim、不改换行。
+bin/loop 续跑 /开发空间/批次.json --id r1 --grant-file /用户授权答复.txt --json
+```
+
+送话仅在段暂停、需要决定、返修到上限或已完成时投递；运行/评审中返回 `rejected「段正在运行」`，不保存消息、不占编号。按 PID 加启动时间核对原会话，已关闭返回 `failed「会话已关闭」`，不新建或恢复会话。带 `AUTOREVIEW_STAGE` 或 `AUTOREVIEW_PIPELINE_DIR`（即使空值）直接拒绝。`--id` 在段内查重，重复调用只返回当前回执；不会重新读取原文或重发。
+
+回执示例：`{"v":1,"ok":true,"command":"送话","id":"m1","state":"read","sha256":"…","at":"…","readAt":"…"}`。`delivered` 只表示通道已送到，`read` 才表示会话核对并读取；`--wait` 内未读取仍返回 `delivered`。调用超时或结果不明为 `unknown`，**不重试**；可用同编号查询回执。退出码：`read/delivered` 为 0，拒绝、失败或不明为 1；参数错误为 2。两命令也支持只读 `--dry-run`。
+
+原文与 SHA-256 留在 `<流水线目录>/<段>.words/<id>.json`，先记 `sending` 再投递。Pi 轮询独立的用户原话收件位置；Claude 走原会话本地认证 socket；Codex 走 `queue --thread`。消息头为 `【用户原话 · 经 PA 转达 · <id>】` 加换行；会话核对记录、原文哈希、`delivered` 状态和会话身份，一次性改为 `read`。核对后的原文走用户输入路径，包括授权；只有消息开头的独立转达头才按信封核对；正文或文件里引用消息头不改变用户来源，撤权与标准更新照常处理。伪造、篡改和重复消费均作机器消息，不更新标准或授权，并报告「送话核对失败」。已完成段读到转达也撤销旧完成资格，按用户的「再改一下」继续。
+
+每次读取都发 `resumed{via:"pa",id}`（位于 `detail`）；发不出去时 `events/errors.log` 带编号。会话状态保留 `userInputVia:"pa"`、输入序号及转达编号；总结和交付总表都记录「经 PA 转达，编号 …」，授权答复另列一行。环境变量防护只是辅助，不能代替 PA 按编号对账。
+
+整批流水线已退出时用「续跑」，不向段送话。`next:"manual"` 或原编排进程仍在则拒绝；`next:"grant"` 必须提供能解析出当前授权答复的原文。答复只追加到 `grants.pa.jsonl`（`{id,text,at,via:"pa",criteriaHash,criteriaEpoch}`），写入时绑定当时标准的条目全文、版本及授权代次，不修改标准文件。各段完成时后台从整批验收续跑，否则走多段启动路径；回执 `started` 含后台 PID、启动时间、日志和实际命令，**不表示验收通过**。编号幂等，重复调用不再启动。
+
+授权只对答复时的标准有效：新增条目、同编号条目内容/归属或版本变化后，旧 PA 答复全部失效，须用新编号重新答复；标准改回旧文本也不复活旧授权。「同意授权：全部」只对应当时已冻结的具体编号。直接写入的无绑定行仍可使用，但首次读取即在 `grants.pa.bindings.json` 固定原文哈希、标准范围及具体答复；遇到已知标准变化的旧行不能自动绑定到新标准，不能修改原文后复用编号。
+
+查询中的 `batch.paGrants` 列出授权文件的**全部**编号（含直接写入的行及已失效行）；每次实际读取 PA 授权的流水线事件在 `detail.paGrantsUsed` 列出命中当前标准的全部编号，后续暂停/完成事件也带上它们，供 PA 核对未经过续跑写入的授权。
+
+## Pi 单会话开发（bin/loop 开发）
+
+正常批次用 `bin/loop 启动 <批次.json>`；临时单会话统一用：
+
+```bash
+/Users/Admin/Desktop/loop/bin/loop 开发 pi --cwd <你的项目> <提示词绝对路径>
+```
+
+脚本固定了 `--offline`、关闭其他扩展与技能、权限扩展、`autoreview.ts` 和 Ponytail（默认 `PONYTAIL_DEFAULT_MODE=full`；`--no-ponytail` 显式关闭），要加载的项找不到就报错退出。启动前还会按方法指纹检查项目的 Pi 权限配置能让开发会话不经询问执行 edit、write、bash；不通过就报错退出，不修改你的配置，指纹不变时跳过检查。检查按实际启动参数（`--approve` / `--no-approve`）、Pi 的项目信任记录和全局 `defaultProjectTrust` 判断项目配置是否生效；未受信任的项目配置不算通过，也不会代你授予信任。流水线段启动失败时会把原因写回编排程序并非零退出，不会一直等一个还没启动的会话。
+
+常用选项：`--model` / `--thinking`、`--tools`、`--session <开发会话id>`（精确恢复，不要用 `pi -c`）、`--name`、`--ponytail <路径>` / `--ponytail-mode <档>`、`--no-ponytail`、`--dry-run`，以及 `-- <参数…>`（原样传给 pi）。完整默认值、环境变量、退出码和会改哪些文件见 [工具清单.md](工具清单.md) 的「loop 开发」。
+
+在本仓库开发时加 `-- --autoreview-accept-cmd "node test/e2e.mjs"`，评审完成后自动跑实操验收（见下面「验收命令」）。脚本默认加载它所在仓库的 `autoreview.ts`；在 Loop 的隔离检出里开发 Loop 自身时，用 `LOOP_DIR=/Users/Admin/Desktop/loop` 指向正在运行的那份，不要让开发中的代码评审自己。
+
+哪些角色加载 Ponytail、路径怎么固定，见 [项目文档/运行与维护.md](项目文档/运行与维护.md)「Ponytail 与 Skill」；路径变了用环境变量 `PONYTAIL_EXTENSION` 指定。批次通过 `bin/loop 启动` 开发会话，见上面「流水线与批次」。
 
 没有标记不代表已经评审过，可以用 `/review-status` 查。
 完成后也可以手动 `/review`。
@@ -293,6 +521,10 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 | `/review-inputs [accept]` | 查看来源索引和「开发期间来源变化」记录；来源内容变化已自动采用新版本并继续跑，accept 只作确认（不再是继续的必经步骤） |
 | `/review-status` | 显示状态、轮次、返修次数、验收命令结果、门禁命令、评审会话 id、总结文件路径 |
 | `/accept` | 立即执行验收命令（需要配置 `--autoreview-accept-cmd`） |
+
+## 项目配置与覆盖
+
+Pi、Claude/Codex、只评审、批次开工/启动和接入共用同一配置读取与预算校验。评审参数按显式启动参数 → 支持的环境覆盖 → `.autoreview.json` → 默认值取值；未传的 flag 不覆盖文件值。开工、启动和 dry-run 在开会话前校验预算，门禁与验收预算之和必须小于 `reviewTimeoutMin`。配置字段及覆盖变量见 [工具清单](工具清单.md)；Pi 追加参数通过 `bin/loop 开发 pi … -- <flag>` 传入。
 
 ## flag
 
@@ -321,19 +553,19 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 - 验收方是弱模型：通过与否由程序按证据判，不信它的自报结论；没有证据、摘录对不上都不算通过。
 - 黑盒是软约束：验收方拿不到 diff、工作目录在项目外，但它有 bash，技术上仍能读到源码。
 - 验收方的操作是真实执行的：被测系统只能指向测试环境（测试库、测试账号、沙箱支付），否则真发邮件、真扣款的后果会真的发生。
-- 被测系统、验收方、评审都登记了进程组，验收结束或中断时按归属关停；失败保留登记并报告，不把未确认释放写成成功。
+- 被测系统、验收方、评审都登记了进程组；结束或中断时按随机归属标记同时清理脱离原组的工具进程，并确认已识别的工具组停止。原组消失不等于全部释放；查询或清理失败时保留登记并暂停，不进入补判或发布完成。
 
 ## 验收命令
 
 `--autoreview-accept-cmd` 在静态评审及配置的自动验收通过后执行。默认 `--autoreview-accept-mode required`：运行中是 accepting；成功且候选指纹未变才发布 done，明确产品失败回原会话，环境、方法、未知失败、超时或中断暂停。失败分类与门禁相同。
 
-显式 `advisory` 保留旧的只报告行为，不能用作段完成的必需条件。整批 E2E 应配置到 `pipeline.e2e`，不要让每段等待尚未启动的整批验收。
+显式 `advisory` 保留旧的只报告行为，不能用作段完成的必需条件。整批验收应配置到批次文件的 `acceptance`，不要让每段等待尚未启动的整批验收。
 
 - `/accept` 重跑已配置命令；不能把失败或中断沿用成通过。
 - 总结包含用途、候选、耗时、输出尾部、完整日志和资源释放结果。代码变化后旧记录不作为新候选依据。
 - Claude Code / Codex Hook 不支持此独立命令；可使用共享的 `acceptance` 或 Pi 流水线。
 
-## E2E 实操验收（本仓库）
+## 实操验收（本仓库）
 
 `node test/e2e.mjs [A1 …]`：依托 pi 真实跑一遍开发与评审（A8、A9 带模拟验收方，A10 用真实验收模型），开发方和真实评审都用 `opencode-go/deepseek-v4.1-flash`，驱动只发一条需求，全程不提醒。
 
@@ -356,6 +588,14 @@ PATH="/Users/Admin/.hermes/node/bin:$PATH" node /Users/Admin/Desktop/loop/pipeli
 
 写到 `~/.pi-autoreview/<项目目录名>/<开发会话id>.md`，每轮评审后覆盖写一次，包括各轮必修/小问题/需求疑问、未解决必修、改动文件和开发方在基线之后新增的提交数（只记录）；开发期间来源文件变过时有一节「开发期间来源变化」（列出文件和时间）；配了自动验收时还有：开头的「需要你做的事」、验收标准（来源和版本）、每轮的逐条验收结果、未通过的验收标准、验收额外发现；配了验收命令时还有最近一次验收命令的结果。
 
+## 内部实现（兼容说明）
+
+- `bin/loop 开发 pi` 内部调用 `bin/pi-dev`，Claude/Codex 调用 `bin/loop-dev`；原脚本保留直接调用兼容，项目无需依赖它们。
+- 多段 `bin/loop 启动` 内部调用 `pipeline.ts`；兼容参数 `--from 验收`（旧名 `e2e`）保留，用户续跑统一使用 `bin/loop 续跑`。
+- `bin/loop 接入` 内部调用 `setup-acceptance.ts`；直接调用行为相同，旧 `--host` 参数仅兼容，不再分宿主写规则。
+
 ## 准备、来源索引与维护
 
-项目脚本负责具体依赖、容量、水位、测试数据和恢复办法；Loop 负责调度、计数、证据和收尾。`preparation`、`context`、Ponytail 配置和迁移示例集中在 [运行与维护](项目文档/运行与维护.md)。原子来源快照、SHA 内容副本、增删改日志和交付索引在项目外保存；AGENTS.md 不随运行变化。`context.sources` 里的来源文件只是资料：内容变化不再暂停或撤销完成资格，Loop 换用新版本继续并在总结里记一笔；只有登记的路径本身缺失（或整个来源配置被移除）才暂停，那是配置错误。登记的是目录时，目录内文件的增删算资料变化，目录本身被删才算缺失。
+项目固定方法写一份在 `.autoreview/methods/`，由 `.autoreview.json` 的 `methods.paths` 指向；准备、门禁、验收命令都在这里维护，不再每批复制门禁、棘轮或启动脚本。每批只写 `批次.json` 和提示词，批次参数由 `AUTOREVIEW_BATCH_FILE` 交给项目方法读取。`loop 开工` 按方法指纹决定是否执行 `methods.selfCheck` 和基线门禁，环境变了用 `--recheck` 强制重跑。
+
+项目脚本负责具体依赖、容量、水位、测试数据和恢复办法；Loop 负责调度、计数、证据和收尾。`preparation`、`methods`、`context`、Ponytail 的字段、默认值和限制统一见 [工具清单.md](工具清单.md)，调度与迁移见 [运行与维护](项目文档/运行与维护.md)。原子来源快照、SHA 内容副本、增删改日志和交付索引在项目外保存；AGENTS.md 不随运行变化。`context.sources` 里的来源文件只是资料：内容变化不再暂停或撤销完成资格，Loop 换用新版本继续并在总结里记一笔；只有登记的路径本身缺失（或整个来源配置被移除）才暂停，那是配置错误。登记的是目录时，目录内文件的增删算资料变化，目录本身被删才算缺失。

@@ -1,45 +1,59 @@
 #!/usr/bin/env node
 /**
- * pipeline.ts — 多段流水线：几段 pi 会话按计划并行或串行完成后，程序跑 e2e 收尾；
- * e2e 没通过的条目按「[段名]」标签退回那一段的会话修，修完自动重跑，直到通过、暂停或超过轮数。
+ * pipeline.ts — 多段流水线：几段 pi 会话按计划并行或串行完成后，程序跑整批验收；
+ * 没通过的条目按「[段名]」标签退回那一段的会话修，修完自动重跑，直到通过、暂停或超过轮数。
  *
- * 用法：node pipeline.ts <计划.json> [--launcher terminal|background] [--from e2e]
+ * 用法：node pipeline.ts <计划.json> [--launcher terminal|background] [--from 验收]
  *   terminal（macOS 默认）：每段开一个终端窗口跑它的启动命令，你可以看、可以插话；
  *   background：后台跑，输出写 <流水线目录>/<段>.log；
- *   --from e2e：各段已经完成、窗口还开着（比如上次 e2e 暂停后处理好了），直接从联调准备 / e2e 接着跑。
- * 退出码：0 完成；1 e2e 超过轮数仍没通过；2 暂停（需要你处理）；3 计划文件有错。
+ *   --from 验收：各段已经完成、窗口还开着，直接从联调准备 / 整批验收接着跑（旧写法 --from e2e 仍可用）。
+ * 退出码：0 完成；1 整批验收超过轮数仍没通过或段启动入口失败；2 暂停（需要你处理）；3 计划文件有错。
  *
  * 每段写 prompt（提示词文件）时，程序按你日常的配置生成 pi 启动命令（加载权限扩展和 autoreview.ts）；
  * 写 start 时原样执行，那条命令里的 pi 必须加载 autoreview.ts。开任何窗口之前先做开跑前检查，有一项不过就不开跑。
  */
+import { randomUUID } from "node:crypto";
+import { beginBatchRun, startBatchProcess, type BatchRun } from "./launch.ts";
 import { setTimeout as sleep } from "node:timers/promises";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  authorizationStatus, extractCriteria, formatFailedItems, grantsFromUser, isAuthorizationCriterion, isManualCriterion,
+  authorizationStatus, extractCriteria, formatFailedItems, isAuthorizationCriterion, isManualCriterion,
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
-import { EXT_DIR, HERMES_BIN, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, type AcceptanceConfig } from "./config.ts";
-import { reapProcs } from "./procs.ts";
-import { createChildExec } from "./hosts/hook.ts";
-import { blockerHint } from "./onboarding.ts";
+import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, workspacePath, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
+import { processStartTime, reapProcs } from "./procs.ts";
+import { batchInfo, batchLocation, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
+import { systemNotify } from "./notify.ts";
+import { mergePAGrants, readPAGrants } from "./pa-records.ts";
+import type { FailureKind } from "./failure.ts";
+import { createChildExec } from "./hosts/review-hook.ts";
+import { createGitEvidence } from "./git.ts";
+import { blockerHint, browserHint } from "./onboarding.ts";
 import {
-  inboxPath, PIPELINE_DIR_ENV, pollMs, readJson, STAGE_ENV, statusPath, writeJsonAtomic,
+  inboxPath, PIPELINE_DIR_ENV, PIPELINE_LAUNCH_ENV, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, readJson, STAGE_ENV, statusPath, writeJsonAtomic,
   type InboxMessage, type StageStatus,
 } from "./pipeline-core.ts";
 import { DEFAULT_MODEL, DEFAULT_THINKING } from "./review.ts";
 import { loadPreparation, runPreparation, type PreparationState } from "./preparation.ts";
 import { loadContext, refreshContext, sourceInputsProblem } from "./project-context.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine } from "./resources.ts";
+import { methodEnv } from "./method-env.ts";
+import { parseStageScope, type StageScope } from "./scope.ts";
+import { commitAll, currentBranch, gitText } from "./workspace.ts";
+import { beginQueuePipeline, endQueuePipeline, queueBatchComplete, queueBatchRecheck, type QueuePipelineRun } from "./merge-queue.ts";
 
 export const DEFAULT_MAX_ROUNDS = 3;
 /** 每段 pi 的默认配置（你日常的启动配置），计划的 pi 一节和每段自己的同名字段可以覆盖。 */
 export const DEFAULT_PI: PiOptions = { model: "openai-codex/gpt-6.1-sol", thinking: "max", tools: "read,edit,write,bash", args: [] };
 const AUTOREVIEW_PATH = join(EXT_DIR, "autoreview.ts");
+export const PI_DEV = join(EXT_DIR, "bin", "pi-dev");
+const snapshotRef = async (cwd: string, signal?: AbortSignal): Promise<string | undefined> => {
+  try { return (await createGitEvidence(createChildExec(), cwd, signal).snapshot()).ref; } catch { return undefined; }
+};
 const BROWSER_TOOL = join(EXT_DIR, "acceptance-tools", "browser.mjs");
 /** 段开窗后这么久还没报状态，提醒你检查启动命令有没有加载 autoreview.ts。 */
 const SILENCE_MS = 3 * 60_000;
@@ -47,17 +61,27 @@ const SILENCE_MS = 3 * 60_000;
 export interface PiOptions {
   model: string; thinking: string; tools: string; args: string[];
   ponytail?: { extension: string; mode: "off" | "lite" | "full" | "ultra" };
+  /** 显式写了 ponytail: false；启动入口据此关闭 Ponytail。 */
+  ponytailDisabled?: boolean;
 }
 export interface StagePlan {
   name: string;
-  /** 实际执行的启动命令：写了 start 就是它，写了 prompt 就是程序生成的 pi 命令。 */
+  /** 实际执行的启动命令：写了 start 就是它，写了 prompt 就是由 bin/pi-dev 生成的命令。 */
   start: string;
   cwd: string;
   /** 写了 prompt 时的提示词文件（绝对路径）。 */
   prompt?: string;
   ponytail?: PiOptions["ponytail"];
+  workspace?: string;
+  branch?: string;
+  /** 本段显式评审参数及配置环境快照；准备、窗口和资格读取使用同一份覆盖。 */
+  configOverrides?: ProjectConfigOverrides;
+  /** 流水线启动前确定的开工依据；准备和会话都用它，避免脏工作区各取一次快照。 */
+  baseline?: string;
+  /** 本段允许/禁止修改的路径前缀；没写不做越界检查。 */
+  scope?: StageScope;
 }
-export interface E2ePlan {
+export interface AcceptancePlan {
   workDir: string;
   /** 验收标准所在文件（[授权] 条目的「同意授权：…」也写在这里）。 */
   criteriaFile: string;
@@ -70,19 +94,39 @@ export interface E2ePlan {
   acceptance: AcceptanceConfig;
   maxRounds: number;
 }
+export type Recipe = "develop" | "review-only";
+export interface ReviewPlan {
+  repo: string; base: string; head: string; requirement?: string; criteria?: string; note?: string;
+}
 export interface Plan {
+  /** 本次取得运行权的代次，不从批次文件读取。 */
+  runId?: string;
+  recipe?: Recipe;
+  review?: ReviewPlan;
   name: string;
-  /** 流水线目录：状态、收件箱、e2e 材料、报告都在这里。 */
+  /** 批次分支（批次.json 的 branch）；写了才在段完成时由程序提交。 */
+  branch?: string;
+  /** 批次文件绝对路径；启动会话时交给扩展读 scope 等项目参数。 */
+  file?: string;
+  /** 流水线目录：状态、收件箱、验收材料、报告都在这里。 */
   dir: string;
   stages: Map<string, StagePlan>;
   /** 每一步里的段并行跑，步与步之间串行。 */
   steps: string[][];
   prepare?: string;
-  e2e?: E2ePlan;
+  acceptance?: AcceptancePlan;
   maxParallel?: number;
+  /** 本次实际读取并命中当前标准的 PA 授权编号。 */
+  paGrantsUsed?: string[];
 }
 
 export class PlanError extends Error {}
+
+export function parseRecipe(value: unknown): Recipe {
+  if (value === undefined) return "develop";
+  if (value !== "develop" && value !== "review-only") throw new PlanError('recipe 可用的值："develop"、"review-only"');
+  return value;
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -114,48 +158,77 @@ function piOptions(value: Record<string, unknown>, label: string, base: PiOption
     args = value.args as string[];
   }
   let ponytail = base.ponytail;
-  if (value.ponytail === false) ponytail = undefined;
+  let ponytailDisabled = base.ponytailDisabled;
+  if (value.ponytail === false) { ponytail = undefined; ponytailDisabled = true; }
   else if (value.ponytail !== undefined) {
     if (!isObject(value.ponytail)) throw new PlanError(`${label}.ponytail 必须是对象或 false`);
     const mode = value.ponytail.mode ?? "full";
     if (!["off", "lite", "full", "ultra"].includes(String(mode))) throw new PlanError(`${label}.ponytail.mode 无效`);
     ponytail = { extension: resolve(planDir, text(value.ponytail.extension, `${label}.ponytail.extension`)), mode: mode as NonNullable<PiOptions["ponytail"]>["mode"] };
+    ponytailDisabled = false;
   }
-  return { model: pick("model"), thinking: pick("thinking"), tools: pick("tools"), args, ...(ponytail ? { ponytail } : {}) };
+  return { model: pick("model"), thinking: pick("thinking"), tools: pick("tools"), args,
+    ...(ponytail ? { ponytail } : {}), ...(ponytailDisabled ? { ponytailDisabled: true } : {}) };
 }
 
-/** 按提示词生成一段的 pi 启动命令：和 README「启动」一节同样的配置，外加 --name 方便认窗口。 */
-export function piCommand(planName: string, stage: string, prompt: string, pi: PiOptions): string {
-  const args = [
-    "--offline", "--model", pi.model, "--thinking", pi.thinking,
-    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--tools", pi.tools,
-    "-e", PERMISSION_EXT, "-e", AUTOREVIEW_PATH, "--name", `${planName}·${stage}`, ...pi.args, `@${prompt}`,
-  ];
-  if (pi.ponytail) args.splice(args.length - 1, 0, "-e", pi.ponytail.extension);
-  const mode = pi.ponytail ? `PONYTAIL_DEFAULT_MODE=${shellQuote(pi.ponytail.mode)} ` : "";
-  return `${mode}PATH=${shellQuote(HERMES_BIN)}:"$PATH" ${shellQuote(PI_BIN)} ${args.map(shellQuote).join(" ")}`;
+/** 按提示词生成一段的启动命令：统一经过 bin/pi-dev，段级覆盖照常传入。 */
+export function piCommand(planName: string, stage: string, prompt: string, pi: PiOptions, cwd = "."): string {
+  const args = [PI_DEV, "--cwd", cwd, "--model", pi.model, "--thinking", pi.thinking, "--tools", pi.tools,
+    "--name", `${planName}·${stage}`];
+  if (pi.ponytail) args.push("--ponytail", pi.ponytail.extension, "--ponytail-mode", pi.ponytail.mode);
+  else if (pi.ponytailDisabled) args.push("--no-ponytail");
+  args.push(prompt);
+  if (pi.args.length) args.push("--", ...pi.args);
+  return args.map(shellQuote).join(" ");
 }
 
 /** 解析并校验计划文件；相对路径按计划文件所在目录解析。 */
-export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv = process.env): Plan {
+export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv = process.env, options: { projectRoot?: string; defaultWorkspace?: string; batchFile?: string; warn?: (message: string) => void } = {}): Plan {
   if (!isObject(raw)) throw new PlanError("计划文件必须是 JSON 对象");
+  const recipe = parseRecipe(raw.recipe);
+  if (recipe === "review-only") {
+    if (!isObject(raw.review)) throw new PlanError("review-only 的 review 必须是对象");
+    const review: ReviewPlan = { repo: resolve(planDir, text(raw.review.repo, "review.repo")), base: text(raw.review.base, "review.base"), head: text(raw.review.head, "review.head") };
+    for (const key of ["requirement", "criteria", "note"] as const) if (raw.review[key] !== undefined) review[key] = resolve(planDir, text(raw.review[key], `review.${key}`));
+    if (raw.name !== undefined) text(raw.name, "name");
+    if (raw.dir !== undefined) text(raw.dir, "dir");
+    const { name, dir } = batchLocation(raw, planDir);
+    return { recipe, review, name, dir, stages: new Map(), steps: [], ...(options.batchFile ? { file: resolve(options.batchFile) } : {}) };
+  }
+  if (raw.acceptance !== undefined && raw.e2e !== undefined) throw new PlanError("计划文件的 acceptance 和 e2e 只能写一个"); // 兼容旧字段，但不合并两套配置。
   const name = text(raw.name, "name");
   if (!isObject(raw.stages) || Object.keys(raw.stages).length === 0) throw new PlanError("计划文件的 stages 至少要有一段");
   if (raw.pi !== undefined && !isObject(raw.pi)) throw new PlanError("计划文件的 pi 必须是对象");
   const planPi = raw.pi === undefined ? DEFAULT_PI : piOptions(raw.pi, "pi", DEFAULT_PI, planDir);
+  const batchBranch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
+  const project = loadProjectLayout(options.projectRoot ?? planDir);
   const stages = new Map<string, StagePlan>();
   for (const [stage, value] of Object.entries(raw.stages)) {
     if (!isObject(value)) throw new PlanError(`stages.${stage} 必须是对象`);
-    const cwd = value.cwd === undefined ? planDir : resolve(planDir, text(value.cwd, `stages.${stage}.cwd`));
+    if (value.cwd !== undefined && value.workspace !== undefined) throw new PlanError(`stages.${stage} 的 cwd 和 workspace 只能写一个`);
+    const workspace = value.workspace === undefined ? undefined : text(value.workspace, `stages.${stage}.workspace`);
+    const cwd = value.cwd !== undefined ? resolve(planDir, text(value.cwd, `stages.${stage}.cwd`))
+      : workspace !== undefined ? workspacePath(project.root, project.layout, workspace)
+      : options.defaultWorkspace !== undefined ? workspacePath(project.root, project.layout, options.defaultWorkspace)
+      : planDir;
+    const branch = value.branch === undefined ? batchBranch : text(value.branch, `stages.${stage}.branch`);
+    let scope;
+    try { scope = parseStageScope(value.scope, `计划文件的 stages.${stage}.scope`); }
+    catch (error) { throw new PlanError((error as Error).message); }
     if ((value.prompt === undefined) === (value.start === undefined)) {
       throw new PlanError(`stages.${stage} 要写 prompt（提示词文件，推荐）或 start（自己的启动命令），两个只能写一个`);
     }
     if (value.prompt !== undefined) {
       const prompt = resolve(planDir, text(value.prompt, `stages.${stage}.prompt`));
       const pi = piOptions(value, `stages.${stage}`, planPi, planDir);
-      stages.set(stage, { name: stage, start: piCommand(name, stage, prompt, pi), cwd, prompt, ...(pi.ponytail ? { ponytail: pi.ponytail } : {}) });
+      stages.set(stage, { name: stage, start: piCommand(name, stage, prompt, pi, cwd), cwd, prompt,
+        configOverrides: captureProjectConfigOverrides(projectConfigOverridesFromArgs(pi.args), env),
+        ...(pi.ponytail ? { ponytail: pi.ponytail } : {}), ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}),
+        ...(scope ? { scope } : {}) });
     } else {
-      stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd });
+      stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd,
+        configOverrides: captureProjectConfigOverrides({}, env),
+        ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}), ...(scope ? { scope } : {}) });
     }
   }
   let steps: string[][];
@@ -176,17 +249,20 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
   for (const stage of stages.keys()) {
     if (!listed.includes(stage)) throw new PlanError(`段「${stage}」没有排进 steps`);
   }
-  const dir = raw.dir === undefined
-    ? resolve(homedir(), ".pi-autoreview", "pipelines", fileSafe(name))
-    : resolve(planDir, text(raw.dir, "dir"));
+  if (raw.dir !== undefined) text(raw.dir, "dir");
+  const { dir } = batchLocation(raw, planDir);
   const prepare = raw.prepare === undefined ? undefined : text(raw.prepare, "prepare");
 
-  let e2e: E2ePlan | undefined;
-  if (raw.e2e !== undefined) {
-    if (!isObject(raw.e2e)) throw new PlanError("计划文件的 e2e 必须是对象");
-    const workDir = resolve(planDir, text(raw.e2e.workDir, "e2e.workDir"));
-    const criteriaFile = resolve(planDir, text(raw.e2e.criteria, "e2e.criteria"));
-    if (!existsSync(criteriaFile)) throw new PlanError(`e2e.criteria 指的文件不存在：${criteriaFile}`);
+  const legacy = raw.e2e !== undefined; // 兼容旧批次字段及其嵌套验收配置。
+  const input = legacy ? raw.e2e : raw.acceptance;
+  const label = legacy ? "e2e" : "acceptance";
+  let acceptance: AcceptancePlan | undefined;
+  if (input !== undefined) {
+    if (legacy) (options.warn ?? console.error)("批次字段 e2e 是旧写法，建议改成 acceptance，并将原 e2e.acceptance 的验收配置字段直接平铺");
+    if (!isObject(input)) throw new PlanError(`计划文件的 ${label} 必须是对象`);
+    const workDir = resolve(planDir, text(input.workDir, `${label}.workDir`));
+    const criteriaFile = resolve(planDir, text(input.criteria, `${label}.criteria`));
+    if (!existsSync(criteriaFile)) throw new PlanError(`${label}.criteria 指的文件不存在：${criteriaFile}`);
     const requirement = readFileSync(criteriaFile, "utf8");
     const parsed = extractCriteria(requirement);
     if (!parsed) throw new PlanError(`${criteriaFile} 里没有「## 验收标准」条目`);
@@ -197,22 +273,24 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
       owners.set(item.id, owner);
       return { id: item.id, text: rest };
     });
-    const maxRounds = raw.e2e.maxRounds === undefined ? DEFAULT_MAX_ROUNDS : raw.e2e.maxRounds;
-    if (typeof maxRounds !== "number" || !Number.isInteger(maxRounds) || maxRounds < 1) throw new PlanError("e2e.maxRounds 必须是正整数");
-    let acceptance: AcceptanceConfig;
+    const maxRounds = input.maxRounds === undefined ? DEFAULT_MAX_ROUNDS : input.maxRounds;
+    if (typeof maxRounds !== "number" || !Number.isInteger(maxRounds) || maxRounds < 1) throw new PlanError(`${label}.maxRounds 必须是正整数`);
+    let config: AcceptanceConfig;
     try {
-      acceptance = parseAcceptanceConfig(raw.e2e.acceptance ?? {}, planDir, env)!;
+      config = parseAcceptanceConfig(legacy ? input.acceptance ?? {} : input, planDir, env)!;
     } catch (error) {
-      throw new PlanError(`e2e.acceptance：${(error as Error).message.replace(/^\.autoreview\.json 的 /, "")}`);
+      const message = (error as Error).message.replace(/^\.autoreview\.json 的 /, "");
+      throw new PlanError(legacy ? `${label}.acceptance：${message}` : message);
     }
-    e2e = { workDir, criteriaFile, requirement, items, owners, acceptance, maxRounds };
+    acceptance = { workDir, criteriaFile, requirement, items, owners, acceptance: config, maxRounds };
   }
   const maxParallel = raw.maxParallel ?? 2;
   if (!Number.isSafeInteger(maxParallel) || (maxParallel as number) < 1) throw new PlanError("maxParallel 必须是正整数");
-  return { name, dir, stages, steps, prepare, e2e, maxParallel: maxParallel as number };
+  return { recipe, name, dir, stages, steps, prepare, acceptance, maxParallel: maxParallel as number,
+    ...(batchBranch ? { branch: batchBranch } : {}), ...(options.batchFile ? { file: resolve(options.batchFile) } : {}) };
 }
 
-/** e2e 没通过的条目按归属分组；系统级的 G1/G2 和没标归属的条目没法派，单独列出。 */
+/** 整批验收没通过的条目按归属分组；系统级的 G1/G2 和没标归属的条目没法派，单独列出。 */
 export function routeFailures(
   record: Pick<AcceptanceRecord, "items">, owners: Map<string, string | undefined>,
 ): { byStage: Map<string, AcceptanceItemResult[]>; unrouted: AcceptanceItemResult[] } {
@@ -237,12 +315,12 @@ export function dispatchBatches(stages: string[], repoOf: (stage: string) => str
   return batches;
 }
 
-/** 发给某一段的 e2e 返修：消息给开发方，条目原文给评审当「上一轮必修」。 */
+/** 发给某一段的整批验收返修：消息给开发方，条目原文给评审当「上一轮必修」。 */
 export function buildRepairMessage(stage: string, round: number, items: AcceptanceItemResult[], runDir: string): Omit<InboxMessage, "seq"> {
   const mustFix = formatFailedItems({ items });
   const message = [
-    `【流水线 e2e 返修 · 第 ${round} 轮】`,
-    `各段都完成后跑的整合 e2e 验收，下面这些条目没通过，归你（${stage}）负责；别的段负责的部分不要改：`,
+    `【整批验收返修 · 第 ${round} 轮】`,
+    `各段都完成后跑的整批验收，下面这些条目没通过，归你（${stage}）负责；别的段负责的部分不要改：`,
     "",
     mustFix,
     "",
@@ -261,24 +339,28 @@ const defaultPreflightEnv = (): PreflightEnv => ({
   playwright: (workDir) => spawnSync(process.execPath, [BROWSER_TOOL, "--check", workDir], { encoding: "utf8", timeout: 30_000 }).status === 0,
 });
 const isDir = (path: string): boolean => { try { return statSync(path).isDirectory(); } catch { return false; } };
-/** 标准里要开网页、点页面时，e2e 需要 Playwright。 */
+/** 标准里要开网页、点页面时，验收需要 Playwright。 */
 const NEEDS_BROWSER = /页面|网页|浏览器|点击|按钮|输入框|表单/;
 
 /**
- * 开跑前检查（不调用模型，几秒钟）：目录、git 仓库、提示词、pi 和扩展、同一步里目录不重复、e2e 端口、[授权] 答复、Playwright。
- * fromE2e 时只查 e2e 相关的几项。
+ * 开跑前检查（不调用模型，几秒钟）：目录、git 仓库、提示词、pi 和扩展、同一步里目录不重复、验收端口、[授权] 答复、Playwright。
+ * fromAcceptance 时只查整批验收相关的几项。
  */
-export async function preflight(plan: Plan, options: { fromE2e?: boolean; env?: Partial<PreflightEnv> } = {}): Promise<Check[]> {
+export async function preflight(plan: Plan, options: { fromAcceptance?: boolean; env?: Partial<PreflightEnv> } = {}): Promise<Check[]> {
   const env = { ...defaultPreflightEnv(), ...options.env };
   const checks: Check[] = [];
   const add = (name: string, ok: boolean, detail: string): void => { if (!checks.some((check) => check.name === name)) checks.push({ name, ok, detail }); };
-  const needsPi = (!options.fromE2e && [...plan.stages.values()].some((stage) => stage.prompt))
-    || Boolean(plan.e2e && !plan.e2e.acceptance.testerCmd);
-  if (!options.fromE2e) {
+  const needsPi = (!options.fromAcceptance && [...plan.stages.values()].some((stage) => stage.prompt))
+    || Boolean(plan.acceptance && !plan.acceptance.acceptance.testerCmd);
+  if (!options.fromAcceptance) {
     for (const stage of plan.stages.values()) {
       add(`${stage.name} 的目录`, isDir(stage.cwd), stage.cwd);
       const head = isDir(stage.cwd) && spawnSync("git", ["-C", stage.cwd, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).status === 0;
       add(`${stage.name} 的目录是有提交的 git 仓库`, head, head ? stage.cwd : "自动评审只在有提交的 git 仓库里工作");
+      try {
+        resolveProjectConfig(findProjectRoot(stage.cwd), stage.configOverrides);
+        add(`${stage.name} 的项目配置`, true, "配置与轮次预算有效");
+      } catch (error) { add(`${stage.name} 的项目配置`, false, (error as Error).message); }
       if (stage.prompt) add(`${stage.name} 的提示词`, existsSync(stage.prompt), stage.prompt);
       if (stage.ponytail) add(`${stage.name} 的 Ponytail 原生扩展`, existsSync(stage.ponytail.extension), `${stage.ponytail.extension}；声明模式 ${stage.ponytail.mode}`);
     }
@@ -292,24 +374,26 @@ export async function preflight(plan: Plan, options: { fromE2e?: boolean; env?: 
     add("pi", existsSync(env.pi), env.pi);
     add("权限扩展", existsSync(env.permission), env.permission);
   }
-  if (!options.fromE2e && [...plan.stages.values()].some((stage) => stage.prompt)) add("autoreview.ts", existsSync(env.autoreview), env.autoreview);
-  const e2e = plan.e2e;
-  if (e2e) {
-    add("e2e 工作目录", isDir(e2e.workDir), e2e.workDir);
-    if (e2e.acceptance.readyUrl) {
-      const url = new URL(e2e.acceptance.readyUrl);
+  if (!options.fromAcceptance && [...plan.stages.values()].some((stage) => stage.prompt)) add("autoreview.ts", existsSync(env.autoreview), env.autoreview);
+  const acceptance = plan.acceptance;
+  if (acceptance) {
+    add("整批验收工作目录", isDir(acceptance.workDir), acceptance.workDir);
+    if (acceptance.acceptance.readyUrl) {
+      const url = new URL(acceptance.acceptance.readyUrl);
       const busy = await portBusy(url);
-      add(`e2e 的地址 ${url.host} 现在空着`, !busy, busy ? `已经有程序在监听：${describeListeners(url)}` : e2e.acceptance.readyUrl);
+      add(`整批验收的地址 ${url.host} 现在空着`, !busy, busy ? `已经有程序在监听：${describeListeners(url)}` : acceptance.acceptance.readyUrl);
     }
-    if (e2e.items.some((item) => isAuthorizationCriterion(item.text))) {
-      const criteria: Criteria = { source: "用户", items: e2e.items, version: 1, updatedAt: "" };
-      const pendingGrants = authorizationStatus(criteria, grantsFromUser(e2e.requirement, criteria)).pending;
-      add("e2e 的 [授权] 条目都已答复", pendingGrants.length === 0, pendingGrants.length === 0 ? "已答复"
-        : `${pendingGrants.join("、")} 还没答复：在 ${e2e.criteriaFile} 里加一行「同意授权：${pendingGrants.join("、")}」或「不授权：${pendingGrants.join("、")}」`);
+    if (acceptance.items.some((item) => isAuthorizationCriterion(item.text))) {
+      const criteria: Criteria = { source: "用户", items: acceptance.items, version: 1, updatedAt: "" };
+      const merged = mergePAGrants(plan.dir, acceptance.requirement, criteria);
+      plan.paGrantsUsed = merged.used;
+      const pendingGrants = authorizationStatus(criteria, merged.grants).pending;
+      add("整批验收的 [授权] 条目都已答复", pendingGrants.length === 0, pendingGrants.length === 0 ? "已答复"
+        : `${pendingGrants.join("、")} 还没答复：在 ${acceptance.criteriaFile} 里加一行「同意授权：${pendingGrants.join("、")}」或「不授权：${pendingGrants.join("、")}」`);
     }
-    if (e2e.items.some((item) => !isManualCriterion(item.text) && NEEDS_BROWSER.test(item.text))) {
-      const found = isDir(e2e.workDir) && env.playwright(e2e.workDir);
-      add("Playwright（e2e 要操作网页）", found, found ? "找到了" : `找不到：在 ${e2e.workDir} 里执行接入手册的【块 3】`);
+    if (acceptance.items.some((item) => !isManualCriterion(item.text) && NEEDS_BROWSER.test(item.text))) {
+      const found = isDir(acceptance.workDir) && env.playwright(acceptance.workDir);
+      add("Playwright（整批验收要操作网页）", found, found ? "找到了" : `找不到：${browserHint(acceptance.workDir)}`);
     }
   }
   return checks;
@@ -323,7 +407,19 @@ export function repoKey(cwd: string): string {
 
 /** 段的启动脚本：进目录、带上流水线环境变量，再跑计划里的启动命令。 */
 export function stageScript(plan: Plan, stage: StagePlan): string {
-  return `cd ${shellQuote(stage.cwd)} && export ${PIPELINE_DIR_ENV}=${shellQuote(plan.dir)} ${STAGE_ENV}=${shellQuote(stage.name)} && ${stage.start}`;
+  const batch = plan.file ? ` AUTOREVIEW_BATCH_FILE=${shellQuote(plan.file)}` : "";
+  const baseline = stage.baseline ? ` AUTOREVIEW_BASE_REV=${shellQuote(stage.baseline)}` : "";
+  // 所有段入口都持有一份启动身份：prompt 由 pi-dev 撤掉，自定义 start 由 autoreview 扩展加载时撤掉。
+  const token = ` ${PIPELINE_LAUNCH_TOKEN_ENV}=${shellQuote(randomUUID())}`;
+  // Terminal 可能早已运行，不能依赖它继承当前编排进程的环境；空值也显式写出以屏蔽旧窗口环境。
+  const configEnv = stage.configOverrides?.env;
+  const config = configEnv ? PROJECT_CONFIG_ENV.map((key) => ` ${key}=${shellQuote(configEnv[key] ?? "")}`).join("") : "";
+  return `cd ${shellQuote(stage.cwd)} && export ${PIPELINE_DIR_ENV}=${shellQuote(plan.dir)} ${STAGE_ENV}=${shellQuote(stage.name)} ${PIPELINE_LAUNCH_ENV}=1${batch}${baseline}${token}${config} && ${stage.start}`;
+}
+
+class StageStartupFailure extends Error {
+  stage: string;
+  constructor(stage: string, reason: string) { super(reason); this.stage = stage; }
 }
 
 export interface PipelineIO {
@@ -336,8 +432,47 @@ export interface PipelineIO {
   preflightEnv?: Partial<PreflightEnv>;
 }
 
+function pipelineInfo(plan: Plan): BatchInfo {
+  const cwd = plan.stages.values().next().value!.cwd;
+  let base: BatchInfo = { project: resolve(cwd), batch: { file: plan.file ? resolve(plan.file) : "", name: plan.name, recipe: "develop" }, dir: plan.dir, stages: [] };
+  try { if (plan.file) base = batchInfo(plan.file, cwd, plan.dir); } catch { /* 定位记录失败不改变流水线业务结果。 */ }
+  return { ...base, stages: [...plan.stages.values()].map((stage) => ({ stage: stage.name, cwd: stage.cwd, branch: stage.branch ?? plan.branch, prompt: stage.prompt })) };
+}
+function pipelineEvent(plan: Plan, phase: PhaseRecord["phase"], status: "started" | "paused" | "repair-limit" | "failed" | "resumed", text: string, detail: Record<string, unknown> = {}, failureKind?: FailureKind): void {
+  try {
+    detail = { ...detail, paGrantsUsed: plan.paGrantsUsed ?? [] };
+    const info = pipelineInfo(plan), reason = eventReason(text, failureKind), evidence = { summary: resolve(plan.dir, "report.md"),
+      ...(typeof detail.log === "string" ? { log: detail.log } : {}), ...(typeof detail.acceptance === "string" ? { acceptance: detail.acceptance } : {}) };
+    writePhase(info, null, phase, { status, ...reason, evidence, detail,
+      ...(detail.next ? { next: detail.next as NextAction } : {}), session: { host: "pipeline", id: plan.name, pid: process.pid, processStarted: processStartTime(process.pid), runId: plan.runId } });
+    if (plan.file) pushEvent(info, null, status, reason, evidence, detail);
+  } catch (error) { process.stderr.write(`[Loop PA] 流水线事件未发送：${String(error)}\n`); }
+}
+
 /** 跑一条流水线，返回退出码（见文件头）。 */
-export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e?: boolean; signal?: AbortSignal } = {}): Promise<number> {
+export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromAcceptance?: boolean; signal?: AbortSignal } = {}): Promise<number> {
+  if (plan.recipe === "review-only") {
+    const { runReviewOnly } = await import("./review-only.ts");
+    const result = await runReviewOnly(plan.review!, { file: plan.file, name: plan.name, dir: plan.dir });
+    io.log(`报告：${result.report}`);
+    return result.exitCode as number;
+  }
+  let run: QueuePipelineRun | undefined, active: BatchRun | undefined;
+  try {
+    run = plan.file ? beginQueuePipeline(plan.stages.values().next().value!.cwd, plan.file, Boolean(plan.acceptance)) : undefined;
+    active = beginBatchRun(pipelineInfo(plan), run?.token);
+    plan.runId = active.runId;
+  }
+  // 尚未取得运行权的调用没有资格发布活动组或批次状态。
+  catch (error) { run?.release(); io.notify(`流水线 ${plan.name}：${(error as Error).message}`); return 2; }
+  try { return await runPipelineBody(plan, io, options, run); }
+  finally {
+    try { active.release(); }
+    finally { delete plan.runId; if (run) endQueuePipeline(run); }
+  }
+}
+
+async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAcceptance?: boolean; signal?: AbortSignal }, run?: QueuePipelineRun): Promise<number> {
   mkdirSync(plan.dir, { recursive: true });
   reapRunResources();
   // 必须先处理本流水线的孤儿，再检查端口；开发会话不在此清理范围。
@@ -354,7 +489,7 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
         || (status.inbox ?? 0) < (message?.seq ?? 0)) invalid.push(name);
       else {
         try {
-          if (inspectSources && sourceInputsProblem(plan.stages.get(name)!.cwd, status.sourceInputs)) { invalid.push(name); continue; }
+          if (inspectSources && sourceInputsProblem(plan.stages.get(name)!.cwd, status.sourceInputs, status.configOverrides ?? plan.stages.get(name)!.configOverrides)) { invalid.push(name); continue; }
           epochs.push([name, status.sessionId, status.readyEpoch, status.inbox ?? 0]);
         } catch { invalid.push(name); } // 无法读取真实来源时不能只相信旧 done。
       }
@@ -362,39 +497,78 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
     return { invalid, token: JSON.stringify(epochs) };
   };
   const report: string[] = [`# 流水线报告：${plan.name}`, "", `- 开始：${new Date().toLocaleString("zh-CN", { hour12: false })}`, `- 目录：${plan.dir}`];
-  const finish = (code: number, line: string): number => {
+  let acceptancePassed = false;
+  let acceptanceRecord: AcceptanceRecord | undefined;
+  let acceptanceEpoch: string | undefined;
+  let activeRound = 0;
+  const finish = (code: number, line: string, detail: { next?: NextAction; failureKind?: FailureKind; status?: "failed"; log?: string } = {}): number => {
     if (code === 0) {
       const latest = readiness();
       if (latest.invalid.length || (completionEpochs && latest.token !== completionEpochs)) { code = 2; line = "完成前段资格已变化，本批结果不能用于新的输入；开发会话与计数保留"; }
     }
+    let submitted = false;
+    if (code === 0 && plan.file) {
+      try { submitted = Boolean(queueBatchComplete(plan.stages.values().next().value!.cwd, plan.file, acceptancePassed, acceptanceRecord, acceptanceEpoch, run)?.length); }
+      catch (error) { code = 2; line = `完成后进合入队列失败：${(error as Error).message}；成果与段资格保留，修复后 --from 验收 重试`; }
+    }
     report.push("", `## 结果`, line);
     writeFileSync(resolve(plan.dir, "report.md"), `${report.join("\n")}\n`);
     writeFileSync(resolve(plan.dir, "pipeline.finished"), `${code}\n`);
+    if (code !== 0) {
+      const status = detail.status ?? (code === 2 ? "paused" : /轮上限/.test(line) ? "repair-limit" : "failed");
+      pipelineEvent(plan, status === "failed" ? "failed" : "paused", status, line, { exitCode: code, round: activeRound,
+        ...(status !== "failed" ? { next: detail.next ?? "manual" } : {}), ...(detail.failureKind ? { failureKind: detail.failureKind } : {}),
+        ...(detail.log ? { log: detail.log } : {}), ...(acceptanceRecord ? { acceptance: acceptanceRecord.runDir } : {}),
+        ...(status === "repair-limit" ? { mustFix: acceptanceRecord ? formatFailedItems(acceptanceRecord) : line } : {}) }, detail.failureKind);
+    } else if (!submitted) reportUncommittedBatch(pipelineInfo(plan), acceptanceRecord, plan.paGrantsUsed);
+    // submitted 的 done phase / 事件只由提交模块发布，不能用退出码 0 补造终态。
     io.notify(`流水线 ${plan.name}：${line}`);
     return code;
   };
   rmSync(resolve(plan.dir, "pipeline.finished"), { force: true });
+  pipelineEvent(plan, "running", options.fromAcceptance ? "resumed" : "started", "", options.fromAcceptance ? { via: process.env.AUTOREVIEW_QUEUE_EXECUTOR_ID ? "auto" : "user" } : { recipe: pipelineInfo(plan).batch.recipe });
+  const stageDone = (name: string, status: StageStatus): void => {
+    if (!plan.file || plan.stages.size < 2) return;
+    const info = pipelineInfo(plan), current = plan.stages.get(name)!, branch = current.branch ?? plan.branch;
+    const phase = readJson<PhaseRecord>(phasePath(plan.dir, name));
+    const detail = { ...(phase?.detail ?? completionDetail()), scope: "段", completion: status.readyEpoch, branch: branch ?? null, commit: branch ? gitText(current.cwd, ["rev-parse", `refs/heads/${branch}`]) : null };
+    const evidence = phase?.evidence ?? (status.summary ? { summary: status.summary } : {});
+    writePhase(info, name, "done", { ...phase, status: "done", evidence, detail });
+    pushEvent(info, name, "done", eventReason(), evidence, detail);
+  };
 
   try {
   options.signal?.throwIfAborted();
   // 开跑前检查：有一项不过就不开任何窗口。
-  const checks = await preflight(plan, { fromE2e: options.fromE2e, env: io.preflightEnv });
+  const checks = await preflight(plan, { fromAcceptance: options.fromAcceptance, env: io.preflightEnv });
+  const auditPAGrants = () => {
+    if (!plan.paGrantsUsed?.length) return;
+    pipelineEvent(plan, "running", "resumed", "", { via: "auto", paGrantsUsed: plan.paGrantsUsed });
+    report.push(...readPAGrants(plan.dir).filter((row) => plan.paGrantsUsed!.includes(row.id)).map((row) => `- 授权答复经 PA 转达，编号 ${row.id}：${JSON.stringify(row.text)}`));
+  };
+  auditPAGrants();
   report.push("", "## 开跑前检查", ...checks.map((check) => `- ${check.ok ? "🟢" : "🔴"} ${check.name}：${check.detail}`), "");
   for (const check of checks) io.log(`${check.ok ? "🟢" : "🔴"} ${check.name}：${check.detail}`);
   const failed = checks.filter((check) => !check.ok);
   if (failed.length > 0) {
-    return finish(2, `开跑前检查没通过：${failed.map((check) => `${check.name}（${check.detail}）`).join("；")}`);
+    return finish(2, `开跑前检查没通过：${failed.map((check) => `${check.name}（${check.detail}）`).join("；")}`, { next: failed.every((check) => check.name === "整批验收的 [授权] 条目都已答复") ? "grant" : "manual" });
   }
 
   /** 等某一段出现「派发之后」的完成或没改动；暂停时提醒你，接着等你在它的窗口里处理。 */
-  const waitStage = async (stage: string, afterSeq: number, inboxSeq = 0): Promise<StageStatus> => {
+  const waitStage = async (stage: string, afterSeq: number, inboxSeq = 0, signal = options.signal): Promise<StageStatus> => {
     const started = Date.now();
     let notifiedPause = 0;
     let warnedSilence = false;
     for (;;) {
-      options.signal?.throwIfAborted();
+      signal?.throwIfAborted();
       const status = readJson<StageStatus>(statusPath(plan.dir, stage));
       if (status && status.seq > afterSeq && status.inbox >= inboxSeq) {
+        if (status.event === "startup-failed") {
+          const info = pipelineInfo(plan), reason = eventReason(`启动失败：${status.pauseReason ?? "启动入口失败，没有启动会话"}`), detail = { exitCode: 1 };
+          writePhase(info, stage, "failed", { status: "failed", ...reason, evidence: status.summary ? { summary: status.summary } : {}, detail });
+          if (plan.file) pushEvent(info, stage, "failed", reason, {}, detail);
+          throw new StageStartupFailure(stage, status.pauseReason ?? "启动入口失败，没有启动会话");
+        }
         if (status.event === "done" && !status.readyEpoch) return { ...status, event: "paused", pauseReason: "旧完成记录没有资格身份，请用当前扩展重新检查" };
         if (status.event === "done" || status.event === "no-change") return status;
         if (status.event === "paused" && notifiedPause !== status.seq) {
@@ -406,15 +580,15 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
         warnedSilence = true;
         io.notify(`流水线 ${plan.name}：还没收到「${stage}」的状态，确认它的启动命令加载了 autoreview.ts（-e …/autoreview.ts）`);
       }
-      await sleep(io.pollMs, undefined, { signal: options.signal });
+      await sleep(io.pollMs, undefined, { signal });
     }
   };
   const currentSeq = (stage: string): number => readJson<StageStatus>(statusPath(plan.dir, stage))?.seq ?? 0;
 
-  if (options.fromE2e) {
+  if (options.fromAcceptance) {
     const notDone = readiness().invalid;
-    if (notDone.length > 0) return finish(2, `--from e2e 需要各段都已完成，${notDone.join("、")} 还没有`);
-    report.push("- 从 e2e 接着跑（各段已完成）");
+    if (notDone.length > 0) return finish(2, `--from 验收 需要各段都已完成，${notDone.join("、")} 还没有`);
+    report.push("- 从整批验收接着跑（各段已完成）");
   } else {
     const concurrency = plan.maxParallel ?? 2;
     for (const stage of plan.stages.keys()) {
@@ -428,20 +602,33 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
           const batch = group.slice(offset, offset + concurrency);
           const invalidBefore = readiness(completed).invalid;
           if (invalidBefore.length) return finish(2, `上游段资格已失效：${invalidBefore.join("、")}；未启动下游`);
+          for (const stage of batch) {
+            const current = plan.stages.get(stage)!;
+            const branch = current.branch ?? plan.branch;
+            if (!branch) continue;
+            let actual: string | undefined;
+            try { actual = currentBranch(current.cwd); } catch (error) {
+              return finish(2, `${stage} 的目录无法读取分支：${(error as Error).message}；未启动会话`);
+            }
+            if (actual !== branch) return finish(2, `${stage} 的目录在分支 ${actual ?? "detached"}，批次要求 ${branch}；未启动会话`);
+          }
           const prepared = await Promise.all(batch.map(async (name) => {
             const stage = plan.stages.get(name)!;
-            const context = loadContext(stage.cwd);
+            stage.baseline = await snapshotRef(stage.cwd, options.signal);
+            if (!stage.baseline) return `${name}：无法读取开工依据`;
+            const context = loadContext(stage.cwd, stage.configOverrides);
             if (context) {
               const source = refreshContext(context);
               report.push(`- ${name} 来源版本 ${source.snapshot.revision}：${source.path}`);
               if (source.snapshot.missing.length) return `${name} 缺少来源：${source.snapshot.missing.join("、")}`;
             }
-            const config = loadPreparation(stage.cwd);
+            const config = loadPreparation(stage.cwd, stage.configOverrides);
             if (!config) return undefined;
             const file = resolve(plan.dir, `${fileSafe(name)}.preparation.json`);
             const state = readJson<PreparationState>(file) ?? {};
             const result = await runPreparation({ config, cwd: stage.cwd, state, signal: options.signal,
               exec: createChildExec(resolve(plan.dir, `${fileSafe(name)}.prepare.procs.json`)), procsFile: resolve(plan.dir, `${fileSafe(name)}.prepare.procs.json`),
+              env: methodEnv(stage.baseline, { batchFile: plan.file, stage: name }),
               runDir: resolve(plan.dir, "preparation", fileSafe(name)), saveState: () => writeJsonAtomic(file, state), onProgress: io.log });
             return result.ok ? undefined : `${name}：${result.reason}（${result.log}）`;
           }));
@@ -451,12 +638,42 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
           const invalidAfter = readiness(completed).invalid;
           if (invalidAfter.length) return finish(2, `上游段资格已失效：${invalidAfter.join("、")}；未启动下游`);
           io.log(`第 ${index + 1} 步：启动 ${batch.join("、")}`);
-          for (const stage of batch) io.launch(plan.stages.get(stage)!, stageScript(plan, plan.stages.get(stage)!));
-          const statuses = await Promise.all(batch.map((stage) => waitStage(stage, 0)));
+          for (const stage of batch) {
+            const info = pipelineInfo(plan), current = plan.stages.get(stage)!;
+            writePhase(info, stage, "running");
+            if (plan.file) pushEvent(info, stage, "started", eventReason(), {}, { recipe: info.batch.recipe, ...(current.prompt ? { prompt: current.prompt } : {}) });
+            io.launch(current, stageScript(plan, current));
+          }
+          let statuses: StageStatus[];
+          const startupAbort = new AbortController();
+          const waitSignal = options.signal ? AbortSignal.any([options.signal, startupAbort.signal]) : startupAbort.signal;
+          try { statuses = await Promise.all(batch.map((stage) => waitStage(stage, 0, 0, waitSignal))); }
+          catch (error) {
+            // 一段启动失败就收束同批其他等待；只停编排轮询，不杀已经启动的开发会话。
+            startupAbort.abort();
+            if (error instanceof StageStartupFailure) return finish(1, `段 ${error.stage} 启动失败：${error.message}；未启动下游`);
+            throw error;
+          }
           if (statuses.some((status) => status.event !== "done")) return finish(2, "段未取得当前完成资格，未启动下游");
+          for (const stage of batch) {
+            const current = plan.stages.get(stage)!;
+            const branch = current.branch ?? plan.branch;
+            if (branch) {
+              try {
+                const commit = commitAll(current.cwd, branch, plan.name, stage);
+                if (commit.committed) {
+                  report.push(`- ${stage} 完成提交：${commit.commit}（${branch}）`);
+                  io.log(`${stage} 完成提交：${branch} ${commit.commit}`);
+                }
+              } catch (error) {
+                return finish(2, `${stage} 完成提交失败：${(error as Error).message}`, { status: "failed" });
+              }
+            }
+            stageDone(stage, statuses.find((item) => item.stage === stage)!);
+          }
           for (const stage of batch) completed.add(stage);
           const invalid = readiness(completed).invalid;
-          if (invalid.length) return finish(2, `已完成段资格被撤销：${invalid.join("、")}；未启动下游或整合验收`);
+          if (invalid.length) return finish(2, `已完成段资格被撤销：${invalid.join("、")}；未启动下游或整批验收`);
         }
       }
       report.push(`- 第 ${index + 1} 步完成：${step.join("、")}（${new Date().toLocaleTimeString("zh-CN", { hour12: false })}）`);
@@ -464,8 +681,8 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
   }
   const ready = readiness();
   if (ready.invalid.length) return finish(2, `整合前段资格无效：${ready.invalid.join("、")}`);
-  const e2e = plan.e2e;
-  if (!e2e) return finish(0, "各段都已完成（计划里没有 e2e）");
+  const acceptance = plan.acceptance;
+  if (!acceptance) return finish(0, "各段都已完成（计划里没有整批验收）");
 
   if (plan.prepare) {
     io.log("联调准备");
@@ -473,33 +690,38 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
     let code: number;
     try {
       const result = await createChildExec(resolve(plan.dir, "prepare.procs.json"))("/bin/sh", ["-c", managedShell(plan.prepare, resource)],
-        { cwd: e2e.workDir, timeout: 10 * 60_000, signal: options.signal, role: "联调准备" });
+        { cwd: acceptance.workDir, timeout: 10 * 60_000, signal: options.signal, role: "联调准备",
+          env: methodEnv(await snapshotRef(acceptance.workDir, options.signal), { batchFile: plan.file }) });
       writeFileSync(resolve(plan.dir, "prepare.log"), `${result.stdout}\n${result.stderr}`);
       options.signal?.throwIfAborted();
       code = result.code;
     } finally { releaseRunResource(resource); report.push(`- ${resourceLine(resource)}`); }
-    if (resource.status !== "released") return finish(2, "联调准备资源释放未确认");
-    if (code !== 0) return finish(2, `联调准备失败（退出码 ${code}）：修好后用 --from e2e 接着跑`);
+    if (resource.status !== "released") return finish(2, "联调准备资源释放未确认", { next: "resume", log: resolve(plan.dir, "prepare.log") });
+    if (code !== 0) return finish(2, `联调准备失败（退出码 ${code}）：修好后用 --from 验收 接着跑`, { next: "resume", log: resolve(plan.dir, "prepare.log") });
     report.push("- 联调准备完成");
   }
 
-  const criteria: Criteria = { source: "用户", items: e2e.items, version: 1, updatedAt: new Date().toISOString() };
+  const criteria: Criteria = { source: "用户", items: acceptance.items, version: 1, updatedAt: new Date().toISOString() };
   // [授权] 条目的答复写在标准文件里（你自己的文件）；没答复的停下来问你，不让验收方先动手。
-  const grants = grantsFromUser(e2e.requirement, criteria);
+  const merged = mergePAGrants(plan.dir, acceptance.requirement, criteria);
+  plan.paGrantsUsed = merged.used;
+  const grants = merged.grants;
+  auditPAGrants();
   const pending = authorizationStatus(criteria, grants).pending;
   if (pending.length > 0) {
-    return finish(2, `e2e 标准里 ${pending.join("、")} 要你授权：同意就在 ${e2e.criteriaFile} 里加一行「同意授权：${pending.join("、")}」，`
-      + `不同意就加「不授权：${pending.join("、")}」（这几条留给你人工验收），再用 --from e2e 接着跑`);
+    return finish(2, `整批验收标准里 ${pending.join("、")} 要你授权：同意就在 ${acceptance.criteriaFile} 里加一行「同意授权：${pending.join("、")}」，`
+      + `不同意就加「不授权：${pending.join("、")}」（这几条留给你人工验收），再用 --from 验收 接着跑`, { next: "grant" });
   }
-  const state = { requirement: e2e.requirement, criteria, grants };
+  const state = { requirement: acceptance.requirement, criteria, grants };
   const procsFile = resolve(plan.dir, "procs.json");
   const inboxSeq = new Map<string, number>([...plan.stages.keys()].map((stage) => [stage, readJson<InboxMessage>(inboxPath(plan.dir, stage))?.seq ?? 0]));
   let previousFailed: string[] = [];
-  for (let round = 1; round <= e2e.maxRounds; round += 1) {
+  for (let round = 1; round <= acceptance.maxRounds; round += 1) {
     options.signal?.throwIfAborted();
-    io.log(`e2e 第 ${round} 轮`);
+    activeRound = round;
+    io.log(`整批验收第 ${round} 轮`);
     const expected = readiness();
-    if (expected.invalid.length) return finish(2, `整合验收前段资格已失效：${expected.invalid.join("、")}`);
+    if (expected.invalid.length) return finish(2, `整批验收前段资格已失效：${expected.invalid.join("、")}`);
     const integration = new AbortController();
     const cancel = () => integration.abort(options.signal?.reason);
     options.signal?.addEventListener("abort", cancel, { once: true });
@@ -516,13 +738,16 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
     let stage: Awaited<ReturnType<typeof runAcceptanceStage>>;
     try {
       check();
+      acceptanceEpoch = plan.file ? queueBatchRecheck(plan.stages.values().next().value!.cwd, plan.file, run) : undefined;
+      const onlyStage = plan.stages.size === 1 ? [...plan.stages.keys()][0] : undefined;
       stage = await runAcceptanceStage({
-      workDir: e2e.workDir, devSessionId: `pipeline-${plan.name}`, round, deliveryNote: "", state, config: e2e.acceptance,
+      workDir: acceptance.workDir, devSessionId: `pipeline-${plan.name}`, round, deliveryNote: "", state, config: acceptance.acceptance,
+      env: methodEnv(await snapshotRef(acceptance.workDir, integration.signal), { batchFile: plan.file, stage: onlyStage }),
       reviewerModel: DEFAULT_MODEL, reviewerThinking: DEFAULT_THINKING, exec: createChildExec(procsFile),
       signal: integration.signal, checkLive: check, upstreamEpochs: JSON.parse(expected.token),
       cleanupExec: createChildExec(`${procsFile}.cleanup`), onCleanup: (_work, path) => { cleanupRecordPath = path; },
-      runDir: acceptanceRunDir(resolve(plan.dir, "e2e"), round), procsFile,
-      deadline: Date.now() + e2e.acceptance.timeoutMin * 60_000, now: Date.now, previousFailed,
+      runDir: acceptanceRunDir(resolve(plan.dir, "e2e"), round), procsFile, // 兼容旧材料目录，不迁移既有状态。
+      deadline: Date.now() + acceptance.acceptance.timeoutMin * 60_000, now: Date.now, previousFailed,
       saveState: () => {}, onProgress: io.log,
     });
       check();
@@ -530,91 +755,111 @@ export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromE2e
     } catch (error) {
       if (invalidated && !options.signal?.aborted) {
         if (cleanupRecordPath) { const cleanup = readJson<{ status: string }>(cleanupRecordPath); report.push(`- 外部资源释放：${cleanup?.status ?? "未确认"}；${cleanupRecordPath}`); }
-        return finish(2, "整合验收期间段完成资格变化，本轮结果已失效；开发会话和计数保留");
+        return finish(2, "整批验收期间段完成资格变化，本轮结果已失效；开发会话和计数保留");
       }
       throw error;
     } finally { clearInterval(watch); options.signal?.removeEventListener("abort", cancel); }
-    if (stage.kind === "paused") return finish(2, `e2e 暂停：${stage.reason}。${stage.hint}；处理好后用 --from e2e 接着跑`);
+    if (stage.kind === "paused") return finish(2, `整批验收暂停：${stage.reason}。${stage.hint}；处理好后用 --from 验收 接着跑`, { next: "resume", failureKind: stage.failureKind });
     const { record } = stage;
-    report.push(`- e2e 第 ${round} 轮：${record.verdict}（材料：${record.runDir}）`);
-    if (record.verdict === "通过") return finish(0, "e2e 全部通过，流水线完成");
-    if (record.verdict === "部分验证") return finish(0, `e2e 通过，但 ${record.reason}（材料：${record.runDir}）`);
+    acceptanceRecord = record;
+    report.push(`- 整批验收第 ${round} 轮：${record.verdict}（材料：${record.runDir}）`);
+    if (record.verdict === "通过") { acceptancePassed = true; return finish(0, "整批验收全部通过，流水线完成"); }
+    if (record.verdict === "部分验证") return finish(0, `整批验收通过，但 ${record.reason}（材料：${record.runDir}）`);
     if (record.verdict === "无法验收") {
-      return finish(2, `e2e 无法验收：${record.reason}。${blockerHint(record, e2e.workDir, e2e.acceptance)}；处理好后用 --from e2e 接着跑`);
+      return finish(2, `整批验收无法验收：${record.reason}。${blockerHint(record, acceptance.workDir, acceptance.acceptance)}；处理好后用 --from 验收 接着跑`, { next: "resume", failureKind: record.failureKind });
     }
     const failedIds = record.items.filter((item) => item.verdict === "不通过").map((item) => item.id);
-    if (round === e2e.maxRounds) return finish(1, `e2e 第 ${round} 轮仍有 ${failedIds.join("、")} 没通过，已到 ${e2e.maxRounds} 轮上限（材料：${record.runDir}）`);
-    const { byStage, unrouted } = routeFailures(record, e2e.owners);
+    if (round === acceptance.maxRounds) return finish(1, `整批验收第 ${round} 轮仍有 ${failedIds.join("、")} 没通过，已到 ${acceptance.maxRounds} 轮上限（材料：${record.runDir}）`);
+    const { byStage, unrouted } = routeFailures(record, acceptance.owners);
     if (unrouted.length > 0) {
-      return finish(2, `e2e 有条目没法确定归谁：${unrouted.map((item) => item.id).join("、")}（没标 [段名]，或是 G1/G2 系统级问题），材料：${record.runDir}`);
+      return finish(2, `整批验收有条目没法确定归谁：${unrouted.map((item) => item.id).join("、")}（没标 [段名]，或是 G1/G2 系统级问题），材料：${record.runDir}`);
     }
     for (const group of dispatchBatches([...byStage.keys()], (name) => repoKey(plan.stages.get(name)!.cwd))) {
       for (let offset = 0; offset < group.length; offset += plan.maxParallel ?? 2) {
       const batch = group.slice(offset, offset + (plan.maxParallel ?? 2));
+      const repairAbort = new AbortController();
+      const repairSignal = options.signal ? AbortSignal.any([options.signal, repairAbort.signal]) : repairAbort.signal;
       const waits = batch.map((name) => {
         const seq = (inboxSeq.get(name) ?? 0) + 1;
         inboxSeq.set(name, seq);
         const afterSeq = currentSeq(name);
         writeJsonAtomic(inboxPath(plan.dir, name), { seq, ...buildRepairMessage(name, round, byStage.get(name)!, record.runDir) });
         report.push(`  - 退回 ${name}：${byStage.get(name)!.map((item) => item.id).join("、")}`);
-        io.log(`e2e 第 ${round} 轮：退回 ${name}（${byStage.get(name)!.map((item) => item.id).join("、")}）`);
-        return waitStage(name, afterSeq, seq).then((status) => ({ name, status }));
+        io.log(`整批验收第 ${round} 轮：退回 ${name}（${byStage.get(name)!.map((item) => item.id).join("、")}）`);
+        return waitStage(name, afterSeq, seq, repairSignal).then((status) => ({ name, status }));
       });
-      for (const { name, status } of await Promise.all(waits)) {
+      let waited: Array<{ name: string; status: StageStatus }>;
+      try { waited = await Promise.all(waits); }
+      catch (error) {
+        repairAbort.abort();
+        if (error instanceof StageStartupFailure) return finish(1, `段 ${error.stage} 启动失败：${error.message}`);
+        throw error;
+      }
+      for (const { name, status } of waited) {
         if (status.event === "no-change") {
-          return finish(2, `${name} 收到 e2e 返修后没改代码，回复：${(status.reply ?? "").trim().slice(0, 500) || "（无）"}。由你决定归谁，改好后用 --from e2e 接着跑`);
+          return finish(2, `${name} 收到整批验收返修后没改代码，回复：${(status.reply ?? "").trim().slice(0, 500) || "（无）"}。由你决定归谁，改好后用 --from 验收 接着跑`);
         }
+        const current = plan.stages.get(name)!, branch = current.branch ?? plan.branch;
+        if (branch) commitAll(current.cwd, branch, plan.name, name);
+        stageDone(name, status);
       }
     }
     }
     previousFailed = failedIds;
   }
-  return finish(1, "e2e 没有跑完");
+  return finish(1, "整批验收没有跑完");
   } catch (error) {
-    if (!options.signal?.aborted) throw error;
+    if (!options.signal?.aborted) return finish(3, `流水线内部错误：${String(error)}`);
     if (cleanupRecordPath) {
       const cleanup = readJson<{ status: string; reason?: string }>(cleanupRecordPath);
       report.push(`- 外部资源释放：${cleanup?.status ?? "未确认"}；记录：${cleanupRecordPath}；${cleanup?.reason ?? ""}`);
     }
-    return finish(2, "流水线已取消并完成有界收尾；开发会话保留，处理后可恢复");
+    return finish(2, "流水线已取消并完成有界收尾；开发会话保留，处理后可恢复", { next: "resume" });
   }
 }
 
 /** macOS：开一个终端窗口跑脚本。 */
-function launchTerminal(_stage: StagePlan, script: string): void {
-  const escaped = script.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  spawnSync("osascript", ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", "tell application \"Terminal\" to activate"]);
+function launchTerminal(plan: Plan) {
+  return (stage: StagePlan, script: string): void => {
+    const command = [process.execPath, join(EXT_DIR, "launch.ts"), JSON.stringify(pipelineInfo(plan)), stage.name, stage.cwd, script].map(shellQuote).join(" ");
+    const escaped = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    spawnSync("osascript", ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", "tell application \"Terminal\" to activate"]);
+  };
 }
 
-function launchBackground(dir: string) {
+function launchBackground(plan: Plan) {
   return (stage: StagePlan, script: string): void => {
-    const out = openSync(resolve(dir, `${fileSafe(stage.name)}.log`), "a");
-    try { spawn("/bin/sh", ["-c", script], { detached: true, stdio: ["ignore", out, out] }).unref(); }
+    const out = openSync(resolve(plan.dir, `${fileSafe(stage.name)}.log`), "a");
+    try { startBatchProcess(pipelineInfo(plan), stage.name, "/bin/sh", ["-c", script], { cwd: stage.cwd, stdio: ["ignore", out, out] }).unref(); }
     finally { closeSync(out); }
   };
 }
 
 function notifySystem(message: string): void {
   console.log(`[流水线] ${message}`);
-  if (process.platform !== "darwin") return;
-  const escaped = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  spawnSync("osascript", ["-e", `display notification "${escaped}" with title "自动评审流水线"`]);
+  systemNotify("自动评审流水线", message);
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const planPath = args.find((arg, index) => !arg.startsWith("--") && !["--launcher", "--from"].includes(args[index - 1] ?? ""));
+  const planPath = args.find((arg, index) => !arg.startsWith("--") && !["--launcher", "--from", "--project-root", "--default-workspace"].includes(args[index - 1] ?? ""));
   const flag = (name: string) => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; };
   if (!planPath) {
-    console.log("用法：node pipeline.ts <计划.json> [--launcher terminal|background] [--from e2e]");
+    console.log("用法：node pipeline.ts <计划.json> [--launcher terminal|background] [--from 验收] [--project-root <目录>] [--default-workspace <名字>]");
     process.exitCode = 3;
     return;
   }
   let plan: Plan;
   try {
-    plan = parsePlan(JSON.parse(readFileSync(planPath, "utf8")), dirname(resolve(planPath)));
+    plan = parsePlan(JSON.parse(readFileSync(planPath, "utf8")), dirname(resolve(planPath)), process.env, {
+      projectRoot: flag("--project-root"), defaultWorkspace: flag("--default-workspace"), batchFile: resolve(planPath) });
   } catch (error) {
     console.log(`计划文件有错：${(error as Error).message}`);
+    try {
+      const info = batchInfo(resolve(planPath), flag("--project-root") ?? dirname(resolve(planPath))), reason = eventReason(`准备阻塞：计划文件有错：${(error as Error).message}`);
+      writePhase(info, null, "failed", { status: "failed", ...reason, detail: { exitCode: 3 } });
+      pushEvent(info, null, "failed", reason, {}, { exitCode: 3 });
+    } catch { /* 无法定位批次时不伪造历史或阻塞退出 */ }
     process.exitCode = 3;
     return;
   }
@@ -626,12 +871,12 @@ async function main(): Promise<void> {
   for (const signal of signals) process.on(signal, cancel);
   try {
   process.exitCode = await runPipeline(plan, {
-    launch: launcher === "terminal" ? launchTerminal : launchBackground(plan.dir),
+    launch: launcher === "terminal" ? launchTerminal(plan) : launchBackground(plan),
     notify: notifySystem,
     log: (message) => console.log(`[流水线] ${message}`),
     pollMs: pollMs(process.env, 2000),
     silenceMs: SILENCE_MS,
-  }, { fromE2e: flag("--from") === "e2e", signal: controller.signal });
+  }, { fromAcceptance: ["验收", "e2e"].includes(flag("--from") ?? ""), signal: controller.signal }); // 兼容旧命令行值。
   } finally { for (const signal of signals) process.off(signal, cancel); }
   console.log(`报告：${resolve(plan.dir, "report.md")}`);
 }

@@ -1,0 +1,24 @@
+{
+  "name": "示例批次-20261012",
+  "branch": "feat/示例批次-20261012",
+  "pi": {
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "max"
+  },
+  "stages": {
+    "实现": {
+      "prompt": "../../prompt/提示词-示例.md",
+      "scope": {
+        "allow": [
+          "线上/",
+          "docs/batches/示例批次-20261012/结果.md"
+        ]
+      }
+    }
+  },
+  "steps": [
+    [
+      "实现"
+    ]
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "开发测试闭环-批1至3",
+  "branch": "fix/open-batch-two-mustfix",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
+  "stages": {
+    "修复开工": {
+      "prompt": "../../prompt/提示词-修复开工两处必修.md",
+      "cwd": "/Users/Admin/Desktop/loop-batches/修复开工两处必修"
+    },
+    "验收能跑完": {
+      "prompt": "../../prompt/提示词-验收能跑完与归因.md",
+      "cwd": "/Users/Admin/Desktop/loop-batches/修复开工两处必修"
+    },
+    "运行材料释放": {
+      "prompt": "../../prompt/提示词-运行材料释放.md",
+      "cwd": "/Users/Admin/Desktop/loop-batches/修复开工两处必修"
+    }
+  },
+  "steps": [["修复开工"], ["验收能跑完"], ["运行材料释放"]]
+}

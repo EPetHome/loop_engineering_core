@@ -26,6 +26,10 @@ const failIds = (process.env.FAKE_ACC_FAIL ?? "").split(",").map((id) => id.trim
 const failOnceIds = (process.env.FAKE_ACC_FAIL_ONCE ?? "").split(",").map((id) => id.trim()).filter(Boolean);
 const stateDir = process.env.FAKE_STATE_DIR;
 if (process.env.FAKE_ACC_TOUCH) appendFileSync(process.env.FAKE_ACC_TOUCH, `touch ${Date.now()}\n`);
+if (process.env.FAKE_ACC_ENV_LOG) {
+  appendFileSync(process.env.FAKE_ACC_ENV_LOG,
+    `${process.env.AUTOREVIEW_BASE_REV ?? ""}|${process.env.AUTOREVIEW_BATCH_FILE ?? ""}|${process.env.AUTOREVIEW_STAGE ?? ""}\n`);
+}
 
 let count = 1;
 if (stateDir) {
@@ -58,7 +62,9 @@ if (mode === "kill" || mode === "kill-restart") {
 const port = Number(process.argv[1]);
 const listen = () => { const server = createServer((q, r) => r.end("orphan")); server.once("error", () => setTimeout(listen, 20)); server.listen(port, "127.0.0.1"); };
 listen(); setTimeout(() => process.exit(0), 60000);`;
-    spawn(process.execPath, ["-e", orphan, port], { detached: true, stdio: "ignore" }).unref();
+    const restarted = spawn(process.execPath, ["-e", orphan, port], { detached: true, stdio: "ignore" });
+    writeFileSync(join(runDir, "restarted.pid"), String(restarted.pid));
+    restarted.unref();
   }
   process.kill(Number(readFileSync(join(runDir, "server.pid"), "utf8")), "SIGTERM");
   // 程序发现系统退出会立刻停掉验收方；没被停掉的话，下面留的证据都在关掉之后。

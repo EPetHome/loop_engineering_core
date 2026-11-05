@@ -5,6 +5,7 @@
  * 评审输入拼接、总结渲染、注入给开发方的约定。所有函数可被 Node 直接单测。
  */
 import { createHash } from "node:crypto";
+import { relaySourceLines } from "./pa-records.ts";
 import {
   ACCEPTANCE_CONVENTION, authorizationLine, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria, type Grants,
 } from "./acceptance-core.ts";
@@ -30,8 +31,8 @@ export function gateConvention(command: string): string {
 }
 
 /** 注入给开发方的约定全文：开发约定，配了验收再追加验收约定，配了门禁再追加门禁约定。 */
-export function conventionText(options: { acceptance?: boolean; gate?: string } = {}): string {
-  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.gate ? gateConvention(options.gate) : ""]
+export function conventionText(options: { acceptance?: boolean; gate?: string; experience?: string } = {}): string {
+  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.gate ? gateConvention(options.gate) : "", options.experience ?? ""]
     .filter(Boolean).join("\n");
 }
 
@@ -64,6 +65,8 @@ export type RoundRecord = ParsedReview & {
   round: number;
   startedAt: string;
   durationMs: number;
+  /** 本轮实际输入与完整工作区字节的本机保留类快照。 */
+  snapshot?: string;
   /** 本轮评审失败时的错误摘要。 */
   failed?: string;
   /** 本轮的验收结果（配了 acceptance 时）。 */
@@ -81,6 +84,7 @@ export type RoundRecord = ParsedReview & {
 export interface GateRecord {
   command: string;
   result: "通过" | "不通过" | "超时" | "无法执行" | "环境阻塞" | "检查方法故障" | "原因待诊断";
+  failureKind?: import("./failure.ts").FailureKind;
   durationMs: number;
   exitCode?: number;
   /** 输出最后几行（stdout 与 stderr 按出现顺序合在一起）。 */
@@ -127,6 +131,8 @@ export interface SummaryInput {
   changedFiles?: string[];
   gitStatusShort: string;
   notes?: string;
+  /** 经 PA 转达的输入与授权来源。 */
+  paRelays?: import("./pa-records.ts").RelaySource[];
   /** 冻结的验收标准（配了 acceptance 时）。 */
   criteria?: Criteria;
   /** 你对 [授权] 条目的答复。 */
@@ -145,6 +151,8 @@ export interface SummaryInput {
   sourceChangeNote?: string;
   /** 本次完成已登记的交付总表；只在状态为完成时写进总结开头。 */
   ledger?: { path: string; pending: { id: string; kind: "部分验证" | "人工" }[]; failed?: boolean };
+  /** 完成后的运行材料瘦身结果；删除失败仅提示。 */
+  materialCleanup?: string;
   /** Pi 开发会话启动时确认未注册 Ponytail；只在完成总结开头提醒，不改变结果。 */
   ponytailMissing?: boolean;
 }
@@ -152,6 +160,7 @@ export interface SummaryInput {
 export interface ReviewInputOptions {
   currentCriteria?: string;
   projectContext?: string;
+  experienceChecklist?: string;
   round: number;
   /** 没有成功检查点时，即使调用轮次大于 1 也重送首轮材料。 */
   firstReview?: boolean;
@@ -303,6 +312,7 @@ export function renderGateLines(record: GateRecord): string[] {
 export function buildReviewInput(options: ReviewInputOptions): string {
   const parts: string[] = [];
   if (options.projectContext) parts.push("## 项目来源与代码定位", options.projectContext);
+  if (options.experienceChecklist) parts.push("## 对照清单", options.experienceChecklist);
   if (options.currentCriteria) parts.push("## 当前验收标准与授权（覆盖历史消息中的旧版本）", options.currentCriteria);
   if (options.firstReview ?? options.round <= 1) {
     parts.push("## 需求原文", options.requirement?.trim() || "本会话没有记录需求原文（手动 /review），请按改动本身和项目文档评审");
@@ -329,10 +339,10 @@ export function buildReviewInput(options: ReviewInputOptions): string {
 }
 
 /**
- * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、acc-strong 换强模型重验、crit 起草验收标准。
+ * 由开发会话 id 推出固定的子会话 id：rev 评审、acc 验收方、acc-strong 重验、acc-report 只读补报告、crit 起草标准。
  * 格式不合法时退化为 sha256 派生的 UUID 形式；评审沿用旧算法，已有评审会话 id 不变。
  */
-export function deriveSessionId(kind: "rev" | "acc" | "acc-strong" | "crit", devSessionId: string): string {
+export function deriveSessionId(kind: "rev" | "acc" | "acc-strong" | "acc-report" | "crit", devSessionId: string): string {
   const candidate = `autoreview-${kind}-${devSessionId}`;
   if (/^[A-Za-z0-9]$/.test(candidate) || /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/.test(candidate)) {
     return candidate;
@@ -361,19 +371,21 @@ export function renderSummary(input: SummaryInput): string {
     else {
       const pending = input.ledger.pending.length > 0
         ? `（${input.ledger.pending.map((item) => `${item.id} ${item.kind}`).join("、")}）` : "";
-      lines.push(`- 已登记到交付总表：${input.ledger.path}；待回写原单${pending}`);
+      lines.push(`- 已登记到交付总表：${input.ledger.path}${pending}`);
     }
   }
   lines.push(`- 项目：${input.cwd}`);
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
+  if (input.status === "完成" && input.materialCleanup) lines.push(`- ${input.materialCleanup}`);
   if (input.acceptRun) {
     lines.push(`- 验收命令：${acceptRunLabel(input.acceptRun)}`);
     lines.push(`- 验收命令用途：${input.acceptRun.mode === "required" ? "本段必需验收" : "附加检查"}`);
   }
   if (input.newCommits) lines.push(`- 开发方新增提交：${input.newCommits} 个（基线之后，只记录不评判）`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
+  if (input.paRelays?.length) lines.push("## PA 转达来源", ...relaySourceLines(input.paRelays));
   const sourceChanges = input.sourceChanges ?? [];
   if (sourceChanges.length > 0 || input.sourceChangeNote) {
     lines.push("## 开发期间来源变化");

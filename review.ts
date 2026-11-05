@@ -7,7 +7,7 @@
  * exec、状态读写、总结、进度等副作用全部通过参数注入；调用方负责把 outcome 变成
  * pi 的返修消息或宿主的 block JSON。
  */
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { acceptanceRunDir, runAcceptanceStage, type AcceptanceState } from "./acceptance.ts";
 import {
   authorizationLine, buildAcceptanceRepairMessage, formatCriteria, formatFailedItems, renderAcceptanceForReview, type AcceptanceRecord,
@@ -16,8 +16,15 @@ import {
   buildGateRepairMessage, buildRepairMessage, buildReviewInput, decideNext, deriveReviewerSessionId, gateOutputTail,
   parseReview, type GateRecord, type ParsedReview, type RoundRecord,
 } from "./core.ts";
-import { EXT_DIR, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
+import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type GateConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
+import { methodEnv as buildMethodEnv } from "./method-env.ts";
+import { saveReviewSnapshot } from "./snapshots.ts";
+import { queueReviewedResult } from "./merge-queue.ts";
+import type { QueueAcceptance } from "./pipeline-core.ts";
+import { experienceInjection, markExperienceRecurrence } from "./experience.ts";
+import { changedSince, outOfScope, stageScopeFromEnv, type StageScope } from "./scope.ts";
+import { recordGateTree } from "./methods.ts";
 import { blockerHint, manualHint } from "./onboarding.ts";
 import { classifyFailure, failureLabel, type FailureKind } from "./failure.ts";
 import { runPreparation, type PreparationConfig, type PreparationState } from "./preparation.ts";
@@ -26,20 +33,30 @@ import { isRegisteredSource, loadContext, recordSourceChange, refreshContext, ty
 
 export { PI_BIN, PERMISSION_EXT };
 export const REVIEW_PROMPT_PATH = join(EXT_DIR, "review-prompt.md");
-export const DEFAULT_MODEL = "openai-codex/gpt-6-astra";
-export const DEFAULT_THINKING = "xhigh";
-/** 门禁、验收打回和评审打回共用。 */
-export const DEFAULT_MAX_REPAIRS = 4;
-export const DEFAULT_TIMEOUT_MIN = 60;
+export { DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_MAX_REPAIRS, DEFAULT_TIMEOUT_MIN } from "./config.ts";
 /** 取消正在进行的评审时使用的固定原因。 */
 export const INTERRUPTED = "评审被中断（会话关闭或重载）";
 
 export interface ReviewState extends AcceptanceState, PreparationState {
+  /** 独立经验起草的输入指纹与软失败；不参与完成资格。 */
+  experienceDraft?: { signature: string; error?: string };
   inputsFingerprint?: string;
+  /** undefined：正常检查；null：兜底命中但历史结论未知；对象：沿用已测资格（空数组才是明确无欠项）。 */
+  queueReviewedAcceptance?: QueueAcceptance | null;
   enabled: boolean;
+  userInputVia?: "user" | "pa";
+  userInputCount?: number;
+  paRelays?: import("./pa-records.ts").RelaySource[];
   baseline?: string;
   baselineUntracked?: string[];
+  /** 开工时未跟踪文件的内容哈希和模式；只豁免确实没变的文件。 */
+  baselineUntrackedDetails?: Snapshot["untracked"];
   baselineFingerprint?: string;
+  /** 在调用评审前落盘；中断或失败轮次的材料也保留，不依赖源仓库 Git 对象。 */
+  reviewSnapshots?: { round: number; path: string }[];
+  /** 越界检查起点：整合返修收到时重置到当时快照；普通返修不重置。 */
+  scopeBaseline?: string;
+  scopeBaselineUntrackedDetails?: Snapshot["untracked"];
   /** 下列字段只在成功评审后更新，不受失败调用影响。 */
   lastSnapshot?: string;
   lastUntracked?: string[];
@@ -52,11 +69,12 @@ export interface ReviewState extends AcceptanceState, PreparationState {
   rounds: RoundRecord[];
   repairs: number;
   phase: "idle" | "reviewing" | "accepting" | "done" | "paused";
+  materialCleanup?: string;
   pauseReason?: string;
+  /** 原执行器的分类随暂停持久化；事件与查询不重新从日志推断。 */
+  pauseFailureKind?: FailureKind;
   /** 暂停时给你看的下一步（写进总结「需要你做的事」），恢复时清掉。 */
   pauseHint?: string;
-  /** 本会话已经提醒过写法段缺失或过期（每个会话只提醒一次）。 */
-  conventionNoticed?: boolean;
   unresolvedMustFix?: string;
   /** 最近一次验收没通过的条目（暂停时写进总结）。 */
   unresolvedAcceptance?: string;
@@ -83,7 +101,10 @@ export interface ReviewConfig {
 }
 
 export interface ReviewOutcome {
-  kind: "done" | "repair" | "paused";
+  kind: "done" | "repair" | "paused" | "report";
+  /** report：只返回静态评审，不进入开发交付与返修。 */
+  review?: ParsedReview;
+  record?: RoundRecord;
   /** kind=repair：发回开发方的返修消息。 */
   message?: string;
   /** kind=paused：暂停原因。 */
@@ -98,6 +119,7 @@ export interface ReviewOutcome {
 }
 
 export interface ReviewDeps {
+  sink?: "repair" | "report";
   getConfig?: () => ReviewConfig;
   cleanupExec?: Exec;
   onCleanup?: (work: Promise<void>, recordPath: string) => void;
@@ -119,6 +141,8 @@ export interface ReviewDeps {
   onProgress?: (text: string) => void;
   /** 写评审输入、门禁日志等材料文件，返回绝对路径。 */
   writeInput: (name: string, text: string) => string;
+  /** 本机保留类快照根；默认在输入文件旁的 review-snapshots/。 */
+  snapshotDir?: string;
   /** 成功评审后的总结（完成/进行中）；抛错由调用方处理。 */
   writeSummary?: (status: "进行中" | "完成") => Promise<void>;
   saveState: () => Promise<void> | void;
@@ -131,6 +155,10 @@ export interface ReviewDeps {
   acceptanceDir?: string;
   /** 进程登记文件：被测系统登记进去。 */
   procsFile?: string;
+  /** 启动入口交给会话的环境变量；缺省读 process.env。 */
+  env?: NodeJS.ProcessEnv;
+  /** 本段 scope；缺省从 AUTOREVIEW_BATCH_FILE / AUTOREVIEW_STAGE 读。 */
+  scope?: StageScope;
 }
 
 export function newReviewState(): ReviewState {
@@ -213,6 +241,53 @@ export async function sourcesOnlyWorkspaceChange(
 }
 
 /**
+ * 越界检查：门禁之前对比开工依据以来的改动文件（含未跟踪文件）与批次段的 scope。
+ * 有越界就按产品失败走门禁返修路径，不执行门禁、不评审。
+ */
+async function scopeStep(
+  deps: ReviewDeps, before: Snapshot, clock: RoundClock,
+): Promise<{ outcome: ReviewOutcome } | undefined> {
+  const { state } = deps;
+  const scope = deps.scope ?? stageScopeFromEnv(deps.env ?? process.env);
+  if (!scope) return undefined;
+  // 整合返修只检查收到返修之后的改动；普通返修仍用原开工依据。
+  const base = state.scopeBaseline ?? state.baseline;
+  if (!base) return undefined;
+  const projectRoot = findProjectRoot(deps.cwd) ?? deps.cwd;
+  const prefix = relative(projectRoot, deps.cwd).replace(/\\/g, "/");
+  const toProject = (path: string): string => prefix ? `${prefix}/${path}`.replace(/\/{2,}/g, "/") : path;
+  const details = state.scopeBaseline
+    ? state.scopeBaselineUntrackedDetails
+    : state.baselineUntrackedDetails;
+  const baselineUntracked = (details ?? []).map((item) => ({ ...item, path: toProject(item.path) }));
+  const files = await changedSince(deps.exec, projectRoot, base, { signal: deps.signal, baselineUntracked });
+  const outside = outOfScope(files, scope);
+  if (outside.length === 0) return undefined;
+  const record: GateRecord = {
+    command: "越界检查（批次 scope）",
+    result: "不通过",
+    durationMs: clock.now() - clock.startedTs,
+    exitCode: 1,
+    outputTail: outside.join("\n"),
+    detail: `这些文件不在 allow 里或落在 deny 里：${outside.join("、")}`,
+  };
+  try {
+    record.logPath = deps.writeInput(`scope-${deps.devSessionId}-r${deps.round}.log`,
+      [`$ 越界检查`, `检查起点：${base}`, "越界文件：", ...outside.map((path) => `- ${path}`), ""].join("\n"));
+  } catch { /* 日志写失败不改变越界结论 */ }
+  pushUnreviewedRound(deps, clock, "未评审（越界改动）", { gate: record });
+  state.lastCheckedFingerprint = before.fingerprint;
+  if (decideNext(1, state.repairs, deps.config.maxRepairs) === "pause") {
+    return { outcome: { kind: "paused", reason: "达到返修上限" } };
+  }
+  state.repairs += 1;
+  state.awaitingRepair = true;
+  await deps.writeSummary?.("进行中");
+  deps.checkLive?.();
+  return { outcome: { kind: "repair", message: buildGateRepairMessage(state.repairs, record) } };
+}
+
+/**
  * 门禁这一步：在开发目录用 /bin/sh -c 执行 gate.cmd，退出码 0 才往下走。
  * 命令跑完且退出码非 0 → 打回开发方（这一轮不验收、不评审）；超时、命令找不到、起不来 → 暂停；
  * 门禁改了项目里的文件 → 暂停。通过返回记录，接着验收或评审。
@@ -232,7 +307,8 @@ async function gateStep(
   try {
     resource = createRunResource(`gate:${deps.devSessionId}:r${deps.round}`, undefined, deps.procsFile);
     // stderr 并进 stdout：返修消息里的输出和在终端里看到的顺序一致。
-    res = await deps.exec("/bin/sh", ["-c", managedShell(`exec 2>&1\n${gate.cmd}`, resource)], { cwd: deps.cwd, timeout, signal: deps.signal, role: "门禁" });
+    res = await deps.exec("/bin/sh", ["-c", managedShell(`exec 2>&1\n${gate.cmd}`, resource)], {
+      cwd: deps.cwd, timeout, signal: deps.signal, role: "门禁", env: buildMethodEnv(state.baseline, {}, deps.env ?? process.env) });
   } catch (error) { failure = errorText(error); }
   finally { if (resource) releaseRunResource(resource); }
   live();
@@ -240,20 +316,21 @@ async function gateStep(
   const record: GateRecord = { command: gate.cmd, result: "通过", durationMs: clock.now() - startedTs };
   if (resource) record.cleanup = resourceLine(resource);
   if (!res) {
-    record.result = "无法执行";
+    record.result = "无法执行"; record.failureKind = "environment";
     record.detail = tail(failure, 300);
   } else {
     record.exitCode = res.code;
     record.outputTail = gateOutputTail(output);
     if (res.killed) {
-      record.result = "超时";
+      record.result = "超时"; record.failureKind = "environment";
       record.detail = `超过 ${Math.round(timeout / 60_000)} 分钟没跑完，被终止`;
     } else if (SHELL_CANNOT_RUN.has(res.code)) {
-      record.result = "无法执行";
+      record.result = "无法执行"; record.failureKind = "environment";
       record.detail = `退出码 ${res.code}：命令找不到或不能执行`;
     } else if (res.code !== 0) {
       const failure = classifyFailure(res.code, output);
       record.result = failure.kind === "product" ? "不通过" : failureLabel(failure.kind) as GateRecord["result"];
+      record.failureKind = failure.kind;
       record.detail = failure.reason;
     }
     record.logPath = deps.writeInput(
@@ -262,7 +339,7 @@ async function gateStep(
     );
   }
   if (resource?.status === "cleanup-failed") {
-    record.result = "环境阻塞";
+    record.result = "环境阻塞"; record.failureKind = "environment";
     record.detail = `临时资源释放未确认：${resource.detail}`;
   }
   const middle = await git.snapshot();
@@ -279,13 +356,17 @@ async function gateStep(
       },
     };
   }
-  if (record.result === "通过") return { record };
+  if (record.result === "通过") {
+    // 记住这个候选的树；开工识别基线已有失败时不再重跑。
+    recordGateTree(deps.cwd, middle.tree);
+    return { record };
+  }
   if (record.result !== "不通过") {
     pushUnreviewedRound(deps, clock, `未评审（门禁${record.result}）`, { gate: record });
     return {
       outcome: {
         kind: "paused", reason: `门禁${record.result}`,
-        failureKind: record.result === "检查方法故障" ? "method" : record.result === "原因待诊断" ? "unknown" : "environment",
+        failureKind: record.failureKind,
         notes: [record.detail, record.outputTail && `输出最后几行：${tail(record.outputTail, 300)}`].filter(Boolean).join("；"),
         hint: `检查 .autoreview.json 的 gate（命令：${gate.cmd}，时限 ${gate.timeoutMin} 分钟）能在项目目录跑完，再发消息继续`,
       },
@@ -321,6 +402,7 @@ async function acceptanceStep(
     state, config: acceptance, reviewerModel: config.reviewerModel, reviewerThinking: config.reviewerThinking,
     cleanupExec: deps.cleanupExec, onCleanup: deps.onCleanup,
     exec: deps.exec, runDir: acceptanceRunDir(deps.acceptanceDir, deps.round), procsFile: deps.procsFile,
+    env: buildMethodEnv(state.baseline, {}, deps.env ?? process.env),
     deadline: Math.min(clock.now() + acceptance.timeoutMin * 60_000, clock.deadline), now: clock.now,
     previousFailed: previous ? previous.items.filter((item) => item.verdict !== "通过" && item.verdict !== "需人工").map((item) => item.id) : [],
     signal: deps.signal, checkLive: deps.checkLive, onProgress: deps.onProgress, saveState: deps.saveState,
@@ -395,20 +477,30 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   // 一轮总预算：门禁、验收（如果有）、评审首次调用和 1 次重试共用；后面的只能用剩余时间。
   const deadline = startedTs + timeoutMs;
 
-  const before = await git.snapshot();
+  let before = await git.snapshot();
   live();
   if (state.baseline === undefined) {
     state.baseline = before.head;
     state.baselineUntracked = [];
+    state.baselineUntrackedDetails = [];
     state.baselineFingerprint = before.fingerprint;
     await deps.saveState();
   }
   const clock: RoundClock = { startedAt, startedTs, deadline, now };
+  const scope = deps.sink === "report" ? undefined : await scopeStep(deps, before, clock);
+  if (scope) return scope.outcome;
   let gate: GateRecord | undefined;
   if (config.gate) {
     const step = await gateStep(deps, before, git, clock);
     if ("outcome" in step) return step.outcome;
     gate = step.record;
+    // 门禁允许登记来源变化；评审输入与可复原快照须对应门禁后实际看到的版本。
+    const current = await git.snapshot();
+    live();
+    if (current.fingerprint !== before.fingerprint && !await sourcesOnlyWorkspaceChange(git, before, current, deps.sourceCover)) {
+      return { kind: "paused", reason: "门禁期间工作区变了" };
+    }
+    before = current;
   }
   const changedBeforeReview = deps.checkInputs?.();
   if (changedBeforeReview) return changedBeforeReview;
@@ -420,6 +512,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   live();
   const inputText = buildReviewInput({
     projectContext: deps.projectContext,
+    experienceChecklist: experienceInjection(cwd, true),
     currentCriteria: state.criteria ? `第 ${state.criteria.version} 版，来源：${state.criteria.source}\n${formatCriteria(state.criteria.items)}\n授权：${authorizationLine(state.criteria, state.grants) ?? "无授权条目"}` : undefined,
     round: deps.round, firstReview, requirement: state.requirement,
     deliveryNote: deps.deliveryNote, previousMustFix: state.unresolvedMustFix,
@@ -427,6 +520,11 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     acceptance: previousAcceptance ? `以下为上一轮记录，不能当作当前候选已验收：\n${renderAcceptanceForReview(previousAcceptance)}` : undefined, gate: gate?.command,
   });
   const inputPath = deps.writeInput(`review-input-${deps.devSessionId}-r${deps.round}.md`, inputText);
+  const snapshot = await saveReviewSnapshot({ exec: deps.exec, cwd, session: deps.devSessionId, round: deps.round,
+    baseline: baseRef, candidate: before, input: inputText, inputPath, root: deps.snapshotDir, signal });
+  live();
+  state.reviewSnapshots ??= [];
+  state.reviewSnapshots.push({ round: deps.round, path: snapshot });
   const reviewerSessionId = state.reviewerSessionId ?? deriveReviewerSessionId(deps.devSessionId);
   state.reviewerSessionId = reviewerSessionId;
   await deps.saveState();
@@ -475,7 +573,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     round: deps.round, startedAt, durationMs: now() - startedTs,
     conclusion: parsed?.conclusion ?? "", mustFixRaw: parsed?.mustFixRaw ?? "",
     mustFix: parsed?.mustFix ?? [], minor: parsed?.minor ?? [], questions: parsed?.questions ?? [],
-    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, gate,
+    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, gate, snapshot,
   };
   state.rounds.push(record);
   const after = await git.snapshot();
@@ -494,6 +592,12 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
   const changedBeforeAcceptance = deps.checkInputs?.();
   if (changedBeforeAcceptance) return changedBeforeAcceptance;
+  if (deps.sink === "report") return { kind: "report", review: parsed, record };
+  const experienceRoot = findProjectRoot(cwd);
+  if (experienceRoot && parsed.mustFix.length) {
+    parsed.mustFixRaw = markExperienceRecurrence(experienceRoot, deps.devSessionId, parsed.mustFixRaw);
+    record.mustFixRaw = parsed.mustFixRaw;
+  }
   state.lastSnapshot = before.ref;
   state.lastUntracked = before.untracked.map(({ path }) => path);
   state.lastSnapshotDetails = before;
@@ -524,6 +628,10 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
 /** 准备和自动恢复有自己的有限预算；不进入用户接管路径，不清零业务计数。 */
 export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
+  if (deps.sink === "report") {
+    // 复用同一评审调用/解析/预算；不运行项目方法、不采用开发队列资格。
+    return runOneReviewRound({ ...deps, config: { ...deps.config, maxRepairs: 0, gate: undefined, acceptance: undefined, preparation: undefined } });
+  }
   // 绑定实际使用的输入；父目录配置不一定在当前 Git 工作区里。
   const configVersion = JSON.stringify(deps.config);
   const requirement = deps.state.requirement, criteria = JSON.stringify(deps.state.criteria), grants = JSON.stringify(deps.state.grants);
@@ -537,7 +645,7 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   deps = { ...deps, checkInputs: executionInputs };
   deps.checkLive?.();
   const initialChange = executionInputs(); if (initialChange) return initialChange;
-  const contextConfig = loadContext(deps.cwd);
+  const contextConfig = loadContext(deps.cwd, deps.config);
   if (contextConfig) {
     const context = refreshContext(contextConfig, `${deps.state.requirement ?? ""}\n${deps.deliveryNote}`);
     if (context.snapshot.missing.length) return { kind: "paused", reason: `上游来源缺失：${context.snapshot.missing.join("、")}` };
@@ -564,12 +672,45 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     deps = { ...deps, projectContext: context.text, checkInputs, sourceCover };
     await deps.saveState();
   }
+  deps.state.queueReviewedAcceptance = undefined;
+  const queueEnv = deps.env ?? process.env;
+  if (queueEnv.AUTOREVIEW_BATCH_FILE && queueEnv.AUTOREVIEW_STAGE) {
+    const reviewed = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
+    deps.checkLive?.();
+    const queued = queueReviewedResult(deps.cwd, reviewed, queueEnv);
+    if (queued) {
+      const changed = deps.checkInputs?.(); if (changed) return changed;
+      const reason = `不再评审：工作区提交和树与本批合入队列测过的合并结果完全相同（${queued.entry.result}），没有新的候选改动`;
+      Object.assign(deps.state, { lastSnapshot: reviewed.ref, lastSnapshotDetails: reviewed, lastUntracked: [],
+        lastFingerprint: reviewed.fingerprint, lastCheckedFingerprint: reviewed.fingerprint, unresolvedMustFix: undefined,
+        unresolvedAcceptance: undefined, queueReviewedAcceptance: queued.acceptance });
+      deps.state.rounds.push({ round: deps.round, startedAt: nowStamp(), durationMs: 0, conclusion: reason,
+        mustFixRaw: "", mustFix: [], minor: [], questions: [], recheck: [], note: queued.acceptance === null ? `${reason}；历史队列缺少验收结论，免重复评审未补做验收` : reason });
+      await deps.saveState();
+      await deps.writeSummary?.("完成");
+      return { kind: "done", notes: reason, hint: queued.acceptance === null ? "历史队列缺少验收结论；免重复评审未补做验收，不能据此自动合入，请重新检查必需验收。"
+        : queued.acceptance.manual.length ? `待人工验收：${queued.acceptance.manual.map((item) => `${item.id}：${item.text}`).join("；")}` : undefined };
+    }
+  }
   const preparation = deps.config.preparation;
+  // 开工依据必须早于准备：准备、门禁和验收都读同一个 state.baseline，不能让准备改写它。
+  // 没有会话启动时记录的快照（手动 /review）时，以 HEAD 为基线，让启动前的未提交改动进入评审。
+  if (deps.state.baseline === undefined) {
+    const snap = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
+    const inherited = process.env.AUTOREVIEW_PIPELINE_LAUNCH === "1" ? process.env.AUTOREVIEW_BASE_REV?.trim() : undefined;
+    deps.state.baseline = inherited || snap.head;
+    deps.state.baselineUntracked = inherited ? snap.untracked.map(({ path }) => path) : [];
+    deps.state.baselineUntrackedDetails = inherited ? snap.untracked.map((item) => ({ ...item })) : [];
+    deps.state.baselineFingerprint = snap.fingerprint;
+    await deps.saveState();
+  }
+  const preparationBase = deps.state.baseline;
   const prepare = async (outcome?: ReviewOutcome): Promise<ReviewOutcome | undefined> => {
     if (!preparation) return outcome;
     const dir = dirname(deps.writeInput(`preparation-${deps.devSessionId}.md`, "准备记录见同名目录；业务返修计数保持原值。\n"));
     const result = await runPreparation({
       config: preparation, cwd: deps.cwd, state: deps.state, exec: deps.exec, procsFile: deps.procsFile,
+      env: buildMethodEnv(preparationBase, {}, deps.env ?? process.env),
       runDir: join(dir, `preparation-${deps.devSessionId}`), signal: deps.signal,
       saveState: deps.saveState, onProgress: deps.onProgress,
       failure: outcome?.failureKind, evidence: outcome?.notes ?? outcome?.reason,

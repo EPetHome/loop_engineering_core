@@ -1,0 +1,1324 @@
+#!/usr/bin/env node
+/**
+ * loop.ts — bin/loop 的实现：开工、启动、状态、合入、清理。
+ *
+ * 所有子命令支持 --dry-run（只核对、只打印，不改文件或分支）和 --json（标准输出一个 JSON 对象）。
+ * 只有显式「推送」操作 origin；合入/撤回仍只做本地操作。开发方不提交。
+ */
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { remapBatchReferences } from "./batch-refs.ts";
+import { findProjectRoot, loadProjectLayout, resolveProjectConfig, workspacePath, type ProjectLayout } from "./config.ts";
+import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
+import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
+import { cleanupMaterialHistory } from "./materials.ts";
+import { registerMiss } from "./misses.ts";
+import { materialCleanupLine, materialCleanupNotes } from "./resources.ts";
+import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch, registeredQueueBatch, pushQueueBatch, withdrawQueuedBatch, scopeOverlapWarnings, type QueueEntry } from "./merge-queue.ts";
+import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
+import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, writePhase, type PhaseRecord } from "./events.ts";
+import { queryBatches } from "./query.ts";
+import { paInfo, sendWords } from "./pa.ts";
+import { resumeBatch } from "./pa-resume.ts";
+import { runReviewOnly } from "./review-only.ts";
+import { stopBatch } from "./stop.ts";
+import { runBatchCommand } from "./launch.ts";
+import { parsePlan, parseRecipe, PlanError, type Plan } from "./pipeline.ts";
+import { readJson, statusPath } from "./pipeline-core.ts";
+import type { StageStatus } from "./pipeline-core.ts";
+import {
+  branchExists, branchType, checkBranchName, commitAll, currentBranch, gitResult, gitText, isClean, shellQuote,
+  stageCommitMessage, worktreeForBranch, worktrees, type CommitResult,
+} from "./workspace.ts";
+
+const LOOP_ROOT = dirname(fileURLToPath(import.meta.url));
+const LOOP_BIN = join(LOOP_ROOT, "bin", "loop");
+const PIPELINE = join(LOOP_ROOT, "pipeline.ts");
+
+export class LoopError extends Error {
+  data: Record<string, unknown>;
+  constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
+}
+
+interface ParsedArgs { reviewTimeoutMin?: string; base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
+
+export function parseArgs(argv: string[]): ParsedArgs {
+  const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--json") result.json = true;
+    else if (arg === "--all") result.all = true;
+    else if (arg === "--dry-run") result.dryRun = true;
+    else if (arg === "--recheck") result.recheck = true;
+    else if (arg === "--autoreview-review-timeout-min") {
+      const value = argv[++i];
+      if (!value || value.startsWith("--") || result.reviewTimeoutMin !== undefined) throw new LoopError(`${arg} 需要一个值且不能重复`);
+      result.reviewTimeoutMin = value;
+    }
+    else if (arg === "--apply") result.apply = true;
+    else if (["--base", "--head", "--requirement", "--criteria", "--note"].includes(arg)) {
+      const key = arg.slice(2) as "base" | "head" | "requirement" | "criteria" | "note";
+      const value = argv[++i];
+      if (!value || value.startsWith("--") || result[key] !== undefined) throw new LoopError(`${arg} 需要一个值且不能重复`);
+      result[key] = value;
+    }
+    else if (["--stage", "--id", "--text-file", "--grant-file", "--wait"].includes(arg)) {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith("--")) throw new LoopError(`${arg} 需要一个值`);
+      const keys: Record<string, "stage" | "id" | "textFile" | "grantFile" | "wait"> = { "--stage": "stage", "--id": "id", "--text-file": "textFile", "--grant-file": "grantFile", "--wait": "wait" };
+      const key = keys[arg];
+      if (result[key] !== undefined) throw new LoopError(`${arg} 不能重复`);
+      if (arg === "--wait") {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) throw new LoopError("--wait 需要 0–3600 秒");
+        result.wait = seconds;
+      } else (result as any)[key] = value;
+    }
+    else if (arg === "--round") {
+      const value = argv[++i];
+      if (!value || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new LoopError("--round 需要正整数轮次");
+      if (result.round !== undefined) throw new LoopError("--round 不能重复");
+      result.round = Number(value);
+    }
+    else if (arg === "--launcher") {
+      const value = argv[i + 1];
+      if (!value || value.startsWith("--")) throw new LoopError("--launcher 需要一个值（terminal 或 background）");
+      result.launcher = value; i += 1;
+    } else if (arg.startsWith("--")) throw new LoopError(`未知选项：${arg}`);
+    else if (!result.command) result.command = arg;
+    else if (!result.batch) result.batch = arg;
+    else result.rest.push(arg);
+  }
+  if (result.reviewTimeoutMin !== undefined && !["开工", "启动"].includes(result.command ?? "")) throw new LoopError("--autoreview-review-timeout-min 只用于 loop 开工/启动");
+  if (result.stage !== undefined && !["送话", "停止"].includes(result.command ?? "")) throw new LoopError("--stage 只用于 loop 送话/停止");
+  if ((result.textFile !== undefined || result.wait !== undefined) && result.command !== "送话") throw new LoopError("--text-file、--wait 只用于 loop 送话");
+  if ([result.base, result.head, result.requirement, result.criteria, result.note].some((value) => value !== undefined) && result.command !== "评审") throw new LoopError("--base、--head、--requirement、--criteria、--note 只用于 loop 评审");
+  if (result.grantFile !== undefined && result.command !== "续跑") throw new LoopError("--grant-file 只用于 loop 续跑");
+  if (result.id !== undefined && !["送话", "续跑"].includes(result.command ?? "")) throw new LoopError("--id 只用于 loop 送话/续跑");
+  if (result.all && (result.command !== "查询" || result.batch)) throw new LoopError("--all 只用于 loop 查询，不能同时指定批次文件");
+  if (result.command === "查询" && (result.rest.length || result.recheck || result.launcher)) throw new LoopError("用法：loop 查询 [<批次.json> | --all] --json");
+  if (result.round !== undefined && result.command !== "漏网") throw new LoopError("--round 只用于 loop 漏网");
+  if (result.apply && result.command !== "清理") throw new LoopError("--apply 只用于 loop 清理");
+  if (result.command === "清理" && (result.batch || result.rest.length || result.recheck || result.launcher)) throw new LoopError("loop 清理不接受批次文件、--recheck 或 --launcher");
+  if (result.apply && result.dryRun) throw new LoopError("--apply 与 --dry-run 不能同时使用");
+  return result;
+}
+
+interface Repo { root: string; projectRoot: string; layout: ProjectLayout }
+
+function mainWorktree(root: string): string {
+  const list = gitResult(root, ["worktree", "list", "--porcelain"]);
+  if (list.status !== 0) return root;
+  const first = list.stdout.split("\n").find((line) => line.startsWith("worktree "));
+  return first ? first.slice("worktree ".length) : root;
+}
+
+export function repoOf(cwd: string): Repo {
+  const res = gitResult(cwd, ["rev-parse", "--show-toplevel"]);
+  if (res.status !== 0 || !res.stdout.trim()) throw new LoopError(`当前目录不是 git 仓库：${cwd}（${(res.stderr || res.stdout).trim().slice(-300)}）`);
+  const root = mainWorktree(res.stdout.trim());
+  const project = loadProjectLayout(root);
+  return { root, projectRoot: project.root, layout: project.layout };
+}
+
+const readBatch = (path: string): Record<string, unknown> => {
+  let raw: unknown;
+  try { raw = JSON.parse(readFileSync(path, "utf8")); } catch (error) { throw new LoopError(`无法读取批次文件 ${path}：${(error as Error).message}`); }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new LoopError(`批次文件必须是 JSON 对象：${path}`);
+  return raw as Record<string, unknown>;
+};
+
+const text = (value: unknown, label: string): string => {
+  if (typeof value !== "string" || !value.trim()) throw new LoopError(`${label} 必须是非空字符串`);
+  return value.trim();
+};
+
+interface WorkspaceUse {
+  name: string;
+  path: string;
+  branch: string;
+  explicit: boolean;
+  stages: string[];
+  exists: boolean;
+  registered: boolean;
+}
+
+interface BatchPlan {
+  raw: Record<string, unknown>;
+  path: string;
+  planDir: string;
+  plan: Plan;
+  branch?: string;
+  /** 开工要创建或切换的工作区。 */
+  workspaces: WorkspaceUse[];
+  /** 段里显式写了 cwd 的本仓库 worktree：不创建，但同样核对脏改动和分支。 */
+  checks: WorkspaceUse[];
+  stages: Map<string, { branch?: string; workspace?: string; cwd: string; prompt?: string }>;
+}
+
+/** 把 workspace 名字换成绝对 cwd；批次文件可以只写工作区名字。 */
+function normalizedRaw(repo: Repo, raw: Record<string, unknown>): Record<string, unknown> {
+  const copy = structuredClone(raw);
+  if (copy.stages === null || typeof copy.stages !== "object" || Array.isArray(copy.stages)) throw new LoopError("批次文件的 stages 必须是对象");
+  for (const [name, value] of Object.entries(copy.stages as Record<string, unknown>)) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new LoopError(`stages.${name} 必须是对象`);
+    const stage = value as Record<string, unknown>;
+    if (stage.cwd !== undefined && stage.workspace !== undefined) throw new LoopError(`stages.${name} 的 cwd 和 workspace 只能写一个`);
+    if (stage.cwd === undefined) {
+      const workspace = stage.workspace === undefined ? "dev分支" : text(stage.workspace, `stages.${name}.workspace`);
+      stage.cwd = workspacePath(repo.projectRoot, repo.layout, workspace);
+      // parsePlan 只认绝对 cwd；workspace 名字已经换算过。
+      delete stage.workspace;
+    }
+  }
+  return copy;
+}
+
+export function loadBatch(repo: Repo, path: string, options: { warn?: (message: string) => void; env?: NodeJS.ProcessEnv } = {}): BatchPlan {
+  const absolute = resolve(path);
+  const raw = readBatch(absolute);
+  const planDir = dirname(absolute);
+  const recipe = parseRecipe(raw.recipe);
+  if (recipe === "review-only") return { raw, path: absolute, planDir, plan: parsePlan(raw, planDir, options.env ?? process.env, { batchFile: absolute }), workspaces: [], checks: [], stages: new Map() };
+  const normalized = normalizedRaw(repo, raw);
+  const plan = parsePlan(normalized, planDir, options.env ?? process.env, { batchFile: absolute, projectRoot: repo.projectRoot, warn: options.warn });
+  const branch = raw.branch === undefined ? undefined : text(raw.branch, "branch");
+  const stages = new Map<string, { branch?: string; workspace?: string; cwd: string; prompt?: string }>();
+  const byPath = new Map<string, WorkspaceUse>();
+  const checksByPath = new Map<string, WorkspaceUse>();
+  const knownWorktrees = worktrees(repo.root);
+  for (const [name, value] of Object.entries(raw.stages as Record<string, unknown>)) {
+    const stage = value as Record<string, unknown>;
+    const workspace = stage.workspace === undefined ? "dev分支" : text(stage.workspace, `stages.${name}.workspace`);
+    const stageBranch = stage.branch === undefined ? branch : text(stage.branch, `stages.${name}.branch`);
+    const explicit = stage.cwd !== undefined;
+    const pathValue = explicit ? resolve(planDir, text(stage.cwd, `stages.${name}.cwd`))
+      : (repo.layout.workspaces[workspace] ?? workspacePath(repo.projectRoot, repo.layout, workspace));
+    const planned = plan.stages.get(name)!;
+    stages.set(name, { ...(stageBranch ? { branch: stageBranch } : {}), ...(stage.workspace === undefined ? {} : { workspace }), cwd: planned.cwd, ...(planned.prompt ? { prompt: planned.prompt } : {}) });
+    if (explicit) {
+      const registered = knownWorktrees.find((item) => resolve(item.path) === resolve(pathValue));
+      if (!registered) continue;
+      const key = resolve(registered.path);
+      const branch = stageBranch ?? "";
+      const existing = checksByPath.get(key);
+      if (existing) {
+        if (branch && existing.branch !== branch) throw new LoopError(`显式 cwd ${pathValue} 里的段要求不同分支：${existing.branch} 和 ${branch}`);
+        existing.stages.push(name);
+      } else checksByPath.set(key, { name, path: key, branch, explicit: true, stages: [name], exists: true, registered: true });
+      continue;
+    }
+    const key = resolve(pathValue);
+    const existing = byPath.get(key);
+    if (existing) {
+      if (stageBranch && existing.branch !== stageBranch) throw new LoopError(`工作区 ${workspace} 里的段要求不同分支：${existing.branch} 和 ${stageBranch}`);
+      existing.stages.push(name);
+    } else byPath.set(key, { name: workspace, path: key, branch: stageBranch ?? "", explicit: false, stages: [name], exists: existsSync(key), registered: false });
+  }
+  return { raw, path: absolute, planDir, plan, ...(branch ? { branch } : {}), workspaces: [...byPath.values()], checks: [...checksByPath.values()], stages };
+}
+
+const branchOfStage = (batch: BatchPlan, stage: string): string | undefined => batch.stages.get(stage)?.branch ?? batch.branch;
+
+function batchCommand(command: string, path: string): string {
+  return `${shellQuote(LOOP_BIN)} ${command} ${shellQuote(path)}`;
+}
+
+function checkClean(repo: Repo, workspace: WorkspaceUse): void {
+  const res = gitResult(workspace.path, ["status", "--porcelain", "-z"]);
+  if (res.status !== 0) throw new LoopError(`无法读取开发空间状态：${workspace.path}（${(res.stderr || res.stdout).trim().slice(-300)}）`);
+  if (res.stdout !== "") {
+    const files = res.stdout.split("\0").filter(Boolean).join("、");
+    throw new LoopError(`开发空间有未提交改动，未继续：${workspace.path}；${files}`, { workspace: workspace.path, files });
+  }
+}
+
+interface WorkingChange { path: string; status: string }
+
+/** 工作区里未提交的文件；改名的两端都算，供输出和合入前的交集检查使用。 */
+function workingChanges(root: string, label: string): WorkingChange[] {
+  const res = gitResult(root, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+  if (res.status !== 0) throw new LoopError(`无法读取${label}状态：${(res.stderr || res.stdout).trim().slice(-300)}`);
+  const tokens = res.stdout.split("\0");
+  const changes: WorkingChange[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const entry = tokens[index];
+    if (!entry) continue;
+    const status = entry.slice(0, 2);
+    const path = entry.slice(3);
+    if (!path) continue;
+    changes.push({ path, status });
+    if (/[RC]/.test(status)) {
+      const original = tokens[index + 1];
+      if (original) { changes.push({ path: original, status }); index += 1; }
+    }
+  }
+  return changes;
+}
+
+/** 批次工作区里会被 commitAll 自动提交的路径；声明的本机文件不参与。 */
+function autoCommitPaths(workspacePath: string): string[] {
+  const changes = workingChanges(workspacePath, "批次工作区");
+  const project = loadProjectLayout(workspacePath);
+  const root = gitText(workspacePath, ["rev-parse", "--show-toplevel"]);
+  const local = project.layout.localFiles
+    .map((path) => relative(root, resolve(project.root, path)).replace(/\\/g, "/"))
+    .filter((path) => path && path !== ".." && !path.startsWith("../"));
+  return changes.map((change) => change.path)
+    .filter((path) => !local.some((rel) => path === rel || path.startsWith(`${rel}/`)));
+}
+
+/** 开工和合入只要求运行版停在发布分支；未提交改动由命令自己列出来。 */
+function checkRuntime(repo: Repo): WorkingChange[] {
+  const branch = currentBranch(repo.root);
+  if (branch !== repo.layout.release) {
+    throw new LoopError(`运行版必须停在发布分支 ${repo.layout.release}，现在是 ${branch ?? "detached"}`, { branch, release: repo.layout.release });
+  }
+  return workingChanges(repo.root, "运行版");
+}
+
+/** 仓库根目录内的相对路径；仓库外和 .git 下的路径返回 undefined。 */
+function insideRepo(repoRoot: string, absolute: string): string | undefined {
+  const rel = relative(repoRoot, absolute);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+  const normalized = rel.split("\\").join("/");
+  if (normalized === ".git" || normalized.startsWith(".git/")) return undefined;
+  return normalized;
+}
+
+function filesUnder(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...filesUnder(path));
+    else files.push(path);
+  }
+  return files;
+}
+
+interface BatchDocs {
+  branch?: string;
+  target?: WorkspaceUse;
+  /** 相对仓库根、相对发布分支 HEAD 有变化的批次文档。 */
+  files: string[];
+  /** 开工输出里的 启动 / 状态 / 合入 该用的批次文件路径。 */
+  batchPath: string;
+}
+
+/** 批次文档：批次目录里的全部文件、各段 prompt、acceptance.criteria；只取仓库内且相对 HEAD 有变化的。 */
+function batchDocsPlan(repo: Repo, batch: BatchPlan, changes: WorkingChange[]): BatchDocs {
+  const branch = batch.branch ?? [...batch.stages.values()].find((stage) => stage.branch)?.branch;
+  const target = branch ? [...batch.workspaces, ...batch.checks].find((workspace) => workspace.branch === branch) : undefined;
+  const dir = resolve(dirname(batch.path));
+  const candidates = new Set<string>([resolve(batch.path)]);
+  const dirRel = relative(repo.root, dir);
+  const dirInside = dirRel === "" || (!dirRel.startsWith("..") && !isAbsolute(dirRel));
+  // 批次文件直接放在仓库根或项目根时，不把同目录的无关文件都算成本批文档。
+  if (dirInside && dir !== resolve(repo.root) && dir !== resolve(repo.projectRoot)) {
+    for (const file of filesUnder(dir)) candidates.add(resolve(file));
+  }
+  for (const stage of batch.plan.stages.values()) if (stage.prompt) candidates.add(resolve(stage.prompt));
+  if (batch.plan.acceptance) candidates.add(resolve(batch.plan.acceptance.criteriaFile));
+
+  const byPath = new Map(changes.map((change) => [change.path, change]));
+  const files: string[] = [];
+  for (const absolute of candidates) {
+    const rel = insideRepo(repo.root, absolute);
+    if (!rel) continue;
+    const change = byPath.get(rel);
+    if (!change || change.status.includes("D") || !existsSync(absolute)) continue;
+    files.push(rel);
+  }
+  const batchRel = insideRepo(repo.root, batch.path);
+  if (target && batchRel) {
+    const mapped = remapBatchReferences(batch.raw, repo.root, target.path, batch.path, new Set(files));
+    if (JSON.stringify(mapped) !== JSON.stringify(batch.raw)) files.push(batchRel);
+  }
+  return {
+    ...(branch ? { branch } : {}), ...(target ? { target } : {}),
+    files: [...new Set(files)].sort(),
+    batchPath: batchRel && target ? resolve(target.path, batchRel) : batch.path,
+  };
+}
+
+interface FileDoc { kind: "file"; content: Buffer }
+interface LinkDoc { kind: "link"; target: string }
+type DocContent = FileDoc | LinkDoc;
+
+function lstatSafe(path: string): ReturnType<typeof lstatSync> | undefined {
+  try { return lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** 目标父路径不能被符号链接带到仓库外；create=false 时只核对，不建目录。 */
+function ensureSafeParents(targetRoot: string, rel: string, create = true): void {
+  let current = targetRoot;
+  for (const part of rel.split("/").slice(0, -1)) {
+    current = join(current, part);
+    const info = lstatSafe(current);
+    if (!info) { if (!create) return; mkdirSync(current); continue; }
+    if (info.isSymbolicLink()) throw new LoopError(`开发空间里的父路径是符号链接，未继续：${rel} → ${current}`);
+    if (!info.isDirectory()) throw new LoopError(`开发空间里的父路径不是目录，未继续：${rel} → ${current}`);
+  }
+}
+
+/** 写入任何批次文档前核对全部目标；忽略规则不能作为覆盖本地内容的许可。 */
+function checkBatchDocTargets(target: WorkspaceUse, files: string[]): void {
+  const listed = gitResult(target.path, ["--literal-pathspecs", "ls-files", "--cached", "-z", "--", ...files]);
+  if (listed.status !== 0) {
+    throw new LoopError(`无法核对开发空间批次文档的跟踪状态：${target.path}（${(listed.stderr || listed.stdout).trim().slice(-300)}）`,
+      { workspace: target.path, files });
+  }
+  const tracked = new Set(listed.stdout.split("\0").filter(Boolean));
+  const blocked = files.filter((rel) => {
+    ensureSafeParents(target.path, rel, false);
+    return !tracked.has(rel) && Boolean(lstatSafe(resolve(target.path, rel)));
+  });
+  if (blocked.length) {
+    throw new LoopError(`开发空间的批次文档目标已有未跟踪内容（含被忽略的），不覆盖：${blocked.join("、")}`,
+      { workspace: target.path, files: blocked });
+  }
+}
+
+let tempCounter = 0;
+
+/** 用临时文件替换目标本身，不跟随目标已有的符号链接写入。 */
+function writeDocSafely(targetRoot: string, rel: string, doc: DocContent): void {
+  ensureSafeParents(targetRoot, rel);
+  const destination = resolve(targetRoot, rel);
+  const existing = lstatSafe(destination);
+  if (existing?.isDirectory()) throw new LoopError(`开发空间里的目标路径是目录，未继续：${rel} → ${destination}`);
+  const temp = join(dirname(destination), `.loop-doc-${process.pid}-${tempCounter++}.tmp`);
+  try {
+    rmSync(temp, { force: true });
+    if (doc.kind === "link") symlinkSync(doc.target, temp);
+    else writeFileSync(temp, doc.content);
+    renameSync(temp, destination);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function rewriteBatchDocument(source: string, repoRoot: string, targetRoot: string, files: readonly string[]): string {
+  const original = readFileSync(source, "utf8");
+  let raw: unknown;
+  try { raw = JSON.parse(original); } catch { return original; }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return original;
+  const mapped = remapBatchReferences(raw as Record<string, unknown>, repoRoot, targetRoot, source, new Set(files));
+  return JSON.stringify(mapped) === JSON.stringify(raw) ? original : `${JSON.stringify(mapped, null, 2)}\n`;
+}
+
+function copyBatchDocs(repo: Repo, target: WorkspaceUse, files: string[], batchPath: string): Map<string, DocContent> {
+  // 新建/切换 worktree 后再核对一次，冲突时不留下部分写入的批次文档。
+  checkBatchDocTargets(target, files);
+  const expected = new Map<string, DocContent>();
+  for (const rel of files) {
+    const source = resolve(repo.root, rel);
+    let doc: DocContent;
+    if (resolve(source) === resolve(batchPath)) {
+      doc = { kind: "file", content: Buffer.from(rewriteBatchDocument(source, repo.root, target.path, files)) };
+    } else {
+      const info = lstatSync(source);
+      doc = info.isSymbolicLink()
+        ? { kind: "link", target: readlinkSync(source) }
+        : { kind: "file", content: readFileSync(source) };
+    }
+    writeDocSafely(target.path, rel, doc);
+    expected.set(rel, doc);
+  }
+  return expected;
+}
+
+/** 恢复项目根之前，确认开发空间里的内容与要保存的一致。 */
+function verifyCopiedDocs(target: WorkspaceUse, expected: Map<string, DocContent>): void {
+  for (const [rel, doc] of expected) {
+    const destination = resolve(target.path, rel);
+    const info = lstatSafe(destination);
+    if (!info) throw new LoopError(`开发空间里没有保存批次文档：${rel}`, { files: [...expected.keys()] });
+    if (doc.kind === "link") {
+      if (!info.isSymbolicLink() || readlinkSync(destination) !== doc.target) {
+        throw new LoopError(`开发空间里的批次文档没有按原样保存：${rel}`, { files: [...expected.keys()] });
+      }
+      continue;
+    }
+    if (info.isSymbolicLink() || info.isDirectory() || !readFileSync(destination).equals(doc.content)) {
+      throw new LoopError(`开发空间里的批次文档内容没有按原样保存：${rel}`, { files: [...expected.keys()] });
+    }
+  }
+}
+
+interface BatchDocsCommit { committed: boolean; commit?: string; files: string[] }
+
+function commitBatchDocs(workspace: WorkspaceUse, branch: string, batchName: string, files: string[]): BatchDocsCommit {
+  const actual = currentBranch(workspace.path);
+  if (actual !== branch) throw new LoopError(`开发空间当前分支是 ${actual ?? "detached"}，不是批次分支 ${branch}；不提交批次文档`);
+  const root = gitText(workspace.path, ["rev-parse", "--show-toplevel"]);
+  const add = gitResult(root, ["add", "-A", "--", ...files]);
+  if (add.status !== 0) throw new LoopError(`git add 批次文档失败：${(add.stderr || add.stdout).trim().slice(-300)}`, { files });
+  const stagedResult = gitResult(root, ["diff", "--cached", "--name-only", "-z"]);
+  if (stagedResult.status !== 0) throw new LoopError(`git diff --cached 失败：${(stagedResult.stderr || stagedResult.stdout).trim().slice(-300)}`, { files });
+  const staged = stagedResult.stdout.split("\0").filter(Boolean);
+  const expected = new Set(files);
+  const extra = staged.filter((path) => !expected.has(path));
+  if (extra.length) throw new LoopError(`批次文档提交出现范围外的改动，未继续：${extra.join("、")}`, { files: extra });
+  if (staged.length === 0) return { committed: false, files };
+  const type = branchType(branch);
+  if (!type) throw new LoopError(`无法从分支名生成批次文档提交说明：${branch}`, { files });
+  const commit = gitResult(root, ["commit", "-m", `${type}: 批次文档\n\n批次：${batchName}`]);
+  if (commit.status !== 0) throw new LoopError(`批次文档提交失败：${(commit.stderr || commit.stdout).trim().slice(-300)}`, { files });
+  return { committed: true, commit: gitText(root, ["rev-parse", "HEAD"]), files: staged };
+}
+
+/** 批次文档提交成功后，把项目根里这些路径恢复成发布分支 HEAD 的状态。 */
+function restoreProjectDocs(repo: Repo, files: string[]): void {
+  for (const rel of files) {
+    const absolute = resolve(repo.root, rel);
+    const tracked = gitResult(repo.root, ["cat-file", "-e", `HEAD:${rel}`]).status === 0;
+    if (tracked) {
+      const restore = gitResult(repo.root, ["checkout", "HEAD", "--", rel]);
+      if (restore.status !== 0) throw new LoopError(`恢复项目根文件失败：${rel}；${(restore.stderr || restore.stdout).trim().slice(-300)}`, { files });
+      continue;
+    }
+    gitResult(repo.root, ["reset", "-q", "--", rel]);
+    rmSync(absolute, { force: true });
+  }
+}
+
+function checkIgnored(repo: Repo, layout: ProjectLayout): void {
+  for (const path of layout.localFiles) {
+    const absolute = resolve(repo.projectRoot, path);
+    const rel = relative(repo.root, absolute);
+    if (rel.startsWith("..")) throw new LoopError(`localFiles 不在仓库里：${path}`);
+    const ignored = gitResult(repo.root, ["check-ignore", "-q", "--", rel]);
+    if (ignored.status !== 0) throw new LoopError(`localFiles 没有被 git 忽略：${path}；先写进 .gitignore 或 .git/info/exclude`);
+  }
+}
+
+function ensureWorktree(repo: Repo, workspace: WorkspaceUse): string {
+  const registered = worktrees(repo.root).find((item) => resolve(item.path) === workspace.path);
+  workspace.registered = Boolean(registered);
+  if (registered) {
+    if (registered.branch && registered.branch !== workspace.branch && !isClean(workspace.path)) checkClean(repo, workspace);
+    if (registered.branch !== workspace.branch) {
+      if (branchExists(repo.root, workspace.branch)) gitText(workspace.path, ["checkout", workspace.branch], `切换到分支 ${workspace.branch}`);
+      else gitText(workspace.path, ["checkout", "-b", workspace.branch, repo.layout.release], `从 ${repo.layout.release} 新建分支 ${workspace.branch}`);
+    }
+    return "已存在";
+  }
+  if (existsSync(workspace.path)) {
+    throw new LoopError(`开发空间路径已存在，但不是这个仓库的 worktree：${workspace.path}；不覆盖，请先确认归属`);
+  }
+  const parent = dirname(workspace.path);
+  if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
+  if (branchExists(repo.root, workspace.branch)) {
+    gitText(repo.root, ["worktree", "add", workspace.path, workspace.branch], `git worktree add ${workspace.path} ${workspace.branch}`);
+  } else {
+    gitText(repo.root, ["worktree", "add", "-b", workspace.branch, workspace.path, repo.layout.release],
+      `git worktree add -b ${workspace.branch} ${workspace.path} ${repo.layout.release}`);
+  }
+  workspace.registered = true;
+  return "新建";
+}
+
+/** 切换/创建分支之前先看目标提交里有没有这些本机路径，避免 checkout 覆盖被忽略的本地文件。 */
+function checkTargetLocalPaths(repo: Repo, workspace: WorkspaceUse): void {
+  const target = branchExists(repo.root, workspace.branch) ? workspace.branch : repo.layout.release;
+  const listed = gitText(repo.root, ["ls-tree", "-r", "--name-only", "-z", target]).split("\0").filter(Boolean);
+  const projectRel = relative(repo.root, repo.projectRoot);
+  for (const path of repo.layout.localFiles) {
+    const rel = relative(workspace.path, resolve(workspace.path, projectRel, path));
+    if (!rel || rel.startsWith("..")) continue;
+    if (listed.some((item) => item === rel || item.startsWith(`${rel}/`) || rel.startsWith(`${item}/`))) {
+      throw new LoopError(`目标分支 ${target} 已跟踪本机文件 ${rel}；切换会覆盖被忽略的本地文件，未继续`);
+    }
+  }
+}
+
+/** 目标工作区也必须忽略这些本机文件，且没有把它们纳入版本控制。 */
+function checkLocalFilesTarget(repo: Repo, workspace: WorkspaceUse): void {
+  const root = gitText(workspace.path, ["rev-parse", "--show-toplevel"]);
+  const projectRel = relative(repo.root, repo.projectRoot);
+  for (const path of repo.layout.localFiles) {
+    const rel = relative(root, resolve(workspace.path, projectRel, path));
+    if (!rel || rel.startsWith("..")) throw new LoopError(`localFiles 不在开发空间里：${path} → ${workspace.path}`);
+    const tracked = gitResult(workspace.path, ["ls-files", "--error-unmatch", "--", rel]);
+    if (tracked.status === 0) throw new LoopError(`localFiles 在目标工作区已被 git 跟踪：${path}；不复制本机文件`);
+    const ignored = gitResult(workspace.path, ["check-ignore", "-q", "--", rel]);
+    if (ignored.status !== 0) throw new LoopError(`目标工作区没有忽略 localFiles：${path}；不复制本机文件，请把忽略规则提交到该分支`);
+  }
+}
+
+function copyLocalFiles(repo: Repo, workspace: WorkspaceUse): string[] {
+  const copied: string[] = [];
+  const projectRel = relative(repo.root, repo.projectRoot);
+  for (const path of repo.layout.localFiles) {
+    const source = resolve(repo.projectRoot, path);
+    const target = resolve(workspace.path, projectRel, path);
+    if (!existsSync(source) || existsSync(target)) continue;
+    const info = lstatSync(source);
+    mkdirSync(dirname(target), { recursive: true });
+    if (info.isDirectory()) cpSync(source, target, { recursive: true });
+    else copyFileSync(source, target);
+    copied.push(path);
+  }
+  return copied;
+}
+
+function methodsSummary(result: MethodsRunResult): Record<string, unknown> {
+  return {
+    skipped: result.skipped,
+    changed: result.changed,
+    fingerprint: result.fingerprint,
+    ...(result.selfCheck ? { selfCheck: result.selfCheck } : {}),
+    ...(result.baseline ? { baseline: result.baseline } : {}),
+    written: result.written,
+  };
+}
+
+function methodsLines(result: MethodsRunResult): string[] {
+  if (result.skipped) return ["方法自测：指纹未变，跳过方法自测"];
+  const lines = [`方法自测：执行一次（${result.changed.length ? result.changed.join("；") : "强制重新自测"}）`];
+  if (result.selfCheck) lines.push(`  selfCheck：通过（${result.selfCheck.command}）`);
+  if (result.baseline) lines.push(`  基线空跑门禁：${result.baseline.cached ? "树已在缓存里，跳过" : "通过"}`);
+  if (result.written) lines.push("  methods.json 已更新");
+  return lines;
+}
+
+/** 显式预算覆盖随子进程传递；不修改调用者的全局环境。 */
+function reviewEnv(args: ParsedArgs): NodeJS.ProcessEnv {
+  return args.reviewTimeoutMin === undefined ? process.env
+    : { ...process.env, AUTOREVIEW_REVIEW_TIMEOUT_MIN: args.reviewTimeoutMin };
+}
+
+/** 在任何工作区/分支/会话副作用前校验运行版及所有已有段目录。 */
+function batchEffectiveConfig(repo: Repo, batch: BatchPlan, args: ParsedArgs) {
+  const root = findProjectRoot(repo.projectRoot);
+  const stages: Record<string, ReturnType<typeof resolveProjectConfig>["effectiveConfig"]> = {};
+  for (const stage of batch.plan.stages.values()) {
+    // 段的 Pi flag 高于入口传递的环境覆盖，与实际宿主的优先级相同。
+    const overrides = { ...stage.configOverrides, reviewTimeoutMin: stage.configOverrides?.reviewTimeoutMin ?? args.reviewTimeoutMin };
+    const runtime = resolveProjectConfig(root, overrides);
+    const config = existsSync(stage.cwd) ? resolveProjectConfig(findProjectRoot(stage.cwd), overrides) : runtime;
+    stages[stage.name] = config.effectiveConfig;
+  }
+  const primary = Object.values(stages)[0] ?? resolveProjectConfig(root, { reviewTimeoutMin: args.reviewTimeoutMin }).effectiveConfig;
+  return { ...primary, stages };
+}
+
+async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch) throw new LoopError("用法：loop 开工 <批次.json> [--dry-run] [--json] [--recheck]");
+  const repo = repoOf(process.cwd());
+  const batch = loadBatch(repo, args.batch, { env: reviewEnv(args) });
+  const effectiveConfig = batchEffectiveConfig(repo, batch, args);
+  if (!batch.branch && ![...batch.stages.values()].some((stage) => stage.branch)) throw new LoopError("批次.json 的 branch 必须写 <类型>/<描述>");
+  const branchOwners = new Map<string, string>();
+  for (const workspace of [...batch.workspaces, ...batch.checks]) {
+    if (!workspace.branch) {
+      if (batch.workspaces.includes(workspace)) throw new LoopError(`工作区 ${workspace.name} 的段没有指定分支`);
+      continue;
+    }
+    checkBranchName(workspace.branch);
+    const owner = branchOwners.get(workspace.branch);
+    if (owner && owner !== workspace.path) {
+      throw new LoopError(`两个开发空间不能检出同一个分支 ${workspace.branch}：${owner} 和 ${workspace.path}；并行时给每段写自己的 branch`);
+    }
+    branchOwners.set(workspace.branch, workspace.path);
+  }
+  // 先只核对，任何一项不过都不建 worktree、不切分支。
+  const runtimeChanges = checkRuntime(repo);
+  checkIgnored(repo, repo.layout);
+  for (const workspace of batch.workspaces) {
+    const rel = relative(repo.root, workspace.path);
+    if (rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"))) {
+      throw new LoopError(`开发空间不能是运行版本身或嵌套在运行版里：${workspace.path}；worktree 要放在运行版目录外`);
+    }
+    const registered = worktrees(repo.root).find((item) => resolve(item.path) === workspace.path);
+    workspace.registered = Boolean(registered);
+    if (registered) checkClean(repo, workspace);
+    else if (existsSync(workspace.path)) throw new LoopError(`开发空间路径已存在，但不是这个仓库的 worktree：${workspace.path}；不覆盖，请先确认归属`);
+    const holder = worktreeForBranch(repo.root, workspace.branch);
+    if (holder && resolve(holder.path) !== workspace.path) {
+      throw new LoopError(`分支 ${workspace.branch} 已经在另一个 worktree 检出：${holder.path}`);
+    }
+    checkTargetLocalPaths(repo, workspace);
+  }
+  for (const check of batch.checks) {
+    if (!existsSync(check.path)) throw new LoopError(`段 ${check.stages.join("、")} 的 cwd 不存在：${check.path}`);
+    checkClean(repo, check);
+    if (check.branch && currentBranch(check.path) !== check.branch) {
+      throw new LoopError(`段 ${check.stages.join("、")} 的目录在分支 ${currentBranch(check.path) ?? "detached"}，批次要求 ${check.branch}；未开工`);
+    }
+  }
+  const docs = batchDocsPlan(repo, batch, runtimeChanges);
+  if (docs.files.length && !docs.target) {
+    throw new LoopError(`批次文档需要搬进分支 ${docs.branch ?? "（未指定）"} 的开发空间，但没有找到对应的工作区；给该分支写 workspace 或已登记的 cwd`,
+      { files: docs.files, branch: docs.branch });
+  }
+  // 必须早于 checkout：Git 切分支本身也可能覆盖被忽略的同名文件；dry-run 同样报告冲突。
+  if (docs.files.length && docs.target?.registered) checkBatchDocTargets(docs.target, docs.files);
+  const docPaths = new Set(docs.files);
+  const uncommitted = [...new Set(runtimeChanges.map((change) => change.path).filter((path) => !docPaths.has(path)))].sort();
+  const lines = [`运行版：${repo.root}（发布分支 ${repo.layout.release}）`];
+  if (uncommitted.length) lines.push(`未提交，不在本批分支上：${uncommitted.join("、")}`);
+  lines.push(`批次：${batch.plan.name}${batch.branch ? `，分支 ${batch.branch}` : ""}`);
+  const warnings = scopeOverlapWarnings(repo.root, batch.plan.name, [...batch.plan.stages.values()]);
+  lines.push(...warnings);
+  const resultWorkspaces: Record<string, unknown>[] = [];
+  let primary: string | undefined = batch.workspaces[0]?.path ?? batch.checks[0]?.path ?? [...batch.stages.values()].find((stage) => existsSync(stage.cwd))?.cwd;
+  for (const workspace of batch.workspaces) {
+    let action = workspace.exists ? "已存在" : "将新建";
+    if (!args.dryRun) {
+      action = ensureWorktree(repo, workspace);
+      checkLocalFilesTarget(repo, workspace);
+    } else if (workspace.exists) checkLocalFilesTarget(repo, workspace);
+    const copied = args.dryRun ? [] : copyLocalFiles(repo, workspace);
+    lines.push(`开发空间：${workspace.name} → ${workspace.path}（${action}）；分支 ${workspace.branch}${copied.length ? `；已复制本机文件 ${copied.join("、")}` : ""}`);
+    resultWorkspaces.push({ name: workspace.name, path: workspace.path, branch: workspace.branch, action, localFiles: copied });
+  }
+  let docsCommit: BatchDocsCommit = { committed: false, files: [] };
+  if (docs.files.length) {
+    if (args.dryRun) {
+      lines.push(`批次文档：将搬入 ${docs.target!.path}（${docs.files.join("、")}）；项目根将恢复：${docs.files.join("、")}`);
+    } else {
+      const expected = copyBatchDocs(repo, docs.target!, docs.files, batch.path);
+      docsCommit = commitBatchDocs(docs.target!, docs.branch!, batch.plan.name, docs.files);
+      verifyCopiedDocs(docs.target!, expected);
+      restoreProjectDocs(repo, docs.files);
+      lines.push(`批次文档：${docsCommit.committed
+        ? `已提交到 ${docs.target!.path}（${docs.files.join("、")}）`
+        : `分支上已有相同内容，未建空提交（${docs.files.join("、")}）`}；项目根已恢复：${docs.files.join("、")}`);
+    }
+  } else {
+    lines.push("批次文档：没有需要搬的文件");
+  }
+  let methods: Record<string, unknown>;
+  if (!primary) {
+    methods = { skipped: false, changed: ["没有可用的开发空间"], written: false };
+    lines.push("方法自测：没有可用的开发空间，未执行");
+  } else if (!existsSync(primary)) {
+    methods = { skipped: false, changed: ["开发空间尚未建立"], written: false, planned: true };
+    lines.push("方法自测：开发空间尚未建立，开工后执行");
+  } else {
+    const overrides = [...batch.plan.stages.values()].find((stage) => stage.cwd === primary)?.configOverrides;
+    const run = runMethodsSelfTest(primary, { loopRoot: LOOP_ROOT, recheck: args.recheck, dryRun: args.dryRun, env: reviewEnv(args), overrides });
+    methods = methodsSummary(run);
+    lines.push(...methodsLines(run));
+  }
+  if (!args.dryRun) {
+    const opened = loadBatch(repo, docs.batchPath, { env: reviewEnv(args) });
+    const stages = [...opened.plan.stages.values()].map((stage) => ({ ...stage, branch: branchOfStage(opened, stage.name) ?? "" }));
+    // 外部/非 git 段沿用原行为，不把它们接入 git 合入队列。
+    if (stages.every((stage) => stage.branch && worktrees(repo.root).some((item) => item.path === gitResult(stage.cwd, ["rev-parse", "--show-toplevel"]).stdout.trim()))) {
+      registerQueueBatch(repo.root, { name: opened.plan.name, file: opened.path, dir: opened.plan.dir, project: repo.projectRoot,
+        release: repo.layout.release, stages, steps: opened.plan.steps, acceptance: Boolean(opened.plan.acceptance) });
+    }
+  }
+  const start = batchCommand("启动", docs.batchPath);
+  const status = batchCommand("状态", docs.batchPath);
+  const merge = batchCommand("合入", docs.batchPath);
+  lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
+  return { ok: true, command: "开工", dryRun: args.dryRun, effectiveConfig, repo: repo.root, release: repo.layout.release,
+    batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
+    uncommitted, warnings,
+    batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
+      files: docs.files, restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
+    methods, startCommand: start, statusCommand: status, mergeCommand: merge, lines };
+}
+
+function commandString(argv: string[]): string {
+  const quote = (value: string): string => /^[\w./:=@-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+  return argv.map(quote).join(" ");
+}
+
+async function cmdStart(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch) throw new LoopError("用法：loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]");
+  const file = resolve(args.batch), raw = readBatch(file);
+  if (parseRecipe(raw.recipe) === "review-only") {
+    const plan = parsePlan(raw, dirname(file), process.env, { batchFile: file });
+    const effectiveConfig = resolveProjectConfig(findProjectRoot(plan.review!.repo), { reviewTimeoutMin: args.reviewTimeoutMin }).effectiveConfig;
+    if (args.dryRun) return { ...await runReviewOnly(plan.review!, { file, name: plan.name, dir: plan.dir, dryRun: true, configOverrides: { reviewTimeoutMin: args.reviewTimeoutMin } }), command: "启动", mode: "review-only", effectiveConfig };
+    const info = batchInfo(file, plan.review!.repo, plan.dir);
+    try {
+      const res = await runBatchCommand(info, null, process.execPath, [join(LOOP_ROOT, "review-only.ts"), file], { cwd: process.cwd(), capture: true, env: reviewEnv(args) });
+      if (!res.stdout.trim()) throw new Error(String(res.error ?? res.stderr));
+      return { ...JSON.parse(res.stdout), command: "启动", mode: "review-only", ...(args.reviewTimeoutMin !== undefined ? { effectiveConfig } : {}) };
+    } catch (error) {
+      const text = `评审启动失败：${String(error)}`;
+      return { ok: false, command: "启动", mode: "review-only", recipe: "review-only", exitCode: 2, reason: eventReason(text), error: text, lines: [text] };
+    }
+  }
+  const repo = repoOf(process.cwd());
+  const batch = loadBatch(repo, args.batch, { env: reviewEnv(args) });
+  const effectiveConfig = batchEffectiveConfig(repo, batch, args);
+  const names = batch.plan.steps.flat();
+  for (const [name, stage] of batch.plan.stages) {
+    const branch = batch.stages.get(name)?.branch;
+    if (!branch) continue;
+    if (!existsSync(stage.cwd)) {
+      if (!args.dryRun) throw new LoopError(`段 ${name} 的目录不存在：${stage.cwd}；先执行 loop 开工`);
+      continue;
+    }
+    const actual = currentBranch(stage.cwd);
+    if (actual !== branch) throw new LoopError(`段 ${name} 的目录在分支 ${actual ?? "detached"}，批次要求 ${branch}；未启动`);
+  }
+  const info = { ...batchInfo(batch.path, repo.projectRoot, batch.plan.dir), project: repo.projectRoot,
+    stages: [...batch.plan.stages.values()].map((stage) => ({ stage: stage.name, cwd: stage.cwd, branch: stage.branch ?? batch.plan.branch, prompt: stage.prompt })) };
+  const started = (): void => {
+    recordBatchInfo(info);
+    const detail = { recipe: info.batch.recipe, ...(names.length === 1 && batch.plan.stages.get(names[0])?.prompt ? { prompt: batch.plan.stages.get(names[0])!.prompt } : {}) };
+    writePhase(info, null, "running", { status: "started", detail });
+    pushEvent(info, null, "started", eventReason(), {}, detail);
+  };
+  if (names.length === 1) {
+    const stage = batch.plan.stages.get(names[0])!;
+    const command = args.reviewTimeoutMin === undefined ? stage.start
+      : `AUTOREVIEW_REVIEW_TIMEOUT_MIN=${shellQuote(args.reviewTimeoutMin)} ${stage.start}`;
+    if (args.dryRun) {
+      let printed = command;
+      if (stage.prompt) {
+        const res = spawnSync("/bin/sh", ["-c", command], { cwd: stage.cwd, encoding: "utf8",
+          env: { ...reviewEnv(args), PI_DEV_DRY_RUN: "1", AUTOREVIEW_PIPELINE_DIR: batch.plan.dir,
+            AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
+        if (res.status !== 0) throw new LoopError(`生成启动命令失败：${(res.stderr || res.stdout).trim().slice(-500)}`);
+        printed = res.stdout.trim();
+      }
+      const lines = [`启动：${command}`, ...(printed !== command ? [`经过 pi-dev 的实际命令：${printed}`] : [])];
+      return { ok: true, command: "启动", dryRun: true, effectiveConfig, mode: "single", stage: stage.name, cwd: stage.cwd, startCommand: command, commands: [printed], lines };
+    }
+    started();
+    const res = await runBatchCommand(info, stage.name, "/bin/sh", ["-c", command], { cwd: stage.cwd, capture: args.json,
+      env: { ...reviewEnv(args), AUTOREVIEW_PIPELINE_DIR: batch.plan.dir, AUTOREVIEW_STAGE: stage.name, AUTOREVIEW_BATCH_FILE: batch.path } });
+    const phase = readJson<PhaseRecord>(phasePath(batch.plan.dir, stage.name));
+    if ((res.status ?? 1) !== 0 && (!phase || phase.phase === "failed") && phase?.category !== "已停止") {
+      const reason = eventReason(`启动失败：${res.error ?? `退出码 ${res.status}`}`), detail = { exitCode: res.status ?? 1 };
+      writePhase(info, null, "failed", { status: "failed", ...reason, detail });
+      pushEvent(info, null, "failed", reason, {}, detail);
+    }
+    return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, effectiveConfig, mode: "single", stage: stage.name, cwd: stage.cwd,
+      exitCode: res.status, ...(args.json ? { stdout: res.stdout, stderr: res.stderr } : {}), lines: [`启动：${command}`] };
+  }
+  const argv = [process.execPath, PIPELINE, batch.path, "--project-root", repo.projectRoot, "--default-workspace", "dev分支",
+    ...(args.launcher ? ["--launcher", args.launcher] : [])];
+  if (args.dryRun) {
+    const command = commandString(argv);
+    return { ok: true, command: "启动", dryRun: true, effectiveConfig, mode: "pipeline", stages: names, commands: [command], lines: [`流水线：${command}`] };
+  }
+  // 多段由真正取得运行锁的 pipeline 发布 started；父入口不能抢先覆盖活动批次。
+  const res = await runBatchCommand(info, null, argv[0], argv.slice(1), { cwd: repo.root, capture: args.json, env: reviewEnv(args) });
+  return { ok: (res.status ?? 1) === 0, command: "启动", dryRun: false, effectiveConfig, mode: "pipeline", stages: names,
+    exitCode: res.status, ...(args.json ? { stdout: res.stdout, stderr: res.stderr } : {}),
+    lines: [`流水线已结束（退出码 ${res.status}）：${names.join("、")}`] };
+}
+
+const EVENT_LABEL: Record<string, string> = { started: "进行中", done: "完成", paused: "暂停", "no-change": "没改动", "startup-failed": "启动失败" };
+
+/** 总结里「评审 N 次」就是本段实际轮次；读不到时留空，不用状态序号冒充。 */
+function summaryRounds(path: string | undefined): number | undefined {
+  if (!path || !existsSync(path)) return undefined;
+  try {
+    const matches = [...readFileSync(path, "utf8").matchAll(/评审\s*(\d+)\s*次/g)];
+    return matches.length ? Number(matches[matches.length - 1][1]) : undefined;
+  } catch { return undefined; }
+}
+
+function statusEntries(batch: BatchPlan): Record<string, unknown>[] {
+  const entries: Record<string, unknown>[] = [];
+  for (const stage of batch.plan.stages.keys()) {
+    const status = readJson<StageStatus>(statusPath(batch.plan.dir, stage));
+    entries.push({
+      stage, dir: batch.plan.dir,
+      event: status?.event ?? "未开始",
+      phase: status ? (EVENT_LABEL[status.event] ?? status.event) : "未开始",
+      round: summaryRounds(status?.summary) ?? null,
+      seq: status?.seq ?? 0,
+      pauseReason: status?.pauseReason,
+      summary: status?.summary,
+      updatedAt: status?.updatedAt,
+    });
+  }
+  return entries;
+}
+
+function scanStatuses(): Record<string, unknown>[] {
+  const root = join(homedir(), ".pi-autoreview", "pipelines");
+  if (!existsSync(root)) return [];
+  const entries: Record<string, unknown>[] = [];
+  for (const name of readdirSafe(root)) {
+    const dir = join(root, name);
+    for (const file of readdirSafe(dir)) {
+      if (!file.endsWith(".status.json")) continue;
+      const status = readJson<StageStatus>(join(dir, file));
+      if (!status) continue;
+      entries.push({ stage: status.stage, dir, event: status.event, phase: EVENT_LABEL[status.event] ?? status.event,
+        round: summaryRounds(status.summary) ?? null, seq: status.seq, pauseReason: status.pauseReason, summary: status.summary, updatedAt: status.updatedAt });
+    }
+  }
+  return entries.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+}
+
+function readdirSafe(path: string): string[] {
+  try { return readdirSync(path); } catch { return []; }
+}
+
+async function cmdStatus(args: ParsedArgs): Promise<Record<string, unknown>> {
+  const entries = args.batch ? statusEntries(loadBatch(repoOf(process.cwd()), args.batch)) : scanStatuses();
+  const detected = gitResult(process.cwd(), ["rev-parse", "--show-toplevel"]);
+  const queue = detected.status === 0 ? readMergeQueue(detected.stdout.trim()) : undefined;
+  if (queue && !args.dryRun) recoverMergeQueue(queue.repo);
+  const lines = entries.length ? entries.map((entry) => {
+    const reason = entry.pauseReason ? `；暂停原因：${entry.pauseReason}` : "";
+    const round = entry.round === undefined || entry.round === null ? "未知" : String(entry.round);
+    return `${entry.stage}：${entry.phase}；轮次：${round}（状态序号 ${entry.seq}）${reason}；总结：${entry.summary ?? "（无）"}；目录：${entry.dir}`;
+  }) : ["没有找到段状态"];
+  const fresh = queue ? readMergeQueue(queue.repo)! : undefined;
+  const active = fresh?.entries.filter((entry) => ["pending", "testing", "ready", "returning", "merging", "withdrawing"].includes(entry.status)).sort((a, b) => a.order - b.order) ?? [];
+  const queueEntries = fresh?.entries.map((entry) => {
+    const batch = fresh.batches.find((item) => item.id === entry.batch)!;
+    const deliveryWarnings = entry.deliveries?.flatMap((delivery) => {
+      const session = entry.qualification.find((item) => item.stage === delivery.stage)?.session;
+      const warning = session && nativeDeliveryWarning(batch.dir, delivery.stage, session, delivery.seq);
+      return warning ? [warning] : [];
+    }) ?? [];
+    return { ...entry, position: active.findIndex((item) => item.id === entry.id) + 1 || null, deliveryWarnings };
+  }) ?? [];
+  const labels: Record<string, string> = { pending: "排队中", testing: "测试中", ready: "可合入", returning: "正在退回", returned: "已退回开发会话", blocked: "资格失效/等待处理", merging: "合入待恢复", merged: "已合入", stopped: "停止自动排队", withdrawing: "撤回待恢复", withdrawn: "已撤回" };
+  if (fresh) lines.push(`合入队列：${fresh.repo}；固定测试工作区：${fresh.workspace}`, ...queueEntries.map((entry) =>
+    `${entry.name}：${entry.position ? `队列第 ${entry.position} 位；` : ""}${labels[entry.status]}；测试 ${entry.attempt} 次${entry.reason ? `；${entry.reason}` : ""}${entry.deliveryWarnings.length ? `；${entry.deliveryWarnings.join("；")}` : ""}${entry.log ? `；日志：${entry.log}` : ""}`));
+  return { ok: true, command: "状态", dryRun: args.dryRun, stages: entries, queue: queueEntries, queueWorkspace: fresh?.workspace, lines };
+}
+
+function checkNoExistingMerge(repo: Repo): void {
+  const mergeHead = gitResult(repo.root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+  if (mergeHead.status !== 0) return;
+  const status = gitText(repo.root, ["status", "--porcelain"]);
+  throw new LoopError(`运行版已有未完成的合并（MERGE_HEAD 存在），未继续；先完成或中止那次合并；项目根状态：${status || "（干净）"}`,
+    { mergeInProgress: true, status });
+}
+
+/** 本次临时保存的 stash commit 和私有引用。 */
+interface ProjectStash { ref: string; hash: string }
+
+/** 未跟踪文件挡在 HEAD 要写回的路径上时，清理会覆盖它们；返回这些路径。 */
+function untrackedBlockers(root: string): string[] {
+  const head = gitText(root, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]).split("\0").filter(Boolean);
+  const scan = gitResult(root, ["ls-files", "--others", "-z"]);
+  if (scan.status !== 0) {
+    throw new LoopError(`无法完整扫描运行版未跟踪文件，未合入：${(scan.stderr || scan.stdout).trim().slice(-300) || "git 未返回错误信息"}`);
+  }
+  const others = scan.stdout.split("\0").filter(Boolean);
+  if (!head.length || !others.length) return [];
+  const files = new Set(head);
+  const dirs = new Set<string>();
+  for (const file of head) {
+    const parts = file.split("/");
+    for (let index = 1; index < parts.length; index += 1) dirs.add(parts.slice(0, index).join("/"));
+  }
+  const blocked = new Set<string>();
+  for (const path of others) {
+    if (files.has(path) || dirs.has(path)) { blocked.add(path); continue; }
+    const parts = path.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      if (files.has(parts.slice(0, index).join("/"))) { blocked.add(path); break; }
+    }
+  }
+  return [...blocked].sort();
+}
+
+/**
+ * 用 stash commit + 独立私有 ref 保存项目根的已跟踪未提交改动（含暂存状态）。
+ * 不读写共享的 refs/stash，避免其他 worktree 同时 push 时认错或删错记录。
+ */
+function stashProjectChanges(repo: Repo, changes: WorkingChange[], onPinned?: (stash: ProjectStash) => void): ProjectStash | undefined {
+  if (!changes.some((change) => !change.status.startsWith("??"))) return undefined;
+  const blockers = untrackedBlockers(repo.root);
+  if (blockers.length) {
+    throw new LoopError(`运行版有未跟踪文件挡在 HEAD 路径上，清理会覆盖它们，未合入：${blockers.join("、")}`,
+      { files: blockers });
+  }
+  const created = gitResult(repo.root, ["stash", "create", `loop 合入：临时保存运行版未提交改动 ${randomUUID()}`]);
+  if (created.status !== 0) {
+    throw new LoopError(`无法临时保存运行版未提交改动，未合入：${(created.stderr || created.stdout).trim().slice(-300)}`,
+      { files: changes.map((change) => change.path) });
+  }
+  const hash = created.stdout.trim();
+  if (!hash) throw new LoopError("无法临时保存运行版未提交改动，未合入");
+  const ref = `refs/loop/merge-stash/${randomUUID()}`;
+  const pin = gitResult(repo.root, ["update-ref", ref, hash]);
+  if (pin.status !== 0) {
+    throw new LoopError(`无法为临时保存的改动创建独立引用，未合入：${(pin.stderr || pin.stdout).trim().slice(-300)}`,
+      { stash: hash });
+  }
+  onPinned?.({ ref, hash });
+  // 改动已经钉在独立 ref 上，再把已跟踪的工作区/索引恢复到 HEAD；未跟踪文件保留。
+  const reset = gitResult(repo.root, ["read-tree", "--reset", "-u", "HEAD"]);
+  if (reset.status !== 0) {
+    throw new LoopError(`临时保存的改动已写入 ${ref}，但无法清理运行版已跟踪改动，未合入；${(reset.stderr || reset.stdout).trim().slice(-300)}`,
+      { stash: ref, hash });
+  }
+  return { ref, hash };
+}
+
+/** 恢复临时保存的改动和索引状态，然后删除本次的独立 ref；失败时保留 ref。 */
+function restoreProjectStash(repo: Repo, stash: ProjectStash): void {
+  const apply = gitResult(repo.root, ["stash", "apply", "--index", stash.hash]);
+  if (apply.status !== 0) {
+    const head = gitText(repo.root, ["rev-parse", "HEAD"]);
+    const status = gitText(repo.root, ["status", "--porcelain"]);
+    throw new LoopError(`合入后无法恢复运行版未提交改动；当前提交 ${head}；改动仍在 ${stash.ref}；项目根状态：${status || "（干净）"}`,
+      { stash: stash.ref, hash: stash.hash, head, status, restoreStashFailed: true });
+  }
+  // 只删除本次的独立 ref；万一引用已变化，update-ref 的比较交换会失败并保留记录。
+  gitResult(repo.root, ["update-ref", "-d", stash.ref, stash.hash]);
+}
+
+/** 手动合入、会话外自动合入与撤回共用运行版保护；调用方持有仓库队列执行锁。 */
+export function applyQueuedResult(root: string, release: string, candidate: QueueEntry, save: (patch: Partial<QueueEntry>) => void, onBegin?: () => void): void {
+    const project = loadProjectLayout(root);
+    const repo: Repo = { root, projectRoot: project.root, layout: project.layout };
+    if (repo.layout.release !== release) throw new LoopError("release 配置已变化，未更新发布分支");
+    checkNoExistingMerge(repo);
+    checkRuntime(repo);
+    if (!candidate.result || !candidate.base) throw new LoopError("队列缺少测过的合并结果");
+    const current = gitText(repo.root, ["rev-parse", "HEAD"]);
+    // 合入进程被杀：先按持久化的 stash 身份恢复，不重复合并已发布的结果。
+    const restore = (): void => {
+      if (!candidate.runtimeStash) return;
+      // 私有 ref 只在恢复成功后删除；进程若死在删除与队列落盘之间，不再重复 apply。
+      if (gitResult(repo.root, ["show-ref", "--verify", "--quiet", candidate.runtimeStash.ref]).status === 0) restoreProjectStash(repo, candidate.runtimeStash);
+      save({ runtimeStash: undefined });
+    };
+    if (current === candidate.result) {
+      if (candidate.base !== candidate.result) save({ runtimePublication: "published" });
+      // ref 的 CAS 已成功而 checkout 尚未完成时，由本次用户命令补齐；后台不碰运行版。
+      if (gitText(repo.root, ["write-tree"]) === gitText(repo.root, ["rev-parse", `${candidate.base}^{tree}`])) {
+        gitText(repo.root, ["read-tree", "-m", "-u", candidate.base, candidate.result]);
+      }
+      restore();
+      if (gitText(repo.root, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree) throw new LoopError("发布树不是测过的结果");
+      return;
+    }
+    if (current !== candidate.base) {
+      if (candidate.runtimePublication === "prepared" && !candidate.runtimeStash) save({ status: "ready", reason: "发布分支已经变化，本次尚未开始发布" });
+      throw new LoopError("发布分支已经变化；未覆盖发布分支，请核对队列重测或运行版收尾状态");
+    }
+    if (candidate.runtimeStash) restore();
+    const changes = workingChanges(repo.root, "运行版");
+    const touched = gitText(repo.root, ["diff", "--name-only", "--no-renames", "-z", candidate.base, candidate.result]).split("\0").filter(Boolean);
+    const scan = gitResult(repo.root, ["ls-files", "--others", "-z"]);
+    if (scan.status !== 0) { save({ status: "ready" }); throw new LoopError("无法完整扫描运行版未跟踪文件，未合入"); }
+    const untouched = [...changes.map((change) => change.path), ...scan.stdout.split("\0").filter(Boolean)];
+    const intersects = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    const overlap = [...new Set(untouched.filter((path) => touched.some((target) => intersects(path, target))))];
+    if (overlap.length) { save({ status: "ready" }); throw new LoopError(`运行版未提交改动与测过的合并碰到同一个文件，未合入：${overlap.join("、")}`, { files: overlap }); }
+    const stash = stashProjectChanges(repo, changes, (value) => { onBegin?.(); save({ runtimeStash: value }); });
+    let failure: unknown, published = false;
+    try {
+      gitText(repo.root, ["read-tree", "-n", "-m", "-u", candidate.base, candidate.result]);
+      // 只读检查已过；在第一次可能改运行版的动作前持久化事务意图（有 stash 时更早登记）。
+      onBegin?.();
+      // 比较与更新由 Git 原子完成：不能在版本核对和发布之间插入另一个提交。
+      save({ runtimePublication: "publishing" });
+      gitText(repo.root, ["-c", "core.hooksPath=/dev/null", "update-ref", `refs/heads/${repo.layout.release}`, candidate.result, candidate.base]);
+      published = true;
+      save({ runtimePublication: "published" });
+      gitText(repo.root, ["read-tree", "-m", "-u", candidate.base, candidate.result]);
+      if (gitText(repo.root, ["rev-parse", "HEAD"]) !== candidate.result || gitText(repo.root, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree) throw new LoopError("合入结果与测过的提交不一致");
+    } catch (error) { failure = error; }
+    if (stash) restore();
+    if (failure) {
+      // 只有本次 CAS 确未成功且临时改动已恢复，才退出事务；已发布后的收尾失败保留恢复意图。
+      const head = gitText(repo.root, ["rev-parse", "HEAD"]);
+      if (!published && head !== candidate.result) save({ status: "ready", runtimePublication: "prepared" });
+      else save({ runtimePublication: "published" });
+      if (head !== candidate.base && head !== candidate.result) throw new LoopError("发布分支已经变化，本次不合入，自动重新测试");
+      throw failure;
+    }
+}
+
+async function cmdQueuedMerge(repo: Repo, batch: BatchPlan, args: ParsedArgs): Promise<Record<string, unknown>> {
+  const registration = registeredQueueBatch(repo.root, batch.path)!;
+  checkNoExistingMerge(repo);
+  const dirty = checkRuntime(repo);
+  const uncommitted = [...new Set(dirty.map((change) => change.path))].sort();
+  if (args.dryRun) {
+    const entry = readMergeQueue(repo.root)!.entries.filter((item) => item.batch === registration.id).at(-1);
+    return { ok: true, command: "合入", dryRun: true, release: repo.layout.release, queue: entry ?? null, uncommitted, pushed: false,
+      lines: [`只核对，不写入；队列状态：${entry?.status ?? "尚未完成进队"}；只允许合入测过且发布基线未变化的提交`] };
+  }
+  const entry = await mergeQueuedBatch(repo.root, registration, false, (candidate, save) => applyQueuedResult(repo.root, registration.release, candidate, save));
+  return { ok: true, command: "合入", dryRun: false, release: repo.layout.release, commit: entry.result, tree: entry.tree,
+    queue: entry, uncommitted, pushed: false, lines: [`已合入 ${repo.layout.release}：${entry.name}；提交：${entry.result}（就是测过的结果）；未推送`,
+      uncommitted.length ? `运行版原有未提交改动已保留：${uncommitted.join("、")}` : "运行版没有未提交改动"] };
+}
+
+async function cmdWithdraw(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch) throw new LoopError("用法：loop 撤回 <批次.json> [--dry-run] [--json]");
+  const repo = repoOf(process.cwd());
+  const batch = registeredQueueBatch(repo.root, resolve(args.batch));
+  if (!batch) throw new LoopError("本批未通过 loop 开工登记，不能撤回");
+  const entry = await withdrawQueuedBatch(repo.root, batch, args.dryRun, (candidate, save, begin) => applyQueuedResult(repo.root, batch.release, candidate, save, begin));
+  return { ok: true, command: "撤回", dryRun: args.dryRun, release: batch.release, commit: entry.base, queue: entry, pushed: false,
+    lines: [`${args.dryRun ? "可撤回（未写入）" : "已撤回"}：${batch.name}；${batch.release} → ${entry.base}；未推送`] };
+}
+
+async function cmdMerge(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch) throw new LoopError("用法：loop 合入 <批次.json> [--dry-run] [--json]");
+  const repo = repoOf(process.cwd());
+  const batch = loadBatch(repo, args.batch);
+  if (registeredQueueBatch(repo.root, batch.path)) return cmdQueuedMerge(repo, batch, args);
+  const branches = [...new Set([...batch.stages.keys()].map((stage) => branchOfStage(batch, stage)).filter((branch): branch is string => Boolean(branch)))];
+  if (!branches.length) throw new LoopError("批次.json 没有指定分支，无法合入");
+  checkNoExistingMerge(repo);
+  const dirty = checkRuntime(repo);
+  const stageNames = (branch: string): string[] =>
+    [...batch.stages.entries()].filter(([, value]) => value.branch === branch).map(([name]) => name);
+
+  // 先算批次分支相对发布分支改了哪些文件，和运行版未提交文件求交集；有交集就不动任何分支。
+  const changed = new Map<string, string[]>();
+  for (const branch of branches) {
+    checkBranchName(branch);
+    if (branch === repo.layout.release) throw new LoopError(`批次分支不能就是发布分支：${branch}`);
+    if (!branchExists(repo.root, branch)) throw new LoopError(`批次分支不存在：${branch}`, { branch });
+    const diff = gitResult(repo.root, ["diff", "--name-only", "-z", "--no-renames", `${repo.layout.release}...${branch}`]);
+    if (diff.status !== 0) {
+      throw new LoopError(`无法读取分支 ${branch} 相对 ${repo.layout.release} 的改动：${(diff.stderr || diff.stdout).trim().slice(-300)}`, { branch });
+    }
+    const paths = diff.stdout.split("\0").filter(Boolean);
+    const holder = worktreeForBranch(repo.root, branch);
+    if (holder && resolve(holder.path) !== resolve(repo.root)) paths.push(...autoCommitPaths(holder.path));
+    changed.set(branch, paths);
+  }
+  const dirtyPaths = new Set(dirty.map((change) => change.path));
+  const overlap = [...new Set([...changed.values()].flat().filter((path) => dirtyPaths.has(path)))].sort();
+  if (overlap.length) {
+    throw new LoopError(`运行版未提交改动与本次合并碰到同一个文件，未合入：${overlap.join("、")}`, { files: overlap, branches });
+  }
+  const uncommitted = [...dirtyPaths].sort();
+
+  const staged: CommitResult[] = [];
+  for (const branch of branches) {
+    const holder = worktreeForBranch(repo.root, branch);
+    if (!holder || resolve(holder.path) === repo.root) continue;
+    if (isClean(holder.path)) continue;
+    if (args.dryRun) {
+      staged.push({ committed: false, branch, reason: "有未提交改动，dry-run 未提交" });
+      continue;
+    }
+    staged.push(commitAll(holder.path, branch, batch.plan.name, stageNames(branch).join("、") || "合入前"));
+  }
+  const original = gitText(repo.root, ["rev-parse", "HEAD"]);
+  const stash = args.dryRun ? undefined : stashProjectChanges(repo, dirty);
+  const merges: Record<string, unknown>[] = [];
+  let failure: unknown;
+  try {
+    for (const branch of branches) {
+      if (args.dryRun) {
+        merges.push({ branch, action: "将合并", commit: undefined });
+        continue;
+      }
+      const merge = gitResult(repo.root, ["merge", "--no-ff", branch, "-m", stageCommitMessage(branch, batch.plan.name, stageNames(branch).join("、") || "合入发布分支")]);
+      if (merge.status !== 0) {
+        const conflicts = gitResult(repo.root, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
+        gitResult(repo.root, ["merge", "--abort"]);
+        let head = gitText(repo.root, ["rev-parse", "HEAD"]);
+        let mergeHead = gitResult(repo.root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status === 0;
+        if (head !== original || mergeHead) {
+          // 用 --keep 退回本次命令产生的合并结果；运行版里无关的未提交改动必须在恢复 stash 后原样保留。
+          const reset = gitResult(repo.root, ["reset", "--keep", original]);
+          head = gitText(repo.root, ["rev-parse", "HEAD"]);
+          mergeHead = gitResult(repo.root, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status === 0;
+          if (reset.status !== 0 || head !== original || mergeHead) {
+            const status = gitText(repo.root, ["status", "--porcelain"]);
+            throw new LoopError(`合并 ${branch} 有冲突，已中止，但无法在不丢未提交改动的前提下退回 ${original}；当前提交 ${head}；未继续强制重置；项目根状态：${status || "（干净）"}`,
+              { branch, conflicts, original, head, status, rollbackFailed: true });
+          }
+        }
+        throw new LoopError(`合并 ${branch} 有冲突，已中止并恢复原状：${conflicts.join("、") || "（未列出冲突文件）"}`,
+          { branch, conflicts, original });
+      }
+      merges.push({ branch, action: "已合并", commit: gitText(repo.root, ["rev-parse", "HEAD"]) });
+    }
+  } catch (error) {
+    failure = error;
+  }
+  if (stash) {
+    try { restoreProjectStash(repo, stash); } catch (error) {
+      const previous = failure instanceof Error ? `；本次合入错误：${failure.message}` : "";
+      throw new LoopError(`${(error as Error).message}${previous}`,
+        { ...(error instanceof LoopError ? error.data : {}), ...(failure instanceof LoopError ? failure.data : {}), rollbackFailed: true });
+    }
+  }
+  if (failure) throw failure;
+  const uncommittedLine = uncommitted.length ? `未提交，不在本批合并范围：${uncommitted.join("、")}` : "运行版没有未提交改动";
+  const lines = args.dryRun
+    ? [`将提交：${staged.length ? staged.map((item) => item.branch).join("、") : "（没有未提交改动）"}`,
+       `将合入 ${repo.layout.release}：${branches.join("、")}；不推送`, uncommittedLine]
+    : [`已合入 ${repo.layout.release}：${merges.map((item) => item.branch).join("、")}`,
+       `提交：${staged.filter((item) => item.committed).map((item) => item.branch).join("、") || "（没有）"}；未推送`, uncommittedLine];
+  return { ok: true, command: "合入", dryRun: args.dryRun, release: repo.layout.release, branches,
+    uncommitted, commits: staged, merges, pushed: false, lines };
+}
+
+export function cmdCleanup(args: ParsedArgs): Record<string, unknown> {
+  const cleanup = cleanupMaterialHistory({ apply: args.apply });
+  const lines = [args.apply ? "按登记瘦身已完成会话（只处理运行材料）" : "预览：不删除、不改写任何文件；加 --apply 才执行",
+    ...cleanup.paths.map((path) => `${args.apply ? "已删除" : "将删除"}：${path}`),
+    ...cleanup.retained.map((item) => `保留：${item.path}（${item.kind}，不参与清理）`),
+    materialCleanupLine(cleanup), ...materialCleanupNotes(cleanup),
+    `完成会话 ${cleanup.sessions.filter((session) => session.phase === "done").length} 个；跳过未完成会话 ${cleanup.sessions.filter((session) => session.phase !== "done").length} 个`];
+  return { ok: cleanup.failures.length === 0, command: "清理", dryRun: !args.apply, ...cleanup, lines };
+}
+
+export function cmdMiss(args: ParsedArgs): Record<string, unknown> {
+  if (!args.batch || args.rest.length !== 3 || args.recheck || args.launcher) {
+    throw new LoopError('用法：loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]');
+  }
+  const result = registerMiss({ project: args.batch, session: args.rest[0], defect: args.rest[1], discovery: args.rest[2], round: args.round, dryRun: args.dryRun });
+  return { ok: true, command: "漏网", dryRun: args.dryRun, ...result,
+    lines: [args.dryRun ? `预览（未写入）：${result.ledger}` : `已追加漏网记录：${result.ledger}`,
+      `${args.dryRun ? "将生成" : "已生成"}案例草稿：${result.draftPath}`, `轮次：${result.draft.round}；${result.draft.replayReason}`,
+      "未修改原会话状态和总结；未重新评审；草稿须核对后再收入 eval/cases/"] };
+}
+
+export function cmdExperience(args: ParsedArgs): Record<string, unknown> {
+  const action = args.batch, project = args.rest[0], value = args.rest[1];
+  if (!action || !["列出", "导入", "批准", "拒绝"].includes(action) || !project || args.rest.length > 2
+    || (action === "列出" ? value !== undefined : !value) || args.recheck || args.launcher) {
+    throw new LoopError("用法：loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]");
+  }
+  const root = findProjectRoot(resolve(project));
+  if (!root) throw new LoopError(`项目目录及上级没有 .autoreview.json：${project}`);
+  const candidates = action === "列出" ? readExperienceStore(root).candidates.filter((item) => item.status === "pending")
+    : action === "导入" ? importExperience(root, resolve(value!), args.dryRun)
+    : action === "批准" ? approveExperience(root, value!, args.dryRun) : rejectExperience(root, value!, args.dryRun);
+  const label = args.dryRun ? `预览${action}（未写入）` : action;
+  const lines = [`${label}：${root}；${candidates.length} 条`, ...candidates.map((item) =>
+    `${compactExperience(item)}\n出现次数：${candidateCount(item)} 个不同开发会话；状态：${item.status}${item.approvedId ? `；写入 ${item.approvedId}` : ""}\n${[...item.metadata, ...item.evidence.map((line) => `证据：${line}`)].join("\n")}`)];
+  if (action === "批准" && !args.dryRun) lines.push(`已写入：${experienceFile(root)}；未提交、未推送`);
+  return { ok: true, command: "经验", action, project: root, dryRun: args.dryRun, candidates, lines };
+}
+
+function cmdPush(args: ParsedArgs): Record<string, unknown> {
+  if (!args.batch || args.rest.length) throw new LoopError("用法：loop 推送 <批次.json> [--dry-run] [--json]");
+  const file = resolve(args.batch);
+  const location = gitResult(dirname(file), ["rev-parse", "--show-toplevel"]);
+  const repo = repoOf(location.status === 0 ? dirname(file) : process.cwd());
+  const batch = registeredQueueBatch(repo.root, file);
+  if (!batch) throw new LoopError("本批未用 loop 开工登记，不能推送");
+  const commits = pushQueueBatch(repo.root, batch, args.dryRun);
+  return { ok: true, command: "推送", dryRun: args.dryRun, remote: "origin", branch: commits[0]?.branch ?? null, commits, pushed: args.dryRun ? null : commits[0]?.commit ?? null,
+    lines: commits.map((item) => `${args.dryRun ? "将推送" : "已推送"} ${item.branch} ${item.commit} → origin；不推 release，不强推`) };
+}
+
+async function cmdPA(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (!args.batch || !args.id || args.rest.length || args.launcher || args.recheck || (args.command === "送话" && (!args.stage || !args.textFile))) throw new LoopError("用法：loop 送话 <批次.json> --stage <段> --id <编号> --text-file <文件|-> [--wait 秒] --json；loop 续跑 <批次.json> --id <编号> [--grant-file <文件|->] --json");
+  const info = paInfo(resolve(args.batch));
+  const input = (file: string) => () => readFileSync(file === "-" ? 0 : resolve(file), "utf8");
+  return args.command === "送话"
+    ? sendWords({ info, stage: args.stage!, id: args.id, readText: input(args.textFile!), wait: args.wait, dryRun: args.dryRun })
+    : resumeBatch({ info, id: args.id, readGrant: args.grantFile ? input(args.grantFile) : undefined, dryRun: args.dryRun });
+}
+
+async function cmdReview(args: ParsedArgs): Promise<Record<string, unknown>> {
+  if (args.batch || args.rest.length || !args.base || !args.head || args.recheck || args.launcher) throw new LoopError("用法：loop 评审 --base <提交或分支> --head <提交或分支> [--requirement 文件] [--criteria 文件] [--note 文件] [--json]");
+  return runReviewOnly({ repo: process.cwd(), base: args.base, head: args.head,
+    ...(args.requirement ? { requirement: resolve(args.requirement) } : {}), ...(args.criteria ? { criteria: resolve(args.criteria) } : {}), ...(args.note ? { note: resolve(args.note) } : {}) }, { dryRun: args.dryRun });
+}
+
+/** PA 执行命令无论在哪一步失败，都返回同一外壳及固定字段。 */
+function executionResult(command: string | undefined, result: Record<string, unknown>, args?: ParsedArgs): Record<string, unknown> {
+  if (!["推送", "合入", "停止"].includes(command ?? "")) return result;
+  let release: string | null = null, queueStatus: string | null = null, branch: string | null = null;
+  try {
+    const repo = repoOf(process.cwd()); release = repo.layout.release;
+    const batch = args?.batch ? registeredQueueBatch(repo.root, resolve(args.batch)) : undefined;
+    if (batch) {
+      release = batch.release; branch = batch.commits?.[0]?.branch ?? batch.stages[0]?.branch ?? null;
+      queueStatus = readMergeQueue(repo.root)?.entries.filter((entry) => entry.batch === batch.id).at(-1)?.status ?? null;
+    }
+  } catch { /* 未核对到的字段显式 null，不猜提交。 */ }
+  const reason = result.reason ?? eventReason(result.ok === false ? String(result.error ?? result.stderr ?? "执行失败") : "");
+  return { v: 1, action: command, ...result, reason,
+    ...(command === "合入" ? { release: result.release ?? release, merged: result.ok === true && !result.dryRun ? result.commit ?? (result.merges as any[])?.at(-1)?.commit ?? null : null, queueStatus: (result.queue as QueueEntry)?.status ?? queueStatus } : {}),
+    ...(command === "推送" ? { branch: result.branch ?? branch, remote: "origin", pushed: typeof result.pushed === "string" ? result.pushed : null } : {}) };
+}
+
+const USAGE = `用法：
+  bin/loop 接入 <项目目录> [--yes] [--dry-run]
+  bin/loop 开发 <pi|claude|codex> [开发参数…]
+  loop 评审 --base <提交或分支> --head <提交或分支> [--requirement 文件] [--criteria 文件] [--note 文件] [--json]
+  loop 停止 <批次.json> [--stage <段>] [--dry-run] --json
+  loop 开工 <批次.json> [--dry-run] [--json] [--recheck]
+  loop 启动 <批次.json> [--dry-run] [--json] [--launcher terminal|background]
+  loop 状态 [<批次.json>] [--dry-run] [--json]
+  loop 查询 [<批次.json> | --all] --json
+  loop 送话 <批次.json> --stage <段> --id <编号> --text-file <文件|-> [--wait 秒] --json
+  loop 续跑 <批次.json> --id <编号> [--grant-file <文件|->] --json
+  loop 推送 <批次.json> [--dry-run] [--json]
+  loop 合入 <批次.json> [--dry-run] [--json]
+  loop 撤回 <批次.json> [--dry-run] [--json]
+  loop 清理 [--apply | --dry-run] [--json]
+  loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]
+  loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
+
+async function main(): Promise<number> {
+  const argv = process.argv.slice(2);
+  let args: ParsedArgs;
+  try { args = parseArgs(argv); } catch (error) {
+    const json = argv.includes("--json"), dryRun = argv.includes("--dry-run");
+    const result = executionResult(argv[0], { ok: false, command: argv[0], dryRun, error: (error as Error).message });
+    if (json) console.log(JSON.stringify(result, null, 2)); else console.error(`loop: ${(error as Error).message}\n${USAGE}`);
+    return 2;
+  }
+  if (!args.command || ["-h", "--help", "帮助"].includes(args.command)) {
+    console.error(USAGE);
+    if (args.json) console.log(JSON.stringify({ ok: false, command: args.command ?? null, dryRun: args.dryRun, error: "缺子命令" }, null, 2));
+    return 2;
+  }
+  try {
+    let result: Record<string, unknown>;
+    if (args.command === "评审") result = await cmdReview(args);
+    else if (args.command === "停止") {
+      if (!args.batch || args.rest.length || args.recheck || args.launcher) throw new LoopError("用法：loop 停止 <批次.json> [--stage <段>] --json");
+      parseRecipe(readBatch(resolve(args.batch)).recipe);
+      result = await stopBatch(resolve(args.batch), { stage: args.stage, dryRun: args.dryRun });
+    }
+    else if (args.command === "开工") result = await cmdOpen(args);
+    else if (args.command === "启动") result = await cmdStart(args);
+    else if (args.command === "状态") result = await cmdStatus(args);
+    else if (args.command === "查询") result = queryBatches(args.batch);
+    else if (args.command === "送话") result = await cmdPA(args);
+    else if (args.command === "续跑") result = await cmdPA(args);
+    else if (args.command === "推送") result = cmdPush(args);
+    else if (args.command === "合入") result = await cmdMerge(args);
+    else if (args.command === "撤回") result = await cmdWithdraw(args);
+    else if (args.command === "清理") result = cmdCleanup(args);
+    else if (args.command === "漏网") result = cmdMiss(args);
+    else if (args.command === "经验") result = cmdExperience(args);
+    else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
+    result = executionResult(args.command, result, args);
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      const lines = Array.isArray(result.lines) ? result.lines as string[] : [];
+      console.log(lines.length ? lines.join("\n") : JSON.stringify(result, null, 2));
+    }
+    return (args.command === "评审" || result.recipe === "review-only") && typeof result.exitCode === "number" ? result.exitCode : result.ok === false ? 1 : 0;
+  } catch (error) {
+    const data = error instanceof LoopError ? error.data : {};
+    const result = executionResult(args.command, { ok: false, command: args.command, dryRun: args.dryRun, error: (error as Error).message, ...data }, args);
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else console.error(`loop: ${(error as Error).message}`);
+    return error instanceof PlanError ? 3 : args.command === "评审" ? 2 : 1;
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().then((code) => { process.exitCode = code; });
+}

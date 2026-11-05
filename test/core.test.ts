@@ -253,7 +253,8 @@ test("T10b Ponytail 未加载只在完成总结开头提醒一次，不改变其
   const ledger = { path: "/tmp/交付记录.md", pending: [{ id: "A1", kind: "部分验证" as const }] };
   const missing = renderSummary(summaryInput({ status: "完成", ponytailMissing: true, ledger }));
   assert.match(missing, /^# 自动评审总结\n未加载 Ponytail（开发角色要求加载）\n- 已登记到交付总表：/);
-  assert.match(missing, /^- 已登记到交付总表：\/tmp\/交付记录\.md；待回写原单（A1 部分验证）$/m);
+  assert.match(missing, /^- 已登记到交付总表：\/tmp\/交付记录\.md（A1 部分验证）$/m);
+  assert.doesNotMatch(missing, /待回写原单/);
 
   const loaded = renderSummary(summaryInput({ status: "完成", ledger }));
   assert.equal(missing.replace("未加载 Ponytail（开发角色要求加载）\n", ""), loaded);

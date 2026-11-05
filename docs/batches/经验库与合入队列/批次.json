@@ -1,0 +1,20 @@
+{
+  "name": "开发测试闭环-2b与批4",
+  "branch": "feat/lessons-merge-queue",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
+  "stages": {
+    "经验库": {
+      "prompt": "../../prompt/提示词-项目经验库.md",
+      "cwd": "/Users/Admin/Desktop/loop-batches/经验库与合入队列"
+    },
+    "合入队列": {
+      "prompt": "../../prompt/提示词-合入队列.md",
+      "cwd": "/Users/Admin/Desktop/loop-batches/经验库与合入队列"
+    },
+    "可回放": {
+      "prompt": "../../prompt/提示词-可回放与漏网登记.md",
+      "cwd": "/Users/Admin/Desktop/loop-batches/经验库与合入队列"
+    }
+  },
+  "steps": [["经验库"], ["合入队列"], ["可回放"]]
+}

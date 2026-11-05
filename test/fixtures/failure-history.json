@@ -1,0 +1,54 @@
+{
+  "note": "只读选自 ~/.pi-autoreview 历史门禁日志和验收 result.json。项目、会话、账号及临时路径已替换；只保留分类所需片段。sourceSha256 是脱敏前原文件校验值。历史自报分类不作为当前期望；尤其旧 G1 的 143 必须判为被关掉，不能复用旧的产品失败标签。",
+  "samples": [
+    {
+      "category": "product",
+      "source": "~/.pi-autoreview/<project-a>/gate-<session-a>-r1.log:5-19",
+      "sourceSha256": "f5db9f65d49e2fb63dc3181cce549392dc9cadef68ba8e995901a7cf623e146d",
+      "type": "command",
+      "code": 1,
+      "output": "新增失败：test_alpha_upstream.AlphaUpstreamTests.test_A10_collection_has_program_owned_static_and_review_lifecycle\nFAIL: test_A10_collection_has_program_owned_static_and_review_lifecycle\nAssertionError: 30 != 29\nFAILED (failures=1)",
+      "expected": "product"
+    },
+    {
+      "category": "environment",
+      "source": "~/.pi-autoreview/<project-b>/gate-<session-b>-r5.log:14-33,111",
+      "sourceSha256": "4f984e0f16eb19f92783449e701416dd03dd52cd4cf5eafb77029f2d85964941",
+      "type": "command",
+      "code": 1,
+      "output": "新增失败：test_control_installation.InstalledControlTests.test_workbuddy_copied_inline_missing_state_zero_budget_and_cancel\nOSError: [Errno 28] No space left on device: '/tmp/<run>/control-stdin-<id>.json'\nFAILED (errors=1)\nFileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp/<run>']",
+      "expected": "environment"
+    },
+    {
+      "category": "method",
+      "source": "~/.pi-autoreview/<project-c>/gate-<session-c>-r4.log:2-4",
+      "sourceSha256": "575fcf39d04eb07bcbe48f21b7a14cd9114d2dd21bd595881067e9523ecc6a8d",
+      "type": "command",
+      "code": 78,
+      "output": "AUTOREVIEW_FAILURE=method 修改越出本批前端范围：.autoreview.json, deploy/acceptance/GUIDE.md, deploy/acceptance/browser-adapter.mjs, deploy/acceptance/environment.mjs, deploy/acceptance/prepare.py",
+      "expected": "method"
+    },
+    {
+      "category": "tester-disconnected",
+      "source": "~/.pi-autoreview/<project-d>/acceptance/<session-d>/r3/result.json:items[0].detail,reason",
+      "sourceSha256": "3eb3b026d3580035b8ab577c00ccf73df98d99e18e7cdd0eb808b66fce5ddff6",
+      "type": "tester",
+      "code": 1,
+      "interrupted": true,
+      "output": "Warning: No project session found with id 'autoreview-acc-<session-d>'; creating a new session with that id.",
+      "detail": "原因：第 1 次验收超时或被终止（退出码 1）",
+      "expected": "environment"
+    },
+    {
+      "category": "system-stopped",
+      "source": "~/.pi-autoreview/<project-e>/acceptance/<session-e>/r1/result.json:items[0].detail,extra[0]",
+      "sourceSha256": "17c504ff3443605c4925140688a379a3a68fc7f3455996b7dc410c463c6f45bb",
+      "type": "system",
+      "exit": { "code": 143, "signal": null },
+      "logErrors": [],
+      "detail": "系统在验收过程中退出了（退出码 143）\n系统输出最后几行：\nINFO Request operation, method=GET, uri=/api/requirements/<id>/status-note, status=403",
+      "extra": "为按要求重新实测，按操作说明用 sh deploy/acceptance/start.sh 重启服务",
+      "expected": "被关掉"
+    }
+  ]
+}

@@ -23,6 +23,7 @@ if (stateDir) {
   count += 1;
   writeFileSync(countFile, String(count));
   writeFileSync(join(stateDir, "reviewer.pid"), String(process.pid));
+  writeFileSync(join(stateDir, "reviewer.cwd"), process.cwd());
 }
 
 if (mode === "fail") {
@@ -38,6 +39,25 @@ if (Number.isFinite(sleepSeconds) && sleepSeconds > 0) {
 
 if (mode === "modify") {
   writeFileSync(join(process.cwd(), "reviewer-touched.txt"), "评审不该改文件\n");
+}
+
+if (mode === "report") {
+  process.stdout.write(`## 结论：需返修
+## 必修
+1. 位置：file.txt:1
+   问题：候选接受了空输入
+   触发条件：传入空字符串
+   后果：返回成功但数据丢失，不能延期
+   建议：拒绝空输入
+## 小问题
+- 补充命令说明
+- 改善报错文案
+## 需求疑问
+- 无
+## 上轮必修复查
+- 无
+`);
+  process.exit(0);
 }
 
 const fixCounts = (process.env.FAKE_FIX_COUNTS ?? "")
