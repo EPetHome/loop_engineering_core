@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { probeAcceptanceReset } from "./acceptance.ts";
-import { findProjectRoot, resolveProjectConfig } from "./config.ts";
+import { isCriteriaHeading } from "./acceptance-core.ts";
+import { MARKER_FILE, findProjectRoot, resolveProjectConfig, workflowSteps } from "./config.ts";
 import { parseReview } from "./core.ts";
 import { createGitEvidence } from "./git.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
@@ -11,6 +12,25 @@ import { methodEnv } from "./method-env.ts";
 import type { Check, Plan } from "./pipeline.ts";
 import { defaultCallReviewer, newReviewState } from "./review.ts";
 import { changedSince, missingSyncScope, outOfScope } from "./scope.ts";
+
+/** 流程和配置必须一致；只读检查，早于任何开发空间或会话副作用。 */
+export function checkStageWorkflow(stage: import("./pipeline.ts").StagePlan, config: ReturnType<typeof resolveProjectConfig>): Check[] {
+  const workflow = stage.workflow ?? "with-acceptance";
+  const basis = stage.workflowExplicit ? `批次 stages.${stage.name}.workflow 明确指定 ${workflow}` : `批次 stages.${stage.name}.workflow 未写，默认带验收`;
+  const checks: Check[] = [{ name: `${stage.name} 的流程`, ok: true, detail: `${workflowSteps(workflow)}；依据：${basis}` }];
+  if (!config.gate) checks.push({ name: `${stage.name} 的门禁配置`, ok: false,
+    detail: `缺少项目门禁。请在项目 .autoreview.json 配置 gate，例如 {"gate":{"cmd":"项目实际测试命令","timeoutMin":10}}；两条流程都必须执行测试。` });
+  if (workflow === "with-acceptance" && !config.acceptance) checks.push({ name: `${stage.name} 的验收配置`, ok: false,
+    detail: `带验收流程缺少验收配置。请在项目 .autoreview.json 配置 acceptance（命令行项目可用 {}），或在 stages.${stage.name}.acceptance 配置本段验收；如果任务确实不带验收，由协作者明确设置 workflow:"without-acceptance"。` });
+  if (workflow === "without-acceptance" && stage.prompt) {
+    try {
+      const prompt = readFileSync(stage.prompt, "utf8");
+      if (prompt.split(/\r?\n/).some(isCriteriaHeading)) checks.push({ name: `${stage.name} 的流程与验收标准`, ok: false,
+        detail: `流程和验收标准对不上：workflow:"without-acceptance"，但提示词 ${stage.prompt} 写了「## 验收标准」。请由协作者改为带验收流程并补齐配置，或确认任务不带验收后修正提示词。` });
+    } catch (error) { checks.push({ name: `${stage.name} 的提示词`, ok: false, detail: `无法核对流程：${String(error)}；请补齐提示词。` }); }
+  }
+  return checks;
+}
 
 /** 写完配置即可调用；不建目录、不运行命令或模型。 */
 export function checkBatchConfiguration(plan: Plan, fallbackRoot: string, options: { localFileCopies?: readonly { source: string; target: string }[] } = {}): Check[] {
@@ -33,8 +53,15 @@ export function checkBatchConfiguration(plan: Plan, fallbackRoot: string, option
     }
   };
   for (const stage of plan.stages.values()) {
-    const root = existsSync(stage.cwd) ? findProjectRoot(stage.cwd) : fallbackRoot;
+    const pendingMarker = options.localFileCopies?.some((copy) => {
+      const rel = relative(resolve(copy.target, ".."), stage.cwd);
+      return copy.target.endsWith(`/${MARKER_FILE}`) && !existsSync(copy.target) && !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../");
+    });
+    // 只有尚未建立的工作区或已计划复制配置的本仓库 worktree 可借运行版核对。
+    // 已存在的外部项目不能借用运行版门禁冒充自己已有配置。
+    const root = findProjectRoot(stage.cwd) ?? (!existsSync(stage.cwd) || pendingMarker ? findProjectRoot(fallbackRoot) : undefined);
     const config = resolveProjectConfig(root, stage.configOverrides);
+    checks.push(...checkStageWorkflow(stage, config));
     const missing = stage.scope ? missingSyncScope(root ?? stage.cwd, stage.scope) : [];
     checks.push({ name: `${stage.name} 的同步范围核对`, ok: !missing.length,
       detail: missing.length ? missing.map((item) => `${item.source} 声明「${item.rule}」；范围缺少：${item.missing.join("、")}。请把这些具体文件或覆盖它们的目录加入 stages.${stage.name}.scope.allow，并移除相应 deny。`).join("\n")

@@ -18,7 +18,7 @@ function fixture(t: test.TestContext): string {
   return dir;
 }
 
-test("返修1：续跑答复在写入时绑定标准，首次使用前新增授权项也不得扩权", (t) => {
+test("PA授权／续跑答复在写入时绑定标准，首次使用前新增授权项也不得扩权", (t) => {
   const dir = fixture(t), original = criteria(), reply = bindPAGrant(dir, row("original"), original, SOURCE);
   assert.equal(reply.criteriaHash, paCriteriaHash(original, SOURCE)); assert.ok(reply.criteriaEpoch);
   save(dir, [reply]);
@@ -31,7 +31,7 @@ test("返修1：续跑答复在写入时绑定标准，首次使用前新增授�
   assert.deepEqual(readPAGrants(dir).map((item) => item.id), ["original", "fresh"], "失效编号仍完整保留供查询对账");
 });
 
-test("返修1：新增条目、同编号内容、版本、段归属变化均使历史 PA 授权失效", async (t) => {
+test("PA授权／新增条目、同编号内容、版本、段归属变化均使历史 PA 授权失效", async (t) => {
   const root = fixture(t);
   const cases = [
     { name: "新增授权条目", source: SOURCE + "A4. [授权] 操作：真实扣费\n", version: 1, pending: ["A3", "A4"] },
@@ -50,7 +50,7 @@ test("返修1：新增条目、同编号内容、版本、段归属变化均使�
   });
 });
 
-test("返修1/A9：直接写入的原文首读冻结；跨进程、标准变化及同编号篡改不重新解释", (t) => {
+test("PA授权／直接写入：直接写入的原文首读冻结；跨进程、标准变化及同编号篡改不重新解释", (t) => {
   const dir = fixture(t), original = criteria(), direct = row("direct-all"); save(dir, [direct]);
   assert.deepEqual(mergePAGrants(dir, SOURCE, original).grants!.approved, ["A3"]);
   const frozen = readFileSync(join(dir, "grants.pa.bindings.json"), "utf8");
@@ -69,7 +69,7 @@ test("返修1/A9：直接写入的原文首读冻结；跨进程、标准变化�
   assert.deepEqual(mergePAGrants(dir, source, current).used, [], "同一 PA 编号不能改原文后重新绑定");
 });
 
-test("返修1：未读取的旧直接授权不能因新答复建立新标准代次而混入授权", (t) => {
+test("PA授权／未读取的旧直接授权不能因新答复建立新标准代次而混入授权", (t) => {
   const dir = fixture(t), original = criteria(); mergePAGrants(dir, SOURCE, original);
   const legacy = row("old-direct"); save(dir, [legacy]);
   const source = SOURCE + "A4. [授权] 操作：真实扣费\n", current = criteria(source);

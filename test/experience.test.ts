@@ -1,5 +1,6 @@
 /** 项目经验验收：所有项目、本机数据与模型替身都在系统临时目录。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -122,7 +123,7 @@ test("A6 批准与活动会话互斥；拒绝与 dry-run 不写项目，成功�
     assert.equal(readExperienceStore(f.project).candidates[0].status, "approved");
   } finally { f.close(); }
 });
-test("返修 2.1：同名旧项目完成并删除后，新项目仍可批准及按启动身份退出收尾，历史原样保留", async (t) => {
+test("经验身份／同名旧项目完成并删除后，新项目仍可批准及按启动身份退出收尾，历史原样保留", async (t) => {
   for (const persistentId of [false, true]) await t.test(persistentId ? "持久身份记录" : "旧版无身份记录", () => {
     const f = fixture();
     try {
@@ -156,7 +157,7 @@ test("返修 2.1：同名旧项目完成并删除后，新项目仍可批准及�
   });
 });
 
-test("返修 2.1：项目身份不依赖已删除的别名；目标身份和旧活动无法确认时仍拒绝批准", () => {
+test("经验身份／项目身份不依赖已删除的别名；目标身份和旧活动无法确认时仍拒绝批准", () => {
   const f = fixture();
   try {
     f.import();
@@ -240,9 +241,9 @@ test("A5 CLI 列出、批准、拒绝、预览，且不要求项目是 Git 仓�
   } finally { f.close(); }
 });
 
-test("A7 首批现成草稿只读导入，临时项目全部批准后正好 20 条", (t) => {
-  const source = process.env.AUTOREVIEW_EXPERIENCE_SEED;
-  if (!source) { t.skip("显式设置 AUTOREVIEW_EXPERIENCE_SEED 才读取机外首批草稿"); return; }
+test("经验导入／现成草稿只读导入，临时项目全部批准后正好20条", () => {
+  // 内置既有草稿的脱敏副本，门禁不再因机外路径缺省而跳过；仍可显式核对外部原件。
+  const source = process.env.AUTOREVIEW_EXPERIENCE_SEED ?? fileURLToPath(new URL("./fixtures/experience-seed.md", import.meta.url));
   const f = fixture();
   try {
     const original = readFileSync(source, "utf8");

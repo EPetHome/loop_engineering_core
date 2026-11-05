@@ -10,6 +10,7 @@
  *       FAKE_ACC_UNKNOWN=A3（这些条目报「无法验证」，原因是标准含糊）
  *       FAKE_ACC_FAIL=A2,A3（这些条目报「不通过」，证据照样留）
  *       FAKE_ACC_FAIL_ONCE=A2（只在第 1 次调用时报「不通过」，之后通过；需要 FAKE_STATE_DIR 计数）
+ *       FAKE_ACC_RESULTS=[{"fail":["A2"],"unknown":[]},{}]（按调用次序指定结果，需要 FAKE_STATE_DIR）
  *       FAKE_ACC_TOUCH=<文件绝对路径>（每次调用都往这个文件追加一行，模拟验收期间来源资料变化）
  *       FAKE_ACC_URL=<网址>（每条都用 node fetch 这个网址留证据；不设就 echo）
  *       FAKE_STATE_DIR=<目录>（记录调用次数与参数）
@@ -38,6 +39,12 @@ if (stateDir) {
   const countFile = join(stateDir, "acc-count");
   count = (existsSync(countFile) ? Number.parseInt(readFileSync(countFile, "utf8"), 10) || 0 : 0) + 1;
   writeFileSync(countFile, String(count));
+}
+
+const scheduled = JSON.parse(process.env.FAKE_ACC_RESULTS || "[]")[count - 1];
+if (scheduled) {
+  failIds.splice(0, failIds.length, ...(scheduled.fail ?? []));
+  unknownIds.splice(0, unknownIds.length, ...(scheduled.unknown ?? []));
 }
 
 if (mode === "garbage") {

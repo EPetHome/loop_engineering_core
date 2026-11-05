@@ -1,4 +1,5 @@
 /** 交付总表：结果索引、历史字节、追加与并发；所有产物只写 os.tmpdir()。 */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -29,7 +30,8 @@ test("A4/L1 新段只记录项目、任务、结果、总结与欠项；人工�
   });
   assert.equal(text, [
     "## 2026-10-19 03:12 · /project · 会话 01a15257", "- 任务：03三项必修",
-    "- 结果：完成（部分验证）；评审 3 次，返修 2 次", "- 总结：/state/01a15257.md",
+    "- 结果：完成（部分验证）；评审 3 次，返修 2 次", "- 门禁：没有记录；评审：没有记录；验收：没有记录",
+    "- 交付报告：/state/01a15257.md", "- 总结：/state/01a15257.md",
     "- [ ] A4 部分验证：标准写得含糊", "- [ ] A10 人工", "",
   ].join("\n"));
   assert.doesNotMatch(text, /已回写原单/);
@@ -39,7 +41,7 @@ test("A4/L1 新段只记录项目、任务、结果、总结与欠项；人工�
   assert.equal(resultLine(record(), 2, 1), "完成（部分验证）；评审 2 次，返修 1 次");
 });
 
-test("返修1：区分明确无验收欠项与历史未知，未知不能显示成全部通过", () => {
+test("交付总表／历史结论：区分明确无验收欠项与历史未知，未知不能显示成全部通过", () => {
   const explicit = { failed: [], partial: [], manual: [] };
   assert.deepEqual(pendingItems(undefined, explicit), []); assert.equal(resultLine(undefined, 2, 0, explicit), "完成；评审 2 次，返修 0 次");
   assert.deepEqual(pendingItems(undefined, null), [{ id: "验收结论", kind: "部分验证", reason: "历史队列缺少验收结论；免重复评审未补做验收" }]);
@@ -111,7 +113,7 @@ for (let i = 0; i < 40; i += 1) {
     const text = readFileSync(file, "utf8").trimEnd(), blocks = text.split("\n\n").filter(Boolean);
     assert.equal(blocks.length, 80);
     for (const block of blocks) {
-      assert.equal(block.split("\n").length, 4, block.slice(0, 80));
+      assert.equal(block.split("\n").length, 6, block.slice(0, 80));
       assert.ok(!/^## /m.test(block.split("\n").slice(1).join("\n")));
     }
     assert.equal((text.match(/会话 s1-/g) ?? []).length, 40); assert.equal((text.match(/会话 s2-/g) ?? []).length, 40);

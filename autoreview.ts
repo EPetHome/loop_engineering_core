@@ -1,5 +1,5 @@
 /**
- * pi 自动评审扩展：交付标记触发评审（配了门禁先跑门禁），必修回送原开发会话；评审完成后执行验收命令（如有配置）。
+ * pi 自动评审扩展：交付标记触发评审（无必修后再跑门禁），必修回送原开发会话；评审完成后执行验收命令（如有配置）。
  * 失败调用不推进成功检查点；git 取证失败或指纹变化只暂停；暂停后你再让开发方干活即恢复自动评审。
  * 加载：pi -e /Users/Admin/Desktop/loop/autoreview.ts
  */
@@ -20,11 +20,11 @@ import { developerQuestion, pauseAction, pauseText, preservePause } from "./bloc
 import { experienceInjection, experienceSession, experienceTodos } from "./experience.ts";
 import { finishExperience } from "./experience-draft.ts";
 import {
-  completionChecks, inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, queueAcceptance, readJson, stageFromEnv, statusPath, writeStageStatus,
+  completionChecks, completionTest, inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, queueAcceptance, readJson, stageFromEnv, statusPath, writeStageStatus,
   type InboxMessage, type StageEvent, type StageLink,
 } from "./pipeline-core.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
-import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "./merge-queue.ts";
+import { queueCommitNotice, queueCommitSummary, queueCommittedResult, queueStageEvent } from "./merge-queue.ts";
 import { classifyFailure, failureLabel, type FailureKind } from "./failure.ts";
 import { batchInfo, observeStage } from "./events.ts";
 import { consumeRelay } from "./pa.ts";
@@ -190,10 +190,11 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     try {
       const status = {
         sessionId: ctx.sessionManager.getSessionId(), host: "pi", pid: process.pid, processStarted: processStartTime(process.pid),
-        summary: summaryPath(ctx), event, configOverrides: captureProjectConfigOverrides(projectOverrides()), ...(event === "done" ? { readyEpoch: state.readyEpoch, candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
+        summary: summaryPath(ctx), event, configOverrides: captureProjectConfigOverrides(projectOverrides()), ...(event === "done" ? { readyEpoch: state.readyEpoch, candidate: state.lastSnapshotDetails, test: completionTest(state.rounds.at(-1)), checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
       };
       writeStageStatus(pipelineLink, status);
       queueStageEvent({ cwd: ctx.cwd, file: process.env.AUTOREVIEW_BATCH_FILE, stage: pipelineLink.stage, status });
+      if (event === "done") queueCommitSummary(ctx.cwd, summaryPath(ctx));
       return true;
     } catch (error) {
       if (event === "done") throw error;
@@ -239,14 +240,16 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     let newCommits: number | undefined;
     try { if (state.baseline) newCommits = await evidence(ctx, life, signal).commitsSince(state.baseline); } catch { checkLive(life, signal); }
     const devSessionId = ctx.sessionManager.getSessionId();
-    let acceptance: AcceptanceConfig | undefined;
-    try { acceptance = acceptanceConfig(ctx); } catch { acceptance = undefined; }
+    let summaryConfig: ReviewConfig | undefined;
+    try { summaryConfig = currentConfig(ctx); } catch { /* 暂停总结保留未知，不编造配置 */ }
+    const acceptance = summaryConfig?.acceptance;
     const todos = acceptanceTodos({
       acceptance, host: "pi", phase: state.phase, pauseHint: state.pauseHint,
       criteria: state.criteria, lastAcceptance: lastAcceptance(state),
     });
     if (status === "完成") todos.push(...experienceTodos(ctx.cwd, state.experienceDraft?.error));
     const text = renderSummary({
+      workflow: summaryConfig?.workflow, gateCommand: summaryConfig?.gate?.cmd, acceptanceConfigured: summaryConfig ? Boolean(acceptance) : undefined,
       cwd: ctx.cwd, devSessionId,
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
@@ -261,6 +264,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const file = summaryPath(ctx);
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, text);
+    if (state.phase === "done") queueCommitSummary(ctx.cwd, file);
   };
 
   /** 错误处理的副作用逐个隔离；任何一步失败都不能挡住后面的通知。 */
@@ -399,7 +403,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const record = {
       project: projectRootOf(ctx.cwd), session, task: taskTitle(state.requirement),
       result: resultLine(acceptance, state.rounds.length, state.repairs, state.queueReviewedAcceptance),
-      summary: summaryPath(ctx), pending, paRelays: state.paRelays,
+      summary: summaryPath(ctx), checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), pending, paRelays: state.paRelays,
     };
     let problem: string | undefined;
     try {
@@ -552,7 +556,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     try { updateStatus(ctx, life); } catch (error) { errors.push(`状态栏更新失败：${errorText(error)}`); }
     try { await rewriteSummary(ctx, life, signal); } catch (error) { errors.push(`总结写入失败：${errorText(error)}`); }
     if (!live(life, signal)) return;
-    const hint = record.result === "中断" ? "，输入 /accept 重新执行" : `，详情见 ${summaryPath(ctx)}`;
+    const hint = record.result === "中断" ? "，输入 /accept 重新执行" : `，${state.phase === "done" ? "交付报告" : "详情"}：${summaryPath(ctx)}`;
     const submission = state.phase === "done" ? queueCommitNotice(ctx.cwd) : "";
     await notifyUser(
       ctx, `${basename(ctx.cwd)}：验收命令${acceptRunLabel(record)}${hint}${errors.length ? `；${errors.join("；")}` : ""}${submission ? `\n${submission}` : ""}`,
@@ -772,7 +776,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       reportStage(ctx, state.phase === "done" ? "done" : "started");
       const submission = state.phase === "done" ? queueCommitNotice(ctx.cwd) : "";
       await notifyUser(
-        ctx, `${basename(cwd)}：${state.phase === "accepting" ? "评审通过，等待本段必需验收" : `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`}${acceptRun ? "，开始执行验收命令" : ""}${submission ? `\n${submission}` : ""}`,
+        ctx, `${basename(cwd)}：${state.phase === "accepting" ? "评审通过，等待本段必需验收" : `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`}${acceptRun ? "，开始执行验收命令" : ""}${state.phase === "done" ? `\n交付报告：${summaryPath(ctx)}` : ""}${submission ? `\n${submission}` : ""}`,
         "info", life, signal, outcome.hint,
       );
       if (acceptRun) await runAcceptCommand(ctx, task, acceptRun);

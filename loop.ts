@@ -3,16 +3,16 @@
  * loop.ts — bin/loop 的实现：开工、启动、状态、合入、清理。
  *
  * 所有子命令支持 --dry-run（只核对、只打印，不改文件或分支）和 --json（标准输出一个 JSON 对象）。
- * 只有显式「推送」操作 origin；合入/撤回仍只做本地操作。开发方不提交。
+ * 批次完成后自动推送批次分支；队列自动提交目标分支（main/master 除外），不推目标分支。开发方不提交。
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { remapBatchReferences } from "./batch-refs.ts";
-import { findProjectRoot, loadProjectLayout, resolveProjectConfig, workspacePath, type ProjectLayout } from "./config.ts";
+import { MARKER_FILE, findProjectRoot, loadProjectLayout, resolveProjectConfig, workspacePath, type ProjectLayout } from "./config.ts";
 import { approveExperience, candidateCount, compactExperience, experienceFile, importExperience, readExperienceStore, rejectExperience } from "./experience.ts";
 import { runMethodsSelfTest, type MethodsRunResult } from "./methods.ts";
 import { checkBatchConfiguration, rehearseBatch } from "./preflight.ts";
@@ -225,6 +225,10 @@ export function loadBatch(repo: Repo, path: string, options: { warn?: (message: 
   const localFileCopies = [...byPath.values()].flatMap((workspace) => repo.layout.localFiles.map((path) => ({
     source: resolve(repo.projectRoot, path), target: resolve(workspace.path, relative(repo.root, repo.projectRoot), path),
   })));
+  if (ignoredLocalMarker(repo)) for (const workspace of [...byPath.values(), ...checksByPath.values()]) {
+    const target = resolve(workspace.path, relative(repo.root, repo.projectRoot), MARKER_FILE);
+    if (!localFileCopies.some((copy) => copy.target === target)) localFileCopies.push({ source: join(repo.projectRoot, MARKER_FILE), target });
+  }
   return { raw, path: absolute, planDir, plan, ...(branch ? { branch } : {}), workspaces: [...byPath.values()], localFileCopies, checks: [...checksByPath.values()], stages };
 }
 
@@ -542,7 +546,14 @@ function checkTargetLocalPaths(repo: Repo, workspace: WorkspaceUse): void {
   const target = branchExists(repo.root, workspace.branch) ? workspace.branch : repo.layout.release;
   const listed = gitText(repo.root, ["ls-tree", "-r", "--name-only", "-z", target]).split("\0").filter(Boolean);
   const projectRel = relative(repo.root, repo.projectRoot);
-  for (const path of repo.layout.localFiles) {
+  const paths = new Set(repo.layout.localFiles);
+  const markerRel = relative(workspace.path, resolve(workspace.path, projectRel, MARKER_FILE));
+  if (workspace.registered && currentBranch(workspace.path) !== workspace.branch && lstatSafe(resolve(workspace.path, markerRel))) {
+    // 自动复制的配置不一定写在 localFiles；checkout 也不能覆盖工作区独有的未跟踪配置。
+    const tracked = gitResult(workspace.path, ["--literal-pathspecs", "ls-files", "--error-unmatch", "--", markerRel]);
+    if (tracked.status !== 0) paths.add(MARKER_FILE);
+  }
+  for (const path of paths) {
     const rel = relative(workspace.path, resolve(workspace.path, projectRel, path));
     if (!rel || rel.startsWith("..")) continue;
     if (listed.some((item) => item === rel || item.startsWith(`${rel}/`) || rel.startsWith(`${item}/`))) {
@@ -565,17 +576,34 @@ function checkLocalFilesTarget(repo: Repo, workspace: WorkspaceUse): void {
   }
 }
 
-function copyLocalFiles(repo: Repo, workspace: WorkspaceUse): string[] {
+function ignoredLocalMarker(repo: Repo): boolean {
+  const rel = relative(repo.root, join(repo.projectRoot, MARKER_FILE));
+  return existsSync(join(repo.projectRoot, MARKER_FILE))
+    && gitResult(repo.root, ["ls-files", "--error-unmatch", "--", rel]).status !== 0
+    && gitResult(repo.root, ["check-ignore", "-q", "--", rel]).status === 0;
+}
+
+function copyLocalFiles(repo: Repo, workspace: WorkspaceUse, notes: string[], localFiles = repo.layout.localFiles): string[] {
   const copied: string[] = [];
   const projectRel = relative(repo.root, repo.projectRoot);
-  for (const path of repo.layout.localFiles) {
+  const paths = [...new Set([...localFiles, ...(ignoredLocalMarker(repo) ? [MARKER_FILE] : [])])];
+  for (const path of paths) {
     const source = resolve(repo.projectRoot, path);
     const target = resolve(workspace.path, projectRel, path);
-    if (!existsSync(source) || existsSync(target)) continue;
+    if (lstatSafe(target)) {
+      if (path === MARKER_FILE) notes.push(`${target} 已有同名配置，不覆盖；本段按已有配置核对和运行`);
+      continue;
+    }
+    if (!existsSync(source)) continue;
+    const rel = relative(workspace.path, target);
+    ensureSafeParents(workspace.path, rel, false);
+    if (path === MARKER_FILE && gitResult(workspace.path, ["check-ignore", "-q", "--", rel]).status !== 0) {
+      throw new LoopError(`开发空间尚未忽略 ${target}；请把该相对路径加入仓库共用的 .git/info/exclude 后重新开工，避免本机配置被提交`);
+    }
     const info = lstatSync(source);
     mkdirSync(dirname(target), { recursive: true });
-    if (info.isDirectory()) cpSync(source, target, { recursive: true });
-    else copyFileSync(source, target);
+    if (info.isDirectory()) cpSync(source, target, { recursive: true, force: false, errorOnExist: true });
+    else copyFileSync(source, target, constants.COPYFILE_EXCL);
     copied.push(path);
   }
   return copied;
@@ -615,7 +643,8 @@ function batchEffectiveConfig(repo: Repo, batch: BatchPlan, args: ParsedArgs) {
     // 段的 Pi flag 高于入口传递的环境覆盖，与实际宿主的优先级相同。
     const overrides = { ...stage.configOverrides, reviewTimeoutMin: stage.configOverrides?.reviewTimeoutMin ?? args.reviewTimeoutMin };
     const runtime = resolveProjectConfig(root, overrides);
-    const config = existsSync(stage.cwd) ? resolveProjectConfig(findProjectRoot(stage.cwd), overrides) : runtime;
+    const stageRoot = existsSync(stage.cwd) ? findProjectRoot(stage.cwd) : undefined;
+    const config = stageRoot ? resolveProjectConfig(stageRoot, overrides) : runtime;
     stages[stage.name] = config.effectiveConfig;
   }
   const primary = Object.values(stages)[0] ?? resolveProjectConfig(root, { reviewTimeoutMin: args.reviewTimeoutMin }).effectiveConfig;
@@ -681,6 +710,8 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   const lines = [`运行版：${repo.root}（发布分支 ${repo.layout.release}）`];
   if (uncommitted.length) lines.push(`未提交，不在本批分支上：${uncommitted.join("、")}`);
   lines.push(`批次：${batch.plan.name}${batch.branch ? `，分支 ${batch.branch}` : ""}`);
+  const workflows = configurationChecks.filter((check) => check.name.endsWith(" 的流程"));
+  lines.push(...workflows.map((check) => `${check.name}：${check.detail}`));
   const warnings = scopeOverlapWarnings(repo.root, batch.plan.name, [...batch.plan.stages.values()]);
   lines.push(...warnings);
   const resultWorkspaces: Record<string, unknown>[] = [];
@@ -691,9 +722,24 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
       action = ensureWorktree(repo, workspace);
       checkLocalFilesTarget(repo, workspace);
     } else if (workspace.exists) checkLocalFilesTarget(repo, workspace);
-    const copied = args.dryRun ? [] : copyLocalFiles(repo, workspace);
+    const copyNotes: string[] = [];
+    const copied = args.dryRun ? [] : copyLocalFiles(repo, workspace, copyNotes);
+    if (args.dryRun && ignoredLocalMarker(repo)) {
+      const target = resolve(workspace.path, relative(repo.root, repo.projectRoot), MARKER_FILE);
+      copyNotes.push(lstatSafe(target) ? `${target} 已有同名配置，不覆盖` : `将复制被忽略的项目配置到 ${target}`);
+    }
+    lines.push(...copyNotes);
     lines.push(`开发空间：${workspace.name} → ${workspace.path}（${action}）；分支 ${workspace.branch}${copied.length ? `；已复制本机文件 ${copied.join("、")}` : ""}`);
     resultWorkspaces.push({ name: workspace.name, path: workspace.path, branch: workspace.branch, action, localFiles: copied });
+  }
+  // 显式 cwd 的本仓库 worktree 也要带上被忽略的项目配置；其他 localFiles 沿用旧行为。
+  for (const workspace of batch.checks) {
+    if (!ignoredLocalMarker(repo)) continue;
+    const notes: string[] = [];
+    const target = resolve(workspace.path, relative(repo.root, repo.projectRoot), MARKER_FILE);
+    if (args.dryRun) notes.push(lstatSafe(target) ? `${target} 已有同名配置，不覆盖` : `将复制被忽略的项目配置到 ${target}`);
+    else if (copyLocalFiles(repo, workspace, notes, []).includes(MARKER_FILE)) notes.push(`已复制本机配置：${target}`);
+    lines.push(...notes);
   }
   let docsCommit: BatchDocsCommit = { committed: false, files: [] };
   if (docs.files.length) {
@@ -712,6 +758,11 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
     lines.push("批次文档：没有需要搬的文件");
   }
   const rehearsalPlan = args.dryRun ? batch.plan : loadBatch(repo, docs.batchPath, { env: reviewEnv(args) }).plan;
+  if (!args.dryRun) {
+    const actualChecks = checkBatchConfiguration(rehearsalPlan, repo.projectRoot);
+    const failures = actualChecks.filter((check) => !check.ok);
+    if (failures.length) throw new LoopError(`开发空间配置核对失败，未派发开发方：\n${failures.map((check) => `${check.name}：${check.detail}`).join("\n")}`, { configurationChecks: actualChecks });
+  }
   const rehearsal = await rehearseBatch(rehearsalPlan, { dryRun: args.dryRun });
   const rehearsalLines = rehearsal.map((check) => `开工空跑 · ${check.name}：${check.ok ? "完成" : "失败"}；${check.detail}`);
   lines.push(...rehearsalLines);
@@ -744,7 +795,7 @@ async function cmdOpen(args: ParsedArgs): Promise<Record<string, unknown>> {
   lines.push(`启动：${start}`, `状态：${status}`, `合入：${merge}`);
   return { ok: true, command: "开工", dryRun: args.dryRun, effectiveConfig, repo: repo.root, release: repo.layout.release,
     batch: batch.plan.name, branch: batch.branch, workspaces: resultWorkspaces, localFiles: repo.layout.localFiles,
-    uncommitted, warnings, configurationChecks, rehearsal,
+    uncommitted, warnings, workflows, configurationChecks, rehearsal,
     batchDocs: { ...(docs.branch ? { branch: docs.branch } : {}), ...(docs.target ? { workspace: docs.target.path } : {}),
       files: docs.files, restore: docs.files, committed: docsCommit.committed, ...(docsCommit.commit ? { commit: docsCommit.commit } : {}) },
     methods, startCommand: start, statusCommand: status, mergeCommand: merge, lines };
@@ -904,7 +955,7 @@ async function cmdStatus(args: ParsedArgs): Promise<Record<string, unknown>> {
       const warning = session && nativeDeliveryWarning(batch.dir, delivery.stage, session, delivery.seq);
       return warning ? [warning] : [];
     }) ?? [];
-    return { ...entry, position: active.findIndex((item) => item.id === entry.id) + 1 || null, deliveryWarnings };
+    return { ...entry, release: batch.release, position: active.filter((item) => fresh.batches.find((other) => other.id === item.batch)?.release === batch.release).findIndex((item) => item.id === entry.id) + 1 || null, deliveryWarnings };
   }) ?? [];
   const labels: Record<string, string> = { pending: "排队中", testing: "测试中", ready: "可合入", returning: "正在退回", returned: "已退回开发会话", blocked: "资格失效/等待处理", merging: "合入待恢复", merged: "已合入", stopped: "停止自动排队", withdrawing: "撤回待恢复", withdrawn: "已撤回" };
   if (fresh) lines.push(`合入队列：${fresh.repo}；固定测试工作区：${fresh.workspace}`, ...queueEntries.map((entry) =>
@@ -1286,8 +1337,8 @@ const USAGE = `用法：
   loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]
   loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
 
-async function main(): Promise<number> {
-  const argv = process.argv.slice(2);
+/** CLI 调度入口；允许测试复用同一执行进程，命令行仍默认读取原始参数。 */
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   let args: ParsedArgs;
   try { args = parseArgs(argv); } catch (error) {
     const json = argv.includes("--json"), dryRun = argv.includes("--dry-run");

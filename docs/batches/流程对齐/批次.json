@@ -1,0 +1,28 @@
+{
+  "name": "流程对齐",
+  "branch": "feat/workflow-align",
+  "pi": { "model": "openai-codex/gpt-6.1-sol", "thinking": "max" },
+  "stages": {
+    "流程与证据": {
+      "prompt": "../../prompt/提示词-流程对齐-1流程与证据.md",
+      "workspace": "流程对齐",
+      "scope": { "deny": ["docs/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    },
+    "提交队列与部署": {
+      "prompt": "../../prompt/提示词-流程对齐-2提交队列与部署.md",
+      "workspace": "流程对齐",
+      "scope": { "deny": ["docs/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    },
+    "返修减负": {
+      "prompt": "../../prompt/提示词-流程对齐-3返修减负.md",
+      "workspace": "流程对齐",
+      "scope": { "deny": ["docs/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    },
+    "测试瘦身": {
+      "prompt": "../../prompt/提示词-流程对齐-4测试瘦身.md",
+      "workspace": "流程对齐",
+      "scope": { "deny": ["docs/", "iusses/", "eval/", "temp/", "test/e2e.mjs", "review-prompt.md", ".autoreview.json", "AGENTS.md"] }
+    }
+  },
+  "steps": [["流程与证据"], ["提交队列与部署"], ["返修减负"], ["测试瘦身"]]
+}

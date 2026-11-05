@@ -1,4 +1,5 @@
 /** A3：按项目模板接入临时 git 项目，占位符不替换时 loop 开工应报方法错误。 */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

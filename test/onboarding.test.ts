@@ -1,4 +1,5 @@
 /** 接入只处理配置；项目、HOME 与全部产物均在本测试创建的系统临时仓库中。 */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

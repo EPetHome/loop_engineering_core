@@ -33,9 +33,9 @@ import { auditLoopConfig, loopConfigMark } from "../config-audit.ts";
 import { developerQuestion, pauseAction, pauseText, preservePause } from "../blockers.ts";
 import { experienceInjection, experienceSession, experienceTodos, hookExperienceDir, hookExperienceStates, type HookExperienceActivity } from "../experience.ts";
 import { finishExperience } from "../experience-draft.ts";
-import { queueCommitNotice, queueCommittedResult, queueStageEvent } from "../merge-queue.ts";
+import { queueCommitNotice, queueCommitSummary, queueCommittedResult, queueStageEvent } from "../merge-queue.ts";
 import { bindHookInputBridge, bridgeRepairSequence } from "./inbox-bridge.ts";
-import { completionChecks, inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
+import { completionChecks, completionTest, inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
@@ -467,6 +467,7 @@ async function writeSummary(
   recordMaterialSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
     state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
   const text = renderSummary({
+    workflow: ctx.config.workflow, gateCommand: ctx.config.gate?.cmd, acceptanceConfigured: Boolean(ctx.config.acceptance),
     materialCleanup: state.materialCleanup,
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
@@ -480,6 +481,7 @@ async function writeSummary(
   });
   mkdirSync(dirname(ctx.paths.summary), { recursive: true });
   writeFileSync(ctx.paths.summary, text);
+  if (state.phase === "done") queueCommitSummary(ctx.workDir, ctx.paths.summary);
 }
 
 /**
@@ -496,7 +498,8 @@ async function recordLedger(ctx: HookContext, state: HookState): Promise<string 
   try {
     const path = appendLedgerRecord({
       project: projectRootOf(ctx.workDir), session, task: taskTitle(state.requirement),
-      result: resultLine(record, state.rounds.length, state.repairs, state.queueReviewedAcceptance), summary: ctx.paths.summary, pending, paRelays: state.paRelays,
+      result: resultLine(record, state.rounds.length, state.repairs, state.queueReviewedAcceptance), summary: ctx.paths.summary,
+      checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), pending, paRelays: state.paRelays,
     });
     state.ledger = { session, path, pending };
   } catch (error) {
@@ -665,13 +668,14 @@ function reportQueueStage(ctx: HookContext, state: HookState, event: "started" |
   const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
     inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
     event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined,
-    ...(event === "done" ? { candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance) } : {}),
+    ...(event === "done" ? { candidate: state.lastSnapshotDetails, test: completionTest(state.rounds.at(-1)), checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance) } : {}),
     sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0,
     ...(event === "done" ? { acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}) };
   const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
   if (dir && stage) bindHookInputBridge(dir, stage, status, { socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
     token: process.env.CLAUDE_CODE_MESSAGING_TOKEN, mode: ctx.permissionMode });
   queueStageEvent({ cwd: ctx.workDir, file: process.env.AUTOREVIEW_BATCH_FILE, stage, status });
+  if (event === "done") queueCommitSummary(ctx.workDir, ctx.paths.summary);
 }
 async function consumeQueueInbox(ctx: HookContext, state: HookState, expectedSeq?: number, stillIdle?: () => boolean, prepareOnly = false): Promise<string | undefined> {
   const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;
@@ -1002,7 +1006,7 @@ async function stop(ctx: HookContext, event: HookEvent): Promise<string | undefi
       state.queueReadyEpoch = randomUUID(); saveStateFile(ctx.paths.state, state);
       reportQueueStage(ctx, state, "done");
       const done = `完成（评审 ${state.rounds.length} 次，返修 ${state.repairs} 次）`, submission = queueCommitNotice(ctx.workDir);
-      await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}${submission ? `\n${submission}` : ""}`, ctx.exec);
+      await notify(`${basename(ctx.workDir)}：${done}${outcome.hint ? `；${outcome.hint}` : ""}\n交付报告：${ctx.paths.summary}${submission ? `\n${submission}` : ""}`, ctx.exec);
       checkUserInputs();
       releaseHookExperience(ctx, state.experienceActivity?.turn, true);
       return userOutput(ctx, outcome.hint && `自动评审${done}。${outcome.hint}`);

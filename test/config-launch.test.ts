@@ -1,5 +1,6 @@
 /** 配置覆盖装配回归：真实 pi-dev / 权限检查 / 流水线，模型及 Terminal 为替身，全部产物位于私有临时目录。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -72,7 +73,7 @@ process.exit(run.status ?? 1);
 
 const json = (path: string): any => JSON.parse(readFileSync(path, "utf8"));
 
-test("返修 1：非 dry-run 的 pi-dev 追加 flag 贯穿权限检查；不足预算仍阻止启动", () => {
+test("启动配置／非预览的 pi-dev 追加 flag 贯穿权限检查；不足预算仍阻止启动", () => {
   const f = fixture();
   try {
     const cwd = f.repo("standalone");
@@ -87,7 +88,7 @@ test("返修 1：非 dry-run 的 pi-dev 追加 flag 贯穿权限检查；不足�
   } finally { f.close(); }
 });
 
-test("返修 1：非 dry-run 单段启动以 pi.args 补足预算并携带完成资格覆盖", () => {
+test("启动配置／非预览单段启动以 pi.args 补足预算并携带完成资格覆盖", () => {
   const f = fixture();
   try {
     const cwd = f.repo("single"), file = join(f.root, "single.json"), dir = join(f.root, "pipeline");
@@ -104,7 +105,7 @@ test("返修 1：非 dry-run 单段启动以 pi.args 补足预算并携带完成
   } finally { f.close(); }
 });
 
-test("返修 1/2：非 dry-run 多段的准备、Terminal 窗口、最终资格沿用覆盖且段 flag 优先", () => {
+test("启动配置／非预览多段的准备、Terminal 窗口、最终资格沿用覆盖且段 flag 优先", () => {
   const f = fixture();
   try {
     const a = f.repo("first"), b = f.repo("second");
@@ -123,7 +124,7 @@ test("返修 1/2：非 dry-run 多段的准备、Terminal 窗口、最终资格�
   } finally { f.close(); }
 });
 
-test("返修 2：入口预算跨 Terminal 环境断点传递，文件 90 和缺省 60 均实际取 120", () => {
+test("启动配置／入口预算跨 Terminal 环境断点传递，文件 90 和缺省 60 均实际取 120", () => {
   for (const fileTimeout of [90, undefined]) {
     const f = fixture();
     try {

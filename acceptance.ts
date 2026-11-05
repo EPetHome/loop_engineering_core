@@ -77,18 +77,23 @@ export interface AcceptanceDeps {
   /** 本轮验收的截止时间（毫秒时间戳）。 */
   deadline: number;
   now: () => number;
-  /** 上一轮没通过的条目，提醒验收方全部重测。 */
+  /** 上一轮没通过的条目，供本次实测核对。 */
   previousFailed: string[];
+  /** 同一段/整批的上一轮记录；标准身份不同时自动完整验收。 */
+  previous?: AcceptanceRecord;
+  /** 完成前的完整验收不沿用任何条目结论。 */
+  fullCheck?: boolean;
   signal?: AbortSignal;
   checkLive?: () => void;
   onProgress?: (text: string) => void;
   saveState: () => Promise<void> | void;
 }
 
-export type AcceptanceStage =
+export type AcceptanceStage = (
   | { kind: "judged"; record: AcceptanceRecord }
   /** hint：给你看的下一步（怎么处理、处理完怎么继续）。 */
-  | { kind: "paused"; reason: string; notes?: string; hint: string; failureKind?: import("./failure.ts").FailureKind };
+  | { kind: "paused"; reason: string; notes?: string; hint: string; failureKind?: import("./failure.ts").FailureKind }
+) & { attempts?: AcceptanceRecord[] };
 
 const shellQuote = (text: string): string => `'${text.replace(/'/g, "'\\''")}'`;
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -742,11 +747,38 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
   return { report, error: report ? "" : error, escalated, executionFailure, recovery, evidence: savedEvidence, processesReleased };
 }
 
+/** 判定报告可以是部分验证，但自动条目未通过不能发布完成；人工/不授权项仍单列。 */
+function requireAutomaticPass(stage: AcceptanceStage): AcceptanceStage {
+  if (stage.kind !== "judged" || !["通过", "部分验证"].includes(stage.record.verdict)) return stage;
+  const pending = stage.record.items.filter((item) => item.verdict !== "通过" && item.verdict !== "需人工");
+  if (pending.length === 0) return stage;
+  const notes = pending.map((item) => `${item.id}：${item.detail}`).join("；");
+  return {
+    kind: "paused", reason: `无法验收：${stage.record.scope?.kind === "retry" ? "定向复验" : "完整验收"}仍有自动条目未通过（${pending.map((item) => item.id).join("、")}）`,
+    notes, hint: `${notes}。请按具体阻塞原因处理后继续；只有用户能修改验收标准；程序不能将这些自动条目转成人工放行。材料：${stage.record.runDir}`,
+    attempts: stage.attempts ?? [stage.record],
+  };
+}
+
 /**
- * 跑一轮验收。返回 judged 时由 review.ts 决定返修、暂停或继续评审；
- * paused 只用于不是开发方造成的情况（异议、标准缺失、端口被占用）。
+ * 跑一轮验收。定向复验通过后立即补做完整验收，共用本轮截止时间，不重跑评审或门禁。
+ * 返回 judged 时由调用方决定返修、暂停或完成；非产品阻塞返回 paused。
  */
 export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<AcceptanceStage> {
+  const first = requireAutomaticPass(await runAcceptanceAttempt(deps));
+  if (first.kind !== "judged" || first.record.scope?.kind !== "retry"
+    || !["通过", "部分验证"].includes(first.record.verdict)) return first;
+  deps.checkLive?.();
+  if (deps.deadline - deps.now() < 60_000) return {
+    kind: "paused", reason: "验收超时：定向复验结束，但剩余预算不足以做完成前完整验收", attempts: [first.record],
+    hint: "本轮尚未完成完整验收，不能发布完成；继续后重新完整验收，或调整验收时限。",
+  };
+  deps.onProgress?.(`自动验收：定向复验结束，完成前完整验收（第 ${deps.round} 轮）`);
+  const final = await runAcceptanceAttempt({ ...deps, previous: first.record, fullCheck: true, runDir: `${deps.runDir}-full` });
+  return requireAutomaticPass({ ...final, attempts: [first.record, ...(final.kind === "judged" ? [final.record] : [])] });
+}
+
+async function runAcceptanceAttempt(deps: AcceptanceDeps): Promise<AcceptanceStage> {
   const groups = findObjections(deps.deliveryNote);
   // 同一条旧回复只处理一次：记下回复指纹，用户回复后重复验收不再因它暂停。
   const replyKey = createHash("sha256").update(deps.deliveryNote).digest("hex");
@@ -766,8 +798,28 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
     const hint = authorizationHint(frozen, auth.pending);
     return { kind: "paused", reason: `等你授权（${auth.pending.join("、")}）`, notes: hint, hint };
   }
-  const criteria: Criteria = auth.denied.length === 0 ? frozen
+  const allCriteria: Criteria = auth.denied.length === 0 ? frozen
     : { ...frozen, items: frozen.items.map((item) => auth.denied.includes(item.id) ? { ...item, declined: true } : item) };
+  const signature = createHash("sha256").update(JSON.stringify([frozen, auth, deps.state.requirement, deps.config])).digest("hex");
+  const previous = deps.previous?.scope?.signature === signature ? deps.previous : undefined;
+  // 只有已确认通过的条目可暂时沿用；缺项、无法验证和历史无身份记录都要实测。
+  const passed = previous?.items.filter((item) => item.verdict === "通过" && !forUser(item)
+    && allCriteria.items.some((criterion) => criterion.id === item.id && criterion.text === item.text)) ?? [];
+  const unresolved = allCriteria.items.filter((item) => !forUser(item) && !passed.some((entry) => entry.id === item.id));
+  const retry = !deps.fullCheck && passed.length > 0 && unresolved.length > 0
+    && previous?.blocker !== "系统被关掉" && !previous?.failureKind;
+  const retained = retry ? passed : [];
+  const criteria: Criteria = retry ? { ...allCriteria, items: allCriteria.items.filter((item) => forUser(item) || unresolved.includes(item)) } : allCriteria;
+  const stamp = (record: AcceptanceRecord): AcceptanceRecord => {
+    record.scope = { kind: retry ? "retry" : "full", round: deps.round, signature,
+      tested: criteria.items.filter((item) => !forUser(item)).map((item) => item.id), reused: retained.map((item) => item.id) };
+    for (const item of record.items) {
+      if (retained.some((entry) => entry.id === item.id)) continue;
+      item.source = { round: deps.round, full: !retry, runDir: record.runDir };
+      if (!retry && item.verdict === "不通过" && passed.some((entry) => entry.id === item.id)) item.previouslyPassed = true;
+    }
+    return record;
+  };
 
   // 恢复或重复调用不能覆盖旧轮证据；新轮有独立目录，报告记录实际位置。
   if (existsSync(deps.runDir)) deps = { ...deps, runDir: `${deps.runDir}-${randomUUID().slice(0, 8)}` };
@@ -778,11 +830,11 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
     mkdirSync(runDir, { recursive: true });
     registerAcceptanceMaterials(deps.devSessionId, deps.workDir, runDir, deps.procsFile);
     if (deps.upstreamEpochs) writeFileSync(join(runDir, "upstream.json"), JSON.stringify(deps.upstreamEpochs, null, 2));
-    const record: AcceptanceRecord = {
-      ...judgeAcceptance({ criteria: criteria.items, evidence: () => undefined, logErrors: [], runDir, hasService: Boolean(config.start) }),
+    const record = stamp({
+      ...judgeAcceptance({ criteria: allCriteria.items, evidence: () => undefined, logErrors: [], runDir, hasService: Boolean(config.start) }),
       durationMs: 0,
       ...(methodDoubts.length ? { methodDoubts } : {}),
-    };
+    });
     writeFileSync(join(runDir, "result.json"), JSON.stringify(record, null, 2));
     return { kind: "judged", record };
   }
@@ -852,7 +904,7 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
         guide: config.guide ? readIfExists(config.guide) ?? `（操作说明文件读不到：${config.guide}）` : undefined,
         deliveryNote: deps.deliveryNote, previousFailed: deps.previousFailed, resetConfigured: Boolean(config.reset),
         authorized: auth.approved, methodDoubts,
-      }) + (config.actions ? "\n## 复用项目动作\n当前目录 actions/ 是项目提供的固定操作脚本，只按指南调用并通过 ./ev 留证据；不要重写已有步骤，不沿用旧验收结论。\n" : ""));
+      }) + (config.actions ? "\n## 复用项目动作\n当前目录 actions/ 是项目提供的固定操作脚本，只按指南调用并通过 ./ev 留证据；不要重写已有步骤；本次列出的条目必须留下新证据，结论沿用由程序负责记录。\n" : ""));
       // 系统一退出就停掉验收方和重置命令；外层取消也一并传下去。
       const testerAbort = new AbortController();
       const stopTester = (): void => testerAbort.abort();
@@ -922,15 +974,15 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
     }
   }
   const judged = judgeAcceptance({
-    criteria: criteria.items, report: tester.report, reportError: tester.error,
+    criteria: allCriteria.items, retained, report: tester.report, reportError: tester.error,
     evidence: (id) => tester.evidence ? tester.evidence.get(id) : readIfExists(join(runDir, "evidence", `${id}.txt`)),
     testerDisconnected: tester.recovery ? [tester.recovery.reason, tester.recovery.error].filter(Boolean).join("；") : undefined,
     writtenScripts: scriptFiles(runDir).filter((path) => !initialScripts.has(path)),
     systemFailure, systemStopped, logErrors, runDir, hasService: Boolean(config.start),
   });
-  const record: AcceptanceRecord = { ...judged, durationMs: deps.now() - startedAt, ...(methodDoubts.length ? { methodDoubts } : {}) };
+  const record = stamp({ ...judged, durationMs: deps.now() - startedAt, ...(methodDoubts.length ? { methodDoubts } : {}) });
   const g1 = record.items.find((item) => item.id === "G1");
-  if (g1 && config.start) g1.execution = { commands: [config.start.length > 240 ? `${config.start.slice(0, 239)}…` : config.start], scripts: [] };
+  if (g1 && config.start) g1.execution = { commands: [config.start], scripts: [] };
   if (tester.recovery) record.recovery = tester.recovery;
   if (tester.executionFailure && !exitDuringTest) {
     record.verdict = "无法验收"; record.failureKind = tester.executionFailure.kind;

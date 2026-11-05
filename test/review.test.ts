@@ -1,5 +1,6 @@
 /** review.ts 单测：评审时间预算（首次调用加 1 次重试共用同一份 60 分钟预算）；门禁（gate）一步。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -57,71 +58,52 @@ function harness() {
   } };
 }
 
-test("评审预算：首次用掉 59.5 分钟后不再重试，暂停原因「评审超时」", async () => {
+test("评审／首次与重试预算：预处理、后置预留和重试共用总时限", async (t) => {
+  const cases: { name: string; total: number; preprocess?: number; spent: number; killed?: boolean; pass?: boolean; gate?: boolean; acceptance?: boolean; calls: number[]; done: boolean; noRetryNote?: boolean }[] = [
+    { name: "首次耗掉59.5分钟不重试", total: 60, spent: 59.5 * 60_000, killed: true, calls: [60 * 60_000], done: false },
+    { name: "失败重试只取剩余30分钟", total: 60, spent: 30 * 60_000, calls: [60 * 60_000, 30 * 60_000], done: true },
+    { name: "首次超时但尚余55分钟仍可重试", total: 60, spent: 5 * 60_000, killed: true, calls: [60 * 60_000, 55 * 60_000], done: true },
+    { name: "首次不足一分钟仍启动／不带验收", total: 11, preprocess: 1000, spent: 59_000, pass: true, gate: true, calls: [59_000], done: true },
+    { name: "首次不足一分钟仍启动／带验收", total: 31, preprocess: 1000, spent: 59_000, pass: true, gate: true, acceptance: true, calls: [59_000], done: true },
+    { name: "预处理耗尽则评审和门禁均不调用", total: 11, preprocess: 60_001, spent: 0, gate: true, calls: [], done: false },
+    { name: "首次短预算失败后不再重试", total: 11, preprocess: 1000, spent: 1000, gate: true, calls: [59_000], done: false, noRetryNote: true },
+  ];
+  // 只共享不可变 Git 基线；每行重新创建状态、时钟、调用记录和资源身份。
   const h = harness();
   try {
-    const calls: number[] = [];
-    let now = 1_000_000;
-    const outcome = await runReviewRound({
-      cwd: h.repo, devSessionId: "budget-1", round: 1, deliveryNote: "x",
-      state: newReviewState(), config: h.config, exec: h.exec, now: () => now,
-      writeInput: (name) => join(h.root, name), saveState: () => {},
-      callReviewer: async (_session, _round, timeoutMs) => {
-        calls.push(timeoutMs);
-        now += 59.5 * 60_000;
-        return { stdout: "", stderr: "timeout", code: 1, killed: true };
-      },
+    for (const item of cases) await t.test(item.name, async () => {
+      let now = 1_000_000;
+      const started = now, calls: number[] = [], gateTimeouts: number[] = [];
+      const config: ReviewConfig = { ...h.config, reviewTimeoutMin: item.total,
+        ...(item.gate ? { gate: { cmd: "true", timeoutMin: 10 } } : {}),
+        ...(item.acceptance ? { acceptance: parseAcceptanceConfig({}, h.repo, {}) } : {}) };
+      checkRoundBudget(config.reviewTimeoutMin, config.acceptance, config.gate);
+      const state = newReviewState();
+      if (item.acceptance) state.criteria = { source: "用户", version: 1, updatedAt: "now", items: [{ id: "A1", text: "[人工] 操作：查看布局\n预期：符合用户偏好" }] };
+      const outcome = await runReviewRound({
+        cwd: h.repo, devSessionId: `budget-${cases.indexOf(item)}`, round: 1, deliveryNote: "完成", state, config, now: () => now,
+        exec: async (command, args, options) => {
+          if (options.role === "门禁") { gateTimeouts.push(options.timeout); now += 30_000; }
+          return h.exec(command, args, options);
+        },
+        writeInput: (name, text) => { now += item.preprocess ?? 0; const path = join(h.root, name); writeFileSync(path, text); return path; },
+        acceptanceDir: join(h.root, `acceptance-${cases.indexOf(item)}`), saveState: () => {},
+        callReviewer: async (_session, _round, timeout) => {
+          calls.push(timeout);
+          if (calls.length === 1) {
+            now += item.spent;
+            if (!item.pass) return { stdout: "", stderr: item.killed ? "timeout" : "review failed", code: 1, killed: item.killed ?? false };
+          }
+          return { stdout: PASS, stderr: "", code: 0, killed: false };
+        },
+      });
+      assert.deepEqual(calls, item.calls);
+      assert.equal(outcome.kind, item.done ? "done" : "paused", JSON.stringify(outcome));
+      assert.deepEqual(gateTimeouts, item.gate && item.done ? [10 * 60_000] : []);
+      if (!item.done) assert.equal(outcome.reason, "评审超时");
+      if (item.noRetryNote) assert.match(outcome.notes!, /第 2 次评审不再重试/);
+      assert.ok(now - started <= config.reviewTimeoutMin * 60_000, "不突破整轮总预算");
     });
-    assert.equal(calls.length, 1, "剩余不足 1 分钟，不再重试");
-    assert.equal(calls[0], 60 * 60_000);
-    assert.equal(outcome.kind, "paused");
-    assert.equal(outcome.reason, "评审超时");
-  } finally { h.close(); }
-});
-
-test("评审预算：首次失败后重试只用剩余时间", async () => {
-  const h = harness();
-  try {
-    const calls: number[] = [];
-    let now = 1_000_000;
-    const outcome = await runReviewRound({
-      cwd: h.repo, devSessionId: "budget-2", round: 1, deliveryNote: "x",
-      state: newReviewState(), config: h.config, exec: h.exec, now: () => now,
-      writeInput: (name) => join(h.root, name), saveState: () => {},
-      callReviewer: async (_session, _round, timeoutMs) => {
-        calls.push(timeoutMs);
-        if (calls.length === 1) {
-          now += 30 * 60_000;
-          return { stdout: "", stderr: "boom", code: 1, killed: false };
-        }
-        return { stdout: PASS, stderr: "", code: 0, killed: false };
-      },
-    });
-    assert.deepEqual(calls, [60 * 60_000, 30 * 60_000]);
-    assert.equal(outcome.kind, "done");
-  } finally { h.close(); }
-});
-
-test("评审预算：首次超时但剩余充足时仍可重试成功", async () => {
-  const h = harness();
-  try {
-    const calls: number[] = [];
-    let now = 1_000_000;
-    const outcome = await runReviewRound({
-      cwd: h.repo, devSessionId: "budget-3", round: 1, deliveryNote: "x",
-      state: newReviewState(), config: h.config, exec: h.exec, now: () => now,
-      writeInput: (name) => join(h.root, name), saveState: () => {},
-      callReviewer: async (_session, _round, timeoutMs) => {
-        calls.push(timeoutMs);
-        if (calls.length === 1) {
-          now += 5 * 60_000;
-          return { stdout: "", stderr: "timeout", code: 1, killed: true };
-        }
-        return { stdout: PASS, stderr: "", code: 0, killed: false };
-      },
-    });
-    assert.deepEqual(calls, [60 * 60_000, 55 * 60_000]);
-    assert.equal(outcome.kind, "done");
   } finally { h.close(); }
 });
 
@@ -149,9 +131,10 @@ async function gateRound(
   const state = options.state ?? newReviewState();
   const gateCalls: { args: string[]; cwd: string; timeout: number; role?: string }[] = [];
   const reviewInputs: string[] = [];
+  const events: string[] = [];
   const base = options.exec ?? h.exec;
   const exec: Exec = async (command, args, execOptions) => {
-    if (command === "/bin/sh") gateCalls.push({ args, cwd: execOptions.cwd, timeout: execOptions.timeout, role: execOptions.role });
+    if (command === "/bin/sh") { events.push("gate"); gateCalls.push({ args, cwd: execOptions.cwd, timeout: execOptions.timeout, role: execOptions.role }); }
     return base(command, args, execOptions);
   };
   const outcome = await runReviewRound({
@@ -159,15 +142,16 @@ async function gateRound(
     state, config: { ...h.config, gate: { cmd, timeoutMin: 10 } }, exec, now: options.now,
     writeInput: (name, text) => { const file = join(h.root, name); writeFileSync(file, text); return file; },
     saveState: () => {},
-    callReviewer: options.reviewer ?? (async (_session, _round, _timeout, inputPath) => {
+    callReviewer: async (session, round, timeout, inputPath) => {
+      events.push("review");
       reviewInputs.push(readFileSync(inputPath, "utf8"));
-      return { stdout: PASS, stderr: "", code: 0, killed: false };
-    }),
+      return options.reviewer ? options.reviewer(session, round, timeout, inputPath) : { stdout: PASS, stderr: "", code: 0, killed: false };
+    },
   });
-  return { outcome, state, gateCalls, reviewInputs };
+  return { outcome, state, gateCalls, reviewInputs, events };
 }
 
-test("门禁通过：先跑门禁再评审，评审输入写明门禁已通过，本轮记下门禁结果", async () => {
+test("测试顺序：先静态评审再门禁，输入明确门禁没跑，本轮记下实际结果", async () => {
   const h = harness();
   try {
     writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
@@ -180,7 +164,8 @@ test("门禁通过：先跑门禁再评审，评审输入写明门禁已通过�
     assert.equal(run.gateCalls[0].timeout, 10 * 60_000);
     assert.equal(run.gateCalls[0].role, "门禁");
     assert.equal(run.reviewInputs.length, 1);
-    assert.ok(run.reviewInputs[0].includes("## 门禁\n程序已在项目目录执行门禁命令 echo GATE_OK，退出码 0（通过）。"));
+    assert.match(run.reviewInputs[0], /本轮静态评审通过后，程序才会执行门禁命令 echo GATE_OK；目前没跑/);
+    assert.deepEqual(run.events, ["review", "gate"]);
     const gate = run.state.rounds[0].gate!;
     assert.equal(gate.result, "通过");
     assert.equal(gate.exitCode, 0);
@@ -188,7 +173,7 @@ test("门禁通过：先跑门禁再评审，评审输入写明门禁已通过�
   } finally { h.close(); }
 });
 
-test("门禁不通过：带输出打回开发方，不评审；计入返修次数；到上限暂停", async () => {
+test("测试失败：保留已通过评审，带输出打回；计入返修次数；到上限暂停", async () => {
   const h = harness();
   try {
     writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
@@ -197,12 +182,13 @@ test("门禁不通过：带输出打回开发方，不评审；计入返修次�
     assert.equal(first.outcome.kind, "repair");
     assert.match(first.outcome.message!, /^【门禁 · 第 1 次返修】\n门禁命令不通过（退出码 1）/);
     assert.ok(first.outcome.message!.includes("not ok 1 - add\nexpected 3, got -1"), "stderr 按出现顺序并进输出");
-    assert.equal(first.reviewInputs.length, 0, "门禁不通过时不评审");
+    assert.equal(first.reviewInputs.length, 1, "测试前已完成静态评审");
     assert.equal(first.state.repairs, 1);
     assert.equal(first.state.awaitingRepair, true);
-    assert.equal(first.state.rounds[0].conclusion, "未评审（门禁不通过）");
+    assert.equal(first.state.rounds[0].conclusion, "评审通过（门禁不通过）");
+    assert.equal(first.state.rounds[0].reviewConclusion, "通过");
     assert.ok(first.state.lastCheckedFingerprint, "记下给出结论时的指纹，返修后没改动能识别");
-    assert.equal(first.state.lastSnapshot, undefined, "门禁不通过不推进评审检查点");
+    assert.ok(first.state.lastSnapshot, "保留本轮已完成的评审检查点");
     assert.ok(existsSync(first.state.rounds[0].gate!.logPath!));
 
     first.state.repairs = h.config.maxRepairs;
@@ -230,7 +216,7 @@ test("门禁没跑完或跑不起来：超时、命令找不到、起不来都�
     });
     assert.equal(timedOut.outcome.reason, "门禁超时");
     assert.equal(timedOut.state.rounds[0].gate!.detail, "超过 10 分钟没跑完，被终止");
-    assert.equal(timedOut.reviewInputs.length, 0);
+    assert.equal(timedOut.reviewInputs.length, 1, "测试环境问题不抹掉已完成的评审");
 
     const broken = await gateRound(h, "npm test", {
       exec: async (command, args, options) => {
@@ -252,7 +238,7 @@ test("门禁改了项目里的文件：暂停并列出文件", async () => {
     assert.equal(run.outcome.reason, "门禁期间工作区变了");
     assert.deepEqual(run.outcome.changedFiles, ["gate-report.txt"]);
     assert.match(run.outcome.notes!, /\.gitignore/);
-    assert.equal(run.reviewInputs.length, 0);
+    assert.equal(run.reviewInputs.length, 1);
   } finally { h.close(); }
 });
 
@@ -414,7 +400,7 @@ test("子目录会话：门禁里改仓库内来源不阻断", async () => {
   }
 });
 
-test("门禁用掉的时间从一轮总预算里扣，评审只拿剩余时间", async () => {
+test("测试预算：评审预留门禁时限，门禁实际耗时仍计入同一轮", async () => {
   const h = harness();
   try {
     writeFileSync(join(h.repo, "file.txt"), "base\nchange\n");
@@ -432,7 +418,7 @@ test("门禁用掉的时间从一轮总预算里扣，评审只拿剩余时间",
       },
     });
     assert.equal(run.outcome.kind, "done");
-    assert.deepEqual(reviewerTimeouts, [55 * 60_000]);
+    assert.deepEqual(reviewerTimeouts, [50 * 60_000]);
     assert.equal(run.state.rounds[0].gate!.durationMs, 5 * 60_000);
   } finally { h.close(); }
 });
@@ -445,28 +431,30 @@ test("环境与方法故障不消耗已使用的业务返修次数", async () =>
     assert.equal(run.outcome.kind, "paused");
     assert.equal(run.outcome.failureKind, "environment");
     assert.equal(state.repairs, 2);
-    assert.equal(run.reviewInputs.length, 0);
+    assert.equal(run.reviewInputs.length, 1);
     const method = await gateRound(h, "exit 78", { state });
     assert.equal(method.outcome.failureKind, "method");
     assert.equal(state.repairs, 2);
   } finally { h.close(); }
 });
 
-test("静态评审有必修时不启动后置验收", async () => {
+test("评审必修：直接返修，测试门禁和验收均没跑", async () => {
   const h = harness();
   try {
     const state = newReviewState();
     state.criteria = { source: "用户", version: 1, updatedAt: "x", items: [{ id: "A1", text: "操作：检查\n预期：通过" }] };
     const run = await runReviewRound({
       cwd: h.repo, devSessionId: "order", round: 1, deliveryNote: "完成", state,
-      config: { ...h.config, acceptance: parseAcceptanceConfig({}, h.repo, {}) }, exec: h.exec,
+      config: { ...h.config, gate: { cmd: "touch must-not-run", timeoutMin: 1 }, acceptance: parseAcceptanceConfig({}, h.repo, {}) }, exec: h.exec,
       writeInput: (name, text) => { const p = join(h.root, name); writeFileSync(p, text); return p; },
       acceptanceDir: join(h.root, "acceptance"), saveState: () => {},
       callReviewer: async () => ({ stdout: PASS.replace("## 必修\n无", "## 必修\n1. 位置：file.txt:1 问题：不正确").replace("结论：通过", "结论：需返修"), stderr: "", code: 0, killed: false }),
     });
     assert.equal(run.kind, "repair");
     assert.equal(state.rounds.length, 1);
+    assert.equal(state.rounds[0].gate, undefined);
     assert.equal(state.rounds[0].acceptance, undefined);
+    assert.equal(existsSync(join(h.repo, "must-not-run")), false);
     assert.equal(existsSync(join(h.root, "acceptance")), false);
   } finally { h.close(); }
 });
