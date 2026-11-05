@@ -1,5 +1,6 @@
 /** A1–A5：无模型评审、完整字节快照、漏网 CLI 与离线复原；只使用系统临时目录。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

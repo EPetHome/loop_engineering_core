@@ -216,7 +216,14 @@ export function slimCompletedSession(session: MaterialSession): string {
 }
 
 function headerOf(summary: string): { workDir: string; sessionId: string; done: boolean; runDirs: string[] } | undefined {
-  const text = readFileSync(summary, "utf8");
+  let text = readFileSync(summary, "utf8");
+  // 新版先展示交付报告，身份只从程序的总结头读取，不解析报告里的需求原文。
+  if (text.startsWith("# 交付报告\n")) {
+    const marker = "\n<!-- loop-summary-metadata -->\n";
+    const at = text.lastIndexOf(marker);
+    if (at < 0) return;
+    text = text.slice(at + marker.length);
+  }
   if (!text.startsWith("# 自动评审总结\n")) return;
   const header = text.split(/^## /m, 1)[0];
   const workDir = /^- 项目：(.+)$/m.exec(header)?.[1];

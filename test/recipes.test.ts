@@ -1,5 +1,6 @@
 /** 配方 A1–A7：临时仓库、替身评审/会话；不触碰真实 HOME、远端或用户材料。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";

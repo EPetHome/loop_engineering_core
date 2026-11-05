@@ -61,14 +61,26 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
   let targets = readTargets();
   const invalid = validateTargets(targets);
   if (invalid) return rejected(invalid);
-  if (!targets.some((target) => target.phase?.session || target.status?.pid || target.launch)) return rejected("没有可核对的活动身份，未确认停止");
   checkScope();
+  const queuePreview = registration ? stopQueueBatch(fallback.stdout.trim(), registration, true) : undefined;
+  if (!targets.some((target) => target.phase?.session || target.status?.pid || target.launch) && !queuePreview?.deployments.length) return rejected("没有可核对的活动身份，未确认停止");
   // 范围核对通过后才撤销队列资格，阻止结束会话时的迟到 done 重新入队。
-  const queue = registration ? stopQueueBatch(fallback.stdout.trim(), registration, options.dryRun) : { entries: [], procs: [], consumers: [] };
+  const queue = registration ? stopQueueBatch(fallback.stdout.trim(), registration, options.dryRun) : { entries: [], procs: [], consumers: [], deployments: [] };
   // 队列恢复派发与停止共用发布锁；撤销后重取，不能漏掉撤销前刚登记的新开发组。
   targets = readTargets();
   const changed = validateTargets(targets);
   if (changed) return rejected(changed);
+  // 部署有自己的监督组和逐条目的命令登记；不借用已完成开发会话的身份，也不停止同项目其他批次。
+  for (const deployment of queue.deployments) {
+    for (const executor of deployment.executors) {
+      checkScope();
+      const result = await stopSessionGroup(executor, options.dryRun, executor);
+      const entry = { kind: "deployment", entry: deployment.entry, ...executor, ...result };
+      if (result.stopped) stopped.push(entry); else skipped.push(entry);
+    }
+    if (deployment.unknown || deployment.inFlight) skipped.push({ kind: "deployment", entry: deployment.entry,
+      reason: deployment.unknown ? "部署执行器身份不完整，后续动作已取消，释放与执行结果需核对" : "后续部署、检查和自动回退已取消；已启动动作的执行结果未确认，保留现场" });
+  }
   for (const { stage, phase, status, launch } of targets) {
     checkScope();
     let session = phase?.session ?? (status?.pid ? { host: status.host ?? "pi", id: status.sessionId, pid: status.pid, processStarted: status.processStarted, runId: status.runId } : undefined);
@@ -83,7 +95,7 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
       pid: launch.pid, processStarted: launch.processStarted, runId: launch.runId } : undefined;
     const group = launch && (!session?.runId || session.runId === launch.runId) ? launch : undefined;
     // 未记录编排身份的旧批次仍允许停止明确登记的段；不猜它的父进程。
-    if (!session && (stage === null || (!phase && !status && !launch))) continue;
+    if (!session && (stage === null || (!phase && !status && !launch) || (queue.deployments.length && status?.event === "done"))) continue;
     const summary = phase?.evidence.summary ?? status?.summary;
     let result: Awaited<ReturnType<typeof stopSessionGroup>>;
     if (unconfirmed) result = { stopped: false, reason: unconfirmed };
@@ -112,7 +124,7 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
     checkScope();
     const released = options.dryRun ? undefined : releaseProc(path, proc.pgid, proc);
     resources.push({ path, pgid: proc.pgid, released: released ?? null });
-    if (released === false) skipped.push({ path, pid: proc.pgid, reason: "队列门禁释放未确认，保留登记" });
+    if (released === false) skipped.push({ path, pid: proc.pgid, reason: "队列或部署消费者释放未确认，保留登记" });
   }
   if (queue.procs.length && !options.dryRun) await sleep(500); // 等执行器观察停止并完成既有 finally。
   // 归属从资源记录的 owner 身份或上述确切登记文件取得；不按目录名/年龄猜会话。
@@ -122,7 +134,8 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
     let resource: RunResource;
     try { resource = JSON.parse(readFileSync(join(root, name), "utf8")); } catch { continue; }
     if (!resource.procsFile || !["active", "cleanup-failed"].includes(resource.status)) continue;
-    const queueResource = queue.entries.some((id) => resource.label === `merge-queue:${id}`);
+    const queueResource = queue.entries.some((id) => resource.label === `merge-queue:${id}`)
+      || (queue.procs.includes(resource.procsFile) && queue.deployments.some((item) => resource.label.startsWith(`deployment:${item.entry}:`)));
     if (!queueResource && !registries.has(resource.procsFile) && owners.get(resource.ownerPid) !== resource.ownerStarted) continue;
     registered.push(resource);
     if (!queueResource) registries.add(resource.procsFile);
@@ -151,7 +164,7 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
     if (cleanup && cleanup.status !== "released") skipped.push({ path, reason: `外部资源释放未确认：${cleanup.status}；${cleanup.reason ?? ""}` });
   }
   const result = { v: 1, ok: skipped.length === 0, action: "停止", command: "停止", dryRun: Boolean(options.dryRun), batch: resolve(file),
-    stage: options.stage ?? null, stopped, skipped, resources, queueStatus: queue.entries.length ? "stopped" : null, queueEntries: queue.entries, reason };
+    stage: options.stage ?? null, stopped, skipped, resources, queueStatus: queue.entries.length || queue.deployments.length ? "stopped" : null, queueEntries: queue.entries, reason };
   if (!options.dryRun) {
     const detail = { stage: options.stage ?? null, stopped, skipped, queueStatus: result.queueStatus };
     const previous = readJson<PhaseRecord>(phasePath(info.dir, null));
@@ -159,7 +172,7 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
     writePhase(info, null, "failed", { status: "failed", ...reason, evidence: previous?.evidence ?? {}, session: previous?.session, detail });
     pushEvent(info, null, "failed", reason, previous?.evidence ?? {}, detail);
   }
-  return { ...result, lines: [`${options.dryRun ? "预览停止" : "已停止"}：${info.batch.name}；会话 ${stopped.length} 个，未触碰/未确认 ${skipped.length} 项`,
+  return { ...result, lines: [`${options.dryRun ? "预览停止" : skipped.length ? "停止未完全确认" : "已停止"}：${info.batch.name}；会话 ${stopped.length} 个，未触碰/未确认 ${skipped.length} 项`,
     "工作区、分支、总结和证据保留", ...skipped.map((item) => JSON.stringify(item))] };
 }
 

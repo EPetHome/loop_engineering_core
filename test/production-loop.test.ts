@@ -2,6 +2,7 @@
  * PostToolUse 使用 tool_input.command（不是 Codex 调用工具时的 cmd）；真实抓样本留给 A9。
  * 全部仓库、HOME、采样和加载探针都在本测试创建的系统临时目录，结束释放。
  */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -18,7 +19,7 @@ type Host = "claude" | "codex";
 const hosts: Host[] = ["claude", "codex"];
 const batchFile = "docs/batches/x/批次.json", promptFile = "docs/prompt/提示词-x.md";
 
-function fixture(marker: Record<string, unknown> | null = {}) {
+function fixture(marker: Record<string, unknown> | null = { gate: { cmd: "true" }, acceptance: {} }) {
   const temp = mkdtempSync(join(tmpdir(), "loop-production-")), repo = join(temp, "repo"), home = join(temp, "home");
   mkdirSync(repo); mkdirSync(home);
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", AUTOREVIEW_DEV_ROOT: "" };
@@ -131,7 +132,7 @@ test("A3/A7 编辑与 Bash 重定向都复用开工报错、同会话去重，�
   }
 });
 
-test("返修 1：两宿主 heredoc 写入即时校验；只读脚本静默、报错去重、改正后静默", () => {
+test("生产指路／两宿主 heredoc 写入即时校验；只读脚本静默、报错去重、改正后静默", () => {
   for (const host of hosts) {
     const h = fixture();
     try {
@@ -160,7 +161,7 @@ test("返修 1：两宿主 heredoc 写入即时校验；只读脚本静默、报
   }
 });
 
-test("返修 1：heredoc 保留引号和命令归属，支持分隔符变体、cd、多文档及 shell 只读正文", () => {
+test("生产指路／heredoc 保留引号和命令归属，支持分隔符变体、cd、多文档及 shell 只读正文", () => {
   const h = fixture();
   try {
     const body = `from pathlib import Path\nPath("${batchFile}").write_text('{"name":"x"}')`;

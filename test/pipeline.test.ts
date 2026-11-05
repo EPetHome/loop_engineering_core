@@ -1,4 +1,4 @@
-/** 流水线：计划解析（含旧写法兼容）、归属、派发分批；接力、整批验收、回流（假段进程 + 假验收方）。产物只写 os.tmpdir()。 */
+/** pipeline：按功能独立运行，夹具与状态不跨测试进程共享。 */
 import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -6,35 +6,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test, { after } from "node:test";
+import test from "node:test";
 import { createServer } from "node:net";
-import { batchInfo, writePhase } from "../events.ts";
-import {
-  buildRepairMessage, DEFAULT_PI, dispatchBatches, launchTerminal, parseOwner, parsePlan, piCommand, PlanError, preflight, routeFailures,
-  runPipeline, stageScript, type PipelineIO, type Plan,
-} from "../pipeline.ts";
-
-const FAKE_STAGE = fileURLToPath(new URL("./fake-stage.mjs", import.meta.url));
-const TESTER = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
-const CRITERIA = "需求：甲做接口，乙做页面\n\n## 验收标准\nA1. [甲] 操作：调接口\n    预期：返回 ok\nA2. [乙] 操作：打开页面\n    预期：显示 ok\n";
-const resourceRoot = mkdtempSync(join(tmpdir(), "autoreview-pipeline-resources-"));
-process.env.AUTOREVIEW_RESOURCE_ROOT = resourceRoot;
-after(() => rmSync(resourceRoot, { recursive: true, force: true }));
-
-function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), "autoreview-pipeline-"));
-}
-
-/** 自动评审只在有提交的 git 仓库里工作：测试里的段目录都建成这样。 */
-function gitRepo(dir: string): string {
-  mkdirSync(dir, { recursive: true });
-  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
-  const git = (...args: string[]) => spawnSync("git", args, { cwd: dir, env, encoding: "utf8" });
-  if (git("rev-parse", "--verify", "HEAD").status === 0) return dir;
-  git("init", "-q"); git("config", "user.email", "t@example.com"); git("config", "user.name", "t");
-  writeFileSync(join(dir, "README.md"), "x\n"); git("add", "README.md"); git("commit", "-qm", "init");
-  return dir;
-}
+import { buildRepairMessage, DEFAULT_PI, dispatchBatches, launchTerminal, parseOwner, parsePlan, piCommand, PlanError, preflight, routeFailures, runPipeline, stageScript } from "../pipeline.ts";
+import { CRITERIA, tempDir, gitRepo, scene, io, at, accCalls } from "./helpers/pipeline-fixture.ts";
 
 test("P1 兼容旧批次：相对路径、默认步骤与目录、标签去掉后交给验收方", () => {
   const root = tempDir();
@@ -119,62 +94,6 @@ test("P3 归属与派发：按标签分组，G1/G2 和没标的单列；同仓�
   assert.doesNotMatch(message, /^## 验收标准/m, "返修消息不能被扩展当成新的验收标准");
 });
 
-// —— 整条流水线：真实的假段进程 + 假验收方 ——
-
-interface Scene { root: string; plan: Plan; notes: string[]; events: (stage: string) => [number, string][]; close: () => void }
-
-function scene(options: {
-  stages: Record<string, { mode?: string; cwd?: string }>;
-  steps?: unknown[];
-  criteria?: string;
-  env?: Record<string, string>;
-  maxRounds?: number;
-}): Scene {
-  const root = tempDir();
-  writeFileSync(join(root, "验收.md"), options.criteria ?? CRITERIA);
-  const saved: Record<string, string | undefined> = {};
-  const vars = { AUTOREVIEW_ACCEPTANCE_CMD: TESTER, FAKE_STATE_DIR: join(root, "fake"), FAKE_STAGE_DELAY_MS: "80", ...options.env };
-  for (const [key, value] of Object.entries(vars)) { saved[key] = process.env[key]; process.env[key] = value; }
-  const stages = Object.fromEntries(Object.entries(options.stages).map(([name, value]) => {
-    const cwd = value.cwd ?? gitRepo(join(root, `work-${name}`));
-    mkdirSync(cwd, { recursive: true });
-    return [name, { start: `"${process.execPath}" "${FAKE_STAGE}" ${value.mode ?? "fix"}`, cwd }];
-  }));
-  const plan = parsePlan({
-    name: "test", dir: join(root, "pipeline"), stages, steps: options.steps,
-    acceptance: { workDir: root, criteria: "验收.md", maxRounds: options.maxRounds },
-  }, root, process.env);
-  return {
-    root, plan, notes: [],
-    events: (stage) => {
-      const file = join(plan.dir, `${stage}.events.log`);
-      return existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").map((line) => {
-        const [at, ...what] = line.split(" ");
-        return [Number(at), what.join(" ")] as [number, string];
-      }) : [];
-    },
-    close: () => {
-      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-      rmSync(root, { recursive: true, force: true });
-    },
-  };
-}
-
-function io(s: Scene, silenceMs = 30_000): PipelineIO {
-  return {
-    launch: (_stage, script) => { spawnSync("/bin/sh", ["-c", `(${script}) >/dev/null 2>&1 &`]); },
-    notify: (message) => s.notes.push(message),
-    log: () => {},
-    pollMs: 20,
-    silenceMs,
-    preflightEnv: { playwright: () => true },
-  };
-}
-
-const at = (events: [number, string][], what: string): number => events.find(([, name]) => name === what)?.[0] ?? Number.NaN;
-const accCalls = (s: Scene): number => existsSync(join(s.root, "fake", "acc-calls.log"))
-  ? readFileSync(join(s.root, "fake", "acc-calls.log"), "utf8").trim().split("\n").length : 0;
-
 test("P4 并行：甲乙都完成后才跑整批验收，全过就完成", async () => {
   const s = scene({ stages: { 甲: {}, 乙: {} } });
   try {
@@ -202,13 +121,73 @@ test("P6 回流：A2 没过退回乙，乙修完自动重跑整批验收通过�
   const s = scene({ stages: { 甲: {}, 乙: {} }, env: { FAKE_ACC_FAIL_ONCE: "A2" } });
   try {
     assert.equal(await runPipeline(s.plan, io(s)), 0, s.notes.join("\n"));
-    assert.equal(accCalls(s), 2, "整批验收跑了两轮");
+    assert.equal(accCalls(s), 3, "首轮完整验收、返修定向复验、完成前完整验收");
+    const calls = readFileSync(join(s.root, "fake", "acc-calls.log"), "utf8").trim().split("\n");
+    const ids = calls.map((line) => {
+      const input = readFileSync(line.split("\t")[1], "utf8").split(/^## 验收标准（.*$/m)[1].split(/^## /m)[0];
+      return [...input.matchAll(/^(A\d+)\./gm)].map((match) => match[1]);
+    });
+    assert.deepEqual(ids, [["A1", "A2"], ["A2"], ["A1", "A2"]]);
+    const retry = JSON.parse(readFileSync(join(calls[1].split("\t")[3], "result.json"), "utf8"));
+    assert.deepEqual(retry.scope.reused, ["A1"]);
+    assert.equal(existsSync(join(retry.runDir, "evidence", "A1.txt")), false);
     assert.ok(existsSync(join(s.plan.dir, "乙.inbox-1.txt")));
     assert.ok(!existsSync(join(s.plan.dir, "甲.inbox-1.txt")), "甲没被退回");
     const message = readFileSync(join(s.plan.dir, "乙.inbox-1.txt"), "utf8");
     assert.match(message, /^【整批验收返修 · 第 1 轮】/);
     assert.match(message, /A2\. 操作：打开页面/);
     assert.match(readFileSync(join(s.plan.dir, "report.md"), "utf8"), /退回 乙：A2[\s\S]*整批验收第 2 轮：通过/);
+  } finally { s.close(); }
+});
+
+test("整批完整验收发现回退时按归属打回，之后只重验回退项再完整验收", async () => {
+  const s = scene({ stages: { 甲: {}, 乙: {} }, env: { FAKE_ACC_RESULTS: JSON.stringify([{ fail: ["A2"] }, {}, { fail: ["A1"] }, {}, {}]) } });
+  try {
+    assert.equal(await runPipeline(s.plan, io(s)), 0, s.notes.join("\n"));
+    assert.equal(accCalls(s), 5);
+    const calls = readFileSync(join(s.root, "fake", "acc-calls.log"), "utf8").trim().split("\n");
+    const inputs = calls.map((line) => readFileSync(line.split("\t")[1], "utf8").split(/^## 验收标准（.*$/m)[1].split(/^## /m)[0]);
+    assert.deepEqual(inputs.map((input) => [...input.matchAll(/^(A\d+)\./gm)].map((match) => match[1])),
+      [["A1", "A2"], ["A2"], ["A1", "A2"], ["A1"], ["A1", "A2"]]);
+    assert.match(readFileSync(join(s.plan.dir, "甲.inbox-1.txt"), "utf8"), /A1\. 操作：调接口[\s\S]*之前通过，这次失败/);
+    const report = readFileSync(join(s.plan.dir, "report.md"), "utf8");
+    assert.match(report, /本次实测：A2；沿用上一轮结论：A1/);
+    assert.match(report, /标准原文：操作：调接口\n预期：返回 ok/);
+    assert.match(report, /第 3 轮完整验收/);
+  } finally { s.close(); }
+});
+
+test("整批完成前完整验收仍有自动项无法验证时暂停，不发布成功", async () => {
+  const s = scene({ stages: { 甲: {}, 乙: {} }, env: { FAKE_ACC_RESULTS: JSON.stringify([{ fail: ["A2"] }, {}, { unknown: ["A1"] }]) } });
+  try {
+    assert.equal(await runPipeline(s.plan, io(s)), 2, s.notes.join("\n"));
+    assert.equal(accCalls(s), 3);
+    assert.equal(readFileSync(join(s.plan.dir, "pipeline.finished"), "utf8").trim(), "2");
+    assert.match(s.notes.at(-1)!, /完整验收仍有自动条目未通过（A1）/);
+    const calls = readFileSync(join(s.root, "fake", "acc-calls.log"), "utf8").trim().split("\n");
+    const finalDir = calls[2].split("\t")[3];
+    const record = JSON.parse(readFileSync(join(finalDir, "result.json"), "utf8"));
+    assert.equal(record.scope.kind, "full"); assert.equal(record.verdict, "部分验证");
+    assert.equal(record.items.find((item) => item.id === "A1").verdict, "无法验证");
+    const report = readFileSync(join(s.plan.dir, "report.md"), "utf8");
+    assert.match(report, /A1：.*标准写得含糊/); assert.ok(report.includes(finalDir));
+    assert.doesNotMatch(report, /整批验收全部通过，流水线完成|整批验收通过，但/);
+    assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "batch.phase.json"), "utf8")).evidence.acceptance, finalDir);
+  } finally { s.close(); }
+});
+
+test("整批最终完整验收只剩人工及不授权项时仍保留既有处理", async () => {
+  const criteria = `${CRITERIA}A3. [人工] 操作：看布局\n    预期：符合偏好\nA4. [乙] [授权] 操作：正式账号同步\n    预期：多一行\n\n不授权：A4\n`;
+  const s = scene({ stages: { 甲: {}, 乙: {} }, criteria, env: { FAKE_ACC_RESULTS: JSON.stringify([{ fail: ["A2"] }, {}, {}]) } });
+  try {
+    assert.equal(await runPipeline(s.plan, io(s)), 0, s.notes.join("\n"));
+    assert.equal(accCalls(s), 3);
+    const calls = readFileSync(join(s.root, "fake", "acc-calls.log"), "utf8").trim().split("\n");
+    const record = JSON.parse(readFileSync(join(calls[2].split("\t")[3], "result.json"), "utf8"));
+    assert.equal(record.verdict, "部分验证"); assert.equal(record.scope.kind, "full");
+    assert.deepEqual(record.scope.tested, ["A1", "A2"]);
+    assert.deepEqual(record.items.map((item: { id: string; verdict: string }) => [item.id, item.verdict]),
+      [["A1", "通过"], ["A2", "通过"], ["A3", "需人工"], ["A4", "需人工"]]);
   } finally { s.close(); }
 });
 
@@ -252,27 +231,6 @@ test("P8 同一仓库的两段逐个派，不同仓库同时派", async (t) => {
     try {
       assert.equal(await runPipeline(s.plan, io(s)), 0, s.notes.join("\n"));
       assert.ok(at(s.events("乙"), "inbox 1") < at(s.events("甲"), "fixed 1"), "不同仓库同时派");
-    } finally { s.close(); }
-  });
-});
-
-test("P9 段暂停时提醒并接着等；从未报状态则在时限内判启动失败",  async (t) => {
-  await t.test("甲先暂停、你处理好后完成：提醒一次，流水线照常走完", async () => {
-    const s = scene({ stages: { 甲: { mode: "pause" }, 乙: {} } });
-    try {
-      assert.equal(await runPipeline(s.plan, io(s)), 0, s.notes.join("\n"));
-      assert.equal(s.notes.filter((note) => /甲 暂停（开发方需要你决定），在它的窗口里处理/.test(note)).length, 1);
-    } finally { s.close(); }
-  });
-  await t.test("段不报状态：明确没有启动并结束等待", async () => {
-    const s = scene({ stages: { 甲: { mode: "silent" } }, criteria: CRITERIA.replace("[乙]", "[甲]") });
-    try {
-      const started = Date.now();
-      assert.equal(await runPipeline(s.plan, io(s, 200)), 1);
-      assert.ok(Date.now() - started < 5000);
-      assert.ok(s.notes.some((note) => /甲 没有启动.*处理办法.*autoreview\.ts/.test(note)));
-      assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "甲.status.json"), "utf8")).event, "startup-failed");
-      assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "甲.phase.json"), "utf8")).phase, "failed");
     } finally { s.close(); }
   });
 });
@@ -415,7 +373,6 @@ test('流水线先用已有项目准备方法；准备失败不启动开发会�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-
 test("兼容旧批次和旧续跑参数：CLI 收到退出信号先取消整批验收并等待 cleanup", async (t) => {
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) await t.test(signal, async () => {
     const root = tempDir(), dir = join(root, "run"), home = join(root, "home"), bin = join(root, "bin");
@@ -472,7 +429,6 @@ test("流水线恢复在端口预检前回收本任务登记的孤儿", async ()
     assert.equal(existsSync(registry), false);
   } finally { if (orphan?.exitCode === null && orphan.signalCode === null) orphan.kill("SIGKILL"); s.close(); }
 });
-
 
 test("从验收续跑不能使用尚有未接收返修的旧 done", async () => {
   const s = scene({ stages: { a: {} }, criteria: '## 验收标准\nA1. [a] 操作：检查\n预期：ok\n' });
@@ -581,25 +537,6 @@ test("P 批次文件与 scope：启动脚本带绝对路径，scope 解析并校
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("P 启动入口失败：写回 startup-failed 后编排程序立即非零退出，不等待会话", async () => {
-  const root = gitRepo(tempDir());
-  try {
-    const start = `${process.execPath} -e 'const fs=require("node:fs"),p=require("node:path");const d=process.env.AUTOREVIEW_PIPELINE_DIR,s=process.env.AUTOREVIEW_STAGE;fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,s+".status.json"),JSON.stringify({stage:s,sessionId:"startup",summary:"",event:"startup-failed",seq:1,inbox:0,pauseReason:"权限自动执行检查未通过：bash 会询问"}));'`;
-    const plan = parsePlan({ name: "启动失败", stages: { 甲: { start } }, steps: [["甲"]], dir: join(root, "pipeline") }, root, {});
-    const notes: string[] = [];
-    const started = Date.now();
-    const code = await runPipeline(plan, {
-      launch: (_stage, script) => { spawnSync("/bin/sh", ["-c", `(${script}) >/dev/null 2>&1 &`]); },
-      notify: (message) => notes.push(message), log: () => {}, pollMs: 20, silenceMs: 1000,
-      preflightEnv: { playwright: () => true },
-    });
-    assert.equal(code, 1);
-    assert.ok(Date.now() - started < 5_000, "没有一直等会话状态");
-    assert.match(notes.at(-1)!, /段 甲 启动失败：权限自动执行检查未通过：bash 会询问/);
-    assert.equal(readFileSync(join(plan.dir, "pipeline.finished"), "utf8").trim(), "1");
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
 test("P 流水线准备和段会话共用准备前确定的开工依据", async () => {
   const root = gitRepo(tempDir());
   const out = mkdtempSync(join(tmpdir(), "autoreview-pipeline-base-"));
@@ -620,96 +557,7 @@ test("P 流水线准备和段会话共用准备前确定的开工依据", async 
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
 });
 
-test("本批 A9：未执行段命令在时限内发失败事件；loop 状态不再显示运行中", async () => {
-  const s = scene({ stages: { 甲: {} }, criteria: CRITERIA.replace("[乙]", "[甲]") });
-  const oldHome = process.env.HOME, oldPA = process.env.LOOP_PA_CONFIG;
-  process.env.HOME = s.root; process.env.LOOP_PA_CONFIG = join(s.root, "pa.json");
-  try {
-    const file = join(s.root, "batch.json"), stage = s.plan.stages.get("甲")!;
-    writeFileSync(file, JSON.stringify({ name: s.plan.name, dir: s.plan.dir, startupTimeoutSec: 1, stages: { 甲: { start: stage.start, cwd: stage.cwd } } }));
-    s.plan.file = file;
-    writeFileSync(process.env.LOOP_PA_CONFIG!, JSON.stringify({ pa: { eventsDir: join(s.root, "events"), localNotify: false } }));
-    assert.equal(await runPipeline(s.plan, { ...io(s, 80), launch: () => {} }), 1);
-    const rows = (await import("node:fs")).readdirSync(join(s.root, "events")).flatMap((name) => readFileSync(join(s.root, "events", name), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
-    const failed = rows.find((row) => row.stage === "甲" && row.status === "failed");
-    assert.match(failed.reason.text, /甲 没有启动/); assert.match(failed.detail.action, /处理办法/);
-    const status = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["状态", file, "--dry-run", "--json"], { cwd: stage.cwd, env: process.env, encoding: "utf8" });
-    assert.equal(status.status, 0, status.stdout + status.stderr);
-    const entry = JSON.parse(status.stdout).stages[0]; assert.equal(entry.event, "startup-failed"); assert.notEqual(entry.phase, "运行中"); assert.match(entry.pauseReason, /甲 没有启动/);
-  } finally {
-    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
-    if (oldPA === undefined) delete process.env.LOOP_PA_CONFIG; else process.env.LOOP_PA_CONFIG = oldPA;
-    s.close();
-  }
-});
-
-test("返修2：并行派发失败时收束所有静默段，已报状态或已有会话的段原样保留", async (t) => {
-  for (const second of ["silent", "started", "paused", "done", "phase-only"]) await t.test(second, async () => {
-    const s = scene({ stages: { 甲: {}, 乙: {} } });
-    const oldHome = process.env.HOME, oldPA = process.env.LOOP_PA_CONFIG;
-    process.env.HOME = s.root; process.env.LOOP_PA_CONFIG = join(s.root, "pa.json");
-    try {
-      const file = join(s.root, "batch.json");
-      writeFileSync(file, JSON.stringify({ name: s.plan.name, dir: s.plan.dir, stages: Object.fromEntries([...s.plan.stages].map(([name, stage]) => [name, { start: stage.start, cwd: stage.cwd }])) }));
-      s.plan.file = file;
-      writeFileSync(process.env.LOOP_PA_CONFIG!, JSON.stringify({ pa: { eventsDir: join(s.root, "events"), localNotify: false } }));
-      let originalStatus: string | undefined, originalPhase: string | undefined;
-      const launched: string[] = [];
-      const started = Date.now();
-      const code = await runPipeline(s.plan, { ...io(s, 100), launch: (stage) => {
-        launched.push(stage.name);
-        if (stage.name !== "乙" || second === "silent") return;
-        const phase = second === "paused" ? "paused" : second === "done" ? "done" : "running";
-        writePhase(batchInfo(file, stage.cwd, s.plan.dir), stage.name, phase, { session: { host: "pi", id: "already-started" }, text: "真实会话状态" });
-        originalPhase = readFileSync(join(s.plan.dir, "乙.phase.json"), "utf8");
-        if (second !== "phase-only") {
-          writeFileSync(join(s.plan.dir, "乙.status.json"), JSON.stringify({ stage: "乙", sessionId: "already-started", event: second, readyEpoch: second === "done" ? "ready" : undefined, seq: 1, inbox: 0, summary: "", pauseReason: second === "paused" ? "等用户答复" : undefined }));
-          originalStatus = readFileSync(join(s.plan.dir, "乙.status.json"), "utf8");
-        }
-      } });
-      assert.equal(code, 1); assert.ok(Date.now() - started < 5000, "失败收尾有界"); assert.deepEqual(launched, ["甲", "乙"]);
-      const rows = (await import("node:fs")).readdirSync(join(s.root, "events")).flatMap((name) => readFileSync(join(s.root, "events", name), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
-      for (const name of second === "silent" ? ["甲", "乙"] : ["甲"]) {
-        assert.equal(JSON.parse(readFileSync(join(s.plan.dir, `${name}.status.json`), "utf8")).event, "startup-failed");
-        assert.equal(JSON.parse(readFileSync(join(s.plan.dir, `${name}.phase.json`), "utf8")).phase, "failed");
-        assert.ok(rows.some((row) => row.stage === name && row.status === "failed" && row.reason.text.includes("没有启动")), `${name} 必须有失败事件`);
-        assert.ok(s.notes.some((note) => note.includes(`${name} 没有启动`) && note.includes("处理办法")), `${name} 必须有通知`);
-      }
-      if (second === "silent") {
-        const status = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["状态", file, "--dry-run", "--json"], { cwd: s.plan.stages.get("甲")!.cwd, env: process.env, encoding: "utf8" });
-        assert.equal(status.status, 0, status.stdout + status.stderr);
-        const entries = JSON.parse(status.stdout).stages;
-        assert.equal(entries.length, 2);
-        for (const entry of entries) { assert.equal(entry.event, "startup-failed"); assert.notEqual(entry.phase, "运行中"); }
-      } else {
-        assert.equal(readFileSync(join(s.plan.dir, "乙.phase.json"), "utf8"), originalPhase);
-        assert.equal(existsSync(join(s.plan.dir, "乙.status.json")), originalStatus !== undefined);
-        if (originalStatus) assert.equal(readFileSync(join(s.plan.dir, "乙.status.json"), "utf8"), originalStatus);
-        assert.equal(rows.some((row) => row.stage === "乙" && row.status === "failed"), false, "不得覆盖已启动段的真实状态");
-      }
-    } finally {
-      if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
-      if (oldPA === undefined) delete process.env.LOOP_PA_CONFIG; else process.env.LOOP_PA_CONFIG = oldPA;
-      s.close();
-    }
-  });
-});
-
-test("返修2：只先报 phase 的真实会话不误判未启动，也不误报第 0 条返修", async () => {
-  const s = scene({ stages: { 甲: {}, 乙: {} } });
-  try {
-    const code = await runPipeline(s.plan, { ...io(s, 100), launch: (stage) => {
-      if (stage.name === "甲") writeFileSync(join(s.plan.dir, "甲.phase.json"), JSON.stringify({ phase: "running", session: { host: "pi", id: "real-session" } }));
-    } });
-    assert.equal(code, 1); assert.equal(existsSync(join(s.plan.dir, "甲.status.json")), false);
-    assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "甲.phase.json"), "utf8")).session.id, "real-session");
-    assert.equal(JSON.parse(readFileSync(join(s.plan.dir, "乙.status.json"), "utf8")).event, "startup-failed");
-    assert.equal(s.notes.some((note) => note.includes("第 0 条返修")), false);
-    assert.equal(s.notes.some((note) => note.includes("甲 没有启动")), false);
-  } finally { s.close(); }
-});
-
-test("本批 A10：Terminal 替身只输入短文件路径，超过 1024 字节的中文启动命令完整执行", async () => {
+test("Terminal启动／Terminal 替身只输入短文件路径，超过 1024 字节的中文启动命令完整执行", async () => {
   const root = gitRepo(tempDir()), oldHome = process.env.HOME;
   process.env.HOME = root;
   try {
@@ -733,34 +581,4 @@ test("本批 A10：Terminal 替身只输入短文件路径，超过 1024 字节�
     assert.equal(existsSync(wrapper), false, "启动凭据和脚本已按身份释放");
     assert.equal(JSON.parse(readFileSync(join(plan.dir, `${name}.status.json`), "utf8")).event, "done");
   } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
-});
-
-test("P 并行段一段启动失败：收束另一段的等待，不杀已启动会话", async () => {
-  const root = tempDir();
-  const out = mkdtempSync(join(tmpdir(), "autoreview-pipeline-cancel-"));
-  const launched: Promise<void>[] = [];
-  try {
-    const a = gitRepo(join(root, "a")), b = gitRepo(join(root, "b"));
-    const status = (event: string, reason = "") => `${process.execPath} -e 'const fs=require("node:fs"),p=require("node:path");const d=process.env.AUTOREVIEW_PIPELINE_DIR,s=process.env.AUTOREVIEW_STAGE;fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,s+".status.json"),JSON.stringify({stage:s,sessionId:"s",summary:"",event:${JSON.stringify(event)},seq:1,inbox:0,pauseReason:${JSON.stringify(reason)}}));'`;
-    const plan = parsePlan({ name: "并行启动失败", maxParallel: 2, stages: {
-      甲: { cwd: a, start: status("startup-failed", "权限自动执行检查未通过：bash 会询问") },
-      乙: { cwd: b, start: status("paused", "等用户决定") },
-    }, steps: [["甲", "乙"]], dir: join(out, "pipeline") }, root, {});
-    const notes: string[] = [];
-    const started = Date.now();
-    const code = await runPipeline(plan, {
-      launch: (_stage, script) => {
-        const child = spawn("/bin/sh", ["-c", script], { stdio: "ignore" });
-        launched.push(new Promise<void>((accept) => { child.once("exit", () => accept()); child.once("error", () => accept()); }));
-      },
-      notify: (message) => notes.push(message), log: () => {}, pollMs: 30, silenceMs: 1000,
-      preflightEnv: { playwright: () => true },
-    });
-    assert.equal(code, 1);
-    assert.ok(Date.now() - started < 5_000, "另一段的等待已收束，进程没有一直挂着");
-    assert.match(notes.at(-1)!, /段 甲 启动失败/);
-    // 编排已及时返回不等于另一个替身已写完文件；按本测试创建的子进程确认退出再读/清理。
-    await Promise.all(launched);
-    assert.equal(JSON.parse(readFileSync(join(plan.dir, "乙.status.json"), "utf8")).event, "paused", "乙的会话状态保留");
-  } finally { await Promise.all(launched); rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
 });

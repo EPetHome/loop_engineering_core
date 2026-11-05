@@ -37,7 +37,7 @@ test("A1/A6：完整 v1 事件、逐批序号、进程重启不补发；同段�
   assert.deepEqual(h.rows().map((row) => row.seq), [1, 2, 3, 4]); assert.equal(h.rows()[3].status, "paused"); assert.equal(lastEventSeq(h.file), 4);
 });
 
-test("PA 返修3：同一完成在队列通知和进程重启后仍去重，真实暂停恢复后同一提交可再次完成", (t) => {
+test("PA事件／完成去重：同一完成在队列通知和进程重启后仍去重，真实暂停恢复后同一提交可再次完成", (t) => {
   const h = fixture(t), detail = { scope: "整批", branch: "feat/same", commit: "same-commit", completion: "same-qualification" };
   const done = () => pushEvent(h.info, null, "done", eventReason(), {}, detail);
   done(); done();

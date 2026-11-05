@@ -27,15 +27,25 @@ export function queueAcceptance(record?: AcceptanceRecord): QueueAcceptance {
 
 /** 提交说明引用真实检查结论；历史未知不能写成未配置或通过。 */
 export function completionChecks(round?: { gate?: { result: string }; conclusion?: string; reviewConclusion?: string; acceptance?: AcceptanceRecord }, qualified?: QueueAcceptance | null): NonNullable<StageStatus["checks"]> {
-  let acceptance: string = round?.acceptance?.verdict ?? "未配置";
+  let acceptance: string = round?.acceptance?.verdict ?? "没有记录";
   if (qualified === null) acceptance = "历史结论未知，未补做验收";
   else if (qualified) {
     acceptance = "沿用原完成资格（无欠项）";
     if (qualified.failed.length) acceptance = "不通过";
     else if (qualified.partial.length || qualified.manual.length) acceptance = "部分验证（见总表欠项）";
   }
-  return { gate: qualified !== undefined ? "沿用原完成资格（见总结）" : round?.gate?.result ?? "未配置",
-    review: round?.reviewConclusion ?? round?.conclusion ?? "见段总结", acceptance };
+  return { gate: qualified !== undefined ? "沿用原完成资格（见总结）" : round?.gate?.result || "没有记录",
+    review: round?.reviewConclusion || round?.conclusion || "没有记录", acceptance };
+}
+
+export interface StageTest {
+  result: string; command: string; candidate: Snapshot | string; round: number; startedAt: string; logPath?: string;
+}
+/** 旧轮次缺少实际测试版本时不补造复用证据。 */
+export function completionTest(round?: import("./core.ts").RoundRecord): StageTest | undefined {
+  const gate = round?.gate;
+  return round && gate?.candidate ? { result: gate.result, command: gate.command, candidate: gate.candidate,
+    round: round.round, startedAt: round.startedAt, ...(gate.logPath ? { logPath: gate.logPath } : {}) } : undefined;
 }
 
 export const PIPELINE_DIR_ENV = "AUTOREVIEW_PIPELINE_DIR";
@@ -70,6 +80,8 @@ export interface StageStatus {
   /** 检查通过时冻结的候选（含未跟踪文件），提交前必须核对。 */
   candidate?: Snapshot | string;
   checks?: { gate: string; review: string; acceptance: string };
+  /** 本段实际测试结果和测过的版本，随完成资格冻结。 */
+  test?: StageTest;
   /** 此资格所依据的冻结来源版本；消费者在接力边界核对实际文件。 */
   sourceInputs?: string;
   /** 此段实际使用的显式评审覆盖；消费者复核来源时不能改用自身进程的默认预算。 */

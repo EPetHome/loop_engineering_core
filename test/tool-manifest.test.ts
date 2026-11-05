@@ -2,6 +2,7 @@
  * 工具清单一致性：子命令和字段从代码的解析定义里取，与 工具清单.md 对照。
  * 任一边新增或删除而另一边没跟上，测试失败并列出缺项/多项。
  */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -180,6 +181,7 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
   const acceptance = functionBody(config, "export function parseAcceptanceConfig");
   const gate = functionBody(config, "export function parseGateConfig");
   const merge = functionBody(config, "export function parseMergeConfig");
+  const deployment = functionBody(config, "export function parseDeploymentConfig");
   const preparation = functionBody(config, "export function parsePreparation");
   const repair = functionBody(preparation, "if (data.repair !== undefined)");
   const context = functionBody(config, "export function parseContext");
@@ -201,6 +203,8 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
     fields.add(`gate.${key}`);
   }
   for (const key of directKeys(merge, ["data"])) fields.add(`merge.${key}`);
+  const deploymentCommands = /for \(const key of \[([^\]]+)\] as const\)/.exec(deployment)?.[1] ?? "";
+  for (const key of new Set([...directKeys(deployment, ["data"]), ...helperKeys(deployment, ["data"]), ...[...deploymentCommands.matchAll(/"([^"]+)"/g)].map((match) => match[1])])) fields.add(`deployment.${key}`);
   for (const key of new Set([...directKeys(preparation, ["data"]), ...helperKeys(preparation, ["data"])])) {
     fields.add(`preparation.${key}`);
   }
@@ -268,4 +272,6 @@ test("一致性检查覆盖 helper 字段读取方式：新增报缺项，删除
   assert.ok(differences(removed, doc).extra.includes("release"), "删除字段应报为清单多项");
   const mergeAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace('if (["auto", "push"].some((key) => key in data))', 'if (data.probe || ["auto", "push"].some((key) => key in data))') });
   assert.ok(differences(mergeAdded, doc).missing.includes("merge.probe"), "merge 子字段新增同样应报清单缺项");
+  const deploymentAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace('["cmd", "check"] as const', '["cmd", "check", "probe"] as const') });
+  assert.ok(differences(deploymentAdded, doc).missing.includes("deployment.probe"), "部署命令字段也由解析定义提取，新增字段不能漏报");
 });

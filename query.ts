@@ -43,7 +43,7 @@ export function queryBatches(file?: string): { v: 1; at: string; batches: Record
     const queue = queueStates.find((queue) => queue.batches.some((batch) => canonicalBatchFile(batch.file) === info.batch.file));
     const registered = queue?.batches.find((batch) => canonicalBatchFile(batch.file) === info.batch.file);
     const entry = queue?.entries.filter((item) => item.batch === registered?.id).at(-1);
-    const active = queue?.entries.filter((item) => ["pending", "testing", "ready", "returning", "merging", "withdrawing"].includes(item.status)).sort((a, b) => a.order - b.order) ?? [];
+    const active = queue?.entries.filter((item) => ["pending", "testing", "ready", "returning", "merging", "withdrawing"].includes(item.status) && queue.batches.find((batch) => batch.id === item.batch)?.release === registered?.release).sort((a, b) => a.order - b.order) ?? [];
     const recorded = readJson<BatchInfo>(batchInfoPath(info.dir));
     const owned = recorded?.batch.file && canonicalBatchFile(recorded.batch.file) === canonicalBatchFile(info.batch.file)
       && canonicalBatchFile(recorded.dir) === canonicalBatchFile(info.dir);

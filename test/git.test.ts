@@ -1,4 +1,5 @@
 /** git 取证补充回归；临时目录内布置仓库，不调用模型。 */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -26,7 +27,7 @@ function repository() {
   return { cwd, exec, calls, git, close: () => rmSync(cwd, { recursive: true, force: true }) };
 }
 
-test("G1 补充：两个特殊路径的内容分别影响指纹，路径字节保留", async () => {
+test("Git指纹／两个特殊路径的内容分别影响指纹，路径字节保留", async () => {
   const r = repository();
   try {
     const git = createGitEvidence(r.exec, r.cwd);
@@ -44,7 +45,7 @@ test("G1 补充：两个特殊路径的内容分别影响指纹，路径字节�
   } finally { r.close(); }
 });
 
-test("G2 补充：tree、stat、变化列表、status 失败及 exec rejection 不可吞掉", async () => {
+test("Git取证／tree、stat、变化列表、status 失败及 exec rejection 不可吞掉", async () => {
   const r = repository();
   try {
     const clean = createGitEvidence(r.exec, r.cwd);
@@ -74,7 +75,7 @@ test("G2 补充：tree、stat、变化列表、status 失败及 exec rejection �
 });
 
 
-test("G4 补充：子目录会话下 changedFiles 统一为工作目录相对路径（已跟踪与未跟踪一致）", async () => {
+test("Git路径／子目录会话下 changedFiles 统一为工作目录相对路径（已跟踪与未跟踪一致）", async () => {
   const r = repository();
   try {
     mkdirSync(join(r.cwd, "sub"));
@@ -96,7 +97,7 @@ test("G4 补充：子目录会话下 changedFiles 统一为工作目录相对路
   } finally { r.close(); }
 });
 
-test("G6 补充：有效内容指纹覆盖子目录会话的完整候选，并冻结未跟踪文件模式", async () => {
+test("Git候选／有效内容指纹覆盖子目录会话的完整候选，并冻结未跟踪文件模式", async () => {
   const r = repository();
   try {
     mkdirSync(join(r.cwd, "sub"));
@@ -165,7 +166,7 @@ test("CRLF／过滤转换：提交前后 Git 内容指纹稳定，原始字节�
   });
 });
 
-test("G5 补充：暂存的重命名报出前后两端，范围校验不会漏掉旧路径", async () => {
+test("Git重命名／暂存的重命名报出前后两端，范围校验不会漏掉旧路径", async () => {
   const r = repository();
   try {
     mkdirSync(join(r.cwd, "sub"));

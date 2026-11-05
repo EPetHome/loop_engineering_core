@@ -186,11 +186,17 @@ export interface AcceptanceItemResult {
   cause?: UnknownCause;
   /** 从本次证据的命令行提取，不采信模型自报；脚本必须是本轮实际新建的文件。 */
   execution?: { commands: string[]; scripts: string[] };
+  /** 实测结论的来源；沿用时保留原轮次和证据目录，不冒充本轮实测。 */
+  source?: { round: number; full: boolean; runDir: string };
+  /** 完整验收发现之前通过的条目回退。 */
+  previouslyPassed?: boolean;
 }
 
 export interface AcceptanceRecord {
   /** 部分验证：其余全部通过，只有个别条目没法自动验证或标了 [人工]（留给你人工验收），已完成静态评审后继续检查其余完成条件。 */
   verdict: "通过" | "部分验证" | "不通过" | "无法验收";
+  /** 缺少范围身份的历史记录不能用于定向复验。 */
+  scope?: { kind: "full" | "retry"; round: number; signature: string; tested: string[]; reused: string[] };
   items: AcceptanceItemResult[];
   logErrors: string[];
   extra: string[];
@@ -217,11 +223,14 @@ const BULLET_START = /^[-*]\s+(.*)$/;
 /** 模型爱加粗（**A1**：通过）；粗体标记在这些行里没有意义，匹配前去掉。 */
 const unbold = (line: string): string => line.replace(/\*\*/g, "");
 
+/** 共用既有标题识别规则；开工核对只查标题，不要求它已经有可解析条目。 */
+export const isCriteriaHeading = (line: string): boolean => /^##(?!#)\s*验收标准\s*[:：]?\s*$/.test(line.trim());
+
 /** 取「## 验收标准」一节到下一个一、二级标题；条目统一重新编号为 A1、A2…。没有返回 undefined。 */
 export function extractCriteria(text: string | undefined): CriterionItem[] | undefined {
   if (!text) return undefined;
   const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^##(?!#)\s*验收标准\s*[:：]?\s*$/.test(line.trim()));
+  const start = lines.findIndex(isCriteriaHeading);
   if (start < 0) return undefined;
   const items: string[] = [];
   for (const raw of lines.slice(start + 1)) {
@@ -242,7 +251,7 @@ export function extractCriteria(text: string | undefined): CriterionItem[] | und
 /** 去掉需求里的「## 验收标准」一节（验收方输入里标准单独列出，避免出现两份）。 */
 export function stripCriteriaSection(text: string): string {
   const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^##(?!#)\s*验收标准\s*[:：]?\s*$/.test(line.trim()));
+  const start = lines.findIndex(isCriteriaHeading);
   if (start < 0) return text;
   const rest = lines.slice(start + 1).findIndex((line) => /^#{1,2}(?!#)\s/.test(line.trim()));
   const end = rest < 0 ? lines.length : start + 1 + rest;
@@ -391,6 +400,8 @@ export function findObjections(text: string): ObjectionGroups {
 
 export interface JudgeInput {
   criteria: CriterionItem[];
+  /** 同版标准的定向复验可沿用通过项；完整验收不传。 */
+  retained?: AcceptanceItemResult[];
   /** 验收方报告；验收方两次都没给出可解析的报告时为空。 */
   report?: ParsedAcceptance;
   reportError?: string;
@@ -483,7 +494,7 @@ export function evidenceExecution(content: string | undefined, runDir: string, w
   for (let i = 0; i < lines.length - 1; i += 1) {
     if (!/^=== [AG]\d+ #\d+ /.test(lines[i]) || !lines[i + 1].startsWith("$ ")) continue;
     const command = lines[i + 1].slice(2).trim();
-    if (commands.length < 3) commands.push(command.length > 240 ? `${command.slice(0, 239)}…` : command);
+    commands.push(command);
     const cwd = lines[i + 2]?.startsWith("目录：") ? lines[i + 2].slice(3) : runDir;
     const tokenize = (text: string): string[] => text.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|()<>]+/g) ?? [];
     const tokens = tokenize(command);
@@ -526,7 +537,10 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
   });
   /** 按标准顺序逐条判定。 */
   const each = (judge: (criterion: CriterionItem) => AcceptanceItemResult): void => {
-    for (const criterion of input.criteria) items.push(forUser(criterion) ? toUser(criterion) : judge(criterion));
+    for (const criterion of input.criteria) {
+      const retained = input.retained?.find((item) => item.id === criterion.id);
+      items.push(forUser(criterion) ? toUser(criterion) : retained ? { ...retained } : judge(criterion));
+    }
   };
   if (input.report || input.testerDisconnected) {
     each((criterion) => {
@@ -597,7 +611,9 @@ export function judgeAcceptance(input: JudgeInput): Omit<AcceptanceRecord, "dura
       : { id: "G2", text: G2_TEXT, verdict: "不通过", detail: input.logErrors.join("\n") });
   }
   for (const item of items) {
-    if (!forUser(item)) item.execution = evidenceExecution(input.evidence(item.id), input.runDir, input.writtenScripts);
+    if (!forUser(item) && !input.retained?.some((entry) => entry.id === item.id)) {
+      item.execution = evidenceExecution(input.evidence(item.id), input.runDir, input.writtenScripts);
+    }
   }
   const failed = items.some((item) => item.verdict === "不通过");
   const unknown = items.filter((item) => item.verdict === "无法验证");
@@ -708,7 +724,7 @@ export function buildAcceptanceInput(options: AcceptanceInputOptions): string {
     ] : []),
   ];
   if (options.previousFailed.length > 0) {
-    parts.push("## 上一轮", `上一轮没通过：${options.previousFailed.join("、")}。这一轮全部标准都要重新实测，上一轮的证据不算。`);
+    parts.push("## 上一轮", `上一轮没通过：${options.previousFailed.join("、")}。本次只实测上面列出的标准，每条重新留证据；未列出的条目由程序记录沿用结论，不能自行补报通过。`);
   }
   return `${parts.join("\n\n")}\n`;
 }
@@ -736,7 +752,7 @@ export function buildCriteriaDraftInput(requirement: string): string {
 export function formatFailedItems(record: Pick<AcceptanceRecord, "items">): string {
   return record.items.filter((item) => item.verdict === "不通过").map((item) => {
     const [first, ...rest] = item.text.split("\n");
-    const body = [...rest, ...item.detail.split("\n")].map((line) => `    ${line}`);
+    const body = [...rest, ...(item.previouslyPassed ? ["之前通过，这次失败"] : []), ...item.detail.split("\n")].map((line) => `    ${line}`);
     return [`${item.id}. ${first}`, ...body].join("\n");
   }).join("\n\n");
 }
@@ -770,6 +786,10 @@ export function renderAcceptanceForReview(record: AcceptanceRecord): string {
 /** 总结里一轮验收的几行。 */
 export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   const lines = [`验收：${record.verdict}（耗时 ${Math.round(record.durationMs / 1000)} 秒；材料：${record.runDir}）`];
+  if (record.scope) {
+    lines.push(`验收范围：第 ${record.scope.round} 轮${record.scope.kind === "full" ? "完整验收" : "定向复验"}`);
+    lines.push(`本次实测：${record.scope.tested.join("、") || "无（标准交给用户）"}；沿用上一轮结论：${record.scope.reused.join("、") || "无"}`);
+  }
   if (record.escalated) lines.push("验收方：第一位没按要求做，已换强模型重验");
   if (record.recovery) lines.push(`验收方：${record.recovery.reason}；${record.recovery.attempted ? "已用强模型只读已有证据补写报告（未重新实测）" : "未调用补报告"}${record.recovery.error ? `；${record.recovery.error}` : ""}`);
   for (const item of record.cleanup ?? []) lines.push(`验收收尾：${item}`);
@@ -781,11 +801,17 @@ export function renderAcceptanceLines(record: AcceptanceRecord): string[] {
   for (const item of record.items) {
     const detail = item.verdict === "无法验证" ? item.detail.replace(/\s*\n\s*/g, "；") : item.detail.split("\n")[0];
     lines.push(`- ${item.id}：${item.verdict}${item.verdict === "通过" ? "" : ` —— ${detail}`}`);
+    lines.push(`  标准原文：${item.text}`, `  看到的结果：${item.detail || "没有记录"}`);
+    if (item.previouslyPassed) lines.push("  之前通过，这次失败");
+    if (record.scope?.reused.includes(item.id)) {
+      lines.push(`  本次没跑，沿用上一轮结论；实测来源：第 ${item.source?.round ?? "未知"} 轮；材料：${item.source?.runDir ?? "没有记录"}`);
+      continue;
+    }
     const execution = item.execution;
     for (const command of execution?.commands ?? []) lines.push(`  实际命令：$ ${command}`);
     for (const script of execution?.scripts ?? []) lines.push(`  验收方脚本：${script}`);
     if (!execution?.commands.length && !execution?.scripts.length) {
-      lines.push(`  实际执行：${item.verdict === "需人工" ? "未执行（交给用户）" : item.id === "G2" ? `程序扫描系统日志（${record.runDir}/system.log、logs/）` : "未留下命令或脚本证据"}`);
+      lines.push(`  实际执行：${item.verdict === "需人工" ? `没跑（${item.detail}）` : item.id === "G2" ? `程序扫描系统日志（${record.runDir}/system.log、logs/）` : "未留下命令或脚本证据"}`);
     }
   }
   return lines;

@@ -1,5 +1,6 @@
 /** 运行材料释放；所有身份、会话和磁盘数据均在系统临时目录。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs, { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

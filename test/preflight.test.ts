@@ -1,5 +1,6 @@
 /** 本批 A1/A2/A4/A5：真实 CLI + 临时 git/worktree，模型和宿主全部替身。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -23,7 +24,7 @@ function fixture() {
     LOOP_PA_CONFIG: join(root, "pa.json"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const git = (...args: string[]) => { const result = spawnSync("git", args, { cwd: repo, env, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); return result.stdout.trim(); };
   git("init", "-qb", "main"); git("config", "user.name", "test"); git("config", "user.email", "test@example.invalid");
-  const config = { workspaces: { dev分支: workspace }, reviewerCmd: REVIEWER };
+  const config = { workspaces: { dev分支: workspace }, reviewerCmd: REVIEWER, gate: { cmd: "true" }, acceptance: {} };
   writeFileSync(join(repo, ".autoreview.json"), JSON.stringify(config));
   writeFileSync(join(repo, "a.py"), "a = 1\n"); writeFileSync(join(repo, "prompt.md"), "做本批开发\n");
   const batch = join(repo, "batch.json");
@@ -80,7 +81,7 @@ test("A5 重置失败在开工暴露，带原始输出和改法；开发方未�
   } finally { f.close(); }
 });
 
-test("返修1：开工空跑的启动、重置和清理使用测试库/端口，宿主同名环境不能覆盖配置", () => {
+test("开工空跑／的启动、重置和清理使用测试库/端口，宿主同名环境不能覆盖配置", () => {
   const f = fixture();
   try {
     Object.assign(f.env, { DATABASE_URL: "host://must-not-reset", PORT: "49001", AUTOREVIEW_TEST_HOST_ONLY: "inherited" });
@@ -109,7 +110,7 @@ if (phase === 'start') { console.log('ENV_PROBE_READY'); setInterval(() => {}, 1
   } finally { f.close(); }
 });
 
-test("返修3：复用干净 worktree 时，localFiles 验收说明按计划复制核对，来源缺失仍拒绝", async (t) => {
+test("开工资料／复用干净 worktree 时，localFiles 验收说明按计划复制核对，来源缺失仍拒绝", async (t) => {
   for (const local of ["deploy/acceptance/GUIDE.md", "deploy/acceptance"]) for (const sourceExists of [true, false]) {
     await t.test(`${local} · ${sourceExists ? "来源存在" : "来源缺失"}`, async () => {
       const f = fixture();
@@ -144,7 +145,7 @@ test("返修3：复用干净 worktree 时，localFiles 验收说明按计划复�
   }
 });
 
-test("返修3：localFiles 目标目录已存在时，不虚报会复制缺少的子文件", () => {
+test("开工资料／localFiles 目标目录已存在时，不虚报会复制缺少的子文件", () => {
   const f = fixture();
   try {
     const guide = "deploy/acceptance/GUIDE.md";

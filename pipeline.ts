@@ -20,11 +20,11 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statS
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  authorizationStatus, extractCriteria, formatFailedItems, isAuthorizationCriterion, isManualCriterion,
+  authorizationStatus, extractCriteria, formatFailedItems, isAuthorizationCriterion, isManualCriterion, renderAcceptanceLines,
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
-import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, stageAcceptance, workspacePath, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
+import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, stageAcceptance, parseStageWorkflow, workspacePath, type StageWorkflow, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
 import { batchInfo, batchLocation, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
@@ -45,7 +45,7 @@ import { createRunResource, managedShell, reapRunResources, releaseRunResource, 
 import { methodEnv } from "./method-env.ts";
 import { parseStageScope, type StageScope } from "./scope.ts";
 import { commitAll, currentBranch, gitText } from "./workspace.ts";
-import { beginQueuePipeline, endQueuePipeline, queueBatchComplete, queueBatchRecheck, type QueuePipelineRun } from "./merge-queue.ts";
+import { beginQueueAcceptance, beginQueuePipeline, endQueuePipeline, queueBatchComplete, queueBatchRecheck, queueCommitNotice, type QueuePipelineRun } from "./merge-queue.ts";
 
 export const DEFAULT_MAX_ROUNDS = 3;
 /** 每段 pi 的默认配置（你日常的启动配置），计划的 pi 一节和每段自己的同名字段可以覆盖。 */
@@ -67,6 +67,8 @@ export interface PiOptions {
 }
 export interface StagePlan {
   name: string;
+  workflow?: StageWorkflow;
+  workflowExplicit?: boolean;
   /** 实际执行的启动命令：写了 start 就是它，写了 prompt 就是由 bin/pi-dev 生成的命令。 */
   start: string;
   cwd: string;
@@ -214,8 +216,9 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
       : options.defaultWorkspace !== undefined ? workspacePath(project.root, project.layout, options.defaultWorkspace)
       : planDir;
     const branch = value.branch === undefined ? batchBranch : text(value.branch, `stages.${stage}.branch`);
-    let scope;
+    let scope, workflow: StageWorkflow;
     try {
+      workflow = parseStageWorkflow(value.workflow);
       scope = parseStageScope(value.scope, `计划文件的 stages.${stage}.scope`);
       stageAcceptance(value.acceptance, undefined, planDir, env);
     } catch (error) { throw new PlanError(`stages.${stage}：${(error as Error).message}`); }
@@ -226,12 +229,12 @@ export function parsePlan(raw: unknown, planDir: string, env: NodeJS.ProcessEnv 
     if (value.prompt !== undefined) {
       const prompt = resolve(planDir, text(value.prompt, `stages.${stage}.prompt`));
       const pi = piOptions(value, `stages.${stage}`, planPi, planDir);
-      stages.set(stage, { name: stage, start: piCommand(name, stage, prompt, pi, cwd), cwd, prompt,
+      stages.set(stage, { name: stage, workflow, workflowExplicit: value.workflow !== undefined, start: piCommand(name, stage, prompt, pi, cwd), cwd, prompt,
         configOverrides: { ...captureProjectConfigOverrides(projectConfigOverridesFromArgs(pi.args), env), ...identity },
         ...(pi.ponytail ? { ponytail: pi.ponytail } : {}), ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}),
         ...(scope ? { scope } : {}) });
     } else {
-      stages.set(stage, { name: stage, start: text(value.start, `stages.${stage}.start`), cwd,
+      stages.set(stage, { name: stage, workflow, workflowExplicit: value.workflow !== undefined, start: text(value.start, `stages.${stage}.start`), cwd,
         configOverrides: { ...captureProjectConfigOverrides({}, env), ...identity },
         ...(workspace ? { workspace } : {}), ...(branch ? { branch } : {}), ...(scope ? { scope } : {}) });
     }
@@ -527,6 +530,7 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
       } catch (error) { io.log(`暂停原文保存失败：${String(error)}`); }
     }
     report.push("", `## 结果`, line);
+    if (submitted) report.push(queueCommitNotice(plan.stages.values().next().value!.cwd, { ...process.env, AUTOREVIEW_BATCH_FILE: plan.file, AUTOREVIEW_STAGE: plan.stages.keys().next().value! }));
     writeFileSync(resolve(plan.dir, "report.md"), `${report.join("\n")}\n`);
     writeFileSync(resolve(plan.dir, "pipeline.finished"), `${code}\n`);
     if (code !== 0) {
@@ -807,10 +811,12 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
     };
     const watch = setInterval(() => { try { check(Date.now() - sourcesCheckedAt >= 30_000); } catch { /* 主任务结束后记录失效 */ } }, Math.min(io.pollMs, 250));
     let stage: Awaited<ReturnType<typeof runAcceptanceStage>>;
+    let releaseCheck = () => {};
     try {
       check();
       acceptanceEpoch = plan.file ? queueBatchRecheck(plan.stages.values().next().value!.cwd, plan.file, run) : undefined;
       const onlyStage = plan.stages.size === 1 ? [...plan.stages.keys()][0] : undefined;
+      releaseCheck = beginQueueAcceptance(run);
       stage = await runAcceptanceStage({
       workDir: acceptance.workDir, devSessionId: `pipeline-${plan.name}`, round, deliveryNote: "", state, config: acceptance.acceptance,
       env: methodEnv(await snapshotRef(acceptance.workDir, integration.signal), { batchFile: plan.file, stage: onlyStage }),
@@ -818,7 +824,7 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
       signal: integration.signal, checkLive: check, upstreamEpochs: JSON.parse(expected.token),
       cleanupExec: createChildExec(`${procsFile}.cleanup`), onCleanup: (_work, path) => { cleanupRecordPath = path; },
       runDir: acceptanceRunDir(resolve(plan.dir, "e2e"), round), procsFile, // 兼容旧材料目录，不迁移既有状态。
-      deadline: Date.now() + acceptance.acceptance.timeoutMin * 60_000, now: Date.now, previousFailed,
+      deadline: Date.now() + acceptance.acceptance.timeoutMin * 60_000, now: Date.now, previous: acceptanceRecord, previousFailed,
       saveState: () => {}, onProgress: io.log,
     });
       check();
@@ -829,7 +835,11 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
         return finish(2, "整批验收期间段完成资格变化，本轮结果已失效；开发会话和计数保留");
       }
       throw error;
-    } finally { clearInterval(watch); options.signal?.removeEventListener("abort", cancel); }
+    } finally { clearInterval(watch); options.signal?.removeEventListener("abort", cancel); releaseCheck(); }
+    for (const attempt of stage.attempts ?? (stage.kind === "judged" ? [stage.record] : [])) {
+      acceptanceRecord = attempt;
+      report.push(...renderAcceptanceLines(attempt));
+    }
     if (stage.kind === "paused") return finish(2, `整批验收暂停：${stage.reason}。${stage.hint}；处理好后用 --from 验收 接着跑`, { next: "resume", failureKind: stage.failureKind });
     const { record } = stage;
     acceptanceRecord = record;

@@ -4,13 +4,42 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitBlobHash, type Snapshot } from "./git.ts";
-import { branchType, checkBranchName, gitText, localFilePaths } from "./workspace.ts";
+import { branchType, checkBranchName, gitResult, gitText, localFilePaths } from "./workspace.ts";
 import { eventReason, pushEvent, writePhase, type BatchInfo, type Evidence } from "./events.ts";
 
 export interface BatchCommit {
   branch: string; cwd: string; base: string; commit: string; tree: string;
   preSquash: string[]; pushed?: string;
+  pushResult?: { status: "started" | "succeeded" | "failed"; reason?: string };
 }
+/** 自动完成与 loop 推送共用：只推已核对的批次头，逐分支保存成功边界，不强推。 */
+export function pushBatch(repo: string, release: string, commits: BatchCommit[], save: () => void, dryRun = false): void {
+  let current: BatchCommit | undefined;
+  try {
+    gitText(repo, ["remote", "get-url", "origin"], "核对 origin");
+    for (const item of commits) {
+      if (item.branch === release || gitText(repo, ["rev-parse", `refs/heads/${item.branch}`]) !== item.commit) throw new Error(`批次分支头已变化或等于目标分支，需重新完成检查：${item.branch}`);
+    }
+    if (dryRun) return;
+    for (const item of commits) {
+      current = item;
+      item.pushResult = { status: "started" }; save();
+      const ref = `refs/heads/${item.branch}`;
+      const result = gitResult(repo, ["-c", "core.hooksPath=/dev/null", "push", "--no-follow-tags", "--recurse-submodules=no", "--", "origin", `${item.commit}:${ref}`]);
+      if (result.status !== 0) throw new Error(`推送 ${item.branch} 到 origin 失败，未强推：${(result.stderr || result.stdout).trim()}`);
+      item.pushed = item.commit; item.pushResult = { status: "succeeded" }; save();
+      gitText(repo, ["config", `branch.${item.branch}.remote`, "origin"]);
+      gitText(repo, ["config", `branch.${item.branch}.merge`, ref]);
+    }
+  } catch (error) {
+    if (!dryRun) {
+      for (const item of current ? [current] : commits) item.pushResult = { status: "failed", reason: String(error) };
+      save();
+    }
+    throw error;
+  }
+}
+
 export interface CommitCandidate { branch: string; cwd: string; candidate: Snapshot | string; conclusions: string[] }
 const changed = (): Error => new Error("批次候选已变化，需要原开发会话重新完成门禁和评审；未提交");
 

@@ -1,4 +1,5 @@
 /** e2e.mjs 的判定、报告与驱动回归：纯函数直接测；驱动用临时写出的假 pi 跑通三种结局，不调用模型。 */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

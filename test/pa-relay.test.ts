@@ -1,4 +1,5 @@
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -134,7 +135,7 @@ for (const host of ["claude", "codex"]) test(`PA A1/A2/A5/A6：${host} 原生替
   } finally { for (const socket of sockets) socket.destroy(); if (server) await new Promise<void>((done) => server!.close(() => done())); rmSync(socketDir, { recursive: true, force: true }); h.close(); }
 });
 
-for (const host of ["claude", "codex"]) test(`返修2：${host} 引用头部时正常撤权、更新标准；核验后的原文不重新判为机器信封`, async () => {
+for (const host of ["claude", "codex"]) test(`PA原话／${host} 引用头部时正常撤权、更新标准；核验后的原文不重新判为机器信封`, async () => {
   const h = fixture(host), header = "【用户原话 · 经 PA 转达 · quoted】";
   try {
     await h.hook("同意授权：A3");
@@ -189,7 +190,7 @@ test("PA 核对：哈希不符不读取；已完成段可读；事件失败留�
   } finally { h.close(); }
 });
 
-test("返修1：标准变化后实际 pipeline 在授权前暂停，新编号答复后才调用替身验收", async (t) => {
+test("PA续跑／标准变化后实际 pipeline 在授权前暂停，新编号答复后才调用替身验收", async (t) => {
   for (const [name, changed] of [["新增授权条目", REQUIREMENT + "A4. [授权] 操作：真实扣费\n"], ["同编号内容变化", REQUIREMENT.replace("真实命令", "删除真实数据")]]) await t.test(name, async () => {
     const h = fixture();
     try {

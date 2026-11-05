@@ -252,7 +252,8 @@ test("T10 总结渲染：完成 / 暂停（达到上限）/ 暂停（评审失�
 test("T10b Ponytail 未加载只在完成总结开头提醒一次，不改变其余内容", () => {
   const ledger = { path: "/tmp/交付记录.md", pending: [{ id: "A1", kind: "部分验证" as const }] };
   const missing = renderSummary(summaryInput({ status: "完成", ponytailMissing: true, ledger }));
-  assert.match(missing, /^# 自动评审总结\n未加载 Ponytail（开发角色要求加载）\n- 已登记到交付总表：/);
+  assert.match(missing, /^# 交付报告\n/);
+  assert.match(missing, /^# 自动评审总结\n未加载 Ponytail（开发角色要求加载）\n- 已登记到交付总表：/m);
   assert.match(missing, /^- 已登记到交付总表：\/tmp\/交付记录\.md（A1 部分验证）$/m);
   assert.doesNotMatch(missing, /待回写原单/);
 
@@ -345,14 +346,14 @@ test("T14 门禁：约定按配置追加；返修消息带命令、退出码、�
     outputTail: "not ok 1 - add\nexpected 3, got -1", logPath: "/tmp/gate.log",
   };
   const message = buildGateRepairMessage(2, record);
-  assert.match(message, /^【门禁 · 第 2 次返修】\n门禁命令不通过（退出码 1），这一轮没有验收、没有评审。/);
+  assert.match(message, /^【门禁 · 第 2 次返修】\n门禁命令不通过（退出码 1），这一轮验收没跑（门禁未通过）。/);
   assert.ok(message.includes("$ npm test\n输出最后 40 行：\n```text\nnot ok 1 - add\nexpected 3, got -1\n```"));
   assert.ok(message.includes("完整输出：/tmp/gate.log"));
   assert.match(message, /完整门禁由程序重跑，不必再次自跑整套/);
   assert.match(message, /修好了最后一行写【交付完成】。/);
 
   const input = buildReviewInput({ round: 1, requirement: "需求", deliveryNote: "说明", diff: "d", diffStat: "", untracked: [], gate: "npm test" });
-  assert.ok(input.includes("## 门禁\n程序已在项目目录执行门禁命令 npm test，退出码 0（通过）。你不需要再跑它。"));
+  assert.ok(input.includes("## 门禁\n本轮静态评审通过后，程序才会执行门禁命令 npm test；目前没跑。评审不要运行测试。"));
   assert.ok(!buildReviewInput({ round: 1, deliveryNote: "", diff: "", diffStat: "", untracked: [] }).includes("## 门禁"));
 
   const summary = renderSummary(summaryInput({

@@ -1,5 +1,6 @@
 /** 第一次返修：批次归属隔离、正式启动链的组归属、无名称只评审的停止/查询。 */
 import "./test-env.ts";
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -238,7 +239,7 @@ test("第 3 条：没有任何活动身份的只评审批次不能返回停止�
   } finally { await f.close(); }
 });
 
-test("第三轮第 1 条：当前恢复组归属无法核对时，不能只看旧宿主退出就返回成功", async () => {
+test("停止安全／恢复组归属：当前恢复组归属无法核对时，不能只看旧宿主退出就返回成功", async () => {
   const f = fixture();
   const original = spawn(process.execPath, ["-e", "setTimeout(()=>process.exit(),150)"], { stdio: "ignore" });
   const originalStarted = processStartTime(original.pid!), originalClosed = new Promise<void>((accept) => original.once("close", () => accept()));
@@ -267,7 +268,7 @@ test("第三轮第 1 条：当前恢复组归属无法核对时，不能只看�
   }
 });
 
-for (const pendingHost of [false, true]) test(`第三轮第 1 条：原会话退出→队列恢复返修→${pendingHost ? "宿主尚未登记时" : "恢复同一 sessionId 后"}停止`, async () => {
+for (const pendingHost of [false, true]) test(`停止安全／原会话恢复：原会话退出→队列恢复返修→${pendingHost ? "宿主尚未登记时" : "恢复同一 sessionId 后"}停止`, async () => {
   const f = fixture();
   let cleanup: { file: string; dir: string; queueRoot: string } | undefined;
   try {
@@ -360,7 +361,7 @@ for (const pendingHost of [false, true]) test(`第三轮第 1 条：原会话退
   }
 });
 
-test("第二轮第 1 条：PA 派发占位不冒充活动 phase；并发编号拒绝，迟到失败不覆盖已取得运行权的身份", async () => {
+test("停止安全／PA 派发占位不冒充活动 phase；并发编号拒绝，迟到失败不覆盖已取得运行权的身份", async () => {
   const f = fixture();
   let failLaunch: ((error: Error) => void) | undefined;
   let pending: Promise<Record<string, unknown>> | undefined;
@@ -388,7 +389,7 @@ test("第二轮第 1 条：PA 派发占位不冒充活动 phase；并发编号�
   } finally { failLaunch?.(new Error("测试收尾")); if (pending) await pending; await f.close(); }
 });
 
-test("第二轮第 1 条：活动编排重复启动被拒绝，不能覆盖持有运行权的组和 phase；原运行仍可停止", async () => {
+test("停止安全／活动编排重复启动被拒绝，不能覆盖持有运行权的组和 phase；原运行仍可停止", async () => {
   const f = fixture();
   try {
     await withEnv(f.env, async () => {
@@ -413,7 +414,7 @@ test("第二轮第 1 条：活动编排重复启动被拒绝，不能覆盖持�
   } finally { await f.close(); }
 });
 
-for (const via of ["pa", "queue"] as const) test(`第二轮第 1 条：启动→暂停→${via === "pa" ? "loop 续跑" : "队列恢复入口"}→停止，活动登记绑定新代次`, async () => {
+for (const via of ["pa", "queue"] as const) test(`停止安全／运行代次：启动→暂停→${via === "pa" ? "loop 续跑" : "队列恢复入口"}→停止，活动登记绑定新代次`, async () => {
   const f = fixture();
   let recovery: Promise<unknown> | undefined;
   try {
@@ -453,7 +454,7 @@ for (const via of ["pa", "queue"] as const) test(`第二轮第 1 条：启动→
   } finally { await f.close(); if (recovery) await recovery; }
 });
 
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) test(`第二轮第 2 条：向 loop 启动发送 ${signal}，等待只评审失败报告、worktree 和进程释放`, async () => {
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) test(`停止安全／向 loop 启动发送 ${signal}，等待只评审失败报告、worktree 和进程释放`, async () => {
   const f = fixture();
   try {
     const file = join(f.repo, "batch.json"), reviewerDir = join(f.root, "reviewer");
@@ -475,7 +476,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) test(`第二轮�
   } finally { await f.close(); }
 });
 
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) test(`第二轮第 2 条：向 loop 启动发送 ${signal}，取消实际编排、不再派发并保留原开发窗口`, async () => {
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) test(`停止安全／向 loop 启动发送 ${signal}，取消实际编排、不再派发并保留原开发窗口`, async () => {
   const f = fixture();
   try {
     const file = join(f.repo, "batch.json"), dir = join(f.root, "pipeline"), start = `'${process.execPath}' '${FAKE}'; printf '不应执行'`;

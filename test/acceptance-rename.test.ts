@@ -1,4 +1,5 @@
 /** 整批验收改名：真实 CLI + 临时 Git 仓库，段会话/验收方均为替身，不调用模型。 */
+import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

@@ -41,14 +41,14 @@ test("测试入口隔离：带流水线上下文执行 Pi、Hook、评审的真�
     // 新开独立 Node 测试运行器，不继承当前测试 worker 的内部身份；流水线身份全部保留。
     delete env.NODE_TEST_CONTEXT;
     const result = spawnSync(process.execPath, ["--test", "--test-reporter=spec",
-      "--test-name-pattern=^G6 B5|^H3 Stop|^评审预算：首次用掉",
+      "--test-name-pattern=^Pi／手动评审基线|^Hook／评审返修生命周期|^评审／首次与重试预算",
       "test/autoreview.test.ts", "test/hook.test.ts", "test/review.test.ts"],
       { cwd: ROOT, encoding: "utf8", env, timeout: 60_000 });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stdout, /G6 B5/);
-    assert.match(result.stdout, /H3 Stop/);
-    assert.match(result.stdout, /评审预算：首次用掉/);
-    assert.match(result.stdout, /pass 3/);
+    assert.match(result.stdout, /Pi／手动评审基线/);
+    assert.match(result.stdout, /Hook／评审返修生命周期/);
+    assert.match(result.stdout, /评审／首次与重试预算/);
+    assert.match(result.stdout, /pass 12/); // 三个入口及其两宿主／七种预算子项均实际运行，不能空选假绿。
     assert.equal(readFileSync(outer.AUTOREVIEW_BATCH_FILE, "utf8"), batch, "不改外层批次文件");
     assert.equal(existsSync(join(outer.AUTOREVIEW_PIPELINE_DIR, "外层段.status.json")), false, "不回报到外层流水线");
   } finally { rmSync(root, { recursive: true, force: true }); }

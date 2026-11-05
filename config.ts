@@ -54,7 +54,18 @@ export const DEFAULT_RESET_TIMEOUT_SEC = 120;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
 export const DEFAULT_GATE_TIMEOUT_MIN = 10;
 
-/** 门禁：每轮验收和评审之前由程序执行的确定性检查（单测、类型检查、验收脚本等）。 */
+/** 批次显式选择流程；旧批次未写时按带验收处理，不从提示词或配置猜测。 */
+export type StageWorkflow = "with-acceptance" | "without-acceptance";
+export function parseStageWorkflow(raw: unknown): StageWorkflow {
+  if (raw === undefined) return "with-acceptance";
+  if (raw !== "with-acceptance" && raw !== "without-acceptance") throw new Error('workflow 只支持 "with-acceptance"（带验收）或 "without-acceptance"（不带验收）');
+  return raw;
+}
+export function workflowSteps(workflow: StageWorkflow): string {
+  return workflow === "with-acceptance" ? "开发 → 评审 → 测试 → 验收 → 提交" : "开发 → 评审 → 测试 → 提交";
+}
+
+/** 门禁：每轮静态评审通过后、验收之前由程序执行的确定性测试。 */
 export interface GateConfig {
   /** 在开发目录用 /bin/sh -c 执行，退出码 0 为通过。 */
   cmd: string;
@@ -246,12 +257,32 @@ export function parseMergeConfig(raw: unknown): MergeConfig {
   if (raw === undefined) return { auto: false, push: false };
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 merge 必须是 JSON 对象`);
   const data = raw as Record<string, unknown>;
-  if (["auto", "push"].some((key) => key in data)) console.error("merge.auto / merge.push 已停用，合入由用户执行 loop 合入");
+  if (["auto", "push"].some((key) => key in data)) console.error("merge.auto / merge.push 已停用并忽略；批次完成后自动推送批次分支，队列通过后自动提交目标分支（main/master 由你自己合），不推送目标分支");
   return { auto: false, push: false };
 }
 export function loadMergeConfig(cwd: string): MergeConfig {
   const root = findProjectRoot(cwd);
   return parseMergeConfig(root ? readMarker(root).merge : undefined);
+}
+
+export interface DeploymentConfig { enabled: boolean; cmd?: string; check?: string; timeoutMin: number }
+export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
+  if (raw === undefined) return { enabled: false, timeoutMin: 10 };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 deployment 必须是 JSON 对象`);
+  const data = raw as Record<string, unknown>;
+  if (data.enabled !== undefined && typeof data.enabled !== "boolean") throw new Error(`${MARKER_FILE} 的 deployment.enabled 必须是布尔值`);
+  const enabled = data.enabled === true, commands: { cmd?: string; check?: string } = {};
+  for (const key of ["cmd", "check"] as const) {
+    if (enabled || data[key] !== undefined) commands[key] = nonEmptyString(data, key, "", `deployment.${key}`);
+    if (enabled && !commands[key]) throw new Error(`${MARKER_FILE} 的 deployment.${key} 必须写`);
+  }
+  const timeoutMin = nonNegativeInt(data, "timeoutMin", 10, "deployment.timeoutMin");
+  if (!timeoutMin) throw new Error(`${MARKER_FILE} 的 deployment.timeoutMin 必须大于 0`);
+  return { enabled, ...commands, timeoutMin };
+}
+export function loadDeploymentConfig(cwd: string): DeploymentConfig {
+  const root = findProjectRoot(cwd);
+  return parseDeploymentConfig(root ? readMarker(root).deployment : undefined);
 }
 
 /** 发布分支、开发工作区、本机文件和项目方法的位置；没写的用默认值。 */
@@ -264,6 +295,7 @@ export interface ProjectLayout {
 
 export function parseProjectLayout(raw: Record<string, unknown>, root: string): ProjectLayout {
   parseMergeConfig(raw.merge);
+  parseDeploymentConfig(raw.deployment);
   const release = raw.release === undefined ? "main" : nonEmptyString(raw, "release", "main");
   const workspaces: Record<string, string> = {};
   if (raw.workspaces !== undefined) {
@@ -471,7 +503,7 @@ export function stageAcceptance(raw: unknown, base: AcceptanceConfig | undefined
   return { ...base, ...Object.fromEntries(Object.entries(parsed).filter(([key]) => fields.has(key))) };
 }
 
-function batchStageAcceptance(overrides: ProjectConfigOverrides, env: NodeJS.ProcessEnv): { raw?: unknown; dir: string } | undefined {
+function batchStageConfiguration(overrides: ProjectConfigOverrides, env: NodeJS.ProcessEnv): { raw?: unknown; workflow: StageWorkflow; dir: string } | undefined {
   const file = overrides.batchFile ?? env.AUTOREVIEW_BATCH_FILE, stage = overrides.stage ?? env.AUTOREVIEW_STAGE;
   if (!file || !stage) return undefined;
   let batch: Record<string, unknown>;
@@ -479,7 +511,7 @@ function batchStageAcceptance(overrides: ProjectConfigOverrides, env: NodeJS.Pro
   catch (error) { throw new Error(`无法读取批次文件 ${file}：${errorText(error)}`); }
   const stages = object(batch.stages, "批次文件的 stages");
   const value = object(stages[stage], `批次文件的 stages.${stage}`);
-  return { raw: value.acceptance, dir: dirname(resolve(file)) };
+  return { raw: value.acceptance, workflow: parseStageWorkflow(value.workflow), dir: dirname(resolve(file)) };
 }
 
 /** root 是标记文件所在目录；undefined 表示尚未接入，使用默认配置。每次读取，不缓存旧值。 */
@@ -503,9 +535,11 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
     reviewTimeoutMin = nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN);
   }
   const configRoot = root ?? process.cwd();
-  const stage = batchStageAcceptance(overrides, env);
-  const acceptance = stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
+  const stage = batchStageConfiguration(overrides, env);
+  const configuredAcceptance = stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
+  const acceptance = stage?.workflow === "without-acceptance" ? undefined : configuredAcceptance;
   const gate = parseGateConfig(data.gate);
+  parseDeploymentConfig(data.deployment);
   const preparation = parsePreparation(data.preparation, configRoot);
   const methods = parseMethodsConfig(data.methods, configRoot);
   const context = parseContext(data.context, configRoot);
@@ -516,9 +550,10 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
     reviewerThinking: overrides.reviewerThinking?.trim() || nonEmptyString(data, "reviewerThinking", DEFAULT_THINKING),
     reviewTimeoutMin,
     reviewerCmd: overrides.reviewerCmd?.trim() || env.AUTOREVIEW_REVIEWER_CMD?.trim() || nonEmptyString(data, "reviewerCmd", ""),
+    ...(stage ? { workflow: stage.workflow } : {}),
     ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}),
     ...(methods ? { methods } : {}), ...(context ? { context } : {}),
-    configurationHash: configurationHash(stage?.raw === undefined ? data : { project: data, stageAcceptance: stage.raw }), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
+    configurationHash: configurationHash(stage ? { project: data, stageAcceptance: stage.raw, workflow: stage.workflow } : data), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
   };
 }
 
