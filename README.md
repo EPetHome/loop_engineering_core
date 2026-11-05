@@ -341,7 +341,7 @@ cd /你的仓库
 
 ## 流水线与批次（几段并行 / 串行 + 整批验收）
 
-正常批次只准备两份材料：提示词和 `docs/batches/<批次>/批次.json`。批次目录不再放门禁、棘轮或启动脚本；项目固定方法写一份在 `.autoreview/methods/`，启动统一用 `bin/loop 启动`。
+正常批次只准备两份材料：提示词和 `docs/batches/<批次>/批次.json`。批次目录不再放门禁、棘轮或启动脚本；项目固定方法写一份在 `.autoreview/methods/`，启动统一用 `bin/loop 启动`。本批修的问题单可用 `issues` 登记，单头回写随本批合入生效，失败只提示；写法见 [接入手册「问题单」](README-验收标准.md#问题单)，字段见 [工具清单](工具清单.md#批次json-字段)。
 
 ```bash
 bin/loop 开工 docs/batches/<批次>/批次.json

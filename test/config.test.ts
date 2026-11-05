@@ -1,6 +1,7 @@
 /** 单一配置入口：临时项目、只读加载；不依赖本机配置或真实模型。 */
+import "./test-env.ts";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -136,8 +137,10 @@ test("接入：已有和待写配置都复用预算校验，保留其他字段�
     f.write({ gate: { cmd: "true", timeoutMin: 45 }, custom: "keep" });
     await assert.rejects(planSetup(f.root), /gate.timeoutMin（45）加 acceptance.timeoutMin（20）必须小于/);
     f.write({ reviewTimeoutMin: 90, custom: "keep" });
+    const before = readFileSync(join(f.root, ".autoreview.json"), "utf8");
     const next = await planSetup(f.root);
     assert.equal(JSON.parse(next.config!).custom, "keep");
+    assert.equal(readFileSync(join(f.root, ".autoreview.json"), "utf8"), before, "预览保留磁盘配置的完整原文");
     assert.equal(resolveProjectConfig(f.root).acceptance, undefined, "预览不落盘");
   } finally { f.close(); }
 });

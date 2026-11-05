@@ -30,6 +30,26 @@ test("测试启动隔离只清除外层启动身份，保留资源归属与普�
   assert.deepEqual(JSON.parse(result.stdout), { ...preserved, PATH: process.env.PATH });
 });
 
+test("配置单测入口隔离：继承段级验收时接入预览仍不落盘", () => {
+  const root = mkdtempSync(join(tmpdir(), "autoreview-config-test-env-"));
+  try {
+    const outer = launchEnv(root);
+    mkdirSync(outer.AUTOREVIEW_PIPELINE_DIR);
+    const batch = JSON.stringify({ stages: { 外层段: { workflow: "with-acceptance", acceptance: {} } } });
+    writeFileSync(outer.AUTOREVIEW_BATCH_FILE, batch);
+    const env: NodeJS.ProcessEnv = { ...process.env, ...outer };
+    delete env.NODE_TEST_CONTEXT;
+    const result = spawnSync(process.execPath, ["--test", "--test-reporter=spec",
+      "--test-name-pattern=^接入：已有和待写配置都复用预算校验，保留其他字段且只做预览$", "test/config.test.ts"],
+      { cwd: ROOT, encoding: "utf8", env, timeout: 30_000 });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /接入：已有和待写配置都复用预算校验，保留其他字段且只做预览/);
+    assert.match(result.stdout, /\bpass 1\b/, "必须实际执行原断言，不能空选或跳过");
+    assert.equal(readFileSync(outer.AUTOREVIEW_BATCH_FILE, "utf8"), batch, "不改外层批次文件");
+    assert.equal(existsSync(join(outer.AUTOREVIEW_PIPELINE_DIR, "外层段.status.json")), false, "不回报到外层流水线");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("测试入口隔离：带流水线上下文执行 Pi、Hook、评审的真实回归场景", () => {
   const root = mkdtempSync(join(tmpdir(), "autoreview-test-env-"));
   try {
