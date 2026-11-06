@@ -29,7 +29,7 @@ const within = (root: string, path: string): string | undefined => {
 };
 
 /** 只认第一个正文二级标题之前、独占一行的单头状态；不搜索或改写正文。 */
-function stateField(content: string): RegExpMatchArray {
+export function stateField(content: string): RegExpMatchArray {
   // 用原文偏移；标题只界定范围，不参与替换。
   const end = /^## /m.exec(content)?.index ?? content.length;
   const fields = [...content.slice(0, end).matchAll(/^状态[：:][^\r\n]*/gm)];
@@ -45,7 +45,7 @@ function pendingLine(batch: string): string {
 }
 
 /** 不跟随问题单或父目录中的链接，也不通过硬链接改写别处。 */
-function regularFile(path: string, writable = false): void {
+export function regularFile(path: string, writable = false): void {
   for (let parent = path;; parent = dirname(parent)) {
     const info = lstatSync(parent);
     if (info.isSymbolicLink()) throw new Error(`路径是符号链接：${parent}`);
@@ -56,7 +56,7 @@ function regularFile(path: string, writable = false): void {
   if (writable) accessSync(path, constants.W_OK);
 }
 /** 同目录临时文件写全后替换，避免写失败截断原单；不覆盖等待期间的新正文。 */
-function writeIssue(path: string, content: string, expected: string): void {
+export function writeIssue(path: string, content: string, expected: string): void {
   regularFile(path, true);
   const temp = join(dirname(path), `.loop-issue-${randomUUID()}.tmp`);
   try {

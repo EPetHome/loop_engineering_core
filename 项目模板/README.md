@@ -30,6 +30,7 @@
     │   ├── release.sh
     │   └── GUIDE.md
     ├── issues/                       问题单（写法见 Loop README-验收标准.md「问题单」）
+    │   └── 【history】/               已解决的问题单
     ├── docs/
     │   ├── baseline/                  基线四页：项目现在在哪
     │   │   ├── 当前基线与入口.md
@@ -71,7 +72,7 @@
 | `docs/batches/<批次>/` | 批次参数和结果 | `coding/docs/<批次>-<日期>/`；新模板只放 `批次.json` 和 `结果.md` |
 | `线上/` | 运行版代码所在位置 | `Promate产品中台/` 和 `promate-frontend/`，各有团队 .git；旧流程仍由协调方合入 |
 | 开发空间 | worktree + 批次分支 | 旧 `dev分支/`；并行时 `dev分支2/` |
-| `issues/`（已放） | 问题单；写法见 [README-验收标准.md「问题单」](../README-验收标准.md#问题单) | 对照项目的目录迁移另行实施 |
+| `issues/`（已放） | 问题单；写法见 [README-验收标准.md「问题单」](../README-验收标准.md#问题单) | Promate 同样使用 `issues/`，统一写法只在 Loop 维护 |
 | 模板没放 | 产品依据 | `文档/` |
 
 ## 谁在干活

@@ -6,7 +6,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "./acceptance-core.ts";
 import { captureProjectConfigOverrides, findProjectRoot, resolveProjectConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
@@ -17,6 +17,7 @@ import { createGitEvidence, GitReadError, type Exec, type ExecResult } from "./g
 import { acceptanceTodos } from "./onboarding.ts";
 import { auditLoopConfig, loopConfigMark } from "./config-audit.ts";
 import { developerQuestion, pauseAction, pauseText, preservePause } from "./blockers.ts";
+import { productionAction } from "./production-loop.ts";
 import { experienceInjection, experienceSession, experienceTodos } from "./experience.ts";
 import { finishExperience } from "./experience-draft.ts";
 import {
@@ -1251,6 +1252,16 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }
     } catch (error) { await pauseForError(ctx, error, life); ctx.abort(); }
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.isError || !["write", "edit"].includes(event.toolName)) return;
+    const touched = { paths: typeof event.input.path === "string" ? [event.input.path] : [] };
+    const roots = [...new Set(productionAction(touched, ctx.cwd)?.files.filter((file) => file.kind === "issue").map((file) => file.root) ?? [])];
+    if (!roots.length) return;
+    const { archiveResolvedIssues } = await import("./issue-archive.ts");
+    const lines = roots.flatMap((root) => archiveResolvedIssues(root, false, touched.paths.map((path) => resolve(ctx.cwd, path))).lines);
+    if (lines.length) return { content: [...event.content, { type: "text" as const, text: lines.join("\n") }] };
   });
 
   pi.on("agent_settled", async (_event, ctx) => {

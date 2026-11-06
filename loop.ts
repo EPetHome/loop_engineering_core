@@ -1352,6 +1352,7 @@ const USAGE = `用法：
   loop 合入 <批次.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]
+  loop 归档问题单 <项目目录> [--dry-run] [--json]
   loop 漏网 <项目目录> <会话ID> <问题描述> <发现方式> [--round N] [--dry-run] [--json]
   loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
 
@@ -1389,6 +1390,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     else if (args.command === "清理") result = cmdCleanup(args);
     else if (args.command === "漏网") result = cmdMiss(args);
     else if (args.command === "经验") result = cmdExperience(args);
+    else if (args.command === "归档问题单") {
+      if (!args.batch || args.rest.length) throw new LoopError("用法：loop 归档问题单 <项目目录> [--dry-run] [--json]");
+      const { archiveResolvedIssues } = await import("./issue-archive.ts");
+      result = archiveResolvedIssues(resolve(args.batch), args.dryRun);
+    }
     else throw new LoopError(`未知子命令：${args.command}\n${USAGE}`);
     result = executionResult(args.command, result, args);
     if (args.json) console.log(JSON.stringify(result, null, 2));

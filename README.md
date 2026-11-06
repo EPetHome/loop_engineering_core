@@ -65,6 +65,8 @@ claude plugin install autoreview@autoreview-local
 
 ### 生产 Loop：按动作指路与即时校验
 
+问题单关闭后也由工具完成事件自动处理：单头明确为「已解决」且有关闭原因，移入 `issues/【history】/` 并更新当前引用。Claude/Codex 使用已有 PostToolUse，Pi 使用扩展的 tool_result；触发边界、补办命令与未验状态保留见 [问题单规则](README-验收标准.md#问题单)。
+
 Claude Code 和 Codex 共用 PostToolUse（只匹配 `Write|Edit|MultiEdit|Bash|apply_patch`，不用 `if`）；无论是否通过 `bin/loop 开发` 启动，行为相同，Pi 不在此 Hook 范围内。
 
 - 写/改 `docs/batches/**/批次.json`、项目根 `.autoreview.json`：复用 Loop 的只读解析校验；正确时静默。引用的提示词、验收标准等尚未写出时只提示「尚未找到」，不是错误。

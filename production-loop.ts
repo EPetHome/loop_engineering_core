@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface Touched { paths: string[]; command?: string }
-type Kind = "batch" | "config" | "guide";
+type Kind = "batch" | "config" | "guide" | "issue";
 export interface ProductionAction { files: { path: string; kind: Kind; root: string }[]; roots: string[] }
 const LOOP_ROOT = dirname(fileURLToPath(import.meta.url));
 
@@ -22,6 +22,7 @@ const ruleLine = (index: number): string => {
 };
 
 function pathKind(path: string): Kind | undefined {
+  if (/(?:^|\/)issues\/【(?:bug|req)】[^/]+\.md$/.test(path)) return "issue";
   if (/(?:^|\/)\.autoreview\.json$/.test(path)) return "config";
   if (/(?:^|\/)docs\/batches\/.+\/批次\.json$/.test(path)) return "batch";
   if (/(?:^|\/)\.autoreview\/methods\/.+/.test(path) || /(?:^|\/)prompt\/提示词-[^/]+\.md$/.test(path)) return "guide";
@@ -107,16 +108,23 @@ function pathCandidates(words: string[]): string[] {
 
 export function productionAction(touched: Touched, cwd = process.cwd()): ProductionAction | undefined {
   const files = new Map<string, ProductionAction["files"][number]>(), roots = new Set<string>();
-  const add = (value: string, base: string): void => {
+  const add = (value: string, base: string, explicitFile = false): void => {
     const path = resolve(base, value), kind = pathKind(path); // 范围外连文件系统都不访问。
     if (!kind) return;
-    const root = kind === "config" ? dirname(path) : projectRoot(dirname(path));
+    // 命令里的字符串只能用于只读校验，不能据此推断脚本实际写了哪个文件并移动它。
+    if (kind === "issue" && !explicitFile) return;
+    const issueRoot = dirname(dirname(path));
+    const root = kind === "issue" ? issueRoot : kind === "config" ? dirname(path) : projectRoot(dirname(path));
     if (!root) return;
+    if (kind === "issue" && !existsSync(join(root, ".autoreview.json"))) {
+      try { if (!readFileSync(join(root, "AGENTS.md"), "utf8").includes("README-验收标准.md#问题单")) return; }
+      catch { return; }
+    }
     // methods 必须属于标记根；嵌套目录中的同名业务路径不是项目方法。
     if (kind === "guide" && path.includes("/.autoreview/methods/") && !relative(root, path).startsWith(".autoreview/methods/")) return;
     files.set(path, { path, kind, root }); roots.add(root);
   };
-  for (const path of touched.paths) add(path, cwd);
+  for (const path of touched.paths) add(path, cwd, true);
   if (touched.command) {
     let base = resolve(cwd), segment: ShellWord[] = [];
     const visit = (): void => {
@@ -198,6 +206,13 @@ export function resetProductionCard(host: string, session: string | undefined): 
 }
 
 export async function productionContext(action: ProductionAction, host: string, session: string | undefined): Promise<string | undefined> {
+  const issueRoots = [...new Set(action.files.filter((file) => file.kind === "issue").map((file) => file.root))];
+  const archiveOutput: string[] = [];
+  if (issueRoots.length) {
+    const { archiveResolvedIssues } = await import("./issue-archive.ts");
+    for (const root of issueRoots) archiveOutput.push(...archiveResolvedIssues(root, false, action.files.filter((file) => file.kind === "issue" && file.root === root).map((file) => file.path)).lines);
+    if (action.files.every((file) => file.kind === "issue")) return archiveOutput.join("\n") || undefined;
+  }
   const path = statePath(host, session);
   if (path) mkdirSync(path, { recursive: true, mode: 0o700 });
   // wx 原子占位，宿主并行工具也不会重复注入；各标记独立，无需长锁或清理猜测进程。
@@ -206,9 +221,9 @@ export async function productionContext(action: ProductionAction, host: string, 
     try { writeFileSync(join(path, name), "", { flag: "wx", mode: 0o600 }); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; }
   };
-  const output: string[] = [];
+  const output: string[] = [...archiveOutput];
   if (claim("card")) output.push(productionCard(action.roots));
-  const configFiles = action.files.filter((file) => file.kind !== "guide");
+  const configFiles = action.files.filter((file) => file.kind === "batch" || file.kind === "config");
   if (configFiles.length) {
     const { validateProductionFile } = await import("./production-loop-validation.ts");
     for (const file of configFiles) {
