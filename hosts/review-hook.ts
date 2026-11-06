@@ -220,7 +220,7 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
 
 /** 注入给开发方的约定：配了验收再追加验收约定。 */
 function conventionFor(ctx: HookContext): string {
-  return conventionText({ acceptance: Boolean(ctx.config.acceptance), experience: experienceInjection(ctx.configRoot) });
+  return conventionText({ singleNode: ctx.config.singleNode, acceptance: Boolean(ctx.config.acceptance), experience: experienceInjection(ctx.configRoot) });
 }
 
 /** 状态和总结都放在 ~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.*。 */
@@ -467,7 +467,7 @@ async function writeSummary(
   recordMaterialSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
     state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
   const text = renderSummary({
-    workflow: ctx.config.workflow, acceptanceConfigured: Boolean(ctx.config.acceptance),
+    singleNode: ctx.config.singleNode, workflow: ctx.config.workflow, acceptanceConfigured: Boolean(ctx.config.acceptance),
     materialCleanup: state.materialCleanup,
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
@@ -606,8 +606,8 @@ const MAX_REF_BYTES = 200 * 1024;
  * 宿主交给 Hook 的 prompt 不展开「@文件」（pi 会展开）：把能读到的引用文件原文附在后面，
  * 需求原文和验收标准都按展开后的算，两个宿主与 pi 一致。读不到的 @ 当普通文字。
  */
-export function expandFileRefs(prompt: string, cwd: string): string {
-  const blocks: string[] = [];
+export function expandFileRefsWithSources(prompt: string, cwd: string): { text: string; files: { path: string; text: string }[] } {
+  const blocks: string[] = [], files: { path: string; text: string }[] = [];
   const seen = new Set<string>();
   for (const match of prompt.matchAll(/(?:^|\s)@("[^"]+"|\S+)/g)) {
     const ref = match[1].replace(/^"|"$/g, "").replace(/[，。,.;；:：)）]+$/, "");
@@ -618,10 +618,14 @@ export function expandFileRefs(prompt: string, cwd: string): string {
       const stat = statSync(path);
       if (!stat.isFile() || stat.size > MAX_REF_BYTES) continue;
       const text = readFileSync(path, "utf8");
-      if (!text.includes("\0")) blocks.push(`\n\n--- @${ref} ---\n${text}`);
+      if (!text.includes("\0")) { blocks.push(`\n\n--- @${ref} ---\n${text}`); files.push({ path, text }); }
     } catch { /* 不是文件 */ }
   }
-  return `${prompt}${blocks.join("")}`;
+  return { text: `${prompt}${blocks.join("")}`, files };
+}
+/** 旧宿主展示格式保持不变；机器输入身份使用结构化 files，不反解析展示文本。 */
+export function expandFileRefs(prompt: string, cwd: string): string {
+  return expandFileRefsWithSources(prompt, cwd).text;
 }
 
 type ActivityContext = Pick<HookContext, "configRoot" | "host" | "sessionId" | "paths">;
@@ -1097,6 +1101,7 @@ async function recover(event: HookEvent, error: unknown): Promise<string | undef
 }
 
 export async function handleReviewEvent(event: HookEvent): Promise<string | undefined> {
+  if (process.env.AUTOREVIEW_KERNEL_LEDGER) return (await import("./kernel-hook.ts")).handleKernelHook(event);
   try { return await dispatch(event); }
   catch (error) { return recover(event, error); }
 }

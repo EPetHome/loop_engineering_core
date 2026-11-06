@@ -4,7 +4,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { findProjectRoot, PI_BIN, resolveTestCmd } from "./config.ts";
 import type { Exec } from "./git.ts";
-import type { ReviewConfig, ReviewState } from "./review.ts";
+import type { RoundRecord } from "./core.ts";
+import type { StaticConfig } from "./static-review.ts";
 import {
   addExperienceCandidate, compactExperience, experienceDataFile, readExperience, readExperienceStore,
   sameExperience, updateExperienceStore, type ExperienceEntry,
@@ -40,7 +41,9 @@ function parseDraft(output: string, count: number): DraftItem[] {
 }
 
 export async function finishExperience(options: {
-  cwd: string; session: string; state: ReviewState; config: ReviewConfig; exec: Exec;
+  cwd: string; session: string;
+  state: { rounds: RoundRecord[]; experienceDraft?: { signature: string; error?: string } };
+  config: StaticConfig & { reviewTimeoutMin: number }; exec: Exec;
   signal?: AbortSignal; summary: string; env?: NodeJS.ProcessEnv;
 }): Promise<void> {
   const { state } = options;

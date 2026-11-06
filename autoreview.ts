@@ -4,6 +4,7 @@
  * 加载：pi -e /Users/Admin/Desktop/loop/autoreview.ts
  */
 import { createHash, randomUUID } from "node:crypto";
+import kernelPi from "./kernel-pi.ts";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -88,6 +89,17 @@ function lastAssistantText(entries: SessionEntry[]): string {
 }
 
 export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exec): void {
+  // 问题单归档属于共用服务，新卡与旧单会话均保留，不依赖评审节点内部状态。
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.isError || !["write", "edit"].includes(event.toolName)) return;
+    const touched = { paths: typeof event.input.path === "string" ? [event.input.path] : [] };
+    const roots = [...new Set(productionAction(touched, ctx.cwd)?.files.filter((file) => file.kind === "issue").map((file) => file.root) ?? [])];
+    if (!roots.length) return;
+    const { archiveResolvedIssues } = await import("./issue-archive.ts");
+    const lines = roots.flatMap((root) => archiveResolvedIssues(root, false, touched.paths.map((path) => resolve(ctx.cwd, path))).lines);
+    if (lines.length) return { content: [...event.content, { type: "text" as const, text: lines.join("\n") }] };
+  });
+  if (process.env.AUTOREVIEW_KERNEL_LEDGER) { kernelPi(pi, execOverride); return; }
   // 自定义 start 不经过 bin/pi-dev；扩展加载即撤掉一次性启动回报身份，检查子进程不能改写父段状态。
   if (process.env[PIPELINE_LAUNCH_TOKEN_ENV]) delete process.env[PIPELINE_LAUNCH_TOKEN_ENV];
   let state: PiState = newReviewState();
@@ -245,7 +257,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     });
     if (status === "完成") todos.push(...experienceTodos(ctx.cwd, state.experienceDraft?.error));
     const text = renderSummary({
-      workflow: summaryConfig?.workflow, acceptanceConfigured: summaryConfig ? Boolean(acceptance) : undefined,
+      singleNode: summaryConfig?.singleNode, workflow: summaryConfig?.workflow, acceptanceConfigured: summaryConfig ? Boolean(acceptance) : undefined,
       cwd: ctx.cwd, devSessionId,
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
@@ -336,7 +348,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     return config;
   };
 
-  const acceptCommand = (): string => flagString(pi, "autoreview-accept-cmd", "");
+  const acceptCommand = (): string => process.env.AUTOREVIEW_SINGLE_NODE === "1" ? "" : flagString(pi, "autoreview-accept-cmd", "");
   const acceptMode = (): "required" | "advisory" => {
     const value = flagString(pi, "autoreview-accept-mode", "required");
     if (value !== "required" && value !== "advisory") throw new Error("autoreview-accept-mode 必须是 required 或 advisory");
@@ -1176,7 +1188,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     const life = lifecycle;
     if (!life.active) return;
     // Pi 1.2 的插件消息没有 prompt，不能当成用户接管、需求或授权。
-    const provenance = { verifiedRelay: verifiedRelayPrompt !== undefined && verifiedRelayPrompt === event.prompt };
+    const provenance = { verifiedRelay: event.messageType !== "custom" && verifiedRelayPrompt !== undefined && verifiedRelayPrompt === event.prompt };
     verifiedRelayPrompt = undefined;
     const prompt = event.messageType === "custom" || isLoopMessage(event.prompt ?? "", provenance) ? undefined : event.prompt;
     // 来源内容变化不再撤销完成资格，这里只比较用户输入（需求、标准、授权）。
@@ -1242,21 +1254,11 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       if (prompt !== undefined && hadReview && !state.needsInputReview && previousInputs !== JSON.stringify([state.requirement, state.criteria, state.grants])) await invalidateCompletion(ctx, life);
       const acceptance = acceptanceEnabled(ctx);
       if (state.enabled) {
-        const convention = conventionText({ acceptance, experience: experienceInjection(ctx.cwd) });
+        const convention = conventionText({ singleNode: process.env.AUTOREVIEW_SINGLE_NODE === "1", acceptance, experience: experienceInjection(ctx.cwd) });
         const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
         event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }
     } catch (error) { await pauseForError(ctx, error, life); ctx.abort(); }
-  });
-
-  pi.on("tool_result", async (event, ctx) => {
-    if (event.isError || !["write", "edit"].includes(event.toolName)) return;
-    const touched = { paths: typeof event.input.path === "string" ? [event.input.path] : [] };
-    const roots = [...new Set(productionAction(touched, ctx.cwd)?.files.filter((file) => file.kind === "issue").map((file) => file.root) ?? [])];
-    if (!roots.length) return;
-    const { archiveResolvedIssues } = await import("./issue-archive.ts");
-    const lines = roots.flatMap((root) => archiveResolvedIssues(root, false, touched.paths.map((path) => resolve(ctx.cwd, path))).lines);
-    if (lines.length) return { content: [...event.content, { type: "text" as const, text: lines.join("\n") }] };
   });
 
   pi.on("agent_settled", async (_event, ctx) => {

@@ -69,8 +69,8 @@ registerHooks({resolve(specifier,context,next){const result=next(specifier,conte
 function assertCard(text: string): void {
   assert.ok(text.split("\n").length <= 6, text);
   for (const rule of PRODUCTION_RULES) assert.ok(text.includes(join(ROOT, rule.file)), rule.file);
-  assert.match(text, /完成后由程序提交并记录，推不推由用户决定/);
-  assert.match(text, /合入只由用户执行 bin\/loop 合入（合入队列），不要在会话里手动 git 合并/);
+  assert.match(text, /前置结论有效后合入 dev 并推送 origin\/dev/);
+  assert.match(text, /接受未验证须真实用户决定，也走 bin\/loop 合入。不要手动 git 合并/);
   assert.doesNotMatch(text, /merge\.auto|由程序自动合入|复制到项目|\.autoreview\/CONVENTIONS\.md|收尾回写/);
 }
 
@@ -123,7 +123,7 @@ test("A3/A7 编辑与 Bash 重定向都复用开工报错、同会话去重，�
       const event = bash ? h.event(host, "Bash", { command: `printf '%s' '{"name":"x"}' > '${batchFile}'` }) : h.editEvent(host, batchFile);
       const env = dev ? { AUTOREVIEW_DEV_ROOT: h.repo } : {};
       const text = h.context(h.run(event, env).stdout);
-      assert.ok(text.includes(error), text); assert.ok(text.includes(join(ROOT, "README.md"))); assert.match(text, /「流水线与批次/);
+      assert.ok(text.includes(error), text); assert.ok(text.includes(join(ROOT, "README.md"))); assert.match(text, /「单任务开发卡（第1步）/);
       assert.equal((text.match(/Loop 规则按需读/g) ?? []).length, 1);
       assert.equal(h.run(event, env).stdout, "");
       h.write(promptFile, "# 提示词\n"); h.write(batchFile, h.valid());

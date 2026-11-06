@@ -6,14 +6,14 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface Touched { paths: string[]; command?: string }
-type Kind = "batch" | "config" | "guide" | "issue";
+type Kind = "card" | "batch" | "config" | "guide" | "issue";
 export interface ProductionAction { files: { path: string; kind: Kind; root: string }[]; roots: string[] }
 const LOOP_ROOT = dirname(fileURLToPath(import.meta.url));
 
 /** 标题用真实完整标题，测试逐一核对；指路卡正文只维护这一份。 */
 export const PRODUCTION_RULES = [
   { file: "README-验收标准.md", sections: ["起草需求时写验收标准（自动验收 v7）", "起草任务提示词（自动评审 v2）"], description: "任务提示词与验收标准" },
-  { file: "README.md", sections: ["流水线与批次（几段并行 / 串行 + 整批验收）", "开工、启动、状态与合入（bin/loop）"], description: "批次配置与开工、启动、合入" },
+  { file: "README.md", sections: ["单任务开发卡（第1步）"], description: "新卡、启动、状态与统一合入（旧批次仅内部保留）" },
   { file: "项目文档/运行与维护.md", sections: ["项目配置示例", "迁移与检查"], description: "项目配置、方法与迁移" },
 ] as const;
 const ruleLine = (index: number): string => {
@@ -24,6 +24,7 @@ const ruleLine = (index: number): string => {
 function pathKind(path: string): Kind | undefined {
   if (/(?:^|\/)issues\/【(?:bug|req)】[^/]+\.md$/.test(path)) return "issue";
   if (/(?:^|\/)\.autoreview\.json$/.test(path)) return "config";
+  if (/(?:^|\/)开发卡\.json$/.test(path)) return "card";
   if (/(?:^|\/)docs\/batches\/.+\/批次\.json$/.test(path)) return "batch";
   if (/(?:^|\/)\.autoreview\/methods\/.+/.test(path) || /(?:^|\/)prompt\/提示词-[^/]+\.md$/.test(path)) return "guide";
   return undefined;
@@ -177,13 +178,13 @@ export function productionAction(touched: Touched, cwd = process.cwd()): Product
 function hasBatch(root: string): boolean {
   // 状态口径是仓库内 docs/batches/*/批次.json，不看解析默认值。
   const batches = join(root, "docs", "batches");
-  try { return readdirSync(batches, { withFileTypes: true }).some((entry) => entry.isDirectory() && existsSync(join(batches, entry.name, "批次.json"))); }
+  try { return readdirSync(batches, { withFileTypes: true }).some((entry) => entry.isDirectory() && (existsSync(join(batches, entry.name, "开发卡.json")) || existsSync(join(batches, entry.name, "批次.json")))); }
   catch { return false; }
 }
 
 export function productionCard(roots: string[]): string {
   const lines = ["Loop 规则按需读：", ...PRODUCTION_RULES.map((rule, index) => `- ${rule.description} → ${ruleLine(index)}`),
-    "完成后由程序提交并记录，推不推由用户决定；合入只由用户执行 bin/loop 合入（合入队列），不要在会话里手动 git 合并。"];
+    "新卡由程序提交并记账；前置结论有效后合入 dev 并推送 origin/dev；接受未验证须真实用户决定，也走 bin/loop 合入。不要手动 git 合并。"];
   const unmigrated = roots.filter((root) => {
     try {
       const raw = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));
@@ -223,7 +224,7 @@ export async function productionContext(action: ProductionAction, host: string, 
   };
   const output: string[] = [...archiveOutput];
   if (claim("card")) output.push(productionCard(action.roots));
-  const configFiles = action.files.filter((file) => file.kind === "batch" || file.kind === "config");
+  const configFiles = action.files.filter((file) => file.kind === "card" || file.kind === "batch" || file.kind === "config");
   if (configFiles.length) {
     const { validateProductionFile } = await import("./production-loop-validation.ts");
     for (const file of configFiles) {
@@ -231,7 +232,7 @@ export async function productionContext(action: ProductionAction, host: string, 
       for (const report of await validateProductionFile(file)) {
         const key = createHash("sha256").update(JSON.stringify([file.path, report])).digest("hex");
         if (!claim(key)) continue;
-        output.push(`${file.path}：\n${report}\n规则见 ${ruleLine(file.kind === "batch" ? 1 : 2)}。`);
+        output.push(`${file.path}：\n${report}\n规则见 ${ruleLine(file.kind === "batch" || file.kind === "card" ? 1 : 2)}。`);
       }
     }
   }

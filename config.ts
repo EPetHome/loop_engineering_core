@@ -519,7 +519,8 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
   }
   const configRoot = root ?? process.cwd();
   const stage = batchStageConfiguration(overrides, env);
-  const configuredAcceptance = stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
+  const configuredAcceptance = env.AUTOREVIEW_SINGLE_NODE === "1" ? undefined
+    : stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
   const acceptance = stage?.workflow === "without-acceptance" ? undefined : configuredAcceptance;
   warnDisabledGate(data);
   parseDeploymentConfig(data.deployment);
@@ -528,6 +529,7 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
   const context = parseContext(data.context, configRoot);
   checkRoundBudget(reviewTimeoutMin, acceptance);
   return {
+    ...(env.AUTOREVIEW_SINGLE_NODE === "1" ? { singleNode: true } : {}),
     maxRepairs: explicit(overrides.maxRepairs) ? intFlag(overrides.maxRepairs, "autoreview-max-repairs") : nonNegativeInt(data, "maxRepairs", DEFAULT_MAX_REPAIRS),
     reviewerModel: overrides.reviewerModel?.trim() || nonEmptyString(data, "reviewerModel", DEFAULT_MODEL),
     reviewerThinking: overrides.reviewerThinking?.trim() || nonEmptyString(data, "reviewerThinking", DEFAULT_THINKING),

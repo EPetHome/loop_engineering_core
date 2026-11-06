@@ -24,8 +24,8 @@ export const CONVENTION = [
 ].join("\n");
 
 /** 注入给开发方的约定全文：开发约定，配了验收再追加验收约定。 */
-export function conventionText(options: { acceptance?: boolean; experience?: string } = {}): string {
-  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.experience ?? ""]
+export function conventionText(options: { singleNode?: boolean; acceptance?: boolean; experience?: string } = {}): string {
+  return [CONVENTION, options.singleNode ? "本次只有开发评审节点；测试、验收：没验证（本次未安排）。不运行旧后置验收命令。" : "", options.acceptance ? ACCEPTANCE_CONVENTION : "", options.experience ?? ""]
     .filter(Boolean).join("\n");
 }
 /** 超过这个字节数的 diff 不再原文附给评审。 */
@@ -95,6 +95,7 @@ export interface AcceptRunRecord {
 }
 
 export interface SummaryInput {
+  singleNode?: boolean;
   workflow?: import("./config.ts").StageWorkflow;
   acceptanceConfigured?: boolean;
   cwd: string;
@@ -303,7 +304,7 @@ export function acceptRunLabel(record: AcceptRunRecord): string {
 export function renderDeliveryReport(input: SummaryInput): string {
   const round = input.rounds.at(-1), acceptance = round?.acceptance;
   const lines = ["# 交付报告", `- 项目：${input.cwd}`];
-  const skipped = input.workflow === "without-acceptance" ? "批次明确选择不带验收流程"
+  const skipped = input.singleNode ? "本次未安排" : input.workflow === "without-acceptance" ? "批次明确选择不带验收流程"
     : round?.mustFix.length ? "评审有必修，本轮直接返修"
     : round?.failed ? "评审未成功，本轮暂停"
     : input.acceptanceConfigured === false ? "未配置自动验收" : "本轮没有验收记录";
@@ -326,7 +327,8 @@ export function renderDeliveryReport(input: SummaryInput): string {
       lines.push(`- ${executed ? `证据：${evidenceDir}/evidence/${item.id}.txt；` : ""}完整判定：${evidenceDir}/result.json`);
     }
   }
-  lines.push("## 测试", `- ${LOOP_TEST_STATUS}`);
+  if (input.singleNode) lines.push("## 验收", "- 没验证（本次未安排）");
+  lines.push("## 测试", `- ${input.singleNode ? "没验证（本次未安排）" : LOOP_TEST_STATUS}`);
   lines.push("## 评审");
   const reviewed = round && !round.failed && !/^(未评审|不再评审)/.test(round.conclusion);
   lines.push(`- 结论：${round?.failed ? `未完成：${round.failed}` : reviewed ? round.reviewConclusion || round.conclusion || "没有记录" : "没跑（本轮没有静态评审记录，见各轮说明）"}`,
@@ -352,7 +354,8 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 项目：${input.cwd}`);
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
-  lines.push(`- 测试：${LOOP_TEST_STATUS}`);
+  lines.push(`- 测试：${input.singleNode ? "没验证（本次未安排）" : LOOP_TEST_STATUS}`);
+  if (input.singleNode) lines.push("- 验收：没验证（本次未安排）");
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
   if (input.status === "完成" && input.materialCleanup) lines.push(`- ${input.materialCleanup}`);
   if (input.acceptRun) {

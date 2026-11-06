@@ -122,7 +122,7 @@ export function renderLedgerRecord(record: LedgerRecord): string {
     `## ${ledgerStamp(record.at)} · ${oneLine(record.project, 500)} · 会话 ${oneLine(record.session, 200)}`,
     `- 任务：${oneLine(record.task, 240)}`,
     `- 结果：${oneLine(record.result, 200)}`,
-    `- 测试：Loop 未运行测试；评审：${oneLine(record.checks?.review || "没有记录", 500)}；验收：${oneLine(record.checks?.acceptance || "没有记录", 500)}`,
+    `- 测试：${oneLine(record.checks?.test || "Loop 未运行测试", 500)}；评审：${oneLine(record.checks?.review || "没有记录", 500)}；验收：${oneLine(record.checks?.acceptance || "没有记录", 500)}`,
     `- 交付报告：${oneLine(record.summary, 1000)}`,
     `- 总结：${oneLine(record.summary, 1000)}`,
     ...relaySourceLines(record.paRelays),

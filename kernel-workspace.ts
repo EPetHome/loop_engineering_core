@@ -1,0 +1,256 @@
+/** 受管任务 Git 边界：私有索引、范围/本机文件排除、CAS；不处理用户独立工作区。 */
+import { spawnSync } from "node:child_process";
+import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { digest, inside } from "./development-card.ts";
+import { findProjectRoot, loadProjectLayout, parseContext, readMarker, resolveProjectConfig } from "./config.ts";
+import { outOfScope } from "./scope.ts";
+import { gitResult, gitText, worktrees } from "./workspace.ts";
+import type { Candidate, KernelRun } from "./node-ledger.ts";
+
+const nul = (s: string): string[] => s.split("\0").filter(Boolean);
+/** 路径按原始 NUL 字节拆分，不 trim 文件名中的首尾空白。 */
+export function gitRaw(repo: string, args: string[]): string {
+  const r = gitResult(repo, args);
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr || r.stdout}`);
+  return r.stdout;
+}
+export function fileDigest(path: string): string {
+  const info = lstatSync(path);
+  if (info.isSymbolicLink()) return digest(`link:${readlinkSync(path)}`);
+  if (!info.isFile()) throw new Error(`不是普通本机文件：${path}`);
+  return digest(Buffer.concat([Buffer.from(`${info.mode & 0o111}:`), readFileSync(path)]));
+}
+/** 有界只读来源清单；不写索引，不跟随链接，不扫描整个磁盘。 */
+function sourceHashes(path: string, into: Record<string, string>, label: string, paths: Record<string, string>, contents: Record<string, string>, capture?: { text?: string }): void {
+  if (Object.keys(into).length > 2000) throw new Error("检查输入超过 2000 文件");
+  if (!existsSync(path)) { into[label] = "缺失"; paths[label] = path; return; }
+  const info = lstatSync(path);
+  if (info.isSymbolicLink()) throw new Error(`检查输入不跟随符号链接：${path}`);
+  if (info.isDirectory()) {
+    into[`${label}/`] = "目录"; paths[`${label}/`] = path;
+    for (const name of readdirSync(path).sort()) sourceHashes(join(path, name), into, `${label}/${name}`, paths, contents);
+  } else {
+    if (!info.isFile() || info.size > 1024 * 1024) throw new Error(`检查输入非普通文件或超过 1MiB：${path}`);
+    // 文件指纹与确认内容都取自同一份字节，不能先哈希 V2、再另读 V1 来校验。
+    const bytes = readFileSync(path), key = `${label}：${path}`;
+    into[key] = digest(Buffer.concat([Buffer.from(`${info.mode & 0o111}:`), bytes])); paths[key] = path; contents[key] = digest(bytes);
+    if (capture) capture.text = bytes.toString("utf8");
+  }
+}
+/** 只归一化本次 CAS/checkout 可证明造成的输入更新；外部写入、用户版本和授权不豁免。 */
+function publicationInputChanges(run: KernelRun, files: Record<string, string>, paths: Record<string, string>): string[] {
+  const p = run.publication;
+  if (p?.local !== "merged" || !p.inputSnapshot || !p.inputRoot) return [];
+  const changed = nul(gitRaw(run.repo, ["diff", "--name-only", "--no-renames", "-z", p.targetBefore, p.commit, "--"]));
+  const verified = new Map<string, boolean>(), normalized: string[] = [];
+  const isPublished = (path: string): boolean => {
+    if (verified.has(path)) return verified.get(path)!;
+    let same = false;
+    if (inside(p.inputRoot!, path)) {
+      const rel = relative(p.inputRoot!, path).replace(/\\/g, "/");
+      if (rel && changed.some((v) => rel === v || rel.startsWith(`${v}/`) || v.startsWith(`${rel}/`))) {
+        const entry = gitRaw(run.repo, ["--literal-pathspecs", "ls-tree", "-z", p.commit, "--", rel]);
+        if (!entry) same = !existsSync(path);
+        else {
+          const info = existsSync(path) ? lstatSync(path) : undefined;
+          if (entry.startsWith("040000 tree ")) same = Boolean(info?.isDirectory() && !info.isSymbolicLink());
+          else if (info?.isFile() && /^100(?:644|755) blob /.test(entry)) {
+            const executable = entry.startsWith("100755 ");
+            const read = spawnSync("git", ["cat-file", "--filters", `--path=${rel}`, `${p.commit}:${rel}`], { cwd: run.repo, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
+            same = read.status === 0 && Boolean(info.mode & 0o111) === executable
+              && fileDigest(path) === digest(Buffer.concat([Buffer.from(`${info.mode & 0o111}:`), read.stdout]));
+          }
+        }
+      }
+    }
+    verified.set(path, same); return same;
+  };
+  const before = p.inputSnapshot.files;
+  for (const key of new Set([...Object.keys(before), ...Object.keys(files)])) {
+    if (before[key] === files[key]) continue;
+    const path = paths[key] ?? p.inputSnapshot.paths[key];
+    if (!path || !isPublished(path)) continue;
+    if (Object.hasOwn(before, key)) files[key] = before[key]; else delete files[key];
+    normalized.push(path);
+  }
+  return [...new Set(normalized)];
+}
+/** 引用是用户确认的内容版本，不是允许程序静默采用未来文件内容的授权。 */
+function verifyUserReferences(run: KernelRun, files: Record<string, string>, paths: Record<string, string>, contents: Record<string, string>, observed: Record<string, string>, publicationChanges: string[]): void {
+  const canonical = (path: string): string => { try { return realpathSync(path); } catch { return resolve(path); } };
+  for (const reference of run.userFiles ?? []) {
+    const expected = run.userFileVersions?.[reference], actualPath = canonical(reference);
+    const keys = Object.keys(files).filter((key) => {
+      const path = paths[key] ?? run.publication?.inputSnapshot?.paths[key];
+      return path && canonical(path) === actualPath;
+    });
+    const mismatch = !expected || !keys.length || keys.some((key) => {
+      if (contents[key] === expected) return false;
+      const path = paths[key] ?? run.publication?.inputSnapshot?.paths[key];
+      // 已检查候选的发布转换仍使用原输入身份；只有原有精确 Git 证明可以归一化。
+      return !(run.publication?.local === "merged" && path && publicationChanges.includes(path)
+        && files[key] === run.publication.inputSnapshot?.files[key] && files[key] !== observed[key]);
+    });
+    if (mismatch) throw new Error(`引用检查输入已变化或缺少确认快照：${reference}；请在原开发会话重新引用确认（发送 ${/\s/.test(reference) ? `@"${reference}"` : `@${reference}`}），再交付；仅续跑不会自动采用新标准`);
+  }
+}
+export function checkInputs(run: KernelRun): { hash: string; files: Record<string, string>; paths: Record<string, string>; observedFiles: Record<string, string>; publicationChanges: string[]; requirement: string } {
+  const files: Record<string, string> = {}, paths: Record<string, string> = {}, contents: Record<string, string> = {};
+  const collect = (path: string, label: string): void => sourceHashes(path, files, label, paths, contents);
+  collect(run.file, "卡");
+  const prompt: { text?: string } = {};
+  sourceHashes(run.card.tasks[0].prompt, files, "提示词", paths, contents, prompt);
+  for (const path of run.userFiles ?? []) collect(path, `用户检查输入/${path}`);
+  for (const [label, root] of [["原目录", run.repo], ["任务目录", run.worktree]] as const) {
+    if (!existsSync(root)) continue;
+    for (const p of [...new Set([...run.localFiles, "AGENTS.md", "CLAUDE.md", ".autoreview/经验.md"])]) collect(join(root, p), `${label}/${p}`);
+  }
+  const configRoot = findProjectRoot(run.repo) ?? run.repo;
+  const raw = existsSync(join(configRoot, ".autoreview.json")) ? readMarker(configRoot) : {};
+  const context = parseContext(raw.context, configRoot);
+  if (context) for (const s of context.sources.filter((s) => s.role !== "code")) {
+    const path = resolve(context.root, s.path);
+    if (!s.optional && !existsSync(path)) throw new Error(`上游来源缺失：${path}`);
+    collect(path, `来源/${s.id}`);
+    if (inside(run.repo, path) && existsSync(run.worktree)) collect(resolve(run.worktree, relative(run.repo, path)), `任务来源/${s.id}`);
+  }
+  if (prompt.text === undefined && !run.publication?.inputSnapshot) throw new Error(`提示词无法形成输入快照：${run.card.tasks[0].prompt}`);
+  const requirement = run.publication?.inputSnapshot?.requirement ?? [prompt.text!, ...run.userInputs].join("\n\n");
+  const observedFiles = { ...files }, publicationChanges = publicationInputChanges(run, files, paths);
+  verifyUserReferences(run, files, paths, contents, observedFiles, publicationChanges);
+  const config = managedConfig(existsSync(run.worktree) ? run.worktree : run.repo);
+  const identityFiles = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
+  return { hash: digest(JSON.stringify([identityFiles, run.userVersion, run.userInputs, config.configurationHash, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审])), files, paths, observedFiles, publicationChanges, requirement };
+}
+export function frozenCardProblem(run: KernelRun): string | undefined {
+  try { if (digest(readFileSync(run.file)) === run.cardHash) return undefined; } catch { /* 明确报卡变化 */ }
+  return "开发卡文件已直接修改；本步不自动采用。恢复冻结原卡后用「续跑」；受控改卡在第 2 步上线";
+}
+export function managedConfig(cwd: string) {
+  return resolveProjectConfig(findProjectRoot(cwd), { env: { ...process.env, AUTOREVIEW_SINGLE_NODE: "1", AUTOREVIEW_BATCH_FILE: "", AUTOREVIEW_STAGE: "" } });
+}
+export function localCopyPlan(repo: string, base: string): string[] {
+  const { root, layout } = loadProjectLayout(repo);
+  if (realpathSync(root) !== realpathSync(repo)) throw new Error("开发卡目前要求 .autoreview.json 在 Git 根目录；请从项目根启动");
+  const locals = [...new Set([".autoreview.json", ...layout.localFiles])];
+  for (const path of locals) {
+    const absolute = resolve(repo, path);
+    if (!inside(repo, absolute) || path === ".git" || path.startsWith(".git/")) throw new Error(`本机文件越界：${path}`);
+    const parts = relative(repo, absolute).split("/");
+    for (let i = 1; i <= parts.length; i++) {
+      const item = join(repo, ...parts.slice(0, i));
+      if (existsSync(item) && lstatSync(item).isSymbolicLink()) throw new Error(`本机文件路径含链接：${path}`);
+      const entry = gitRaw(repo, ["ls-tree", "-z", base, "--", parts.slice(0, i).join("/")]);
+      if (entry.startsWith("120000 ")) throw new Error(`开工树的本机文件父路径含链接：${path}`);
+    }
+    if (!existsSync(absolute) || !lstatSync(absolute).isFile()) throw new Error(`声明的本机文件不存在或不是普通文件：${path}`);
+    if (gitResult(repo, ["cat-file", "-e", `${base}:${path}`]).status === 0) throw new Error(`本机文件在开工树已跟踪，拒绝覆盖或夹带：${path}`);
+  }
+  return locals;
+}
+export function assertWorkspace(run: KernelRun): void {
+  if (!run.workspaceCreated || !existsSync(run.worktree) || realpathSync(run.worktree) !== resolve(run.worktree)) throw new Error("任务工作区归属未确认");
+  const actual = worktrees(run.repo).find((w) => resolve(w.path) === run.worktree);
+  if (actual?.branch !== run.branch || gitText(run.worktree, ["branch", "--show-current"]) !== run.branch
+    || realpathSync(gitText(run.worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"])) !== run.common) throw new Error("任务工作区、分支或仓库身份变化");
+  const hidden = nul(gitRaw(run.worktree, ["ls-files", "-v", "-z"])).filter((line) => !line.startsWith("H "));
+  if (hidden.length) throw new Error(`索引含 assume-unchanged、skip-worktree 或未解决状态，不能隐藏候选改动：${hidden.join("、")}`);
+}
+export function createWorkspace(run: KernelRun): void {
+  if (existsSync(run.worktree)) throw new Error("隐藏路径已存在，未认领或覆盖");
+  if (existsSync(dirname(run.worktree))) throw new Error("隐藏任务父目录已存在，未认领或覆盖");
+  mkdirSync(dirname(run.worktree), { recursive: true, mode: 0o700 }); run.workspaceParentCreated = true;
+  gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", run.branch, run.worktree, run.base]);
+  for (const path of run.localFiles) {
+    const source = resolve(run.repo, path), target = resolve(run.worktree, path);
+    // worktree 中的路径也不能沿基础树的符号链接逃逸。
+    let parent = dirname(target);
+    while (parent !== run.worktree) {
+      if (existsSync(parent) && lstatSync(parent).isSymbolicLink()) throw new Error(`任务本机路径含链接：${path}`);
+      parent = dirname(parent);
+    }
+    if (existsSync(target)) throw new Error(`任务本机文件已存在，未覆盖：${path}`);
+    mkdirSync(dirname(target), { recursive: true }); cpSync(source, target, { errorOnExist: true, force: false });
+  }
+}
+const local = (run: KernelRun, p: string): boolean => run.localFiles.some((l) => p === l || p.startsWith(`${l}/`));
+export function dirtyPaths(run: KernelRun): string[] {
+  const root = run.worktree;
+  return [...new Set([...nul(gitRaw(root, ["diff", "--name-only", "--no-renames", "-z", "HEAD", "--"])),
+    ...nul(gitRaw(root, ["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD", "--"])),
+    ...nul(gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"]))])].filter((p) => !local(run, p));
+}
+/** 包括索引和原始字节；HEAD 相同或 clean filter 归一化相同不足以证明工作区没变。 */
+export function workspaceGuard(run: KernelRun): string {
+  assertWorkspace(run);
+  const paths = [...new Set(nul(gitRaw(run.worktree, ["ls-files", "--cached", "--others", "-z"])))].sort();
+  const files = paths.map((p) => [p, existsSync(join(run.worktree, p)) ? fileDigest(join(run.worktree, p)) : "缺失"]);
+  return digest(JSON.stringify([gitText(run.worktree, ["rev-parse", "HEAD"]), gitRaw(run.worktree, ["ls-files", "--stage", "-z"]), files]));
+}
+const ancestor = (repo: string, a: string, b: string): boolean => gitResult(repo, ["merge-base", "--is-ancestor", a, b]).status === 0;
+const treeEntry = (repo: string, commit: string, path: string): string => gitRaw(repo, ["--literal-pathspecs", "ls-tree", "-z", commit, "--", path]);
+/** 范围不扩张：已登记候选的原样文件可沿用；新增范围外内容必须能证明来自 dev 的合并父提交。 */
+export function taskScopeBaseline(run: KernelRun, head: string): { target: string; base: string; imported: string[] } {
+  const target = gitText(run.repo, ["rev-parse", "refs/heads/dev"]);
+  const files = nul(gitRaw(run.worktree, ["diff", "--name-only", "--no-renames", "-z", run.base, head, "--"]));
+  const outside = outOfScope(files, run.card.tasks[0].scope);
+  const fresh = outside.filter((p) => !run.candidate || treeEntry(run.repo, head, p) !== treeEntry(run.repo, run.candidate.commit, p));
+  if (!fresh.length) return { target, base: run.base, imported: outside };
+  const reject = (paths: string[]): never => { throw new Error(`任务范围外变更，未自动提交（不是已核对 dev 来源）：${paths.join("、")}`); };
+  if (!ancestor(run.repo, run.targetAtStart, target) || !ancestor(run.repo, run.base, head)) reject(fresh);
+  const base = gitText(run.repo, ["merge-base", head, target]);
+  const invalid = fresh.filter((p) => treeEntry(run.repo, head, p) !== treeEntry(run.repo, base, p));
+  if (invalid.length) reject(invalid);
+  const start = run.candidate && ancestor(run.repo, run.candidate.commit, head) ? run.candidate.commit : run.base;
+  const commits = gitText(run.repo, ["rev-list", "--first-parent", "--reverse", `${start}..${head}`]).split("\n").filter(Boolean);
+  for (const commit of commits) {
+    if (ancestor(run.repo, commit, target)) continue;
+    const parents = gitText(run.repo, ["rev-list", "--parents", "-n", "1", commit]).split(" ").slice(1);
+    const touched = nul(gitRaw(run.repo, ["diff", "--name-only", "--no-renames", "-z", parents[0], commit, "--"])).filter((p) => fresh.includes(p));
+    const incoming = parents.slice(1).filter((p) => ancestor(run.repo, p, target));
+    const unauthorized = touched.filter((p) => !incoming.some((parent) => treeEntry(run.repo, commit, p) === treeEntry(run.repo, parent, p)));
+    if (unauthorized.length) reject(unauthorized);
+  }
+  return { target, base, imported: outside };
+}
+/** 仅内核登记的工作区可自动提交；索引预先有内容不猜测归属。 */
+export function deliverCandidate(run: KernelRun): Candidate {
+  assertWorkspace(run);
+  const target = gitText(run.worktree, ["rev-parse", "--path-format=absolute", "--git-path", "index"]), lock = `${target}.lock`;
+  const fd = openSync(lock, "wx", 0o600), state = { published: false };
+  try { return deliverWithIndex(run, fd, lock, target, state); }
+  finally { closeSync(fd); if (!state.published) rmSync(lock); }
+}
+function deliverWithIndex(run: KernelRun, fd: number, lock: string, target: string, state: { published: boolean }): Candidate {
+  const head = gitText(run.worktree, ["rev-parse", "HEAD"]);
+  const branchFiles = nul(gitRaw(run.worktree, ["diff", "--name-only", "--no-renames", "-z", run.base, head, "--"]));
+  const imported = new Set(taskScopeBaseline(run, head).imported);
+  const changed = dirtyPaths(run);
+  const outside = outOfScope([...new Set([...branchFiles.filter((p) => !imported.has(p)), ...changed])], run.card.tasks[0].scope);
+  if (outside.length) throw new Error(`任务范围外变更，未自动提交：${outside.join("、")}`);
+  if (branchFiles.some((p) => local(run, p))) throw new Error("任务历史夹带本机文件，未交付");
+  if (gitText(run.worktree, ["diff", "--cached", "--name-only", "-z"])) throw new Error("索引有未经登记的用户暂存改动，未自动提交；请保留成果并取消暂存后在原会话重新交付");
+  if (!changed.length) return { commit: head, tree: gitText(run.worktree, ["rev-parse", "HEAD^{tree}"]) };
+  const before = workspaceGuard(run), index = join(run.dir, `index-${randomUUID()}`);
+  const runGit = (args: string[]): string => {
+    const r = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: run.worktree, env: { ...process.env, GIT_INDEX_FILE: index }, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 120_000 });
+    if (r.status !== 0) throw new Error(`程序提交失败：${r.stderr || r.stdout || r.error}`);
+    return r.stdout.trim();
+  };
+  try {
+    runGit(["read-tree", head]);
+    runGit(["--literal-pathspecs", "add", "-A", "--", ...changed]);
+    const tree = runGit(["write-tree"]);
+    if (before !== workspaceGuard(run)) throw new Error("提交期间工作区或索引变化，未更新分支");
+    if (tree === gitText(run.worktree, ["rev-parse", `${head}^{tree}`])) return { commit: head, tree };
+    const commit = runGit(["commit-tree", tree, "-p", head, "-m", `chore: ${run.card.name}\n\n任务：${run.card.tasks[0].name}\n程序交付提交`]);
+    if (before !== workspaceGuard(run)) throw new Error("程序提交落盘前候选又变化，未更新分支");
+    gitText(run.worktree, ["update-ref", `refs/heads/${run.branch}`, commit, head]);
+    // 持有 Git 原生索引锁，不覆盖并发 git add；只原子安装已核对的私有索引，不改文件。
+    writeFileSync(fd, readFileSync(index)); fsyncSync(fd); renameSync(lock, target); state.published = true;
+    if (dirtyPaths(run).length) throw new Error("提交后又出现改动，候选已保存但需原会话重新交付");
+    return { commit, tree };
+  } finally { rmSync(index, { force: true }); rmSync(`${index}.lock`, { force: true }); }
+}

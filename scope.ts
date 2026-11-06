@@ -15,7 +15,7 @@ export interface StageScope {
   deny?: string[];
 }
 
-export type ScopeEnv = Pick<NodeJS.ProcessEnv, "AUTOREVIEW_BATCH_FILE" | "AUTOREVIEW_STAGE">;
+export type ScopeEnv = Partial<Pick<NodeJS.ProcessEnv, "AUTOREVIEW_BATCH_FILE" | "AUTOREVIEW_STAGE">>;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);

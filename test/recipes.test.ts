@@ -35,7 +35,8 @@ function fixture() {
   git(repo, "add", "."); git(repo, "commit", "-qm", "base"); const base = git(repo, "rev-parse", "HEAD");
   writeFileSync(join(repo, "file.txt"), "candidate\n"); git(repo, "commit", "-am", "candidate"); const head = git(repo, "rev-parse", "HEAD");
   const cli = (...args: string[]) => {
-    const result = spawnSync(process.execPath, [join(ROOT, "loop.ts"), ...args, "--json"], { cwd: repo, env, encoding: "utf8", timeout: 90_000 });
+    const entry = args[0] === "启动" ? ["--input-type=module", "-e", `import { main } from ${JSON.stringify(join(ROOT, "loop.ts"))}; process.exitCode = await main(process.argv.slice(1), { legacyCompatibility: true });`] : [join(ROOT, "loop.ts")];
+    const result = spawnSync(process.execPath, [...entry, ...args, "--json"], { cwd: repo, env, encoding: "utf8", timeout: 90_000 });
     assert.ok(result.stdout.trim(), result.stderr); return { code: result.status, data: JSON.parse(result.stdout), stderr: result.stderr };
   };
   const close = () => rmSync(root, { recursive: true, force: true });

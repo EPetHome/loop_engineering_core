@@ -1,4 +1,4 @@
-/** 配置覆盖装配回归：真实 pi-dev / 权限检查 / 流水线，模型及 Terminal 为替身，全部产物位于私有临时目录。 */
+/** 旧内部路径配置装配回归：真实 pi-dev / 权限检查 / 流水线；公开新卡 CLI 在 kernel.test.ts 覆盖。 */
 import "./test-env.ts";
 import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
@@ -67,7 +67,9 @@ process.exit(run.status ?? 1);
     }
     return cwd;
   };
-  const run = (cwd: string, entry: string, args: string[]) => spawnSync(join(EXT_DIR, entry), args, { cwd, env, encoding: "utf8", timeout: 60_000 });
+  const run = (cwd: string, entry: string, args: string[]) => entry === "bin/loop" && args[0] === "启动"
+    ? spawnSync(process.execPath, ["--input-type=module", "-e", `import { main } from ${JSON.stringify(join(EXT_DIR, "loop.ts"))}; process.exitCode = await main(process.argv.slice(1), { legacyCompatibility: true });`, ...args], { cwd, env, encoding: "utf8", timeout: 60_000 })
+    : spawnSync(join(EXT_DIR, entry), args, { cwd, env, encoding: "utf8", timeout: 60_000 });
   return { root, env, launches, windows, repo, run, close: () => rmSync(root, { recursive: true, force: true }) };
 }
 

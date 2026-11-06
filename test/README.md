@@ -4,6 +4,8 @@ Loop 不运行项目测试；开发方按影响范围执行定向文件，例如
 
 ## 功能入口
 
+- `kernel.test.ts` / `fake-kernel-pi.mjs`：新开发卡真实 CLI/受管 Git/本地 bare origin、Pi 生命周期替身、实际 Claude/Codex Hook；候选/输入/授权版本、停止/资源、发布输入转换、dev 整合来源正反例。替身不证明真实模型质量或宿主安装/信任。
+- `loop-fixture.ts`、`config-launch.test.ts`、`recipes.test.ts` 中的旧批次启动明确调用 `main(..., {legacyCompatibility:true})`，保留旧内部场景断言；公开新卡与旧卡迁移拒绝由 `kernel.test.ts` 调用真实 `bin/loop`，不以兼容入口冒充新 CLI。
 - `hook*.test.ts`：Hook 会话、评审、验收、输入、进程、并发、经验及交付。
 - `autoreview*.test.ts`：Pi 会话、必需／附加验收命令、验收、来源、授权、队列、经验及交付。
 - `acceptance*.test.ts`：解析和证据、系统、格式更正、检查点、资源、断线、实测工具及定向复验。

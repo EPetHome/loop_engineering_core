@@ -24,6 +24,7 @@ import { mergeQueuedBatch, readMergeQueue, recoverMergeQueue, registerQueueBatch
 import { nativeDeliveryWarning } from "./hosts/inbox-bridge.ts";
 import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, writePhase, type PhaseRecord } from "./events.ts";
 import { queryBatches } from "./query.ts";
+import { kernelCLI, queryKernelRuns } from "./kernel-cli.ts";
 import { paInfo, sendWords } from "./pa.ts";
 import { resumeBatch } from "./pa-resume.ts";
 import { runReviewOnly } from "./review-only.ts";
@@ -46,13 +47,14 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { reviewTimeoutMin?: string; base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
+interface ParsedArgs { acceptUnverified?: boolean; reviewTimeoutMin?: string; base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--json") result.json = true;
+    if (arg === "--接受未验证") result.acceptUnverified = true;
+    else if (arg === "--json") result.json = true;
     else if (arg === "--all") result.all = true;
     else if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--recheck") result.recheck = true;
@@ -95,6 +97,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.acceptUnverified && result.command !== "合入") throw new LoopError("--接受未验证 只用于新卡的统一合入入口，且需真实用户决定");
   if (result.reviewTimeoutMin !== undefined && !["开工", "启动"].includes(result.command ?? "")) throw new LoopError("--autoreview-review-timeout-min 只用于 loop 开工/启动");
   if (result.stage !== undefined && !["送话", "停止"].includes(result.command ?? "")) throw new LoopError("--stage 只用于 loop 送话/停止");
   if ((result.textFile !== undefined || result.wait !== undefined) && result.command !== "送话") throw new LoopError("--text-file、--wait 只用于 loop 送话");
@@ -1319,7 +1322,7 @@ async function cmdReview(args: ParsedArgs): Promise<Record<string, unknown>> {
 
 /** PA 执行命令无论在哪一步失败，都返回同一外壳及固定字段。 */
 function executionResult(command: string | undefined, result: Record<string, unknown>, args?: ParsedArgs): Record<string, unknown> {
-  if (!["推送", "合入", "停止"].includes(command ?? "")) return result;
+  if (result.kernel === 1 || !["推送", "合入", "停止"].includes(command ?? "")) return result;
   let release: string | null = null, queueStatus: string | null = null, branch: string | null = null;
   try {
     const repo = repoOf(process.cwd()); release = repo.layout.release;
@@ -1347,7 +1350,9 @@ const USAGE = `用法：
   loop 送话 <批次.json> --stage <段> --id <编号> --text-file <文件|-> [--wait 秒] --json
   loop 续跑 <批次.json> --id <编号> [--grant-file <文件|->] --json
   loop 推送 <批次.json> [--dry-run] [--json]
-  loop 合入 <批次.json> [--dry-run] [--json]
+  loop 合入 <开发卡.json> [--接受未验证] [--dry-run] [--json]
+  loop 续跑 <开发卡.json> [--launcher background] [--dry-run] [--json]
+  loop 整合 <开发卡.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]
   loop 归档问题单 <项目目录> [--dry-run] [--json]
@@ -1355,7 +1360,7 @@ const USAGE = `用法：
   loop 经验 <列出|导入|批准|拒绝> <项目目录> [候选文件|候选ID|全部] [--dry-run] [--json]`;
 
 /** CLI 调度入口；允许测试复用同一执行进程，命令行仍默认读取原始参数。 */
-export async function main(argv = process.argv.slice(2)): Promise<number> {
+export async function main(argv = process.argv.slice(2), internal: { legacyCompatibility?: boolean } = {}): Promise<number> {
   let args: ParsedArgs;
   try { args = parseArgs(argv); } catch (error) {
     const json = argv.includes("--json"), dryRun = argv.includes("--dry-run");
@@ -1370,7 +1375,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   try {
     let result: Record<string, unknown>;
-    if (args.command === "评审") result = await cmdReview(args);
+    // 迁移期库内兼容调用用于保留旧批次能力；bin/loop 永远不传此选项，旧卡不回退。
+    const kernel = internal.legacyCompatibility ? undefined : await kernelCLI(args);
+    if (kernel) result = kernel;
+    else if (args.command === "评审") result = await cmdReview(args);
     else if (args.command === "停止") {
       if (!args.batch || args.rest.length || args.recheck || args.launcher) throw new LoopError("用法：loop 停止 <批次.json> [--stage <段>] --json");
       parseRecipe(readBatch(resolve(args.batch)).recipe);
@@ -1379,7 +1387,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     else if (args.command === "开工") result = await cmdOpen(args);
     else if (args.command === "启动") result = await cmdStart(args);
     else if (args.command === "状态") result = await cmdStatus(args);
-    else if (args.command === "查询") result = queryBatches(args.batch);
+    else if (args.command === "查询") {
+      const legacy = queryBatches(args.batch);
+      result = args.batch ? legacy : { ...legacy, batches: [...queryKernelRuns(), ...legacy.batches] };
+    }
     else if (args.command === "送话") result = await cmdPA(args);
     else if (args.command === "续跑") result = await cmdPA(args);
     else if (args.command === "推送") result = cmdPush(args);

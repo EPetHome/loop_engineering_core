@@ -8,7 +8,7 @@
  * pi 的返修消息或宿主的 block JSON。
  */
 import { dirname, join, relative, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { executeStaticReview, staticReviewer, REVIEW_PROMPT_PATH } from "./static-review.ts";
 import { auditLoopConfig, type ConfigAudit } from "./config-audit.ts";
 import type { PauseDetail } from "./blockers.ts";
 import { acceptanceRunDir, runAcceptanceStage, type AcceptanceState } from "./acceptance.ts";
@@ -17,9 +17,9 @@ import {
 } from "./acceptance-core.ts";
 import {
   buildRepairMessage, buildReviewInput, decideNext, deriveReviewerSessionId,
-  parseReview, type ParsedReview, type RoundRecord,
+  type ParsedReview, type RoundRecord,
 } from "./core.ts";
-import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig, type StageWorkflow } from "./config.ts";
+import { findProjectRoot, PERMISSION_EXT, PI_BIN, type AcceptanceConfig, type StageWorkflow } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
 import { methodEnv as buildMethodEnv } from "./method-env.ts";
 import { saveReviewSnapshot } from "./snapshots.ts";
@@ -33,7 +33,7 @@ import { runPreparation, type PreparationConfig, type PreparationState } from ".
 import { isRegisteredSource, loadContext, recordSourceChange, refreshContext, type SourceChangeMark } from "./project-context.ts";
 
 export { PI_BIN, PERMISSION_EXT };
-export const REVIEW_PROMPT_PATH = join(EXT_DIR, "review-prompt.md");
+export { REVIEW_PROMPT_PATH };
 export { DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_MAX_REPAIRS, DEFAULT_TIMEOUT_MIN } from "./config.ts";
 /** 取消正在进行的评审时使用的固定原因。 */
 export const INTERRUPTED = "评审被中断（会话关闭或重载）";
@@ -89,6 +89,7 @@ export interface ReviewState extends AcceptanceState, PreparationState, ConfigAu
 }
 
 export interface ReviewConfig {
+  singleNode?: boolean;
   workflow?: StageWorkflow;
   configurationHash?: string;
   maxRepairs: number;
@@ -192,23 +193,8 @@ export function nowStamp(): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 }
 
-/** 缺省评审调用：测试命令优先，否则走 pi CLI（与 pi 扩展 6.8 相同）。 */
-export function defaultCallReviewer(deps: ReviewDeps) {
-  const { config, exec, cwd, signal } = deps;
-  return async (reviewerSessionId: string, round: number, timeoutMs: number, inputPath: string): Promise<ExecResult> => {
-    if (config.reviewerCmd) {
-      const cmd = resolveTestCmd(config.reviewerCmd);
-      return exec(cmd, [String(round), inputPath, reviewerSessionId], { cwd, timeout: timeoutMs, signal, role: "评审" });
-    }
-    const args = [
-      "--offline", "-p", "--session-id", reviewerSessionId, "--model", config.reviewerModel, "--thinking", config.reviewerThinking,
-      "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
-      "--tools", "read,grep,find,ls,bash", "-e", PERMISSION_EXT,
-      "--append-system-prompt", REVIEW_PROMPT_PATH, `@${inputPath}`,
-    ];
-    return exec(deps.env?.PI_BIN || PI_BIN, args, { cwd, timeout: timeoutMs, signal, role: "评审" });
-  };
-}
+/** 旧组合入口兼容导出；新开发节点直接使用无验收/队列依赖的执行器。 */
+export function defaultCallReviewer(deps: ReviewDeps) { return staticReviewer(deps); }
 
 interface RoundClock {
   startedAt: string;
@@ -423,50 +409,11 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   // 静态评审先执行，自动验收尚未开始；Loop 不运行项目测试。
   if (config.acceptance) deps.onProgress?.(`自动评审中（第 ${deps.round} 轮）`);
 
-  let parsed: ParsedReview | undefined;
-  let lastError = "";
-  const reviewLogs: string[] = [];
-  let timedOut = false;
-  for (let attempt = 1; attempt <= 2 && !parsed; attempt += 1) {
-    // 为后置验收保留预算。首次只要还有正预算就调用，避免合法的一分钟余量被预处理耗时卡死；重试仍至少留一分钟。
-    const remaining = deadline - (config.acceptance?.timeoutMin ?? 0) * 60_000 - now();
-    if (remaining <= 0 || (attempt > 1 && remaining < 60_000)) {
-      timedOut = true;
-      lastError = attempt > 1
-        ? `第 ${attempt} 次评审不再重试：两次尝试共用 ${Math.round(timeoutMs / 60_000)} 分钟已用完（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`
-        : `为验收预留预算后，首次评审预算已用完（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`;
-      break;
-    }
-    const attemptTimeout = remaining;
-    let rawOutput = "";
-    try {
-      const result = await callReviewer(reviewerSessionId, deps.round, attemptTimeout, inputPath);
-      rawOutput = `${result.stdout}\n${result.stderr}`;
-      live();
-      if (result.killed) {
-        timedOut = true;
-        lastError = `第 ${attempt} 次评审超时或被终止（退出码 ${result.code}）`;
-      } else if (result.code !== 0) lastError = `第 ${attempt} 次评审退出码 ${result.code}：${rawOutput}`;
-      else if (!result.stdout.trim()) lastError = `第 ${attempt} 次评审输出为空`;
-      else {
-        const outcome = parseReview(result.stdout);
-        if (outcome.ok) parsed = outcome.review;
-        else lastError = `第 ${attempt} 次评审输出无法解析：${outcome.error}`;
-      }
-    } catch (error) {
-      live();
-      rawOutput = error instanceof Error ? error.stack ?? error.message : String(error);
-      lastError = `第 ${attempt} 次评审调用失败：${rawOutput}`;
-    }
-    if (!parsed) {
-      try { reviewLogs.push(deps.writeInput(`review-error-${deps.devSessionId}-r${deps.round}-a${attempt}-${randomUUID()}.log`, rawOutput || lastError)); }
-      catch (error) { lastError += `\n错误原文写盘失败：${errorText(error)}`; }
-
-      live();
-      deps.onProgress?.(`自动评审中（第 ${deps.round} 轮，重试 ${attempt}）`);
-    }
-  }
-  live();
+  const { parsed, error: lastError, timedOut, logs: reviewLogs } = await executeStaticReview({
+    session: reviewerSessionId, developer: deps.devSessionId, round: deps.round, input: inputPath,
+    deadline, timeoutMs, reservedMs: (config.acceptance?.timeoutMin ?? 0) * 60_000,
+    now, live, progress: deps.onProgress, call: callReviewer, write: deps.writeInput,
+  });
   const record: RoundRecord = {
     round: deps.round, startedAt, durationMs: now() - startedTs,
     conclusion: parsed?.conclusion ?? "", reviewConclusion: parsed?.conclusion, mustFixRaw: parsed?.mustFixRaw ?? "",
