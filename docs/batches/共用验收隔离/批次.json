@@ -1,0 +1,27 @@
+{
+  "name": "共用验收隔离",
+  "branch": "feat/acceptance-isolation",
+  "issues": ["../../../issues/【bug】验收演示数据写入真实状态目录.md"],
+  "pi": {
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "max",
+    "tools": "read,edit,write,bash",
+    "args": ["--no-mcp", "--approve", "--autoreview-accept-cmd", "node test/e2e.mjs", "--autoreview-accept-mode", "required"],
+    "ponytail": {
+      "extension": "/Users/Admin/.codex/plugins/cache/ponytail/ponytail/4.13.0/pi-extension/index.js",
+      "mode": "full"
+    }
+  },
+  "stages": {
+    "开发": {
+      "prompt": "../../prompt/提示词-共用验收隔离.md",
+      "workspace": "共用验收隔离",
+      "workflow": "with-acceptance",
+      "acceptance": { "guide": "../../prompt/验收说明-共用验收隔离.md", "timeoutMin": 20 },
+      "scope": {
+        "allow": ["acceptance-tools/isolated-loop.mjs", "acceptance-tools/isolated-loop.md", "test/acceptance-isolation.test.ts", "docs/batches/共用验收隔离/结果.md"]
+      }
+    }
+  },
+  "steps": [["开发"]]
+}
