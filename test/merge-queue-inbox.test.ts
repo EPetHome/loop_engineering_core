@@ -15,17 +15,17 @@ test("队列返修／控制字节：原生收件内容不携带终端控制字�
   assert.equal(message.includes("\x1b"), false); assert.equal(message.includes("\x03"), false); assert.equal(message.includes("\r"), false);
 });
 
-test("A6 门禁输出随失败退回，不通知可合入；关闭的开发窗口精确恢复同一个会话", async () => {
+test("A6 文本冲突退回，不通知可合入；关闭的开发窗口精确恢复同一个会话", async () => {
   const f = fixture(1);
   try {
-    f.write(0, "src/a.txt", "bad\n"); f.mode("fail"); const before = f.devEvidence(f.batches[0].cwd);
+    f.write(0, "src/a.txt", "bad\n"); f.conflict(); const before = f.devEvidence(f.batches[0].cwd);
     f.complete(0, "failed-epoch", false);
     await f.until(() => f.queue().entries[0]?.status === "returned");
     await f.until(() => existsSync(join(f.root, "sessions.jsonl")));
     const entry = f.queue().entries[0];
     const inbox = readJson<InboxMessage>(inboxPath(f.batches[0].dir, "甲"))!;
-    assert.match(inbox.message, /GATE_OUTPUT_SENTINEL/); assert.match(inbox.message, /完整门禁日志/);
-    assert.match(readFileSync(entry.log!, "utf8"), /GATE_OUTPUT_SENTINEL/);
+    assert.match(inbox.message, /合并冲突[\s\S]*src\/a.txt/); assert.match(inbox.message, /Loop 未运行测试/);
+    assert.equal(Object.hasOwn(entry, "log"), false);
     assert.doesNotMatch(notification(f, entry.id), /可合入/);
     const args = JSON.parse(readFileSync(join(f.root, "sessions.jsonl"), "utf8").trim());
     assert.equal(args[args.indexOf("--session") + 1], "original-dev-0"); assert.ok(!args.some((arg: string) => arg.startsWith("@")), "恢复不重新发送原需求");
@@ -63,13 +63,13 @@ const result = cp.spawnSync('/bin/sh', ['-c', command], {env, encoding:'utf8', t
 process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || ''); process.exit(result.status ?? 1);
 `);
       chmodSync(join(f.root, "bin", "osascript"), 0o755);
-      f.mode("fail-hold-queue-only"); f.write(0, "src/a.txt", "candidate\n");
+      f.mode("hold"); f.write(0, "src/a.txt", "candidate\n"); f.conflict();
       const initialRun = f.cli("启动", batch.file, "--autoreview-review-timeout-min", "120");
       assert.equal(initialRun.code, 0, JSON.stringify(initialRun));
       const original = readJson<any>(join(log, "甲.json"))!;
       assert.equal(original.resumed, false); assert.equal(original.effectiveConfig.reviewTimeoutMin.value, explicit ? 150 : 120);
       assert.notEqual(processStartTime(original.pid), original.processStarted, "原开发进程已退出后才放行队列失败");
-      await f.until(() => f.queue().entries[0]?.status === "testing");
+      await f.until(() => f.queue().entries[0]?.status === "checking");
       const candidate = f.devEvidence(batch.cwd);
       writeFileSync(join(f.root, "release"), "allow failed queue gate after developer exit");
       await f.until(() => existsSync(windows), "已派发独立恢复窗口");

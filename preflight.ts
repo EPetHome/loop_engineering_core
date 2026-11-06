@@ -18,8 +18,6 @@ export function checkStageWorkflow(stage: import("./pipeline.ts").StagePlan, con
   const workflow = stage.workflow ?? "with-acceptance";
   const basis = stage.workflowExplicit ? `批次 stages.${stage.name}.workflow 明确指定 ${workflow}` : `批次 stages.${stage.name}.workflow 未写，默认带验收`;
   const checks: Check[] = [{ name: `${stage.name} 的流程`, ok: true, detail: `${workflowSteps(workflow)}；依据：${basis}` }];
-  if (!config.gate) checks.push({ name: `${stage.name} 的门禁配置`, ok: false,
-    detail: `缺少项目门禁。请在项目 .autoreview.json 配置 gate，例如 {"gate":{"cmd":"项目实际测试命令","timeoutMin":10}}；两条流程都必须执行测试。` });
   if (workflow === "with-acceptance" && !config.acceptance) checks.push({ name: `${stage.name} 的验收配置`, ok: false,
     detail: `带验收流程缺少验收配置。请在项目 .autoreview.json 配置 acceptance（命令行项目可用 {}），或在 stages.${stage.name}.acceptance 配置本段验收；如果任务确实不带验收，由协作者明确设置 workflow:"without-acceptance"。` });
   if (workflow === "without-acceptance" && stage.prompt) {
@@ -58,7 +56,7 @@ export function checkBatchConfiguration(plan: Plan, fallbackRoot: string, option
       return copy.target.endsWith(`/${MARKER_FILE}`) && !existsSync(copy.target) && !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../");
     });
     // 只有尚未建立的工作区或已计划复制配置的本仓库 worktree 可借运行版核对。
-    // 已存在的外部项目不能借用运行版门禁冒充自己已有配置。
+    // 已存在的外部项目不能借用运行版验收冒充自己已有配置。
     const root = findProjectRoot(stage.cwd) ?? (!existsSync(stage.cwd) || pendingMarker ? findProjectRoot(fallbackRoot) : undefined);
     const config = resolveProjectConfig(root, stage.configOverrides);
     checks.push(...checkStageWorkflow(stage, config));

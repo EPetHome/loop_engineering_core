@@ -21,7 +21,6 @@
     │   └── methods/                   项目固定方法，只写一份，进仓库
     │       ├── README.md              方法说明
     │       ├── self-check.sh          方法自测；占位符没替换就报方法错误
-    │       ├── gate.sh                门禁命令（替换示例）
     │       └── prepare.sh             准备检查与恢复（替换示例）
     ├── .gitignore.示例                本机忽略规则示例；复制到 .git/info/exclude，不提交验收环境
     ├── deploy/acceptance/             分支专属、只在本机：隔离验收环境（localFiles 声明）
@@ -53,8 +52,10 @@
 
 项目外：
 ../<仓库目录名>-dev分支/                git worktree 开发空间（.autoreview.json 的 workspaces 可改）
-~/.pi-autoreview/<项目目录名>/          loop 状态、总结、门禁日志、验收材料
+~/.pi-autoreview/<项目目录名>/          loop 状态、总结、验收材料
 ```
+
+Loop 不运行项目测试；开工、每段评审后和合入队列都不执行。开发方自行做受影响的定向自检；Loop 的总结、通知、交付记录、队列和查询写「Loop 未运行测试」。旧配置的 gate 字段已停用并忽略，读到只提醒，不要求项目修改配置。静态评审与项目配置的自动验收保持不变。
 
 开发空间不在 `项目根/` 里，也不进模板目录。`loop 开工` 在运行版目录外创建或复用 worktree，并在里面切批次分支。
 
@@ -64,7 +65,7 @@
 |---|---|---|
 | `项目根/` | 一个 git 仓库骨架 | `/Users/Admin/Desktop/Promate` 仍是旧结构：项目根不是 git 仓库，代码在 `线上/`，开发在手工同步的 `dev分支/` |
 | `AGENTS.md`、`CLAUDE.md` | 协调方规则 | 同名 |
-| `.autoreview.json` | 项目配置：发布分支、工作区、本机文件、方法、门禁、验收 | 旧版在 `dev分支/.autoreview.json` |
+| `.autoreview.json` | 项目配置：发布分支、工作区、本机文件、方法、验收 | 旧版在 `dev分支/.autoreview.json` |
 | `.autoreview/methods/` | 项目固定方法 | Promate 旧版把门禁等放在批次目录，尚未迁移 |
 | `docs/baseline/` | 基线四页 | `重新出发/00-基线/`（07、06、02、03） |
 | `docs/requirements/` | 需求书 | `新需求/<线>/`，做完的在 `新需求/xxx/` |
@@ -79,7 +80,7 @@
 
 - 用户：拍板，做业务验收，授权合入和推送。需要时在终端执行协调方给出的同一条命令，不打开文件夹。
 - 协调方（Claude Code，工作目录在运行版项目根）：写需求、方案、提示词和 `批次.json`；执行 `bin/loop 开工` / `启动`，核对状态和结果；维护项目方法与基线；用户授权后执行 `bin/loop 合入`。
-- 项目维护者：维护 `.autoreview/methods/`（门禁、准备、棘轮、自测）和验收环境；方法只写一份。
+- 项目维护者：维护 `.autoreview/methods/`（准备、方法自检）和验收环境；方法只写一份。
 - 开发方（Pi）：在 worktree 的批次分支里改代码；不提交。段完成后由程序提交。
 - 评审方、验收方：由 loop 启动，评审方只读。
 
@@ -96,7 +97,7 @@
    → 执行 bin/loop 启动 <批次.json>
       单段直接开会话；多段交给流水线，全部段完成后执行配置的整批验收
 ─────────────────── loop 管的部分 ───────────────────
-⑥ Loop 准备 → Pi 开发与定向自检 → 静态评审 → 测试门禁 →（流程要求的自动验收/必需验收命令） → 返修（最多 4 次）→ 完成 / 暂停
+⑥ Loop 准备 → Pi 开发与定向自检 → 静态评审 →（流程要求的自动验收/必需验收命令） → 返修（最多 4 次）→ 完成 / 暂停
    每段完成时程序按 <类型>: <描述> 提交；串行的下一段以这次提交为开工依据
    产出：~/.pi-autoreview/<项目目录名>/<会话>.md；Pi 另外写 docs/batches/<批次>/结果.md
 ──────────────────────────────────────────────────────
@@ -109,7 +110,7 @@
 
 多段整批验收写在 `批次.json` 的 `acceptance`：`workDir`、`criteria`、`maxRounds` 与验收配置直接平铺；字段及默认值见 [工具清单](../工具清单.md)「批次.json 字段」。整批暂停且编排已退出时，用 `bin/loop 续跑 <批次.json> --id <新编号> --json` 续跑；各段完成后从整批验收接续。
 
-批次目录里不再放门禁、棘轮、启动脚本或 `.autoreview.json` 副本。每批只写 `批次.json` 和结果；提示词在 `docs/prompt/`，由 `批次.json` 的 `stages.<段>.prompt` 引用。门禁和准备来自 `.autoreview/methods/`，启动统一用 `bin/loop 启动`；临时单会话用 `bin/loop 开发 <pi|claude|codex>`。模板里的 `deploy/acceptance/` 骨架随仓库交付；接入时将 `.gitignore.示例` 的忽略项写入项目 `.git/info/exclude`（或项目自己的 `.gitignore`），让真实本机文件只在本地存在。
+批次目录里不再放门禁、棘轮、启动脚本或 `.autoreview.json` 副本。每批只写 `批次.json` 和结果；提示词在 `docs/prompt/`，由 `批次.json` 的 `stages.<段>.prompt` 引用。准备来自 `.autoreview/methods/`，启动统一用 `bin/loop 启动`；临时单会话用 `bin/loop 开发 <pi|claude|codex>`。模板里的 `deploy/acceptance/` 骨架随仓库交付；接入时将 `.gitignore.示例` 的忽略项写入项目 `.git/info/exclude`（或项目自己的 `.gitignore`），让真实本机文件只在本地存在。
 
 ## 规则分四层
 
@@ -125,7 +126,7 @@
 | 改 loop 的哪一块 | 对照模板的哪里 | 相关缺口 |
 |---|---|---|
 | `core.ts` 开发约定、`autoreview.ts` | `提示词-示例.md`；`AGENTS.md`（Pi 也会读到） | 1、7 |
-| `review.ts` 门禁、`scope.ts` 越界 | `.autoreview/methods/gate.sh`；`批次.json` 的 `scope` | 2 |
+| `review.ts` 静态评审、`scope.ts` 越界 | `批次.json` 的 `scope` | 2 |
 | `git.ts`、`config.ts`、`workspace.ts` | `dev分支说明.md` 的 worktree；`.autoreview.json.示例` 的 `release` / `workspaces` / `localFiles` | 3 |
 | `hosts/hook.ts`（Claude Code 插件） | `AGENTS.md` 的评审边界 | 3 |
 | `acceptance.ts`、`setup-acceptance.ts` | `.autoreview.json.示例`、`deploy/acceptance/` | 9 |
@@ -145,7 +146,7 @@
 
 - `AGENTS.md`：稳定职责与来源链接，普通准备、归档和定时刷新不写它。
 - 任务与验收写法：只在 Loop 仓库的 `README-验收标准.md` 维护，运行时注入或按需指路。`bin/loop 接入 <项目目录>` 只处理 `.autoreview.json`，不读写项目规则副本和稳定规则；已有旧副本由用户另行决定。
-- `.autoreview/methods/`：项目固定方法，只写一份；门禁、棘轮、准备、自测都在这里。
+- `.autoreview/methods/`：项目固定方法，只写一份；准备与非测试的方法自检在这里。
 - `批次.json`：每批参数；字段见 [工具清单.md](../工具清单.md) 的「批次.json 字段」。
 - `context.sources`：项目维护者声明需求、方案、方法和源码位置；`changes.jsonl` 记录增删改与受影响依赖，`contents/<SHA>` 留内容版本。
 - `preparation.check/recover/repair.paths`：已有方法优先、已知故障有限恢复、方法失效才调用受限模型。

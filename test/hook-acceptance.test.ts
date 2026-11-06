@@ -170,55 +170,48 @@ test("H11 自动验收：先静态评审再验收，失败按证据打回，标�
   });
 });
 
-test("H15 测试：评审后执行门禁；失败带输出打回且不验收；修好后重走评审、测试、验收", () => {
+test("H15 Hook 旧 gate 不运行，静态评审后直接进入配置的自动验收", () => {
   const gate = "grep -q FIXED file.txt || { echo 'AUTOREVIEW_FAILURE=product 测试失败：file.txt 里没有 FIXED'; exit 1; }";
   const h = fixture({ marker: JSON.stringify({ gate: { cmd: gate }, acceptance: {} }) });
   const requirement = "修好 file.txt\n## 验收标准\n1. 操作：cat file.txt\n   预期：有 FIXED";
   const fakeLog = (name: string) => existsSync(join(h.root, "fake", name)) ? readFileSync(join(h.root, "fake", name), "utf8").trim().split("\n") : [];
   try {
     const start = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
-    assert.equal(start.hookSpecificOutput.additionalContext, conventionText({ acceptance: true, gate }));
+    assert.equal(start.hookSpecificOutput.additionalContext, conventionText({ acceptance: true }));
     h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
 
     h.write("file.txt", "base\nTODO\n");
-    const failed = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
-    assert.equal(failed.decision, "block");
-    assert.match(failed.reason, /^【门禁 · 第 1 次返修】\n门禁命令不通过（退出码 1）/);
-    assert.ok(failed.reason.includes("测试失败：file.txt 里没有 FIXED"));
-    assert.equal(fakeLog("calls.log").length, 1, "门禁失败前已经完成静态评审");
-    assert.equal(fakeLog("acc-calls.log").length, 0, "门禁不通过时不验收");
-    assert.equal(h.readState().repairs, 1);
-    assert.match(h.summary(), /门禁：不通过（退出码 1）/);
-
-    h.write("file.txt", "base\nFIXED\n");
     assert.equal(h.run(h.delivered(), { env: ACC_ENV }).stdout, "");
+    assert.equal(h.readState().repairs, 0);
     const state = h.readState();
     assert.equal(state.phase, "done");
-    assert.equal(state.rounds[1].gate.result, "通过");
-    assert.equal(state.rounds[1].acceptance.verdict, "通过");
+    assert.equal(state.rounds[0].gate, undefined);
+    assert.equal(state.rounds[0].acceptance.verdict, "通过");
     assert.equal(fakeLog("acc-calls.log").length, 1);
-    assert.equal(fakeLog("calls.log").length, 2);
-    const input = readFileSync(join(h.home, ".pi-autoreview", basename(h.repo), "review-input-claude-s1-r2.md"), "utf8");
-    assert.ok(input.includes("## 门禁\n本轮静态评审通过后，程序才会执行门禁命令"));
-    assert.match(h.summary(), /门禁：通过（耗时/);
+    assert.equal(fakeLog("calls.log").length, 1);
+    const input = readFileSync(join(h.home, ".pi-autoreview", basename(h.repo), "review-input-claude-s1-r1.md"), "utf8");
+    assert.match(input, /Loop 未运行测试/);
+    assert.match(h.summary(), /Loop 未运行测试/);
+    assert.doesNotMatch(h.summary(), /门禁：通过|测试通过/);
   } finally { h.close(); }
 });
 
-test("Hook门禁／配置校验：gate 配置非法或超出一轮总预算 → 暂停并说明，不评审", () => {
+test("Hook旧 gate 不校验类型、命令或预算，不因此暂停", () => {
   const root = mkdtempSync(join(tmpdir(), "autoreview-gate-config-"));
   try {
     writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ gate: { cmd: "npm test", timeoutMin: 5 } }));
-    assert.deepEqual(loadConfig(root, {}).gate, { cmd: "npm test", timeoutMin: 5 });
+    assert.equal(Object.hasOwn(loadConfig(root, {}), "gate"), false);
     writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ reviewTimeoutMin: 30, acceptance: {}, gate: { cmd: "npm test" } }));
-    assert.throws(() => loadConfig(root, {}), /gate\.timeoutMin（10）加 acceptance\.timeoutMin（20）必须小于一轮总预算 reviewTimeoutMin（30）/);
+    assert.equal(loadConfig(root, {}).reviewTimeoutMin, 30);
   } finally { rmSync(root, { recursive: true, force: true }); }
 
   const h = fixture({ marker: JSON.stringify({ gate: { timeoutMin: 5 } }) });
   try {
     h.write("file.txt", "base\nCHANGE\n");
-    assertPauseOutput(h.run(h.delivered()), /gate.cmd 必须写/);
-    assert.equal(h.readState().phase, "paused");
-    assert.match(h.summary(), /gate\.cmd 必须写/);
-    assert.ok(!existsSync(join(h.root, "fake", "calls.log")));
+    const output = h.run(h.delivered());
+    assert.equal(output.stdout, ""); assert.match(output.stderr, /gate 已停用并忽略/);
+    assert.equal(h.readState().phase, "done");
+    assert.match(h.summary(), /Loop 未运行测试/);
+    assert.ok(existsSync(join(h.root, "fake", "calls.log")));
   } finally { h.close(); }
 });

@@ -1,10 +1,11 @@
 /**
  * core.ts — 纯函数集合，不导入 pi。
  *
- * 负责：交付标记判断、评审输出解析、下一步决策、返修消息拼接（评审、门禁）、
+ * 负责：交付标记判断、评审输出解析、下一步决策、返修消息拼接（评审）、
  * 评审输入拼接、总结渲染、注入给开发方的约定。所有函数可被 Node 直接单测。
  */
 import { createHash } from "node:crypto";
+import { LOOP_TEST_STATUS } from "./config.ts";
 import { relaySourceLines } from "./pa-records.ts";
 import {
   ACCEPTANCE_CONVENTION, authorizationLine, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria, type Grants,
@@ -19,26 +20,14 @@ export const CONVENTION = [
   "- 需要用户决定时，最后一行写【需要你决定】。",
   "- 收到「自动评审」消息后，逐条写「第 N 条：已修」或「第 N 条：异议：理由」。",
   "- 需求可能只写了目标、已拍板、边界和验收标准：现状自己读代码了解，没写到的细节按现有代码习惯做，拿不准的写进交付说明。",
+  "- 开发方自行做改动相关的定向自检；Loop 不运行、不判定项目测试，交付记录统一写「Loop 未运行测试」。",
 ].join("\n");
 
-/** 配了门禁（.autoreview.json 的 gate）时追加在开发约定后面注入。 */
-export function gateConvention(command: string): string {
-  return [
-    "【门禁约定】",
-    `- 开发时做改动相关的定向自测；交付后由程序统一执行完整门禁：${command}。不要求你在交付前重复执行同一份完整门禁。`,
-    "- 产品检查失败会带证据返回原会话；明确环境和检查方法故障不计业务返修。原因不明时先诊断，不修改产品绕过检查。",
-  ].join("\n");
-}
-
-/** 注入给开发方的约定全文：开发约定，配了验收再追加验收约定，配了门禁再追加门禁约定。 */
-export function conventionText(options: { acceptance?: boolean; gate?: string; experience?: string } = {}): string {
-  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.gate ? gateConvention(options.gate) : "", options.experience ?? ""]
+/** 注入给开发方的约定全文：开发约定，配了验收再追加验收约定。 */
+export function conventionText(options: { acceptance?: boolean; experience?: string } = {}): string {
+  return [CONVENTION, options.acceptance ? ACCEPTANCE_CONVENTION : "", options.experience ?? ""]
     .filter(Boolean).join("\n");
 }
-
-/** 返修消息和总结里保留的门禁输出：最后 40 行，最多 4000 字。 */
-export const GATE_TAIL_LINES = 40;
-const GATE_TAIL_CHARS = 4000;
 /** 超过这个字节数的 diff 不再原文附给评审。 */
 export const MAX_DIFF_BYTES = 200 * 1024;
 
@@ -75,34 +64,11 @@ export type RoundRecord = ParsedReview & {
   acceptance?: AcceptanceRecord;
   /** 同轮定向复验及完成前完整验收，按执行顺序保留；acceptance 为最后一次结论。 */
   acceptanceAttempts?: AcceptanceRecord[];
-  /** 本轮的门禁结果（配了 gate 时）。 */
-  gate?: GateRecord;
+  /** 评审前的越界检查失败，不冒充测试或静态评审。 */
+  scope?: { files: string[]; logPath?: string };
   /** 验收后置时，整体轮次可能未通过；单独保留已取得的静态评审结论。 */
   reviewConclusion?: string;
 };
-
-/**
- * 门禁的一次执行。只有命令跑完并且退出码非 0 才算「不通过」打回开发方；
- * 超时、命令找不到（126/127）、起不来都暂停，不冤枉开发方。
- */
-export interface GateRecord {
-  /** 实际开始测试时冻结的版本，含未跟踪文件；不能用完成时的树冒充。 */
-  candidate?: import("./git.ts").Snapshot;
-  command: string;
-  result: "通过" | "不通过" | "超时" | "无法执行" | "环境阻塞" | "检查方法故障" | "原因待诊断";
-  failureKind?: import("./failure.ts").FailureKind;
-  durationMs: number;
-  exitCode?: number;
-  /** 输出最后几行（stdout 与 stderr 按出现顺序合在一起）。 */
-  outputTail?: string;
-  /** 完整输出所在的日志文件。 */
-  logPath?: string;
-  detail?: string;
-  cleanup?: string;
-  /** 仅从命令实际输出解析；未知不以退出码推断成 0。 */
-  testsTotal?: number;
-  testsFailed?: number;
-}
 
 /** 验收命令（--autoreview-accept-cmd）的一次执行；与自动验收无关，只有 pi 扩展配置了验收命令时才有。 */
 export interface AcceptRunRecord {
@@ -130,7 +96,6 @@ export interface AcceptRunRecord {
 
 export interface SummaryInput {
   workflow?: import("./config.ts").StageWorkflow;
-  gateCommand?: string;
   acceptanceConfigured?: boolean;
   cwd: string;
   devSessionId: string;
@@ -187,8 +152,6 @@ export interface ReviewInputOptions {
   untracked: string[];
   /** 此前验收记录，仅供静态评审复查，不能作为当前候选已验收的依据。 */
   acceptance?: string;
-  /** 静态评审通过后将由程序执行的门禁命令；不是已通过的结论。 */
-  gate?: string;
 }
 
 /** 判断开发方最后一条回复的标记：只看最后一个非空行。 */
@@ -286,58 +249,6 @@ export function buildRepairMessage(repairRound: number, mustFixRaw: string): str
   ].join("\n");
 }
 
-/** 门禁输出的尾巴：最后 GATE_TAIL_LINES 行，再按字数截一次（单行很长时也不撑爆返修消息）。 */
-export function gateOutputTail(output: string): string {
-  const lines = output.trimEnd().split(/\r?\n/).slice(-GATE_TAIL_LINES).join("\n");
-  return lines.length <= GATE_TAIL_CHARS ? lines : `…${lines.slice(-GATE_TAIL_CHARS)}`;
-}
-
-/** 门禁结果的一句话写法，返修消息、总结共用。 */
-export function gateLabel(record: GateRecord): string {
-  return record.result === "不通过" ? `不通过（退出码 ${record.exitCode ?? "未知"}）` : record.result;
-}
-
-/** 发回开发方的门禁返修消息：命令、退出码、输出尾巴和完整日志位置。 */
-export function buildGateRepairMessage(repairRound: number, record: GateRecord): string {
-  return [
-    `【门禁 · 第 ${repairRound} 次返修】`,
-    `门禁命令${gateLabel(record)}，这一轮验收没跑（门禁未通过）。`,
-    "",
-    `$ ${record.command}`,
-    `输出最后 ${GATE_TAIL_LINES} 行：`,
-    "```text",
-    record.outputTail?.trim() || "（没有输出）",
-    "```",
-    ...(record.logPath ? [`完整输出：${record.logPath}`] : []),
-    "",
-    "根据失败证据定位根因及相关调用方，修复后做必要的定向自测；完整门禁由程序重跑，不必再次自跑整套。修好了最后一行写【交付完成】。无法归因时如实说明，不更改产品或检查标准凑通过。",
-  ].join("\n");
-}
-
-/** 读取测试输出的统计：支持显式协议、Node TAP/spec、Jest；不从退出码猜测总数/失败数。 */
-export function gateTestCounts(output: string): Pick<GateRecord, "testsTotal" | "testsFailed"> {
-  output = output.replace(/\x1b\[[0-9;]*m/g, "");
-  const count = (pattern: RegExp): number | undefined => {
-    const matches = [...output.matchAll(pattern)];
-    const value = matches.at(-1)?.[1];
-    return value !== undefined && Number.isSafeInteger(Number(value)) ? Number(value) : undefined;
-  };
-  const jest = output.match(/^Tests:\s*(.+)$/m)?.[1];
-  return {
-    testsTotal: count(/^AUTOREVIEW_TEST_TOTAL=(\d+)\s*$/gm) ?? count(/^(?:#|ℹ)?\s*tests\s+(\d+)\s*$/gm) ?? count(/^Tests:.*?(\d+) total\s*$/gm),
-    testsFailed: count(/^AUTOREVIEW_TEST_FAILED=(\d+)\s*$/gm) ?? count(/^(?:#|ℹ)?\s*fail\s+(\d+)\s*$/gm) ?? (jest && /\d+ total/.test(jest) ? Number(jest.match(/(\d+) failed/)?.[1] ?? 0) : undefined),
-  };
-}
-
-/** 总结里一轮门禁的几行；没通过时带输出尾巴。 */
-export function renderGateLines(record: GateRecord): string[] {
-  const lines = [`门禁：${gateLabel(record)}（耗时 ${Math.round(record.durationMs / 1000)} 秒${record.logPath ? `；完整输出：${record.logPath}` : ""}）`];
-  if (record.detail) lines.push(`门禁说明：${record.detail}`);
-  if (record.cleanup) lines.push(`资源：${record.cleanup}`);
-  if (record.result !== "通过" && record.outputTail?.trim()) lines.push("门禁输出最后几行：", "```text", record.outputTail.trimEnd(), "```");
-  return lines;
-}
-
 /** 拼评审输入：尚无成功评审时带需求原文，否则带成功检查点的必修。 */
 export function buildReviewInput(options: ReviewInputOptions): string {
   const parts: string[] = [];
@@ -361,9 +272,7 @@ export function buildReviewInput(options: ReviewInputOptions): string {
   change.push("", "新增未跟踪文件：");
   change.push(...(options.untracked.length > 0 ? options.untracked.map((path) => `- ${path}`) : ["- 无"]));
   parts.push(change.join("\n"));
-  if (options.gate) {
-    parts.push(`## 门禁\n本轮静态评审通过后，程序才会执行门禁命令 ${options.gate}；目前没跑。评审不要运行测试。`);
-  }
+  parts.push(`## 测试\n${LOOP_TEST_STATUS}。评审只做静态检查，不运行测试。`);
   if (options.acceptance) parts.push(options.acceptance);
   return `${parts.join("\n\n")}\n`;
 }
@@ -392,12 +301,11 @@ export function acceptRunLabel(record: AcceptRunRecord): string {
 
 /** 用户首先看到本轮证据，不能把上一轮通过结果或缺失字段当成本轮结论。 */
 export function renderDeliveryReport(input: SummaryInput): string {
-  const round = input.rounds.at(-1), acceptance = round?.acceptance, gate = round?.gate;
+  const round = input.rounds.at(-1), acceptance = round?.acceptance;
   const lines = ["# 交付报告", `- 项目：${input.cwd}`];
   const skipped = input.workflow === "without-acceptance" ? "批次明确选择不带验收流程"
     : round?.mustFix.length ? "评审有必修，本轮直接返修"
     : round?.failed ? "评审未成功，本轮暂停"
-    : gate && gate.result !== "通过" ? `测试${gate.result}，未进入验收`
     : input.acceptanceConfigured === false ? "未配置自动验收" : "本轮没有验收记录";
   lines.push("## 逐条验收");
   const criteria = input.criteria?.items ?? acceptance?.items.filter((item) => /^A\d+$/.test(item.id)) ?? [];
@@ -418,14 +326,7 @@ export function renderDeliveryReport(input: SummaryInput): string {
       lines.push(`- ${executed ? `证据：${evidenceDir}/evidence/${item.id}.txt；` : ""}完整判定：${evidenceDir}/result.json`);
     }
   }
-  lines.push("## 测试");
-  if (gate) {
-    lines.push(`- 命令：${gate.command}`, `- 结论：${gate.result}${gate.exitCode === undefined ? "" : `（退出码 ${gate.exitCode}）`}`,
-      `- 总数：${gate.testsTotal ?? "没有记录（命令未提供统计）"}；失败数：${gate.testsFailed ?? "没有记录（命令未提供统计）"}`,
-      `- 耗时：${gate.durationMs / 1000} 秒`, `- 日志路径：${gate.logPath ?? "没有记录"}`);
-    if (gate.detail) lines.push(`- 说明：${gate.detail}`);
-  } else lines.push(`- 没跑（${round?.mustFix.length ? "评审有必修，本轮直接返修" : round?.failed ? "评审未成功" : "本轮没有门禁执行记录"}）`,
-    `- 命令：${input.gateCommand ?? "没有记录"}；总数：没有记录；失败数：没有记录；耗时：没有记录；日志路径：没有记录`);
+  lines.push("## 测试", `- ${LOOP_TEST_STATUS}`);
   lines.push("## 评审");
   const reviewed = round && !round.failed && !/^(未评审|不再评审)/.test(round.conclusion);
   lines.push(`- 结论：${round?.failed ? `未完成：${round.failed}` : reviewed ? round.reviewConclusion || round.conclusion || "没有记录" : "没跑（本轮没有静态评审记录，见各轮说明）"}`,
@@ -451,6 +352,7 @@ export function renderSummary(input: SummaryInput): string {
   lines.push(`- 项目：${input.cwd}`);
   lines.push(`- 开发会话：${input.devSessionId}　评审会话：${input.reviewerSessionId}`);
   lines.push(`- 状态：${status}`);
+  lines.push(`- 测试：${LOOP_TEST_STATUS}`);
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
   if (input.status === "完成" && input.materialCleanup) lines.push(`- ${input.materialCleanup}`);
   if (input.acceptRun) {
@@ -510,7 +412,7 @@ export function renderSummary(input: SummaryInput): string {
     if (round.note) lines.push(`提示：${round.note}`);
     if (round.failed) lines.push(`错误：${round.failed}`);
     if (round.reviewLogs?.length) lines.push("评审错误原文：", ...round.reviewLogs.map((path) => `- ${path}`));
-    if (round.gate) lines.push(...renderGateLines(round.gate));
+    if (round.scope) lines.push(`越界检查：不通过；文件：${round.scope.files.join("、")}${round.scope.logPath ? `；日志：${round.scope.logPath}` : ""}`);
     for (const acceptance of round.acceptanceAttempts ?? (round.acceptance ? [round.acceptance] : [])) {
       lines.push(...renderAcceptanceLines(acceptance));
     }
@@ -524,7 +426,7 @@ export function renderSummary(input: SummaryInput): string {
     lines.push(input.unresolvedAcceptance.trim());
   }
   if (input.changedFiles && input.changedFiles.length > 0) {
-    const stage = /^(验收|门禁)期间工作区变了$/.exec(input.pauseReason ?? "")?.[1] ?? "评审";
+    const stage = /^(验收)期间工作区变了$/.exec(input.pauseReason ?? "")?.[1] ?? "评审";
     lines.push(`## ${stage}期间变化的工作区文件`);
     lines.push(...input.changedFiles.map((file) => `- ${file}`));
   }

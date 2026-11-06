@@ -116,7 +116,7 @@ export function main(argv = process.argv.slice(2)): void {
   const args = launchArgs(host, prompt, values.session, extra);
   const root = findProjectRoot(cwd);
   if (root) loadConfig(root);
-  else if (!values.init) throw new Error("项目没有 .autoreview.json；首次接入加 --init，或先配置已有的门禁和验收方法");
+  else if (!values.init) throw new Error("项目没有 .autoreview.json；首次接入加 --init，或先配置已有的验收方法");
   run("git", ["rev-parse", "--verify", "HEAD"], cwd);
   for (const path of [PI_BIN, PERMISSION_EXT]) if (!existsSync(path)) throw new Error(`现有评审引擎缺少：${path}`);
   const command = resolveHost(host);
@@ -124,7 +124,7 @@ export function main(argv = process.argv.slice(2)): void {
   if (!help.includes(host === "claude" ? '"auto"' : "--approve-for-me")) throw new Error(`${host} 当前版本不支持所需自动审批入口`);
   checkPlugin(host, JSON.parse(run(command, ["plugin", "list", ...(host === "codex" ? ["--marketplace", "autoreview-local"] : []), "--json"], cwd)));
   if (values["dry-run"]) {
-    if (!root) console.log(`启动时将新建 ${join(cwd, ".autoreview.json")}（仅开启评审，门禁和验收未配置）`);
+    if (!root) console.log(`启动时将新建 ${join(cwd, ".autoreview.json")}（仅开启评审，自动验收未配置；Loop 未运行测试）`);
     const devRoot = root ?? cwd;
     // 无空格时打印成可直接核对的 KEY=值；有空格再按 shell 规则加引号。
     console.log(`cd ${quote(cwd)}\nAUTOREVIEW_DEV_ROOT=${/\s/.test(devRoot) ? quote(devRoot) : devRoot}\n${[command, ...args].map(quote).join(" ")}`);

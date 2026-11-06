@@ -8,16 +8,13 @@ import test from "node:test";
 import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import {
   CONVENTION,
-  GATE_TAIL_LINES,
   MAX_DIFF_BYTES,
   acceptRunLabel,
-  buildGateRepairMessage,
   buildRepairMessage,
   buildReviewInput,
   classifyMarker,
   conventionText,
   decideNext,
-  gateOutputTail,
   parseReview,
   renderSummary,
   type RoundRecord,
@@ -324,48 +321,19 @@ test("T12 总结渲染验收命令：状态行下多一行，详情一节带命�
   assert.equal(acceptRunLabel({ command: "x", trigger: "auto", round: 1, startedAt: "t", result: "中断" }), "中断");
 });
 
-test("T14 门禁：约定按配置追加；返修消息带命令、退出码、输出尾巴；评审输入和总结都记门禁", () => {
+test("T14 Loop 不运行测试：开发约定、评审输入和各种状态的总结如实记录", () => {
   assert.equal(conventionText(), CONVENTION);
   assert.equal(conventionText({ acceptance: true }), `${CONVENTION}\n${ACCEPTANCE_CONVENTION}`);
-  const withGate = conventionText({ acceptance: true, gate: "npm test" });
-  assert.ok(withGate.startsWith(`${CONVENTION}\n${ACCEPTANCE_CONVENTION}\n【门禁约定】`));
-  assert.ok(withGate.includes("交付后由程序统一执行完整门禁：npm test"));
-  assert.ok(withGate.includes("不要求你在交付前重复执行同一份完整门禁"));
-  assert.ok(withGate.includes("最后一行写【需要你决定】"));
-
-  const long = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
-  const tailText = gateOutputTail(long);
-  assert.equal(tailText.split("\n").length, GATE_TAIL_LINES);
-  assert.ok(tailText.startsWith("line 61\n") && tailText.endsWith("line 100"));
-  const wide = gateOutputTail("x".repeat(10_000));
-  assert.equal(wide.length, 4001, "单行很长时按字数截，前面加省略号");
-  assert.ok(wide.startsWith("…"));
-
-  const record = {
-    command: "npm test", result: "不通过" as const, exitCode: 1, durationMs: 3_400,
-    outputTail: "not ok 1 - add\nexpected 3, got -1", logPath: "/tmp/gate.log",
-  };
-  const message = buildGateRepairMessage(2, record);
-  assert.match(message, /^【门禁 · 第 2 次返修】\n门禁命令不通过（退出码 1），这一轮验收没跑（门禁未通过）。/);
-  assert.ok(message.includes("$ npm test\n输出最后 40 行：\n```text\nnot ok 1 - add\nexpected 3, got -1\n```"));
-  assert.ok(message.includes("完整输出：/tmp/gate.log"));
-  assert.match(message, /完整门禁由程序重跑，不必再次自跑整套/);
-  assert.match(message, /修好了最后一行写【交付完成】。/);
-
-  const input = buildReviewInput({ round: 1, requirement: "需求", deliveryNote: "说明", diff: "d", diffStat: "", untracked: [], gate: "npm test" });
-  assert.ok(input.includes("## 门禁\n本轮静态评审通过后，程序才会执行门禁命令 npm test；目前没跑。评审不要运行测试。"));
-  assert.ok(!buildReviewInput({ round: 1, deliveryNote: "", diff: "", diffStat: "", untracked: [] }).includes("## 门禁"));
-
-  const summary = renderSummary(summaryInput({
-    status: "暂停", pauseReason: "达到返修上限",
-    rounds: [
-      roundRecord({ conclusion: "未评审（门禁不通过）", mustFixRaw: "", gate: record }),
-      roundRecord({ round: 2, gate: { command: "npm test", result: "通过", exitCode: 0, durationMs: 2_000, outputTail: "ok" } }),
-    ],
-  }));
-  assert.ok(summary.includes("门禁：不通过（退出码 1）（耗时 3 秒；完整输出：/tmp/gate.log）\n门禁输出最后几行：\n```text\nnot ok 1 - add"));
-  assert.ok(summary.includes("门禁：通过（耗时 2 秒）\n"));
-  assert.ok(!summary.includes("```text\nok\n```"), "通过时不贴输出");
-  const changed = renderSummary(summaryInput({ status: "暂停", pauseReason: "门禁期间工作区变了", changedFiles: ["coverage/x.json"] }));
-  assert.ok(changed.includes("## 门禁期间变化的工作区文件\n- coverage/x.json"));
+  assert.match(CONVENTION, /开发方自行做改动相关的定向自检/);
+  assert.doesNotMatch(CONVENTION, /程序统一执行完整门禁/);
+  const input = buildReviewInput({ round: 1, requirement: "需求", deliveryNote: "说明", diff: "d", diffStat: "", untracked: [] });
+  assert.match(input, /Loop 未运行测试/);
+  assert.doesNotMatch(input, /## 门禁/);
+  for (const status of ["完成", "暂停", "进行中"] as const) {
+    const summary = renderSummary(summaryInput({ status, rounds: [roundRecord()] }));
+    assert.match(summary, /测试：Loop 未运行测试/);
+    assert.doesNotMatch(summary, /门禁：通过|测试通过/);
+  }
+  const changed = renderSummary(summaryInput({ status: "暂停", pauseReason: "验收期间工作区变了", changedFiles: ["coverage/x.json"] }));
+  assert.ok(changed.includes("## 验收期间变化的工作区文件\n- coverage/x.json"));
 });

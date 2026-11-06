@@ -1,4 +1,5 @@
 /** PA v1 快照：仅 JSON、mtime、每段一次进程身份核对；绝不导入队列执行器或解析/启动流水线。 */
+import { LOOP_TEST_STATUS } from "./config.ts";
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -43,7 +44,7 @@ export function queryBatches(file?: string): { v: 1; at: string; batches: Record
     const queue = queueStates.find((queue) => queue.batches.some((batch) => canonicalBatchFile(batch.file) === info.batch.file));
     const registered = queue?.batches.find((batch) => canonicalBatchFile(batch.file) === info.batch.file);
     const entry = queue?.entries.filter((item) => item.batch === registered?.id).at(-1);
-    const active = queue?.entries.filter((item) => ["pending", "testing", "ready", "returning", "merging", "withdrawing"].includes(item.status) && queue.batches.find((batch) => batch.id === item.batch)?.release === registered?.release).sort((a, b) => a.order - b.order) ?? [];
+    const active = queue?.entries.filter((item) => ["pending", "checking", "testing", "ready", "returning", "merging", "withdrawing"].includes(item.status) && queue.batches.find((batch) => batch.id === item.batch)?.release === registered?.release).sort((a, b) => a.order - b.order) ?? [];
     const recorded = readJson<BatchInfo>(batchInfoPath(info.dir));
     const owned = recorded?.batch.file && canonicalBatchFile(recorded.batch.file) === canonicalBatchFile(info.batch.file)
       && canonicalBatchFile(recorded.dir) === canonicalBatchFile(info.dir);
@@ -60,20 +61,20 @@ export function queryBatches(file?: string): { v: 1; at: string; batches: Record
         : status?.event === "paused" ? pauseStatus(reason) : status?.event === "startup-failed" ? "failed" : status?.event === "done" ? "done" : "running";
       const session = phase?.session ?? (status ? { host: status.host ?? "pi", id: status.sessionId, pid: status.pid, processStarted: status.processStarted, log: undefined } : undefined);
       const evidence = Object.fromEntries(Object.entries({ ...(status?.summary ? { summary: status.summary } : {}), ...phase?.evidence }).filter(([, path]) => isAbsolute(path)));
-      return { stage: stage.stage, state, round: phase?.round ?? 0, repairs: phase?.repairs ?? 0,
+      return { stage: stage.stage, state, test: LOOP_TEST_STATUS, round: phase?.round ?? 0, repairs: phase?.repairs ?? 0,
         lastActivity: activity([statusFile, phaseFile, evidence.summary, session?.log]),
         pause: phase ? paused(phase) : status?.event === "paused" ? { ...reason, since: status.updatedAt } : null,
         ...(phase?.next ? { next: phase.next } : {}),
         session: session ? { host: session.host, id: session.id, alive: session.pid && session.processStarted ? processStartTime(session.pid) === session.processStarted : false } : null,
         evidence, paRelays: (owned ? wordRecords(info.dir, stage.stage) : []).filter((row) => row.state === "read").sort((a, b) => (b.readAt ?? b.at).localeCompare(a.readAt ?? a.at)).slice(0, 50).map((row) => ({ id: row.id, at: row.readAt ?? row.at })) };
     });
-    return { project: info.project, batch: { ...info.batch, paGrants: (owned ? readPAGrants(info.dir) : []).map(({ id, at }) => ({ id, at })) },
+    return { project: info.project, test: LOOP_TEST_STATUS, batch: { ...info.batch, paGrants: (owned ? readPAGrants(info.dir) : []).map(({ id, at }) => ({ id, at })) },
       branch: commit?.branch ?? batchPhase?.detail.branch ?? info.stages[0]?.branch ?? null,
       commit: commit?.commit ?? batchPhase?.detail.commit ?? null, pushed: commit?.pushed ?? null,
       ...(registered?.commits && registered.commits.length > 1 ? { commits: registered.commits } : {}),
       state: batchPhase?.phase === "reviewing" || batchPhase?.phase === "running" ? "running" : batchPhase?.status ?? null,
       pause: paused(batchPhase), ...(batchPhase?.next ? { next: batchPhase.next } : {}), stages,
-      queue: entry ? { status: entry.status, position: active.findIndex((item) => item.id === entry.id) + 1 || null, returnCount: entry.returnCount ?? 0, reason: entry.reason ?? null, log: entry.log ?? null } : null,
+      queue: entry ? { status: (entry.status as string) === "testing" ? "checking" : entry.status, test: LOOP_TEST_STATUS, position: active.findIndex((item) => item.id === entry.id) + 1 || null, returnCount: entry.returnCount ?? 0, reason: entry.reason ?? null, log: null } : null,
       evidence: batchPhase?.evidence ?? {}, events: { lastSeq: lastEventSeq(info.batch.file) } };
   });
   return { v: 1, at: new Date().toISOString(), batches };

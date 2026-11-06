@@ -2,6 +2,6 @@
 import test from "node:test";
 import { nativeRepairCases, liveHookRepair } from "./helpers/merge-queue-fixture.ts";
 
-test("队列返修／Codex原生收件：同会话、草稿、终端提交和精确恢复", async (t) => {
+test("文本冲突返修／Codex原生收件：同会话、草稿、终端提交和精确恢复", async (t) => {
   for (const item of nativeRepairCases) await t.test(item.name, () => liveHookRepair("codex", item.draft, item.scenario));
 });

@@ -17,10 +17,6 @@
     "probe": "node -v"
   },
   "reviewTimeoutMin": 90,
-  "gate": {
-    "cmd": "sh .autoreview/methods/gate.sh check",
-    "timeoutMin": 35
-  },
   "acceptance": {
     "start": "sh deploy/acceptance/start.sh",
     "readyUrl": "http://127.0.0.1:38081/actuator/health",

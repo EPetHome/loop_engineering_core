@@ -761,7 +761,7 @@ function requireAutomaticPass(stage: AcceptanceStage): AcceptanceStage {
 }
 
 /**
- * 跑一轮验收。定向复验通过后立即补做完整验收，共用本轮截止时间，不重跑评审或门禁。
+ * 跑一轮验收。定向复验通过后立即补做完整验收，共用本轮截止时间，不重跑评审。
  * 返回 judged 时由调用方决定返修、暂停或完成；非产品阻塞返回 paused。
  */
 export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<AcceptanceStage> {

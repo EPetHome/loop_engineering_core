@@ -1,5 +1,5 @@
 /**
- * pi 自动评审扩展：交付标记触发评审（无必修后再跑门禁），必修回送原开发会话；评审完成后执行验收命令（如有配置）。
+ * pi 自动评审扩展：交付标记触发评审（无必修后按配置自动验收），必修回送原开发会话；评审完成后执行验收命令（如有配置）。
  * 失败调用不推进成功检查点；git 取证失败或指纹变化只暂停；暂停后你再让开发方干活即恢复自动评审。
  * 加载：pi -e /Users/Admin/Desktop/loop/autoreview.ts
  */
@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "./acceptance-core.ts";
-import { captureProjectConfigOverrides, findProjectRoot, resolveProjectConfig, type AcceptanceConfig, type GateConfig } from "./config.ts";
+import { LOOP_TEST_STATUS, captureProjectConfigOverrides, findProjectRoot, resolveProjectConfig, type AcceptanceConfig } from "./config.ts";
 import {
   acceptRunLabel, classifyMarker, conventionText, deriveReviewerSessionId, renderSummary, type AcceptRunRecord,
 } from "./core.ts";
@@ -21,7 +21,7 @@ import { productionAction } from "./production-loop.ts";
 import { experienceInjection, experienceSession, experienceTodos } from "./experience.ts";
 import { finishExperience } from "./experience-draft.ts";
 import {
-  completionChecks, completionTest, inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, queueAcceptance, readJson, stageFromEnv, statusPath, writeStageStatus,
+  completionChecks, inboxPath, PIPELINE_LAUNCH_TOKEN_ENV, pollMs, queueAcceptance, readJson, stageFromEnv, statusPath, writeStageStatus,
   type InboxMessage, type StageEvent, type StageLink,
 } from "./pipeline-core.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
@@ -88,7 +88,7 @@ function lastAssistantText(entries: SessionEntry[]): string {
 }
 
 export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exec): void {
-  // 自定义 start 不经过 bin/pi-dev；扩展加载即撤掉一次性启动回报身份，门禁子进程不能改写父段状态。
+  // 自定义 start 不经过 bin/pi-dev；扩展加载即撤掉一次性启动回报身份，检查子进程不能改写父段状态。
   if (process.env[PIPELINE_LAUNCH_TOKEN_ENV]) delete process.env[PIPELINE_LAUNCH_TOKEN_ENV];
   let state: PiState = newReviewState();
   const experienceOwner = randomUUID();
@@ -153,12 +153,6 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   const acceptanceEnabled = (ctx: ExtensionContext): boolean => {
     try { return acceptanceConfig(ctx) !== undefined; } catch { return false; }
   };
-  /** .autoreview.json 的 gate 一节；配置非法时抛错（评审路径里会变成暂停）。 */
-  const gateConfig = (ctx: ExtensionContext): GateConfig | undefined => projectConfig(ctx).gate;
-  /** 只用于注入约定：配置非法时当作没配，错误留给评审路径报。 */
-  const gateCommand = (ctx: ExtensionContext): string | undefined => {
-    try { return gateConfig(ctx)?.cmd; } catch { return undefined; }
-  };
   const saveState = (life: Lifecycle): void => {
     checkLive(life);
     if (state.phase !== "done") state.materialCleanup = undefined;
@@ -191,7 +185,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     try {
       const status = {
         sessionId: ctx.sessionManager.getSessionId(), host: "pi", pid: process.pid, processStarted: processStartTime(process.pid),
-        summary: summaryPath(ctx), event, configOverrides: captureProjectConfigOverrides(projectOverrides()), ...(event === "done" ? { readyEpoch: state.readyEpoch, candidate: state.lastSnapshotDetails, test: completionTest(state.rounds.at(-1)), checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
+        summary: summaryPath(ctx), event, configOverrides: captureProjectConfigOverrides(projectOverrides()), ...(event === "done" ? { readyEpoch: state.readyEpoch, candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance), sourceInputs: state.inputsFingerprint, acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}), inbox: state.inboxHandled ?? 0, ...extra,
       };
       writeStageStatus(pipelineLink, status);
       queueStageEvent({ cwd: ctx.cwd, file: process.env.AUTOREVIEW_BATCH_FILE, stage: pipelineLink.stage, status });
@@ -219,6 +213,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     ctx: ExtensionContext, body: string, type: "info" | "warning", life: Lifecycle, signal?: AbortSignal, detail?: string,
   ): Promise<void> => {
     if (!live(life, signal)) return;
+    body += `\n测试：${LOOP_TEST_STATUS}`;
     try { ctx.ui.notify(detail ? `${body}\n${detail}` : body, type); } catch { /* 无 UI 时仍尝试系统通知 */ }
     if (!live(life, signal)) return;
     await systemNotify("自动评审", body, { exec: (cmd, args, options) => pi.exec(cmd, args, options), signal });
@@ -250,7 +245,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
     });
     if (status === "完成") todos.push(...experienceTodos(ctx.cwd, state.experienceDraft?.error));
     const text = renderSummary({
-      workflow: summaryConfig?.workflow, gateCommand: summaryConfig?.gate?.cmd, acceptanceConfigured: summaryConfig ? Boolean(acceptance) : undefined,
+      workflow: summaryConfig?.workflow, acceptanceConfigured: summaryConfig ? Boolean(acceptance) : undefined,
       cwd: ctx.cwd, devSessionId,
       reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId),
       status, pauseReason, rounds: state.rounds, repairs: state.repairs,
@@ -540,7 +535,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         state.awaitingRepair = true;
         state.unresolvedAcceptance = `必需验收命令不通过：${record.command}\n${record.outputTail ?? record.detail ?? ""}`;
         saveState(life);
-        const message = `【自动验收 · 第 ${state.repairs} 次返修】\n${state.unresolvedAcceptance}\n请按失败证据修复并定向自测，完整检查由程序执行。最后一行写【交付完成】。`;
+        const message = `【自动验收 · 第 ${state.repairs} 次返修】\n${state.unresolvedAcceptance}\n请按失败证据修复并定向自测，配置的验收由程序执行；Loop 未运行测试。最后一行写【交付完成】。`;
         deliverRepair(ctx, message, life);
       } else {
         const atLimit = record.failureKind === "product" && state.repairs >= currentConfig(ctx).maxRepairs;
@@ -989,7 +984,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
         `自动评审：${state.enabled ? "开启" : "关闭"}`, `状态：${phase}`,
         `评审 ${state.rounds.length} 次，返修 ${state.repairs} 次`,
         `验收命令：${state.acceptRun ? acceptRunLabel(state.acceptRun) : acceptCommand() ? "未执行" : "未配置"}`,
-        `门禁：${gateCommand(ctx) ?? "未配置"}`,
+        `测试：${LOOP_TEST_STATUS}`,
         `评审会话：${state.reviewerSessionId ?? deriveReviewerSessionId(devSessionId)}`, `总结：${summaryPath(ctx)}`,
         `自动验收：${!acceptanceEnabled(ctx) ? "未配置" : state.criteria
           ? `标准第 ${state.criteria.version} 版（${state.criteria.items.length} 条，${state.criteria.source === "用户" ? "你写的" : "自动起草"}）`
@@ -1210,7 +1205,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       if (state.baseline === undefined) {
         const snap = await evidence(ctx, life).snapshot();
         checkLive(life);
-        // 流水线在准备前已经确定开工依据并传进来；会话不能另取一次 stash，否则准备和门禁会不同。
+        // 流水线在准备前已经确定开工依据并传进来；会话不能另取一次 stash，否则准备和验收会不同。
         const inherited = process.env.AUTOREVIEW_PIPELINE_LAUNCH === "1" ? process.env.AUTOREVIEW_BASE_REV?.trim() : undefined;
         state.baseline = inherited || snap.ref;
         state.baselineUntracked = snap.untracked.map(({ path }) => path);
@@ -1247,7 +1242,7 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
       if (prompt !== undefined && hadReview && !state.needsInputReview && previousInputs !== JSON.stringify([state.requirement, state.criteria, state.grants])) await invalidateCompletion(ctx, life);
       const acceptance = acceptanceEnabled(ctx);
       if (state.enabled) {
-        const convention = conventionText({ acceptance, gate: gateCommand(ctx), experience: experienceInjection(ctx.cwd) });
+        const convention = conventionText({ acceptance, experience: experienceInjection(ctx.cwd) });
         const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
         event.systemPromptOptions.appendSystemPrompt = existing ? `${existing}\n\n${convention}` : convention;
       }

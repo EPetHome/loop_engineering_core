@@ -61,12 +61,14 @@ test("PA 多段：逐段提交后各发一次段 done，压缩为一个真实批
     const plan = parsePlan(raw, root, process.env, { batchFile: file });
     assert.equal(await runPipeline(plan, { launch: (stage) => {
       writeFileSync(join(dev, `${stage.name}.txt`), `checked-${stage.name}`);
-      const detail = { gate: "通过", review: { verdict: "通过", mustFix: 0, suggestions: 1 }, acceptance: { verdict: "未配置", failed: [], partial: [], manual: [] } };
+      const detail = { test: "Loop 未运行测试", review: { verdict: "通过", mustFix: 0, suggestions: 1 }, acceptance: { verdict: "未配置", failed: [], partial: [], manual: [] } };
       writePhase(batchInfo(file, repo, dir), stage.name, "done", { status: "done", detail });
       writeStageStatus({ dir, stage: stage.name }, { event: "done", readyEpoch: stage.name, sessionId: `fake-${stage.name}`, summary: "", inbox: 0, candidate: workingTree(dev, dir).tree,
-        checks: { gate: "通过", review: "通过", acceptance: "未配置" }, acceptance: { failed: [], partial: [], manual: [] } });
-    }, notify: () => {}, log: () => {}, pollMs: 10, silenceMs: 1000 }), 0);
+        checks: { test: "Loop 未运行测试", review: "通过", acceptance: "未配置" }, acceptance: { failed: [], partial: [], manual: [] } });
+    }, notify: (message) => { assert.match(message, /Loop 未运行测试/); }, log: () => {}, pollMs: 10, silenceMs: 1000 }), 0);
+    assert.match(readFileSync(join(dir, "report.md"), "utf8"), /测试：Loop 未运行测试/);
     const rows = readdirSync(events).flatMap((name) => readFileSync(join(events, name), "utf8").trim().split("\n").map((line) => JSON.parse(line))), done = rows.filter((row) => row.status === "done");
+    assert.ok(done.every((row) => row.detail.test === "Loop 未运行测试"));
     assert.deepEqual(done.map((row) => [row.stage, row.detail.scope]), [["甲", "段"], ["乙", "段"], [null, "整批"]]);
     assert.equal(done[2].detail.commit, git(dev, "rev-parse", "feat/multi")); assert.equal(git(dev, "rev-list", "--count", `${base}..feat/multi`), "1");
     assert.equal(git(dev, "show", `${done[2].detail.commit}:甲.txt`), "checked-甲"); assert.equal(git(dev, "show", `${done[2].detail.commit}:乙.txt`), "checked-乙");

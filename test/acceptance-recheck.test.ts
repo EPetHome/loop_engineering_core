@@ -39,7 +39,6 @@ function fixture(results: { fail?: string[]; unknown?: string[] }[]) {
   state.requirement = STANDARD;
   state.criteria = { source: "用户", items: extractCriteria(STANDARD)!, version: 1, updatedAt: "initial" };
   const config: ReviewConfig = { maxRepairs: 4, reviewerModel: "fake", reviewerThinking: "off", reviewerCmd: "", reviewTimeoutMin: 10,
-    gate: { cmd: "printf 'full gate\\n'", timeoutMin: 1 },
     acceptance: parseAcceptanceConfig({ timeoutMin: 5, reset: "printf 'reset\\n'", cleanup: "printf 'released\\n'" }, repo, {})! };
   config.acceptance!.testerCmd = TESTER;
   const procsFile = join(root, "procs.json"), exec = createChildExec(procsFile);
@@ -98,7 +97,7 @@ test("返修只重验未通过项，完成前完整验收并逐条标明最终�
     assert.equal(attempts[1].scope?.kind, "full"); assert.equal(attempts[1].verdict, "通过");
     assert.deepEqual(attempts[1].scope?.reused, []);
     assert.deepEqual(f.summaryStatuses, ["进行中", "完成"]);
-    assert.deepEqual(f.order.filter((role) => ["review", "门禁", "验收方"].includes(role)), ["review", "门禁", "验收方", "review", "门禁", "验收方", "验收方"]);
+    assert.deepEqual(f.order.filter((role) => ["review", "门禁", "验收方"].includes(role)), ["review", "验收方", "review", "验收方", "验收方"]);
     const summary = f.summary("完成");
     assert.match(summary, /本次实测：A2、A4；沿用上一轮结论：A1、A3、A5/);
     for (const item of f.deps.state.criteria!.items) assert.ok(summary.includes(`标准原文：${item.text}`));
@@ -125,7 +124,7 @@ test("完整验收发现通过项回退后打回，下一轮只重验回退项",
     assert.equal(f.deps.state.repairs, 2);
     assert.equal((await f.deliver()).kind, "done");
     assert.deepEqual(f.calls().map((call) => call.ids), [IDS, ["A2", "A4"], IDS, ["A1"], IDS]);
-    assert.equal(f.order.filter((role) => role === "门禁").length, 3);
+    assert.equal(f.order.filter((role) => role === "门禁").length, 0);
     assert.equal((f.summary("完成").match(/最终结论来源：第 3 轮完整验收/g) ?? []).length, 5);
   } finally { f.close(); }
 });

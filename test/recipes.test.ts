@@ -110,6 +110,8 @@ test("单一入口 A3：只评审从候选配置读取 90 分钟，仍不运行�
         },
       });
       assert.ok(called); assert.equal(run.exitCode, 0); assert.equal(run.model, "file/model");
+      assert.equal(run.test, "Loop 未运行测试");
+      assert.match(readFileSync(String(run.report), "utf8"), /测试：Loop 未运行测试/);
       assert.deepEqual((run.effectiveConfig as any).reviewTimeoutMin, { value: 90, source: "file" });
     });
   } finally { f.close(); }
@@ -188,7 +190,7 @@ test("sink report 有/无必修均返回报告，不写总结、不返修、不�
     for (const fixes of [true, false]) await withEnv(f.env, async () => {
       const state = newReviewState(); state.baseline = f.base;
       const outcome = await runReviewRound({ sink: "report", cwd: f.repo, devSessionId: "report-sink", round: 1, state, deliveryNote: "",
-        config: { maxRepairs: 0, reviewerModel: "m", reviewerThinking: "xhigh", reviewTimeoutMin: 60, reviewerCmd: "", gate: { cmd: "exit 99", timeoutMin: 1 } },
+        config: { maxRepairs: 0, reviewerModel: "m", reviewerThinking: "xhigh", reviewTimeoutMin: 60, reviewerCmd: "" },
         exec: createChildExec(), env: {}, writeInput: (name, text) => { const path = join(f.root, name); writeFileSync(path, text); return path; }, saveState: () => {},
         writeSummary: async () => { assert.fail("report 不走开发总结"); }, callReviewer: async () => ({ code: 0, killed: false, stderr: "", stdout: `## 结论：通过\n## 必修\n${fixes ? "1. 触发：空输入；后果：数据丢失" : "无"}\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n` }),
       });

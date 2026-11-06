@@ -97,7 +97,7 @@ export interface LedgerRecord {
   task: string;
   result: string;
   summary: string;
-  checks?: { gate: string; review: string; acceptance: string };
+  checks?: { test: string; review: string; acceptance: string };
   pending: PendingItem[];
   paRelays?: RelaySource[];
 }
@@ -122,7 +122,7 @@ export function renderLedgerRecord(record: LedgerRecord): string {
     `## ${ledgerStamp(record.at)} · ${oneLine(record.project, 500)} · 会话 ${oneLine(record.session, 200)}`,
     `- 任务：${oneLine(record.task, 240)}`,
     `- 结果：${oneLine(record.result, 200)}`,
-    `- 门禁：${oneLine(record.checks?.gate || "没有记录", 500)}；评审：${oneLine(record.checks?.review || "没有记录", 500)}；验收：${oneLine(record.checks?.acceptance || "没有记录", 500)}`,
+    `- 测试：Loop 未运行测试；评审：${oneLine(record.checks?.review || "没有记录", 500)}；验收：${oneLine(record.checks?.acceptance || "没有记录", 500)}`,
     `- 交付报告：${oneLine(record.summary, 1000)}`,
     `- 总结：${oneLine(record.summary, 1000)}`,
     ...relaySourceLines(record.paRelays),
@@ -142,14 +142,14 @@ export function appendLedgerRecord(record: LedgerRecord, path = deliveryLedgerPa
 }
 
 /** 合入另追加本批的收尾段，不改写并发会话已追加的正文。entry 身份用于崩溃恢复去重。 */
-export function appendMergeRecord(record: { project: string; batch: string; entry: string; commit: string; file: string; manual: { id: string; text: string; detail: string }[]; test?: string; deployment?: string; notes?: string[] }, path = deliveryLedgerPath()): string {
+export function appendMergeRecord(record: { project: string; batch: string; entry: string; commit: string; file: string; manual: { id: string; text: string; detail: string }[]; deployment?: string; notes?: string[] }, path = deliveryLedgerPath()): string {
   const marker = `<!-- loop-merge:${record.entry} -->`;
   try { if (readFileSync(path, "utf8").includes(marker)) return path; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   return appendSegment([
     `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 批次-${oneLine(record.entry, 200)}`,
     marker, `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
-    `- 已合入 ${record.commit}`, ...(record.test ? [`- ${oneLine(record.test, 2000)}`] : []), `- ${record.deployment ?? "部署：未开启"}`,
+    `- 已合入 ${record.commit}`, `- 测试：Loop 未运行测试`, `- ${record.deployment ?? "部署：未开启"}`,
     ...(record.notes ?? []).map((note) => `- ${oneLine(note, 2000)}`),
     ...record.manual.map((item) => `- [ ] ${oneLine(item.id, 120)} 人工：${oneLine(item.text, 1000)}${item.detail ? `；${oneLine(item.detail, 500)}` : ""}`), "",
   ].join("\n"), path);
@@ -161,6 +161,7 @@ export function appendBatchCommitRecord(record: { project: string; batch: string
   return appendSegment([
     `## ${ledgerStamp()} · ${oneLine(record.project, 500)} · 会话 批次-${oneLine(record.entry, 200)}`,
     `- 批次：${oneLine(record.batch, 240)}`, `- 批次文件：${oneLine(record.file, 1000)}`,
+    `- 测试：Loop 未运行测试`,
     ...record.commits.flatMap((item) => [`- 已提交 ${item.branch} ${item.commit}`, `- 推送：${item.pushed === item.commit ? `已推送 origin/${item.branch} ${item.pushed}` : `失败，本机提交保留；${oneLine(item.pushResult?.reason ?? "结果未确认，未自动重试", 2000)}`}`, ...item.preSquash.map((ref) => `- 中间历史：${ref}`)]),
     ...record.conclusions.map((line) => `- ${oneLine(line, 2000)}`),
     ...record.pending.map((item) => `- [ ] ${oneLine(item.id, 120)} 待验：${oneLine(item.text, 1000)}；${oneLine(item.detail, 500)}`), "",

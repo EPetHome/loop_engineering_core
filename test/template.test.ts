@@ -49,7 +49,10 @@ test("A3 模板占位符未替换时 loop 开工报方法错误，不空跑通�
   }
 });
 
-test("模板骨架随仓库交付：验收环境文件没有被忽略", () => {
+test("模板骨架随仓库交付：不配置 gate，验收环境文件没有被忽略", () => {
+  const config = JSON.parse(readFileSync(join(TEMPLATE, ".autoreview.json.示例"), "utf8"));
+  assert.equal(Object.hasOwn(config, "gate"), false);
+  assert.equal(existsSync(join(TEMPLATE, ".autoreview/methods/gate.sh")), false);
   const files = [
     "deploy/acceptance/start.sh",
     "deploy/acceptance/reset-data.sh",

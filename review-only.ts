@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractCriteria } from "./acceptance-core.ts";
-import { findProjectRoot, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
+import { LOOP_TEST_STATUS, findProjectRoot, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
 import { batchInfo, eventReason, pushEvent, writePhase, type BatchInfo } from "./events.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { beginBatchRun } from "./launch.ts";
@@ -22,7 +22,7 @@ export async function runReviewOnly(review: ReviewPlan, options: {
   if (options.dryRun) {
     const base = revision(review.repo, review.base), head = revision(review.repo, review.head);
     for (const file of [review.requirement, review.criteria, review.note]) if (file) readFileSync(file, "utf8");
-    return { ok: true, command: "评审", recipe: "review-only", dryRun: true, base, head, effectiveConfig: initialConfig.effectiveConfig, lines: [`只读预览：评审 ${base} → ${head}；不建 worktree、不调用评审`] };
+    return { ok: true, command: "评审", recipe: "review-only", dryRun: true, test: LOOP_TEST_STATUS, base, head, effectiveConfig: initialConfig.effectiveConfig, lines: [`只读预览：评审 ${base} → ${head}；不建 worktree、不调用评审`] };
   }
   let effectiveConfig = initialConfig.effectiveConfig;
   const id = randomUUID(), started = Date.now();
@@ -96,17 +96,17 @@ export async function runReviewOnly(review: ReviewPlan, options: {
   }
   const parsed = outcome?.review;
   const exitCode = failure || !parsed ? 2 : parsed.mustFix.length ? 1 : 0;
-  const result = { v: 1, ok: exitCode !== 2, action: "评审", command: "评审", recipe: "review-only", id,
+  const result = { v: 1, ok: exitCode !== 2, action: "评审", command: "评审", recipe: "review-only", id, test: LOOP_TEST_STATUS,
     repo: resolve(review.repo), baseline: base, candidate: head, files, mustFix: parsed?.mustFix ?? [], mustFixRaw: parsed?.mustFixRaw ?? "",
     suggestions: parsed?.minor ?? [], questions: parsed?.questions ?? [], conclusion: failure ? "评审失败" : parsed?.conclusion,
     model, durationMs: Date.now() - started, exitCode, report, reportJson: json,
     effectiveConfig, reason: eventReason(failure), record: outcome?.record ?? state.rounds.at(-1) ?? null };
   writeFileSync(json, `${JSON.stringify(result, null, 2)}\n`);
-  writeFileSync(report, ["# 只评审报告", `基线：${base ?? review.base}`, `候选：${head ?? review.head}`, `模型：${model}`, `耗时：${result.durationMs} ms`,
+  writeFileSync(report, ["# 只评审报告", `基线：${base ?? review.base}`, `候选：${head ?? review.head}`, `模型：${model}`, `耗时：${result.durationMs} ms`, `测试：${LOOP_TEST_STATUS}`,
     `结论：${result.conclusion ?? "评审失败"}`, failure ? `评审失败：${failure}` : "", "\n## 改动文件", ...files.map((file) => `- ${file}`),
     "\n## 必修（含触发条件和后果）", parsed?.mustFixRaw || "无", "\n## 建议", ...result.suggestions.map((item) => `- ${item}`),
     "\n## 需求疑问", ...result.questions.map((item) => `- ${item}`), ""].join("\n"));
-  const evidence = { report, reportJson: json }, finalDetail = { recipe: "review-only", report, reportJson: json, exitCode };
+  const evidence = { report, reportJson: json }, finalDetail = { recipe: "review-only", test: LOOP_TEST_STATUS, report, reportJson: json, exitCode };
   writePhase(info, null, exitCode === 2 ? "failed" : "done", { status: exitCode === 2 ? "failed" : "done", ...result.reason, session, evidence, detail: finalDetail });
   pushEvent(info, null, exitCode === 2 ? "failed" : "done", result.reason, evidence, finalDetail);
   return { ...result, lines: [`${result.conclusion}；必修 ${result.mustFix.length} 条，建议 ${result.suggestions.length} 条`, `报告：${report}`, `JSON：${json}`] };

@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { authorizationLine, criteriaFromUser, grantsFromUser, isLoopMessage, typedByUser } from "../acceptance-core.ts";
 import {
-  findProjectRoot, HERMES_BIN, MARKER_FILE, resolveProjectConfig,
+  LOOP_TEST_STATUS, findProjectRoot, HERMES_BIN, MARKER_FILE, resolveProjectConfig,
 } from "../config.ts";
 import { classifyMarker, conventionText, deriveReviewerSessionId, renderSummary } from "../core.ts";
 import { batchInfo, observeStage } from "../events.ts";
@@ -35,7 +35,7 @@ import { experienceInjection, experienceSession, experienceTodos, hookExperience
 import { finishExperience } from "../experience-draft.ts";
 import { queueCommitNotice, queueCommitSummary, queueCommittedResult, queueStageEvent } from "../merge-queue.ts";
 import { bindHookInputBridge, bridgeRepairSequence } from "./inbox-bridge.ts";
-import { completionChecks, completionTest, inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
+import { completionChecks, inboxPath, queueAcceptance, readJson, statusPath, type InboxMessage, type StageStatus } from "../pipeline-core.ts";
 import { processStartTime, reapProcs, registerProc, releaseProc, releaseProcessTree } from "../procs.ts";
 import { reapRunResources } from "../resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "../materials.ts";
@@ -218,9 +218,9 @@ export function loadConfig(root: string, env: NodeJS.ProcessEnv = process.env): 
   return config;
 }
 
-/** 注入给开发方的约定：配了验收再追加验收约定，配了门禁再追加门禁约定。 */
+/** 注入给开发方的约定：配了验收再追加验收约定。 */
 function conventionFor(ctx: HookContext): string {
-  return conventionText({ acceptance: Boolean(ctx.config.acceptance), gate: ctx.config.gate?.cmd, experience: experienceInjection(ctx.configRoot) });
+  return conventionText({ acceptance: Boolean(ctx.config.acceptance), experience: experienceInjection(ctx.configRoot) });
 }
 
 /** 状态和总结都放在 ~/.pi-autoreview/<项目目录名>/<宿主>-<会话id>.*。 */
@@ -441,7 +441,7 @@ export function lastAssistantMessage(event: HookEvent): string {
 
 /** SessionStart 只有 10 秒时限，那里发通知要传更短的 timeoutMs。 */
 async function notify(body: string, exec: Exec, timeoutMs = 15_000): Promise<void> {
-  await systemNotify("自动评审", body, { exec, timeoutMs });
+  await systemNotify("自动评审", `${body}\n测试：${LOOP_TEST_STATUS}`, { exec, timeoutMs });
 }
 
 async function writeSummary(
@@ -467,7 +467,7 @@ async function writeSummary(
   recordMaterialSession(materialSession(`${ctx.host}-${ctx.sessionId}`, ctx.workDir, ctx.paths.summary, state.phase,
     state.rounds.flatMap((round) => round.acceptance ? [round.acceptance.runDir] : [])));
   const text = renderSummary({
-    workflow: ctx.config.workflow, gateCommand: ctx.config.gate?.cmd, acceptanceConfigured: Boolean(ctx.config.acceptance),
+    workflow: ctx.config.workflow, acceptanceConfigured: Boolean(ctx.config.acceptance),
     materialCleanup: state.materialCleanup,
     cwd: ctx.workDir, devSessionId: `${ctx.host}-${ctx.sessionId}`, todos,
     reviewerSessionId: state.reviewerSessionId ?? deriveReviewerSessionId(`${ctx.host}-${ctx.sessionId}`),
@@ -668,7 +668,7 @@ function reportQueueStage(ctx: HookContext, state: HookState, event: "started" |
   const status = { sessionId: ctx.sessionId, host: ctx.host, pid, processStarted: process.env.AUTOREVIEW_DEV_STARTED || processStartTime(pid),
     inputBridge: process.env.AUTOREVIEW_DEV_INPUT_BRIDGE, summary: ctx.paths.summary,
     event, readyEpoch: event === "done" ? state.queueReadyEpoch : undefined,
-    ...(event === "done" ? { candidate: state.lastSnapshotDetails, test: completionTest(state.rounds.at(-1)), checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance) } : {}),
+    ...(event === "done" ? { candidate: state.lastSnapshotDetails, checks: completionChecks(state.rounds.at(-1), state.queueReviewedAcceptance) } : {}),
     sourceInputs: state.inputsFingerprint, inbox: state.queueInboxHandled ?? 0,
     ...(event === "done" ? { acceptance: state.queueReviewedAcceptance === undefined ? queueAcceptance(state.rounds.at(-1)?.acceptance) : state.queueReviewedAcceptance ?? undefined } : {}) };
   const dir = process.env.AUTOREVIEW_PIPELINE_DIR, stage = process.env.AUTOREVIEW_STAGE;

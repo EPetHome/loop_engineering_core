@@ -59,7 +59,7 @@ test("多段完成事件不提前进队；必须整批验收通过；失败文�
       { name: "甲", cwd: first.cwd, branch: first.branch, start: "true", scope: { allow: ["src/a.txt"] } },
       { name: "乙", cwd: first.cwd, branch: first.branch, start: "true", scope: { allow: ["src/b.txt"] } },
     ] });
-    f.write(0, "src/a.txt", "a\n"); f.mode("fail");
+    f.write(0, "src/a.txt", "a\n"); f.conflict();
     for (const stage of ["甲", "乙"]) queueStageEvent({ cwd: first.cwd, file: multi, stage, status: { sessionId: `multi-${stage}`, event: "done", readyEpoch: stage, summary: "", inbox: 0, pid: process.pid, processStarted: processStartTime(process.pid) } });
     assert.equal(f.queue().entries.length, 0);
     queueBatchComplete(f.repo, multi, false); assert.equal(f.queue().entries.length, 1, "没有整批验收标准时跳过验收并进队");
@@ -70,18 +70,18 @@ test("多段完成事件不提前进队；必须整批验收通过；失败文�
   } finally { await f.close(); }
 });
 
-test("门禁输出无法定位失败文件时，明确说明原因并退回多段批次最后一段", async () => {
+test("冲突文件不属于任何段时，明确说明原因并退回最后一段", async () => {
   const f = fixture(1);
   try {
     const file = join(f.root, "fallback.json"), dir = join(f.root, "fallback-pipeline"), dev = f.batches[0];
     writeFileSync(file, "{}");
     registerQueueBatch(f.repo, { name: "无法定位", file, dir, project: f.repo, release: "main", steps: [["甲"], ["乙"]],
       stages: ["甲", "乙"].map((name) => ({ name, cwd: dev.cwd, branch: dev.branch, start: "true", scope: { allow: [`src/${name}`] } })) });
-    f.write(0, "src/other.txt", "bad\n"); f.mode("fail");
+    f.write(0, "src/other.txt", "bad\n"); f.conflict("src/other.txt");
     for (const stage of ["甲", "乙"]) queueStageEvent({ cwd: dev.cwd, file, stage, status: { sessionId: stage, event: "done", readyEpoch: stage, summary: "", inbox: 0, pid: process.pid, processStarted: processStartTime(process.pid) } });
     queueBatchComplete(f.repo, file, true); await f.until(() => f.queue().entries[0]?.status === "returned");
     assert.equal(readJson(inboxPath(dir, "甲")), undefined);
-    assert.match(readJson<InboxMessage>(inboxPath(dir, "乙"))!.message, /未能从门禁输出定位失败文件[\s\S]*无法唯一确定文件归属，退回最后一段「乙」/);
+    assert.match(readJson<InboxMessage>(inboxPath(dir, "乙"))!.message, /src\/other.txt[\s\S]*无法唯一确定文件归属，退回最后一段「乙」/);
   } finally { await f.close(); }
 });
 
@@ -104,12 +104,13 @@ test("多段完整接线：整批验收后自动进队；队列退回原段修�
     } });
     done("甲", "initial-a"); done("乙", "initial-b"); assert.equal(f.queue().entries.length, 0);
     const plan = parsePlan(raw, f.root, process.env, { batchFile: file, projectRoot: f.repo });
-    f.mode("fail");
+    f.conflict();
     const code = await runPipeline(plan, { launch: () => { throw new Error("不应新开开发会话"); }, notify: () => {}, log: () => {}, pollMs: 20, silenceMs: 1000,
       preflightEnv: { pi: process.env.PI_BIN, permission: process.env.PERMISSION_EXTENSION, autoreview: join(ROOT, "autoreview.ts"), playwright: () => true } }, { fromAcceptance: true });
     assert.equal(code, 0, `${readFileSync(join(dir, "report.md"), "utf8")}\n${readFileSync(join(dir, "e2e", "r1", "result.json"), "utf8")}`); await f.until(() => f.queue().entries[0]?.status === "returned"); // 兼容旧材料目录。
     const inbox = readJson<InboxMessage>(inboxPath(dir, "甲"))!; assert.ok(inbox); assert.equal(readJson(inboxPath(dir, "乙")), undefined);
-    f.write(0, "src/a.txt", "fixed\n"); f.mode("pass"); done("甲", "repaired-a", inbox.seq);
+    f.git(f.batches[0].cwd, "merge", "-s", "ours", "main", "--no-edit");
+    f.write(0, "src/a.txt", "fixed\n"); done("甲", "repaired-a", inbox.seq);
     await f.until(() => f.queue().entries.length === 2 && f.queue().entries[1].status === "ready"); await f.idle();
     const batch = f.queue().batches.find((item) => item.name === "多段整合")!;
     await f.until(() => !existsSync(join(queueDir(f.repo), `integration-${batch.id}.lock`)), "整合编排释放执行锁");

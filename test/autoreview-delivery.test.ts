@@ -249,12 +249,11 @@ test("PA A1/A2：Pi 替身会话开始；决定事件带问题和选项原文，
   } finally { await h.close(); }
 });
 
-test("PA A3：Pi 门禁保留执行器的 environment 分类和日志，查询原因与事件相同", async (t) => {
-  const h = harness({ stage: "甲" }), pa = paFixture(h, t);
+test("PA A3：Pi 必需验收命令保留执行器的 environment 分类和日志，查询与事件相同", async (t) => {
+  const h = harness({ stage: "甲", flags: { "autoreview-accept-cmd": "fake accept", "autoreview-accept-mode": "required" } }), pa = paFixture(h, t);
   try {
-    h.write(".autoreview.json", JSON.stringify({ gate: { cmd: "fake gate", timeoutMin: 1 } })); h.git("add", ".autoreview.json"); h.git("commit", "-qm", "config");
     h.acceptor = () => result("AUTOREVIEW_FAILURE=environment TEST_ENV_BLOCK\n", 75);
-    await h.event("session_start"); await h.begin(); h.write("file.txt", "change\n"); h.assistant(); await h.event("agent_settled"); await h.terminal();
+    await h.event("session_start"); await h.begin(); h.write("file.txt", "change\n"); h.assistant(); await h.event("agent_settled"); await h.accepted();
     const event = pa.rows().at(-1); assert.equal(event.status, "paused"); assert.equal(event.reason.category, "环境"); assert.equal(event.detail.failureKind, "environment"); assert.equal(event.detail.next, "send");
     assert.ok(existsSync(event.evidence.log)); const query: any = queryBatches(pa.file).batches[0];
     assert.deepEqual({ category: query.stages[0].pause.category, text: query.stages[0].pause.text }, event.reason);
@@ -287,7 +286,7 @@ test("PA A5/A7：单段只在程序提交后发整批 done；接收目录只读�
         const done = pa.rows().filter((event) => event.status === "done"); assert.equal(done.length, 1); assert.equal(done[0].stage, null); assert.equal(done[0].detail.scope, "整批");
         assert.equal(done[0].detail.branch, "feat/pa"); assert.equal(done[0].detail.commit, h.git("rev-parse", "feat/pa"));
         assert.equal(h.git("merge-base", "--is-ancestor", done[0].detail.commit, "feat/pa"), "");
-        assert.equal(done[0].detail.gate, "通过"); assert.equal(done[0].detail.review.mustFix, 0); assert.equal(done[0].detail.acceptance.verdict, "未配置");
+        assert.equal(done[0].detail.test, "Loop 未运行测试"); assert.equal(done[0].detail.review.mustFix, 0); assert.equal(done[0].detail.acceptance.verdict, "未配置");
         await h.event("session_shutdown"); await h.event("session_start"); assert.equal(pa.rows().filter((event) => event.status === "done").length, 1, "恢复不补历史 done");
       }
     } finally { if (existsSync(pa.events)) chmodSync(pa.events, 0o700); await h.close(); }

@@ -24,7 +24,7 @@ import {
   type AcceptanceItemResult, type AcceptanceRecord, type Criteria, type CriterionItem,
 } from "./acceptance-core.ts";
 import { acceptanceRunDir, describeListeners, portBusy, runAcceptanceStage } from "./acceptance.ts";
-import { captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, stageAcceptance, parseStageWorkflow, workspacePath, type StageWorkflow, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
+import { LOOP_TEST_STATUS, captureProjectConfigOverrides, EXT_DIR, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, PERMISSION_EXT, PI_BIN, PROJECT_CONFIG_ENV, projectConfigOverridesFromArgs, resolveProjectConfig, stageAcceptance, parseStageWorkflow, workspacePath, type StageWorkflow, type AcceptanceConfig, type ProjectConfigOverrides } from "./config.ts";
 import { processStartTime, reapProcs } from "./procs.ts";
 import { batchInfo, batchLocation, completionDetail, eventReason, phasePath, pushEvent, reportUncommittedBatch, writePhase, type BatchInfo, type NextAction, type PhaseRecord } from "./events.ts";
 import { systemNotify } from "./notify.ts";
@@ -455,7 +455,7 @@ function pipelineInfo(plan: Plan): BatchInfo {
 }
 function pipelineEvent(plan: Plan, phase: PhaseRecord["phase"], status: "started" | "paused" | "repair-limit" | "failed" | "resumed", text: string, detail: Record<string, unknown> = {}, failureKind?: FailureKind): void {
   try {
-    detail = { ...detail, paGrantsUsed: plan.paGrantsUsed ?? [] };
+    detail = { ...detail, test: LOOP_TEST_STATUS, paGrantsUsed: plan.paGrantsUsed ?? [] };
     const info = pipelineInfo(plan), reason = eventReason(text, failureKind), evidence = { summary: resolve(plan.dir, "report.md"),
       ...(typeof detail.log === "string" ? { log: detail.log } : {}), ...(typeof detail.acceptance === "string" ? { acceptance: detail.acceptance } : {}), ...(typeof detail.blocker === "string" ? { blocker: detail.blocker } : {}) };
     writePhase(info, null, phase, { status, ...reason, evidence, detail,
@@ -466,6 +466,8 @@ function pipelineEvent(plan: Plan, phase: PhaseRecord["phase"], status: "started
 
 /** 跑一条流水线，返回退出码（见文件头）。 */
 export async function runPipeline(plan: Plan, io: PipelineIO, options: { fromAcceptance?: boolean; signal?: AbortSignal } = {}): Promise<number> {
+  const originalIO = io;
+  io = { ...io, notify: (message) => originalIO.notify(`${message}\n测试：${LOOP_TEST_STATUS}`) };
   if (plan.recipe === "review-only") {
     const { runReviewOnly } = await import("./review-only.ts");
     const result = await runReviewOnly(plan.review!, { file: plan.file, name: plan.name, dir: plan.dir });
@@ -511,7 +513,7 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
     }
     return { invalid, token: JSON.stringify(epochs) };
   };
-  const report: string[] = [`# 流水线报告：${plan.name}`, "", `- 开始：${new Date().toLocaleString("zh-CN", { hour12: false })}`, `- 目录：${plan.dir}`];
+  const report: string[] = [`# 流水线报告：${plan.name}`, "", `- 开始：${new Date().toLocaleString("zh-CN", { hour12: false })}`, `- 目录：${plan.dir}`, `- 测试：${LOOP_TEST_STATUS}`];
   let acceptancePassed = false;
   let acceptanceRecord: AcceptanceRecord | undefined;
   let acceptanceEpoch: string | undefined;
@@ -555,7 +557,9 @@ async function runPipelineBody(plan: Plan, io: PipelineIO, options: { fromAccept
     if (!plan.file || plan.stages.size < 2) return;
     const info = pipelineInfo(plan), current = plan.stages.get(name)!, branch = current.branch ?? plan.branch;
     const phase = readJson<PhaseRecord>(phasePath(plan.dir, name));
-    const detail = { ...(phase?.detail ?? completionDetail()), scope: "段", completion: status.readyEpoch, branch: branch ?? null, commit: branch ? gitText(current.cwd, ["rev-parse", `refs/heads/${branch}`]) : null };
+    const checks = { ...(phase?.detail ?? completionDetail()) };
+    delete checks.gate; // 历史段记录也不能在新交付中冒充本次测试通过。
+    const detail = { ...checks, test: LOOP_TEST_STATUS, scope: "段", completion: status.readyEpoch, branch: branch ?? null, commit: branch ? gitText(current.cwd, ["rev-parse", `refs/heads/${branch}`]) : null };
     const evidence = phase?.evidence ?? (status.summary ? { summary: status.summary } : {});
     writePhase(info, name, "done", { ...phase, status: "done", evidence, detail });
     pushEvent(info, name, "done", eventReason(), evidence, detail);

@@ -13,7 +13,7 @@ import { loadContext, refreshContext } from "../project-context.ts";
 import type { AcceptanceRecord } from "../acceptance-core.ts";
 import { queueStageEvent, fixture, repeatableMulti, autoConfig, autoComplete, automaticMerged, notification, multiReady } from "./helpers/merge-queue-fixture.ts";
 
-test("队列配置／资格复核和独立队列门禁使用原段覆盖，仍拒绝不足预算", async () => {
+test("队列配置／资格复核使用原段覆盖，验收预算不足仍拒绝，gate 不执行", async () => {
   const f = fixture(1);
   try {
     const batch = f.batches[0], marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8"));
@@ -27,7 +27,8 @@ test("队列配置／资格复核和独立队列门禁使用原段覆盖，仍�
     queueStageEvent({ cwd: batch.cwd, file: batch.file, stage: "甲", status: { sessionId: "config-overrides", host: "pi", event: "done", readyEpoch: "config-ready", summary: "", inbox: 0,
       configOverrides: overrides, sourceInputs, acceptance: queueAcceptance() } });
     await f.ready(0);
-    assert.equal(f.queue().entries[0].gate?.timeoutMin, 20, "独立队列执行器实际读取门禁并通过");
+    assert.equal(f.queue().entries[0].testConclusion, "Loop 未运行测试");
+    assert.equal(existsSync(join(f.root, "gate-executed")), false);
     const registration = f.queue().batches[0];
     const readOnly = () => mergeQueuedBatch(f.repo, registration, true, () => assert.fail("只读核对不能发布"));
     assert.equal((await readOnly()).status, "ready");
@@ -35,6 +36,27 @@ test("队列配置／资格复核和独立队列门禁使用原段覆盖，仍�
     writeJsonAtomic(path, { ...status, configOverrides: captureProjectConfigOverrides({ reviewTimeoutMin: "60" }, {}) });
     await assert.rejects(readOnly(), /必须小于一轮总预算/);
     writeJsonAtomic(path, status);
+  } finally { await f.close(); }
+});
+
+test("不配置 gate 仍完成候选核对，旧门禁元数据只读忽略，不生成通过记录", async () => {
+  const f = fixture(1);
+  try {
+    const marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8")); delete marker.gate;
+    writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify(marker));
+    f.git(f.repo, "add", ".autoreview.json"); f.git(f.repo, "commit", "-qm", "remove obsolete gate");
+    f.write(0, ".autoreview.json", JSON.stringify(marker)); f.write(0, "src/a.txt", "candidate\n");
+    f.complete(0); await f.ready(0);
+    assert.equal(f.queue().entries[0].testConclusion, "Loop 未运行测试");
+    const path = join(queueDir(f.repo), "queue.json"), raw = JSON.parse(readFileSync(path, "utf8"));
+    Object.assign(raw.entries[0], { gate: { cmd: "exit 99" }, runtimeGate: "old", tests: [{}], reusedTest: {}, log: "/old/gate.log", output: "门禁通过", reason: "门禁通过" });
+    raw.entries[0].qualification[0].test = { result: "通过" };
+    writeFileSync(path, JSON.stringify(raw)); const original = readFileSync(path);
+    const entry = f.queue().entries[0];
+    for (const key of ["gate", "runtimeGate", "tests", "reusedTest", "log", "output"]) assert.equal(Object.hasOwn(entry, key), false);
+    assert.equal(entry.testConclusion, "Loop 未运行测试"); assert.doesNotMatch(JSON.stringify(entry), /门禁通过/);
+    assert.deepEqual(readFileSync(path), original, "只读迁移不改写历史记录");
+    assert.equal(existsSync(join(f.root, "gate-executed")), false);
   } finally { await f.close(); }
 });
 

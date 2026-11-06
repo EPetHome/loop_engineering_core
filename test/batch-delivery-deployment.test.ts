@@ -6,7 +6,6 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
-import { completionTest } from "../pipeline-core.ts";
 import { parseDeploymentConfig } from "../config.ts";
 import { beginQueueAcceptance, endQueuePipeline, queueDir, recoverMergeQueue } from "../merge-queue.ts";
 import { batchInfo, writePhase } from "../events.ts";
@@ -18,7 +17,6 @@ test("部署配置：默认关闭，开启必须同时提供部署和检查命�
   assert.equal(parseDeploymentConfig({ cmd: "deploy", check: "check" }).enabled, false);
   assert.deepEqual(parseDeploymentConfig({ enabled: true, cmd: "deploy", check: "check" }), { enabled: true, cmd: "deploy", check: "check", timeoutMin: 10 });
   for (const raw of [null, [], true, { enabled: "true" }, { enabled: true }, { enabled: true, cmd: "deploy" }, { enabled: true, cmd: " ", check: "check" }, { timeoutMin: 0 }, { timeoutMin: 0.1 }]) assert.throws(() => parseDeploymentConfig(raw), /deployment/);
-  assert.equal(completionTest(undefined), undefined);
 });
 
 test("停止待执行部署：开发会话已退出也能取消，dry-run 只读，恢复不再派发或回退", async () => {

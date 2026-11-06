@@ -13,7 +13,7 @@ import { FAKE, ACC_ENV, fixture } from "./helpers/hook-fixture.ts";
 
 test("PA A1-A4：Claude/Codex Hook 的事件、phase、通知关闭、恢复与 FailureKind", async (t) => {
   for (const host of ["claude", "codex"]) await t.test(host, () => {
-    const h = fixture({ marker: JSON.stringify({ gate: { cmd: "printf 'AUTOREVIEW_FAILURE=environment PA_ENV_BLOCK\\n'; exit 75", timeoutMin: 1 } }) });
+    const h = fixture({ marker: JSON.stringify({ preparation: { check: "printf 'AUTOREVIEW_FAILURE=environment PA_ENV_BLOCK\\n'; exit 75", maxRecoveries: 0 } }) });
     try {
       const config = join(h.root, "pa.json"), file = join(h.root, "batch.json"), dir = join(h.home, ".pi-autoreview", "pipelines", "pa"), events = join(h.root, "events");
       writeFileSync(config, JSON.stringify({ pa: { eventsDir: events, localNotify: false } }));
@@ -28,7 +28,7 @@ test("PA A1-A4：Claude/Codex Hook 的事件、phase、通知关闭、恢复与 
       h.run(h.event("SessionStart"), { env }); assert.equal(rows().filter((event) => event.status === "needs-decision").length, 1, "重启不补旧暂停");
       h.run(h.event("UserPromptSubmit", { prompt: "选 A" }), { env }); assert.equal(rows().at(-1).status, "resumed"); assert.equal(rows().at(-1).detail.via, "user");
       h.write("file.txt", "changed\n"); h.run(h.delivered(), { env });
-      const paused = rows().at(-1); assert.equal(paused.status, "paused"); assert.equal(paused.reason.category, "环境"); assert.equal(paused.detail.failureKind, "environment"); assert.ok(existsSync(paused.evidence.log));
+      const paused = rows().at(-1); assert.equal(paused.status, "paused"); assert.equal(paused.reason.category, "环境"); assert.equal(paused.detail.failureKind, "environment"); assert.ok(existsSync(paused.evidence.blocker));
       const query = spawnSync(process.execPath, [fileURLToPath(new URL("../loop.ts", import.meta.url)), "查询", file, "--json"], { cwd: h.root, env: { ...process.env, HOME: h.home, ...env }, encoding: "utf8" });
       assert.equal(query.status, 0, query.stderr + query.stdout); const stage = JSON.parse(query.stdout).batches[0].stages[0];
       assert.equal(stage.pause.category, paused.reason.category); assert.equal(stage.pause.text, paused.reason.text);
@@ -46,10 +46,10 @@ test("PA A1-A4：Claude/Codex Hook 的事件、phase、通知关闭、恢复与 
   });
 });
 
-test("A1/A2 Hook 只在真正完成时瘦身登记验收轮次和门禁 TMPDIR，总结保留小证据", async (t) => {
+test("A1/A2 Hook 只在真正完成时瘦身登记验收轮次和准备 TMPDIR，总结保留小证据", async (t) => {
   for (const paused of [false, true]) await t.test(paused ? "暂停保留" : "完成瘦身", () => {
     const script = `const fs=require('node:fs'),p=process.env.TMPDIR;fs.writeFileSync(p+'/large.db',Buffer.alloc(300000));fs.writeFileSync(p+'/reuse.sh','echo reuse');fs.writeFileSync(p+'/system.log','keep');`;
-    const h = fixture({ marker: JSON.stringify({ gate: { cmd: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` } }) });
+    const h = fixture({ marker: JSON.stringify({ preparation: { check: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` } }) });
     try {
       h.run(h.event("SessionStart")); h.run(h.event("UserPromptSubmit", { prompt: "需求" }));
       const run = join(h.home, ".pi-autoreview", "repo", "acceptance", "claude-s1", "r0");
@@ -67,7 +67,7 @@ test("A1/A2 Hook 只在真正完成时瘦身登记验收轮次和门禁 TMPDIR�
       else {
         assert.match(h.summary(), /运行材料瘦身：删除 3 个文件，释放约 .*；保留/);
         const root = join(h.home, ".pi-autoreview", "resources");
-        const record = readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(root, name), "utf8"))).find((item) => item.label === "gate:claude-s1:r1");
+        const record = readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(root, name), "utf8"))).find((item) => item.label === `preparation:${h.repo}`);
         assert.ok(record); assert.equal(existsSync(join(record.evidenceDir, "large.db")), false);
         assert.ok(existsSync(join(record.evidenceDir, "reuse.sh"))); assert.ok(existsSync(join(record.evidenceDir, "system.log")));
       }

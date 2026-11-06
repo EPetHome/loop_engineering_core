@@ -97,7 +97,7 @@ export function grantsFromUser(text: string, criteria: Criteria | undefined, pre
 }
 
 /** 程序自己发给开发方的消息：不是用户打的字；继续识别旧流水线返修开头。 */
-const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|门禁|整批验收返修|流水线 e2e 返修) · |合入队列返修】|流程等待】|流程准备】)/;
+const LOOP_MESSAGE = /^\s*【(?:(?:自动评审|自动验收|越界检查|门禁|整批验收返修|流水线 e2e 返修) · |合入队列返修】|流程等待】|流程准备】)/;
 /** 只有开头的独立转达头才是信封；正文、文件或行内引用不改变真实用户来源。 */
 export const isPARelayEnvelope = (prompt: string): boolean => /^\s*【用户原话 · 经 PA 转达 · [^\r\n】]*】\r?\n/.test(prompt);
 export interface UserPromptProvenance { verifiedRelay?: boolean }

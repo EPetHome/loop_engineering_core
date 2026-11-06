@@ -35,7 +35,7 @@ test("A5 冲突在干净测试工作区退回；修好重走完成事件后排�
   } finally { await f.close(); }
 });
 
-test("A7 杀掉测试执行器后按登记释放孤儿门禁并恢复；不丢批次、不自动或重复合入", async () => {
+test("A7 杀掉合并执行器后按身份恢复；不丢批次、不自动或重复合入", async () => {
   const f = fixture();
   try {
     f.write(0, "src/a.txt", "a\n"); f.write(1, "src/b.txt", "b\n"); f.mode("hold");

@@ -11,7 +11,7 @@ import { queueAcceptance } from "../pipeline-core.ts";
 import { queueCommitNotice, queueStageEvent, recoverMergeQueue, registerQueueBatch } from "../merge-queue.ts";
 import { fixture } from "./helpers/batch-delivery-fixture.ts";
 
-test("批次自动推送与测试复用：保存同名远端提交，沿用有版本的测试后自动提交目标分支，默认不部署", async () => {
+test("批次自动推送：不运行或复用测试，核对后自动提交目标分支，默认不部署", async () => {
   const f = fixture();
   try {
     writeFileSync(join(f.batches[0].cwd, "code.txt"), "checked\n"); f.complete();
@@ -19,11 +19,11 @@ test("批次自动推送与测试复用：保存同名远端提交，沿用有�
     const batch = f.queue().batches[0], entry = f.queue().entries[0], commit = batch.commits![0];
     assert.equal(f.git(f.remote, "rev-parse", commit.branch), commit.commit); assert.equal(commit.pushed, commit.commit);
     assert.equal(f.git(f.repo, "rev-parse", f.release), entry.result); assert.equal(f.git(f.remote, "rev-parse", f.release), f.base);
-    assert.equal(f.gates().filter((item) => item.queued).length, 0); assert.equal(entry.reusedTest?.round, 2);
-    assert.equal(entry.reusedTest?.tree, entry.tree); assert.match(entry.testConclusion!, /沿用测试：dev；会话 session-0；资格/);
-    assert.match(f.notice(), /已自动提交到目标分支[\s\S]*沿用测试[\s\S]*已推送到 origin\/feat\/delivery-0/);
+    assert.deepEqual(f.gates(), []); assert.equal(Object.hasOwn(entry, "reusedTest"), false);
+    assert.equal(entry.testConclusion, "Loop 未运行测试");
+    assert.match(f.notice(), /已自动提交到目标分支[\s\S]*Loop 未运行测试[\s\S]*已推送到 origin\/feat\/delivery-0/);
     assert.doesNotMatch(f.notice(), /要不要推|要推到远端|请执行.*推送/); assert.equal(entry.deployment?.status, "disabled"); assert.deepEqual(f.deployments(), []);
-    assert.match(readFileSync(entry.ledger!, "utf8"), /部署：未开启/); assert.match(readFileSync(entry.ledger!, "utf8"), /沿用测试/);
+    assert.match(readFileSync(entry.ledger!, "utf8"), /部署：未开启/); assert.match(readFileSync(entry.ledger!, "utf8"), /Loop 未运行测试/);
     assert.match(queueCommitNotice(f.batches[0].cwd, { AUTOREVIEW_BATCH_FILE: f.batches[0].file, AUTOREVIEW_STAGE: "dev" }), /部署：未开启/);
     recoverMergeQueue(f.repo); await f.idle(); assert.equal(f.queue().entries.length, 1);
   } finally { await f.close(); }
@@ -42,14 +42,14 @@ test("批次远端分歧：自动推送失败保留本机提交和 Git 原因，
   } finally { await f.close(); }
 });
 
-test("目标分支前进：测试最新目标加候选后自动提交，不推目标分支", async () => {
+test("目标分支前进：核对最新目标加候选后自动提交，不运行测试或推目标分支", async () => {
   const f = fixture();
   try {
     const base = f.advance(); writeFileSync(join(f.batches[0].cwd, "code.txt"), "checked\n"); f.complete();
     await f.until(() => f.queue().entries[0]?.status === "merged"); await f.idle();
     const entry = f.queue().entries[0], gates = f.gates().filter((item) => item.queued);
-    assert.equal(gates.length, 1); assert.equal(gates[0].base, base); assert.equal(gates[0].head, entry.result);
-    assert.equal(entry.reusedTest, undefined); assert.match(entry.testConclusion!, /队列测试通过/);
+    assert.equal(gates.length, 0); assert.equal(entry.base, base);
+    assert.equal(Object.hasOwn(entry, "reusedTest"), false); assert.equal(entry.testConclusion, "Loop 未运行测试");
     assert.equal(f.git(f.repo, "rev-parse", f.release), entry.result); assert.equal(f.git(f.remote, "rev-parse", f.release), f.base);
     assert.equal(readFileSync(join(f.repo, "code.txt"), "utf8"), "checked\n");
   } finally { await f.close(); }
@@ -66,7 +66,7 @@ test("主分支保护：main 和 master 都保留可合入，不自动提交", a
   });
 });
 
-test("测试复用边界：没有实际测试版本或测过的树不匹配仍执行队列测试", async (t) => {
+test("旧测试证据缺失或树不匹配均忽略，不执行队列测试", async (t) => {
   for (const kind of ["missing", "different-tree"]) await t.test(kind, async () => {
     const f = fixture({ release: "main" });
     try {
@@ -75,15 +75,15 @@ test("测试复用边界：没有实际测试版本或测过的树不匹配仍�
       else {
         const batch = f.batches[0], candidate = workingTree(batch.cwd, f.root).tree;
         queueStageEvent({ cwd: batch.cwd, file: batch.file, stage: "dev", status: { sessionId: "old-tree", event: "done", readyEpoch: randomUUID(), summary: "", inbox: 0, candidate, acceptance: queueAcceptance(),
-          test: { candidate: f.git(f.repo, "rev-parse", "HEAD^{tree}"), result: "通过", command: f.config.gate.cmd, round: 1, startedAt: new Date().toISOString() } } });
+          ...{ test: { candidate: f.git(f.repo, "rev-parse", "HEAD^{tree}"), result: "通过", command: f.config.gate.cmd, round: 1, startedAt: new Date().toISOString() } } } });
       }
       await f.until(() => f.queue().entries[0]?.status === "ready"); await f.idle();
-      assert.equal(f.gates().filter((item) => item.queued).length, 1); assert.equal(f.queue().entries[0].reusedTest, undefined);
+      assert.deepEqual(f.gates(), []); assert.equal(Object.hasOwn(f.queue().entries[0], "reusedTest"), false);
     } finally { await f.close(); }
   });
 });
 
-test("自动提交比较交换：发布边界发生并发提交时不覆盖，重新测试最新目标后继续", async () => {
+test("自动提交比较交换：发布边界发生并发提交时不覆盖，重新核对最新目标后继续", async () => {
   const f = fixture();
   try {
     const realGit = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
@@ -93,7 +93,7 @@ test("自动提交比较交换：发布边界发生并发提交时不覆盖，�
     writeFileSync(join(f.batches[0].cwd, "code.txt"), "checked\n"); f.complete();
     await f.until(() => f.queue().entries[0]?.status === "merged"); await f.idle();
     const entry = f.queue().entries[0]; assert.ok(entry.attempt >= 2); assert.equal(entry.base, external);
-    assert.equal(f.gates().filter((item) => item.queued).length, 1, "首次复用，CAS 拒绝后才测试整合结果");
+    assert.deepEqual(f.gates(), [], "CAS 拒绝后重新核对整合结果，不运行测试");
     assert.equal(f.git(f.repo, "merge-base", external, entry.result!), external); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), entry.result);
   } finally { await f.close(); }
 });

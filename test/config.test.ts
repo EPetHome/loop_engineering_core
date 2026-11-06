@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { captureProjectConfigOverrides, resolveProjectConfig, projectConfigArgs, projectConfigOverridesFromArgs, loadAcceptanceConfig, loadGateConfig } from "../config.ts";
+import { captureProjectConfigOverrides, resolveProjectConfig, projectConfigArgs, projectConfigOverridesFromArgs, loadAcceptanceConfig } from "../config.ts";
 import { loadConfig } from "../hosts/review-hook.ts";
 import { loadPreparation } from "../preparation.ts";
 import { loadContext } from "../project-context.ts";
@@ -39,7 +39,7 @@ test("统一配置：完整文件、不传参数时所有字段及兼容读取�
     assert.deepEqual(config.effectiveConfig.reviewTimeoutMin, { value: 90, source: "file" });
     assert.deepEqual(loadConfig(f.root, {}).acceptance, config.acceptance);
     assert.deepEqual(loadAcceptanceConfig(f.root, {}), config.acceptance);
-    assert.deepEqual(loadGateConfig(f.root), config.gate);
+    assert.equal(Object.hasOwn(config, "gate"), false);
     assert.deepEqual(loadPreparation(f.root), config.preparation);
     assert.deepEqual(loadContext(f.root), config.context);
     assert.deepEqual(config.methods, fullConfig.methods);
@@ -102,7 +102,7 @@ test("覆盖快照只保留配置环境；下游方法和来源读取继续校�
     assert.equal(methodsComponents(f.root, f.root, { dryRun: true, overrides: copied }).files.length, 0);
     assert.throws(() => methodsComponents(f.root, f.root, { dryRun: true, env: {} }), /必须小于一轮总预算/);
     assert.equal(loadContext(f.root, copied), undefined);
-    assert.equal(loadGateConfig(f.root, copied)?.timeoutMin, 20);
+    assert.equal(Object.hasOwn(resolveProjectConfig(f.root, copied), "gate"), false);
   } finally { f.close(); }
 });
 
@@ -115,7 +115,7 @@ test("统一校验：预算文案不变，所有配置节提前报错，显式�
     assert.throws(() => loadConfig(f.root, {}), { message });
     assert.equal(resolveProjectConfig(f.root, { env: {}, reviewTimeoutMin: "120" }).reviewTimeoutMin, 120);
     assert.equal(loadContext(f.root, { reviewTimeoutMin: "120" }), undefined);
-    for (const section of ["methods", "context", "preparation", "gate", "acceptance"]) {
+    for (const section of ["methods", "context", "preparation", "acceptance"]) {
       f.write({ [section]: null });
       assert.throws(() => resolveProjectConfig(f.root, { env: {} }), new RegExp(section));
     }
@@ -135,7 +135,7 @@ test("接入：已有和待写配置都复用预算校验，保留其他字段�
     f.write({ reviewTimeoutMin: 10, acceptance: { timeoutMin: 20 } });
     await assert.rejects(planSetup(f.root), /acceptance.timeoutMin（20）必须小于/);
     f.write({ gate: { cmd: "true", timeoutMin: 45 }, custom: "keep" });
-    await assert.rejects(planSetup(f.root), /gate.timeoutMin（45）加 acceptance.timeoutMin（20）必须小于/);
+    assert.equal(JSON.parse((await planSetup(f.root)).config!).custom, "keep", "停用 gate 不占预算");
     f.write({ reviewTimeoutMin: 90, custom: "keep" });
     const before = readFileSync(join(f.root, ".autoreview.json"), "utf8");
     const next = await planSetup(f.root);

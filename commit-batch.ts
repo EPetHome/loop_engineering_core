@@ -41,7 +41,7 @@ export function pushBatch(repo: string, release: string, commits: BatchCommit[],
 }
 
 export interface CommitCandidate { branch: string; cwd: string; candidate: Snapshot | string; conclusions: string[] }
-const changed = (): Error => new Error("批次候选已变化，需要原开发会话重新完成门禁和评审；未提交");
+const changed = (): Error => new Error("批次候选已变化，需要原开发会话重新完成评审与流程要求的验收；未提交");
 
 /** 不接触真实索引；历史未跟踪文件使用冻结哈希，绝不拿当前内容冒充检查候选。 */
 function withIndex<T>(cwd: string, scratch: string, fn: (run: (args: string[], input?: Buffer) => string, top: string) => T): T {

@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { mergeQueuedBatch, queueDir, queueStageEvent, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
-import { completionTest, inboxPath, queueAcceptance, statusPath, writeJsonAtomic } from "../pipeline-core.ts";
+import { inboxPath, queueAcceptance, statusPath, writeJsonAtomic } from "../pipeline-core.ts";
 import { inputBridgePath, inputStatePath } from "../hosts/inbox-bridge.ts";
 import { processStartTime } from "../procs.ts";
 import { applyQueuedResult } from "../loop.ts";
@@ -51,7 +51,7 @@ test("合入队列：Hook 完成自动进队；机器返修保留需求、授权
   }
 });
 
-test("自动 A9：Claude/Codex Hook 共用入口不重复评审队列测过的同一提交和树", async (t) => {
+test("自动 A9：Claude/Codex Hook 共用入口不重复评审队列核对的同一提交和树", async (t) => {
   for (const host of ["claude", "codex"]) await t.test(host, async () => {
     const h = fixture({ marker: JSON.stringify({ release: "release", gate: { cmd: "true", timeoutMin: 1 } }) });
     const old = process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = join(h.root, "queues");
@@ -80,7 +80,7 @@ test("自动 A9：Claude/Codex Hook 共用入口不重复评审队列测过的�
       const before = h.readState(host).reviewSnapshots.length;
       h.run(h.delivered(), { env, mode: "fail" });
       assert.equal(h.readState(host).phase, "done", h.summary(host)); assert.equal(h.readState(host).reviewSnapshots.length, before, "没有新评审调用/快照");
-      assert.match(h.summary(host), /不再评审：工作区提交和树与本批合入队列测过的合并结果完全相同/);
+      assert.match(h.summary(host), /不再评审：工作区提交和树与本批合入队列核对的合并结果完全相同/);
       await wait(() => !existsSync(join(observed.dir, "worker.lock"))); assert.equal(readMergeQueue(runtime)!.entries.length, 1);
     } finally { await waitQueueIdle(h.repo); if (old === undefined) delete process.env.AUTOREVIEW_MERGE_QUEUE_ROOT; else process.env.AUTOREVIEW_MERGE_QUEUE_ROOT = old; h.close(); }
   });
@@ -113,7 +113,7 @@ test("Hook队列／历史部分验证缺少队列结论时，A9 兜底及再次�
       writeFileSync(h.statePath(host), JSON.stringify(legacy));
       queueStageEvent({ cwd: h.repo, file, stage: "甲", status: { sessionId: "s1", event: "done", readyEpoch: legacy.queueReadyEpoch,
         summary: h.statePath(host).replace(/\.state\.json$/, ".md"), inbox: 0, candidate: legacy.lastSnapshotDetails,
-        acceptance: queueAcceptance(legacy.rounds.at(-1).acceptance), test: completionTest(legacy.rounds.at(-1)) } });
+        acceptance: queueAcceptance(legacy.rounds.at(-1).acceptance) } });
       await wait(() => observed.read()?.entries[0]?.status === "ready" && !existsSync(join(observed.dir, "worker.lock")));
       const queue = readMergeQueue(runtime)!; delete queue.entries[0].qualification[0].acceptance;
       const status = JSON.parse(readFileSync(statusPath(dir, "甲"), "utf8")); delete status.acceptance;

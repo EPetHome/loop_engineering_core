@@ -13,7 +13,7 @@ import type { ReviewConfig } from "./review.ts";
 
 export const DEFAULT_MODEL = "openai-codex/gpt-6-astra";
 export const DEFAULT_THINKING = "xhigh";
-/** 门禁、验收打回和评审打回共用。 */
+/** 验收打回和评审打回共用。 */
 export const DEFAULT_MAX_REPAIRS = 4;
 export const DEFAULT_TIMEOUT_MIN = 60;
 
@@ -52,7 +52,7 @@ export const DEFAULT_ACCEPTANCE_IDLE_TIMEOUT_SEC = 300;
 export const DEFAULT_READY_TIMEOUT_SEC = 60;
 export const DEFAULT_RESET_TIMEOUT_SEC = 120;
 export const DEFAULT_ERROR_PATTERNS = ["ERROR", "FATAL", "Traceback", "Unhandled", "panic:"];
-export const DEFAULT_GATE_TIMEOUT_MIN = 10;
+export const LOOP_TEST_STATUS = "Loop 未运行测试";
 
 /** 批次显式选择流程；旧批次未写时按带验收处理，不从提示词或配置猜测。 */
 export type StageWorkflow = "with-acceptance" | "without-acceptance";
@@ -62,15 +62,7 @@ export function parseStageWorkflow(raw: unknown): StageWorkflow {
   return raw;
 }
 export function workflowSteps(workflow: StageWorkflow): string {
-  return workflow === "with-acceptance" ? "开发 → 评审 → 测试 → 验收 → 提交" : "开发 → 评审 → 测试 → 提交";
-}
-
-/** 门禁：每轮静态评审通过后、验收之前由程序执行的确定性测试。 */
-export interface GateConfig {
-  /** 在开发目录用 /bin/sh -c 执行，退出码 0 为通过。 */
-  cmd: string;
-  /** 一轮里门禁最多用多少分钟，从一轮总预算（reviewTimeoutMin）里扣。 */
-  timeoutMin: number;
+  return workflow === "with-acceptance" ? "开发 → 评审 → 验收 → 提交" : "开发 → 评审 → 提交";
 }
 
 export interface AcceptanceConfig {
@@ -294,6 +286,7 @@ export interface ProjectLayout {
 }
 
 export function parseProjectLayout(raw: Record<string, unknown>, root: string): ProjectLayout {
+  warnDisabledGate(raw);
   parseMergeConfig(raw.merge);
   parseDeploymentConfig(raw.deployment);
   const release = raw.release === undefined ? "main" : nonEmptyString(raw, "release", "main");
@@ -339,25 +332,15 @@ export function workspacePath(root: string, layout: ProjectLayout, name: string)
   return resolve(root, "..", dirName);
 }
 
-/** 解析 gate 一节；没写返回 undefined（不跑门禁）。字段非法时抛错。 */
-export function parseGateConfig(raw: unknown): GateConfig | undefined {
-  if (raw === undefined) return undefined;
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MARKER_FILE} 的 gate 必须是 JSON 对象`);
-  const data = raw as Record<string, unknown>;
-  if (data.cmd === undefined) throw new Error(`${MARKER_FILE} 的 gate.cmd 必须写（门禁命令）`);
-  const timeoutMin = nonNegativeInt(data, "timeoutMin", DEFAULT_GATE_TIMEOUT_MIN, "gate.timeoutMin");
-  if (timeoutMin === 0) throw new Error(`${MARKER_FILE} 的 gate.timeoutMin 必须大于 0`);
-  return { cmd: nonEmptyString(data, "cmd", "", "gate.cmd"), timeoutMin };
+/** 旧 gate 不解析类型或命令，也不再参与任何执行与预算。 */
+export function warnDisabledGate(raw: Record<string, unknown>): void {
+  if (Object.hasOwn(raw, "gate")) console.error("gate 已停用并忽略；Loop 不运行项目测试，开发方自行做定向自检");
 }
 
-/** 门禁和验收都从一轮总预算里扣，必须给评审留时间。 */
-export function checkRoundBudget(reviewTimeoutMin: number, acceptance: AcceptanceConfig | undefined, gate?: GateConfig): void {
+/** 验收从一轮总预算里扣，必须给评审留时间。 */
+export function checkRoundBudget(reviewTimeoutMin: number, acceptance: AcceptanceConfig | undefined): void {
   if (acceptance && acceptance.timeoutMin >= reviewTimeoutMin) {
     throw new Error(`${MARKER_FILE} 的 acceptance.timeoutMin（${acceptance.timeoutMin}）必须小于一轮总预算 reviewTimeoutMin（${reviewTimeoutMin}）`);
-  }
-  if (gate && gate.timeoutMin + (acceptance?.timeoutMin ?? 0) >= reviewTimeoutMin) {
-    const used = acceptance ? `加 acceptance.timeoutMin（${acceptance.timeoutMin}）` : "";
-    throw new Error(`${MARKER_FILE} 的 gate.timeoutMin（${gate.timeoutMin}）${used}必须小于一轮总预算 reviewTimeoutMin（${reviewTimeoutMin}）`);
   }
 }
 
@@ -538,12 +521,12 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
   const stage = batchStageConfiguration(overrides, env);
   const configuredAcceptance = stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
   const acceptance = stage?.workflow === "without-acceptance" ? undefined : configuredAcceptance;
-  const gate = parseGateConfig(data.gate);
+  warnDisabledGate(data);
   parseDeploymentConfig(data.deployment);
   const preparation = parsePreparation(data.preparation, configRoot);
   const methods = parseMethodsConfig(data.methods, configRoot);
   const context = parseContext(data.context, configRoot);
-  checkRoundBudget(reviewTimeoutMin, acceptance, gate);
+  checkRoundBudget(reviewTimeoutMin, acceptance);
   return {
     maxRepairs: explicit(overrides.maxRepairs) ? intFlag(overrides.maxRepairs, "autoreview-max-repairs") : nonNegativeInt(data, "maxRepairs", DEFAULT_MAX_REPAIRS),
     reviewerModel: overrides.reviewerModel?.trim() || nonEmptyString(data, "reviewerModel", DEFAULT_MODEL),
@@ -551,9 +534,9 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
     reviewTimeoutMin,
     reviewerCmd: overrides.reviewerCmd?.trim() || env.AUTOREVIEW_REVIEWER_CMD?.trim() || nonEmptyString(data, "reviewerCmd", ""),
     ...(stage ? { workflow: stage.workflow } : {}),
-    ...(acceptance ? { acceptance } : {}), ...(gate ? { gate } : {}), ...(preparation ? { preparation } : {}),
+    ...(acceptance ? { acceptance } : {}), ...(preparation ? { preparation } : {}),
     ...(methods ? { methods } : {}), ...(context ? { context } : {}),
-    configurationHash: configurationHash(stage ? { project: data, stageAcceptance: stage.raw, workflow: stage.workflow } : data), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
+    configurationHash: configurationHash(stage ? { project: { ...data, gate: undefined }, stageAcceptance: stage.raw, workflow: stage.workflow } : { ...data, gate: undefined }), raw: data, effectiveConfig: { reviewTimeoutMin: { value: reviewTimeoutMin, source } },
   };
 }
 
@@ -561,10 +544,4 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
 export function loadAcceptanceConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): AcceptanceConfig | undefined {
   const root = findProjectRoot(cwd);
   return resolveProjectConfig(root, { env }).acceptance;
-}
-
-/** 兼容入口：仍通过完整配置解析和预算校验。 */
-export function loadGateConfig(cwd: string, overrides: ProjectConfigOverrides = {}): GateConfig | undefined {
-  const root = findProjectRoot(cwd);
-  return resolveProjectConfig(root, overrides).gate;
 }

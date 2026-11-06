@@ -31,9 +31,9 @@ test("单一入口 A2/A3/A4：Pi 文件预算 90 与显式覆盖均用于真实�
       const call = h.calls.find((call) => call.command === "/fake-reviewer");
       assert.ok(call, "触发了一轮评审");
       const budget = (flagged ? 120 : 90) * 60_000;
-      // 评审先执行，为测试 20 分钟、自动验收 60 分钟预留预算。
-      const reviewerBudget = budget - 80 * 60_000;
-      assert.ok(call.options.timeout! > reviewerBudget - 30_000 && call.options.timeout! <= reviewerBudget, `整轮 ${budget} ms，预留测试及验收后应为 ${reviewerBudget} ms，实际 ${call.options.timeout}`);
+      // 评审只为自动验收 60 分钟预留预算，旧 gate 的 20 分钟忽略。
+      const reviewerBudget = budget - 60 * 60_000;
+      assert.ok(call.options.timeout! > reviewerBudget - 30_000 && call.options.timeout! <= reviewerBudget, `整轮 ${budget} ms，只预留验收后应为 ${reviewerBudget} ms，实际 ${call.options.timeout}`);
       assert.doesNotMatch(h.summary(), /必须小于一轮总预算/);
       assert.equal((h.state() as any).rounds[0].acceptance.verdict, "通过");
       const published = JSON.parse(readFileSync(statusPath(h.pipelineDir, "甲"), "utf8"));
@@ -168,7 +168,7 @@ test("G12/A1/A2 Pi 使用当前运行时约定，不提醒或修改项目副本�
   });
 });
 
-test("G14 pi 扩展测试门禁：评审后执行，失败带输出打回，修好后重新评审、测试", async () => {
+test("G14 Pi 单会话配置旧 gate，评审后不执行、不返修并如实总结", async () => {
   const h = harness();
   const gate = "grep -q FIXED file.txt || { echo 'AUTOREVIEW_FAILURE=product'; echo 'no FIXED in file.txt'; exit 1; }";
   try {
@@ -180,26 +180,21 @@ test("G14 pi 扩展测试门禁：评审后执行，失败带输出打回，修�
     await h.event("session_start");
     const options: { appendSystemPrompt?: string } = {};
     await h.event("before_agent_start", { prompt: "修好 file.txt", systemPromptOptions: options });
-    assert.equal(options.appendSystemPrompt, conventionText({ gate }));
+    assert.equal(options.appendSystemPrompt, conventionText());
 
     h.write("file.txt", "base\nTODO\n");
     h.assistant(); await h.event("agent_settled");
-    await until(() => h.messages.length === 1, "门禁返修消息");
-    assert.match(h.messages[0], /^【门禁 · 第 1 次返修】\n门禁命令不通过（退出码 1）/);
-    assert.ok(h.messages[0].includes("no FIXED in file.txt"));
-    assert.equal(h.inputs.length, 1, "门禁失败前已完成静态评审");
-    assert.equal(h.accepts[0].options.cwd, h.repo);
-    assert.equal(h.state().repairs, 1);
-
-    await h.begin(h.messages[0]);
-    h.write("file.txt", "base\nFIXED\n");
-    h.assistant("已修\n【交付完成】"); await h.event("agent_settled"); await h.terminal();
+    await h.terminal();
+    assert.deepEqual(h.messages, []);
+    assert.deepEqual(h.accepts, []);
+    assert.equal(h.state().repairs, 0);
     assert.equal(h.state().phase, "done");
-    assert.equal(h.inputs.length, 2);
-    assert.ok(h.inputs[0].includes("## 门禁\n本轮静态评审通过后，程序才会执行门禁命令"));
-    assert.match(h.summary(), /门禁：不通过（退出码 1）[\s\S]*门禁：通过/);
+    assert.equal(h.inputs.length, 1);
+    assert.match(h.inputs[0], /Loop 未运行测试/);
+    assert.match(h.summary(), /Loop 未运行测试/);
+    assert.doesNotMatch(h.summary(), /门禁：通过|测试通过/);
     await h.command("review-status");
-    assert.ok(h.notifications.some((text) => text.includes(`门禁：${gate}`)));
+    assert.ok(h.notifications.some((text) => text.includes("测试：Loop 未运行测试")));
   } finally { await h.close(); }
 });
 

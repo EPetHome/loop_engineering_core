@@ -179,7 +179,7 @@ test("A6 仓库外单子只在合入后直接回写，只读失败进入总结�
   });
 });
 
-test("A8 正文紧邻状态行被目标分支修改时，先合并两者再测试，不冲突退回且仍发布测过提交", async () => {
+test("A8 正文紧邻状态行被目标分支修改时，先合并两者并核对，不冲突退回", async () => {
   const f = fixture(1, 0);
   try {
     register(f, [issuePath]); open(f);
@@ -191,8 +191,9 @@ test("A8 正文紧邻状态行被目标分支修改时，先合并两者再测�
     assert.match(content(join(f.repo, issuePath)), /状态：已合入待验·批次0/);
     assert.match(content(join(f.repo, issuePath)), /## 问题描述（补充）\n用户补充的新正文/);
     assert.equal(f.git(f.repo, "status", "--porcelain"), "");
-    const events = content(f.events).trim().split("\n").map((line) => JSON.parse(line));
-    assert.ok(events.some((event) => event.event === "start" && event.head === entry.result), "状态与正文整合提交已经经过队列门禁");
+    assert.equal(f.git(f.repo, "rev-parse", "HEAD^{tree}"), entry.tree);
+    assert.equal(entry.testConclusion, "Loop 未运行测试");
+    assert.equal(existsSync(join(f.root, "gate-executed")), false);
   } finally { await f.close(); }
 });
 

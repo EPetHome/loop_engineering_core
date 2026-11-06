@@ -23,10 +23,10 @@ test("提交 A1/A3：含批次文档压成一个；重发幂等，推前重压�
     assert.equal(f.git(dev, "rev-parse", "HEAD^{tree}"), candidate); assert.equal(record.tree, candidate);
     assert.equal(f.git(dev, "rev-parse", record.preSquash[0]), before);
     assert.equal(f.git(dev, "log", "-1", "--format=%s"), "feat: 批次0");
-    assert.match(f.git(dev, "log", "-1", "--format=%b"), /段：甲[\s\S]*门禁：[\s\S]*评审：[\s\S]*验收：[\s\S]*pre-squash/);
+    assert.match(f.git(dev, "log", "-1", "--format=%b"), /段：甲[\s\S]*测试：Loop 未运行测试[\s\S]*评审：[\s\S]*验收：[\s\S]*pre-squash/);
     const ledger = readFileSync(f.queue().entries[0].ledger!, "utf8");
     assert.match(ledger, new RegExp(`${record.branch} ${record.commit}`));
-    assert.match(ledger, /段：甲；门禁：没有记录；评审：没有记录；验收：没有记录；交付报告：/);
+    assert.match(ledger, /段：甲；测试：Loop 未运行测试；评审：没有记录；验收：没有记录；交付报告：/);
     assert.doesNotMatch(ledger, /完成资格已确认/);
     assert.ok(notification(f, f.queue().entries[0].id).includes(`交付报告：${join(f.root, "summary-0.md")}`));
     assert.match(notification(f, f.queue().entries[0].id), /已提交 feat\/b0 [0-9a-f]+。推送失败，本机提交保留/);

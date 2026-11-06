@@ -273,10 +273,9 @@ for (const pendingHost of [false, true]) test(`停止安全／原会话恢复：
   let cleanup: { file: string; dir: string; queueRoot: string } | undefined;
   try {
     await withEnv(f.env, async () => {
-      const gate = join(f.root, "gate.mjs"), pi = join(f.root, "fake-pi"), permission = join(f.root, "permission.ts");
+      const pi = join(f.root, "fake-pi"), permission = join(f.root, "permission.ts");
       const resumeWait = join(f.root, "resume.wait"), resumePending = join(f.root, "resume.pending"), resumeArgs = join(f.root, "resume.args");
-      writeFileSync(gate, `console.log('QUEUE_RETURN_SENTINEL file.txt:1'); process.exit(process.cwd().startsWith(${JSON.stringify(f.env.AUTOREVIEW_MERGE_QUEUE_ROOT)}) ? 1 : 0);\n`);
-      writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify({ gate: { cmd: `${JSON.stringify(process.execPath)} ${JSON.stringify(gate)}`, timeoutMin: 1 } }));
+      writeFileSync(join(f.repo, ".autoreview.json"), "{}");
       writeFileSync(join(f.repo, "prompt.md"), "替身开发任务\n");
       f.git(f.repo, "add", ".autoreview.json", "prompt.md"); f.git(f.repo, "commit", "-qm", "fixture gate and prompt");
       writeFileSync(permission, "");
@@ -301,25 +300,26 @@ for (const pendingHost of [false, true]) test(`停止安全／原会话恢复：
       const before = readJson<any>(sessionFile), originalGroup = readJson<BatchLaunch>(launchPath(dir, "甲"))!;
       assert.notEqual(before.pid, originalGroup.pid);
       writeFileSync(join(dev, "file.txt"), "checked candidate\n");
-      const gatePass = spawnSync(process.execPath, [gate], { cwd: dev, env: f.env, encoding: "utf8" });
-      assert.equal(gatePass.status, 0, gatePass.stderr);
+      writeFileSync(join(f.repo, "file.txt"), "target conflict\n");
+      f.git(f.repo, "add", "file.txt"); f.git(f.repo, "commit", "-qm", "target conflicts with candidate");
       assert.equal(processStartTime(original.child.pid!), original.started); original.child.kill("SIGTERM");
       await original.closed;
       await until(() => !running(before.pid) && !running(originalGroup.pid), "原开发窗口及其组已经退出");
       const summary = join(f.env.STOP_FIXTURE_DIR, "甲.md");
       queueStageEvent({ cwd: dev, file, stage: "甲", status: { host: "pi", sessionId: before.id, pid: before.pid,
         processStarted: before.processStarted, runId: before.runId, event: "done", readyEpoch: "original-ready", inbox: 0, summary,
-        candidate: workingTree(dev, f.root).tree, checks: { gate: "通过", review: "通过", acceptance: "未配置" } } });
+        candidate: workingTree(dev, f.root).tree, checks: { test: "Loop 未运行测试", review: "通过", acceptance: "未配置" } } });
       if (pendingHost) await until(() => existsSync(resumePending), "队列恢复命令已启动，宿主尚未更新 phase/status");
       else await until(() => {
         const current = readJson<any>(sessionFile);
         return current?.pid !== before.pid && current?.id === before.id && current?.inbox === 1;
       }, "队列真实恢复原会话并读取返修，不是整批验收编排恢复");
-      await until(() => readMergeQueue(f.repo)?.entries[0]?.status === "returned", "失败门禁已经通过队列恢复入口退回");
+      await until(() => readMergeQueue(f.repo)?.entries[0]?.status === "returned", "真实文本冲突已经通过队列恢复入口退回");
       const active = readJson<BatchLaunch>(launchPath(dir, "甲"))!;
       assert.notEqual(active.runId, originalGroup.runId); assert.notEqual(active.pid, originalGroup.pid); assert.equal(active.active, true);
       const entry = readMergeQueue(f.repo)!.entries[0];
-      assert.match(readFileSync(entry.log!, "utf8"), /QUEUE_RETURN_SENTINEL/);
+      assert.match(entry.deliveries![0].message, /合并冲突[\s\S]*file.txt/);
+      assert.equal(entry.testConclusion, "Loop 未运行测试");
       assert.equal(entry.deliveries?.[0].stage, "甲"); assert.equal(entry.deliveries?.[0].resumed, true);
       const args: string[] = pendingHost ? readFileSync(resumeArgs, "utf8").trim().split("\n") : readJson<any>(sessionFile).args;
       assert.equal(args[args.indexOf("--session") + 1], before.id, "恢复命令必须精确使用原 sessionId");

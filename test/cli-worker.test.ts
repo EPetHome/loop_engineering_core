@@ -22,8 +22,8 @@ test("测试CLI／复用进程与命令行输出一致，配置变化不沿用�
     const head = f.git(f.repo, "rev-parse", "HEAD");
     assert.equal(compare("合入", f.batches[0].file, "--dry-run").ok, true);
     assert.equal(f.git(f.repo, "rev-parse", "HEAD"), head, "预览不发布提交");
-    writeFileSync(marker, JSON.stringify({ ...JSON.parse(original.toString()), reviewTimeoutMin: 1, gate: { cmd: "true", timeoutMin: 2 } }));
+    writeFileSync(marker, JSON.stringify({ ...JSON.parse(original.toString()), reviewTimeoutMin: -1 }));
     const invalid = compare("开工", f.batches[0].file, "--dry-run");
-    assert.equal(invalid.ok, false); assert.match(invalid.error, /必须小于一轮总预算/);
+    assert.equal(invalid.ok, false); assert.match(invalid.error, /reviewTimeoutMin 必须是非负整数/);
   } finally { writeFileSync(marker, original); await f.close(); }
 });

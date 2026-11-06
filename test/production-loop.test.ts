@@ -19,7 +19,7 @@ type Host = "claude" | "codex";
 const hosts: Host[] = ["claude", "codex"];
 const batchFile = "docs/batches/x/批次.json", promptFile = "docs/prompt/提示词-x.md";
 
-function fixture(marker: Record<string, unknown> | null = { gate: { cmd: "true" }, acceptance: {} }) {
+function fixture(marker: Record<string, unknown> | null = { acceptance: {} }) {
   const temp = mkdtempSync(join(tmpdir(), "loop-production-")), repo = join(temp, "repo"), home = join(temp, "home");
   mkdirSync(repo); mkdirSync(home);
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", AUTOREVIEW_DEV_ROOT: "" };
@@ -45,13 +45,14 @@ registerHooks({resolve(specifier,context,next){const result=next(specifier,conte
   const editEvent = (host: Host, path: string, session = "one", tool = "Edit") => host === "claude"
     ? event(host, tool, { file_path: join(repo, path), old_string: "old", new_string: "new" }, session)
     : event(host, "apply_patch", { command: tool === "Write" ? `*** Begin Patch\n*** Add File: ${path}\n+new\n*** End Patch` : `*** Begin Patch\n*** Update File: ${path}\n@@\n-old\n+new\n*** End Patch` }, session);
-  const run = (input: object | string, extra: NodeJS.ProcessEnv = {}, probe = false) => {
+  const run = (input: object | string, extra: NodeJS.ProcessEnv = {}, probe = false, warning?: RegExp) => {
     const start = performance.now();
     const result = spawnSync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", ...(probe ? ["--import", guard] : []), HOOK], {
       cwd: repo, env: { ...env, ...extra }, input: typeof input === "string" ? input : JSON.stringify(input), encoding: "utf8", timeout: 15_000,
     });
     assert.equal(result.status, 0, result.stderr || String(result.error));
-    assert.equal(result.stderr, "", result.stderr);
+    if (warning) assert.match(result.stderr, warning);
+    else assert.equal(result.stderr, "", result.stderr);
     return { stdout: result.stdout, ms: performance.now() - start };
   };
   const context = (stdout: string): string => {
@@ -245,7 +246,6 @@ test("A6 compact 后重给卡，保留报错去重；宿主/session_id 隔离", 
 test("项目配置复用布局/acceptance/gate/评审解析；程序报错原文并指向运行维护", () => {
   const cases = [
     ['{"methods":{"paths":[]}}', ".autoreview.json 的 methods.paths 必须是非空字符串数组"],
-    ['{"gate":{}}', ".autoreview.json 的 gate.cmd 必须写（门禁命令）"],
     ['{"acceptance":{"readyUrl":"bad"}}', ".autoreview.json 的 acceptance.readyUrl 不是合法网址"],
     ['{"maxRepairs":-1}', ".autoreview.json 的 maxRepairs 必须是非负整数"],
     ["[]", ".autoreview.json 必须是 JSON 对象"],
@@ -259,6 +259,9 @@ test("项目配置复用布局/acceptance/gate/评审解析；程序报错原文
         assert.ok(text.includes(expected), text); assert.ok(text.includes(join(ROOT, "项目文档/运行与维护.md")));
         assert.equal(h.run(h.editEvent(host, ".autoreview.json")).stdout, "");
       }
+      h.write(".autoreview.json", '{"gate":{}}');
+      const ignored = h.run(h.editEvent(host, ".autoreview.json"), {}, false, /gate 已停用并忽略/);
+      assert.equal(ignored.stdout, "");
       h.write(".autoreview.json", "{}"); assert.equal(h.run(h.editEvent(host, ".autoreview.json")).stdout, "");
     } finally { h.close(); }
   }

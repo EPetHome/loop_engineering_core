@@ -94,7 +94,7 @@ async function prepare(deps: PreparationDeps): Promise<PreparationResult> {
         const input = join(deps.runDir, `repair-${attempts.method}.md`);
         writeFileSync(input, [
           "只修复项目准备方法，不实现业务功能，不修改用户要求、验收标准、稳定规则或 .autoreview.json。",
-          `允许修改：${config.repair.paths.join("、")}。使用 read/edit/write 工具；不得降低门禁、跳过失败或用空成功替代检查。`,
+          `允许修改：${config.repair.paths.join("、")}。使用 read/edit/write 工具；不得降低检查标准、跳过失败或用空成功替代检查。`,
           `准备命令：${config.check}`, "此前运行证据：", readFileSync(logPath, "utf8").slice(-6000),
           "完成时说明根因、变更及仍未确认的条件。程序会按原命令独立重查。",
         ].join("\n\n"));

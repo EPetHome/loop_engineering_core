@@ -20,8 +20,8 @@ test("A1/A2/A3/A8 自动 FIFO；可合入前不改发布版；合入的提交和
     writeFileSync(join(f.repo, "unrelated.txt"), "staged\n"); f.git(f.repo, "add", "unrelated.txt"); writeFileSync(join(f.repo, "unrelated.txt"), "unstaged\n");
     const runtime = f.evidence(f.repo), developers = f.batches.map((batch) => f.devEvidence(batch.cwd));
     f.mode("hold"); f.complete(0); f.complete(1);
-    await f.until(() => f.queue().entries[0]?.status === "testing" && existsSync(f.events));
-    assert.deepEqual(f.queue().entries.map((entry) => entry.status), ["testing", "pending"]);
+    await f.until(() => f.queue().entries[0]?.status === "checking" && existsSync(f.events));
+    assert.deepEqual(f.queue().entries.map((entry) => entry.status), ["checking", "pending"]);
     const status = f.cli("状态"); assert.deepEqual(status.queue.map((entry: any) => entry.position), [1, 2]);
     assert.equal(f.cli("合入", f.batches[1].file).ok, false, "不能绕过队头");
     writeFileSync(join(f.root, "release"), "go"); await f.ready(0);
@@ -51,17 +51,17 @@ test("队列工作区／第一批已测试后仍能开工第二批；只豁免�
     assert.equal(f.cli("合入", f.batches[0].file).ok, true); await f.ready(1);
     const registration = f.queue().batches[0];
     f.git(f.queue().workspace, "switch", "-c", "feat/not-owned");
-    assert.throws(() => registerQueueBatch(f.repo, registration), /测试工作区身份不符/);
+    assert.throws(() => registerQueueBatch(f.repo, registration), /合并工作区身份不符/);
   } finally { await f.close(); }
 });
 
 test("队列资格／队头完成资格撤销后退出活动队列，后续批次继续；旧结果不可合入", async (t) => {
-  for (const phase of ["ready", "testing"]) await t.test(phase, async () => {
+  for (const phase of ["ready", "checking"]) await t.test(phase, async () => {
     const f = fixture();
     try {
       f.write(0, "src/a.txt", "a\n"); f.write(1, "src/b.txt", "b\n");
       const runtime = f.evidence(f.repo), developers = f.batches.map((batch) => f.devEvidence(batch.cwd));
-      if (phase === "testing") f.mode("hold");
+      if (phase === "checking") f.mode("hold");
       f.complete(0); f.complete(1);
       if (phase === "ready") await f.ready(0); else await f.until(() => existsSync(f.events));
       const status = readJson<StageStatus>(statusPath(f.batches[0].dir, "甲"))!;
@@ -79,7 +79,7 @@ test("队列资格／整合重验撤销正在测试的旧资格，失败/中断�
   try {
     autoConfig(f); f.write(0, "src/a.txt", "candidate\n"); const { file, passed, partial } = multiReady(f), base = f.git(f.repo, "rev-parse", "HEAD");
     f.mode("hold"); const firstEpoch = queueBatchRecheck(f.repo, file); queueBatchComplete(f.repo, file, true, passed, firstEpoch);
-    await f.until(() => existsSync(f.events) && f.queue().entries[0]?.status === "testing");
+    await f.until(() => existsSync(f.events) && f.queue().entries[0]?.status === "checking");
     const secondEpoch = queueBatchRecheck(f.repo, file); writeFileSync(join(f.root, "release"), "go"); await f.idle();
     assert.equal(f.queue().entries[0].status, "blocked"); assert.match(f.queue().entries[0].reason!, /整批验收完成资格已变化/); assert.equal(f.git(f.repo, "rev-parse", "HEAD"), base);
     queueBatchComplete(f.repo, file, true, passed, firstEpoch); await f.idle(); assert.equal(f.queue().entries.length, 1, "迟到的通过不能覆盖新一轮");

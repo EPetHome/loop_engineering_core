@@ -44,12 +44,12 @@ const reasonRules: [RegExp, ReasonCategory][] = [
   [/达到返修上限|已到 .*轮上限/, "返修到上限"],
   [/等你授权|要你授权|\[授权\].*(?:未答复|还没答复|没通过)/, "授权待答复"],
   [/返修后没有任何改动|收到整批验收返修后没改代码/, "返修后没改动"],
-  [/上游来源|来源配置|准备阻塞|准备未完成|开发前准备|开跑前检查|开跑前检查没过|没有需求原文|验收标准起草失败|门禁期间工作区变了|验收期间工作区变了|门禁检查方法故障|门禁原因待诊断|无法验收|没法确定归谁|必需验收尚未确认完成|当前必需验收尚未通过|目录.*分支|项目配置不可用|旧完成记录没有资格身份|段未取得当前完成资格|--from 验收 需要各段都已完成/, "方法"],
+  [/上游来源|来源配置|准备阻塞|准备未完成|开发前准备|开跑前检查|开跑前检查没过|没有需求原文|验收标准起草失败|验收期间工作区变了|无法验收|没法确定归谁|必需验收尚未确认完成|当前必需验收尚未通过|目录.*分支|项目配置不可用|旧完成记录没有资格身份|段未取得当前完成资格|--from 验收 需要各段都已完成/, "方法"],
   [/输入.*(?:变化|更新)|需求、标准或授权已变化|配置已变化|候选.*变化|工作区或提交发生了变化|评审改动了工作区|完成依据失效|段资格|段完成资格|段的完成资格|整合前段资格|整批完成资格|资格已变化|资格被撤销|候选或配置已变化/, "输入变化"],
   [/超时|准备时间预算已用完/, "超时"],
-  [/端口 .*已被占用|环境|资源释放|释放未确认|联调准备失败|门禁无法执行|重置数据失败|流水线已取消|必需验收命令.*(?:中断|无法执行)/, "环境"],
+  [/端口 .*已被占用|环境|资源释放|释放未确认|联调准备失败|重置数据失败|流水线已取消|必需验收命令.*(?:中断|无法执行)/, "环境"],
   [/评审失败|评审被中断|内部错误|状态.*(?:保存|写入)失败|总结写入失败|提交失败|提交核对失败|完成后进合入队列失败|启动失败|启动入口失败|整批验收没有跑完|无法读取.*git|git .*失败/, "内部错误"],
-  [/必需验收命令|^门禁|整批验收暂停|尚未完成提交/, "方法"],
+  [/必需验收命令|整批验收暂停|尚未完成提交/, "方法"],
 ];
 export function eventReason(text = "", failureKind?: FailureKind): EventReason {
   const category = failureKind !== undefined
@@ -215,7 +215,7 @@ export function reportUncommittedBatch(info: BatchInfo, record?: AcceptanceRecor
   const reason = eventReason(record?.verdict === "部分验证" ? "整批验收部分验证，尚未完成提交" : "整批尚未完成提交，成果与证据保留");
   const evidence = { summary: join(info.dir, "report.md"), ...(record?.runDir ? { acceptance: record.runDir } : {}) };
   const next: NextAction = record?.verdict === "部分验证" ? "resume" : "manual";
-  const detail = { next, acceptance: { verdict: record?.verdict ?? "未验证", ...queueAcceptance(record) },
+  const detail = { next, test: "Loop 未运行测试", acceptance: { verdict: record?.verdict ?? "未验证", ...queueAcceptance(record) },
     paGrantsUsed: paGrantsUsed ?? readJson<PhaseRecord>(phasePath(info.dir, null))?.detail.paGrantsUsed ?? [] };
   writePhase(info, null, "paused", { status: "paused", ...reason, next, evidence, detail });
   if (info.batch.file) pushEvent(info, null, "paused", reason, evidence, detail);
@@ -235,7 +235,7 @@ export function observeStage(options: {
   const previous = readJson<PhaseRecord>(phasePath(dir, stage)), state = options.state, round = state.rounds.at(-1);
   const reason = eventReason(options.reason ?? "", options.failureKind);
   const status = options.phase === "paused" ? pauseStatus(reason) : options.phase === "done" ? "done" : options.phase === "failed" ? "failed" : options.via ? "resumed" : "started";
-  const evidence: Evidence = { summary: options.summary, ...(round?.gate?.logPath ? { log: round.gate.logPath } : {}), ...(round?.acceptance?.runDir ? { acceptance: round.acceptance.runDir } : {}),
+  const evidence: Evidence = { summary: options.summary, ...(round?.scope?.logPath ? { log: round.scope.logPath } : {}), ...(round?.acceptance?.runDir ? { acceptance: round.acceptance.runDir } : {}),
     ...(state.acceptRun?.logPath ? { log: state.acceptRun.logPath } : {}), ...(round?.snapshot ? { review: round.snapshot } : {}), ...(options.session.log ? { session: options.session.log } : {}) };
   const detail: Record<string, unknown> = options.phase === "done" ? completionDetail(round, state.queueReviewedAcceptance) : { round: state.rounds.length, repairs: state.repairs };
   if (options.failureKind) detail.failureKind = options.failureKind;
@@ -248,7 +248,7 @@ export function observeStage(options: {
       if (state.pauseDetail.evidence) evidence.blocker = state.pauseDetail.evidence;
     }
   }
-  if (status === "repair-limit") detail.mustFix = state.unresolvedMustFix || state.unresolvedAcceptance || round?.mustFixRaw || round?.gate?.outputTail || "";
+  if (status === "repair-limit") detail.mustFix = state.unresolvedMustFix || state.unresolvedAcceptance || round?.mustFixRaw || round?.scope?.files.join("、") || "";
   if (status === "needs-decision") {
     detail.question = detail.question ?? options.question ?? (options.replay ? previous?.detail.question : "") ?? "";
     const choices = String(detail.question).split(/\r?\n/).filter((line) => /^\s*(?:[A-Z]|\d+)[.、)）]\s*\S/.test(line));
@@ -267,6 +267,6 @@ export function observeStage(options: {
 }
 export function completionDetail(round?: RoundRecord, qualified?: QueueAcceptance | null): Record<string, unknown> {
   const acceptance = qualified ?? queueAcceptance(round?.acceptance);
-  return { gate: round?.gate?.result ?? "未配置", review: { verdict: round?.reviewConclusion ?? round?.conclusion ?? "未验证", mustFix: round?.mustFix?.length ?? null, suggestions: round?.minor?.length ?? null },
+  return { test: "Loop 未运行测试", review: { verdict: round?.reviewConclusion ?? round?.conclusion ?? "未验证", mustFix: round?.mustFix?.length ?? null, suggestions: round?.minor?.length ?? null },
     acceptance: { verdict: qualified === null ? "未验证" : round?.acceptance?.verdict ?? (qualified ? "沿用原完成资格" : "未配置"), ...acceptance } };
 }

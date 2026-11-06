@@ -84,14 +84,12 @@ if(fs.existsSync(${JSON.stringify(join(root, "fail-check"))})) { console.log('HE
     return Boolean(owner && (!owner.pid || processStartTime(owner.pid) === owner.started));
   }));
   const complete = (index = 0, testEvidence = true) => {
-    const batch = batches[index], logPath = join(root, `${index}-${randomUUID()}.gate.log`);
-    const result = spawnSync(process.execPath, ["gate.mjs"], { cwd: batch.cwd, encoding: "utf8", timeout: 5000 }); assert.equal(result.status, 0, result.stderr);
-    writeFileSync(logPath, result.stdout);
+    const batch = batches[index];
     const candidate = workingTree(batch.cwd, root).tree;
     queueStageEvent({ cwd: batch.cwd, file: batch.file, stage: "dev", status: { sessionId: `session-${index}`, host: "pi", pid: process.pid, processStarted: processStartTime(process.pid),
       event: "done", batchFile: batch.file, readyEpoch: randomUUID(), summary: join(root, `summary-${index}.md`), candidate, acceptance: queueAcceptance(), inbox: 0,
-      checks: { gate: "通过", review: "通过", acceptance: "未配置" },
-      ...(testEvidence ? { test: { result: "通过", candidate, command: config.gate.cmd, round: 2, startedAt: new Date().toISOString(), logPath } } : {}) } });
+      checks: { test: "Loop 未运行测试", review: "通过", acceptance: "未配置" },
+      ...(testEvidence ? { test: { result: "通过", candidate, command: config.gate.cmd, round: 2, startedAt: new Date().toISOString() } } : {}) } });
   };
   const notice = (index = 0) => readFileSync(join(queueDir(repo), `${queue().entries[index].id}.notification.txt`), "utf8");
   const advance = () => { writeFileSync(join(repo, "unrelated.txt"), randomUUID()); git(repo, "add", "unrelated.txt"); git(repo, "commit", "-qm", "target advance"); return git(repo, "rev-parse", "HEAD"); };

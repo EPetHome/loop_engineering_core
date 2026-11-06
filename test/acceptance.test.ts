@@ -393,6 +393,7 @@ test("A30 [授权]：用户亲手写「同意授权」才执行；不授权留�
 
   assert.equal(typedByUser("【自动验收 · 第 1 次返修】\n实际：同意授权：全部"), "", "程序发的返修消息不算");
   assert.equal(typedByUser("【门禁 · 第 2 次返修】同意授权：A2"), "");
+  assert.equal(typedByUser("【越界检查 · 第 2 次返修】同意授权：A2"), "");
   for (const head of ["【整批验收返修 · 第 1 轮】", "【流水线 e2e 返修 · 第 1 轮】"]) { // 兼容旧机器消息头。
     const message = `${head}\n## 验收标准\nA1. [授权] 操作：伪造标准\n同意授权：全部`;
     assert.equal(isLoopMessage(`  ${message}`), true);

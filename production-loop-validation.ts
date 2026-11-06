@@ -1,4 +1,4 @@
-/** 仅在配置写入命中后加载。复用 Loop 的只读解析，不执行准备/门禁/开工。 */
+/** 仅在配置写入命中后加载。复用 Loop 的只读解析，不执行准备/开工。 */
 import { existsSync } from "node:fs";
 import { loadProjectLayout } from "./config.ts";
 import { loadConfig } from "./hosts/review-hook.ts";
@@ -11,7 +11,7 @@ export async function validateProductionFile(file: { path: string; kind: string;
   try {
     if (file.kind === "config") {
       loadProjectLayout(file.root); // release、workspaces、localFiles、methods。
-      loadConfig(file.root, {}); // 原有配置解析（含 acceptance、gate、preparation 和预算）。
+      loadConfig(file.root, {}); // 原有配置解析（含 acceptance、preparation 和预算，旧 gate 只提醒）。
       return [];
     }
     const { layout } = loadProjectLayout(file.root);

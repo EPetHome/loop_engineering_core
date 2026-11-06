@@ -11,7 +11,7 @@ if [ -n "${matches}" ]; then
   exit 78
 fi
 
-for file in .autoreview/methods/gate.sh .autoreview/methods/prepare.sh; do
+for file in .autoreview/methods/prepare.sh; do
   [ -f "${file}" ] || { echo "AUTOREVIEW_FAILURE=method 缺少方法入口：${file}" >&2; exit 78; }
   sh -n "${file}" || { echo "AUTOREVIEW_FAILURE=method 方法脚本语法错误：${file}" >&2; exit 78; }
 done

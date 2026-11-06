@@ -119,7 +119,7 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
       if (stage !== null) pushEvent(info, stage, "failed", reason, phase?.evidence ?? {}, detail);
     }
   }
-  // 共享队列登记只处理撤销时冻结的消费者，不能顺手杀掉接着运行的另一批门禁。
+  // 共享队列登记只处理撤销时冻结的消费者，不能顺手杀掉接着运行的另一批消费者。
   for (const { path, proc } of queue.consumers) {
     checkScope();
     const released = options.dryRun ? undefined : releaseProc(path, proc.pgid, proc);

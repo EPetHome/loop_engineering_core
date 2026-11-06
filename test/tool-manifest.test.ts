@@ -179,7 +179,6 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
   const layout = functionBody(config, "export function parseProjectLayout");
   const methods = functionBody(config, "export function parseMethodsConfig");
   const acceptance = functionBody(config, "export function parseAcceptanceConfig");
-  const gate = functionBody(config, "export function parseGateConfig");
   const merge = functionBody(config, "export function parseMergeConfig");
   const deployment = functionBody(config, "export function parseDeploymentConfig");
   const preparation = functionBody(config, "export function parsePreparation");
@@ -199,9 +198,8 @@ function autoreviewFields(sources: Sources = realSources()): Set<string> {
   for (const key of new Set([...directKeys(acceptance, ["data"]), ...helperKeys(acceptance, ["data"])])) {
     fields.add(`acceptance.${key}`);
   }
-  for (const key of new Set([...directKeys(gate, ["data"]), ...helperKeys(gate, ["data"])])) {
-    fields.add(`gate.${key}`);
-  }
+  // 只识别为停用兼容字段，不再解析 gate 子字段。
+  fields.add("gate");
   for (const key of directKeys(merge, ["data"])) fields.add(`merge.${key}`);
   const deploymentCommands = /for \(const key of \[([^\]]+)\] as const\)/.exec(deployment)?.[1] ?? "";
   for (const key of new Set([...directKeys(deployment, ["data"]), ...helperKeys(deployment, ["data"]), ...[...deploymentCommands.matchAll(/"([^"]+)"/g)].map((match) => match[1])])) fields.add(`deployment.${key}`);

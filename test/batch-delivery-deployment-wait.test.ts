@@ -6,7 +6,6 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
-import { completionTest } from "../pipeline-core.ts";
 import { parseDeploymentConfig } from "../config.ts";
 import { beginQueueAcceptance, endQueuePipeline, queueDir, recoverMergeQueue } from "../merge-queue.ts";
 import { batchInfo, writePhase } from "../events.ts";

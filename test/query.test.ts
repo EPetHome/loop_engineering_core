@@ -40,12 +40,13 @@ test("A3/A8：查询暂停、队列、提交及预留字段；实际 CLI 完全�
   assert.equal(batch.branch, "feat/query"); assert.equal(batch.commit, "abc"); assert.equal(batch.pushed, "abc");
   assert.equal(batch.stages[0].state, "paused"); assert.equal(batch.stages[0].next, "send"); assert.deepEqual({ category: batch.stages[0].pause.category, text: batch.stages[0].pause.text }, reason);
   assert.equal(batch.stages[0].session.alive, true); assert.equal(batch.stages[0].round, 3); assert.equal(batch.stages[0].repairs, 1);
-  assert.equal(batch.queue.status, "testing"); assert.equal(batch.queue.position, 1); assert.equal(batch.events.lastSeq, 1);
+  assert.equal(batch.queue.status, "checking"); assert.equal(batch.queue.test, "Loop 未运行测试");
+  assert.equal(batch.test, "Loop 未运行测试"); assert.equal(batch.queue.position, 1); assert.equal(batch.events.lastSeq, 1);
   assert.deepEqual(batch.batch.paGrants, []); assert.deepEqual(batch.stages[0].paRelays, []);
   for (const args of [[file], ["--all"], []]) {
     const child = spawnSync(process.execPath, [LOOP, "查询", ...args, "--json"], { cwd: root, env: process.env, encoding: "utf8", timeout: 3000 });
     assert.equal(child.status, 0, child.stdout + child.stderr); const output = JSON.parse(child.stdout);
-    assert.equal(output.v, 1); assert.equal(output.batches[0].events.lastSeq, 1); assert.equal(output.batches[0].queue.status, "testing");
+    assert.equal(output.v, 1); assert.equal(output.batches[0].events.lastSeq, 1); assert.equal(output.batches[0].queue.status, "checking"); assert.equal(output.batches[0].stages[0].test, "Loop 未运行测试");
   }
   assert.deepEqual(snapshot(root), before, "查询前后所有文件内容、大小和修改时间不变");
   writePhase(info, "甲", "reviewing", { session: { ...session, processStarted: "different process" } });

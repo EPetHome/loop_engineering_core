@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { readMethodsRecord, recordGateTree } from "../methods.ts";
+import { methodsRecordPath, readMethodsRecord } from "../methods.ts";
 import { commitAll } from "../workspace.ts";
 import { LOOP_ROOT, git, fixture, loop, jsonOf, count } from "./helpers/loop-fixture.ts";
 
@@ -31,12 +31,12 @@ test("开工／方法指纹与执行次数：首次执行、未变跳过、变�
   assert.doesNotMatch(command, /GIT_DIR/);
 
   assert.equal(count(f.selfLog), 1);
-  assert.equal(count(f.gateLog), 1);
+  assert.equal(count(f.gateLog), 0);
   const second = loop(f.repo, ["开工", f.batch]);
   assert.equal(second.status, 0, second.stderr);
   assert.match(second.stdout, /指纹未变，跳过方法自测/);
   assert.equal(count(f.selfLog), 1, "selfCheck 没有执行");
-  assert.equal(count(f.gateLog), 1, "基线空跑门禁没有执行");
+  assert.equal(count(f.gateLog), 0, "停用 gate 始终不执行");
 
   writeFileSync(join(f.worktree, "methods/check.sh"), "echo method-v2\n");
   git(f.worktree, ["add", "methods/check.sh"]); git(f.worktree, ["commit", "-qm", "change method"]);
@@ -44,13 +44,13 @@ test("开工／方法指纹与执行次数：首次执行、未变跳过、变�
   assert.equal(changed.status, 0, changed.stderr);
   assert.match(String((jsonOf(changed).methods as Record<string, unknown>).changed), /methods\/check\.sh/);
   assert.equal(count(f.selfLog), 2);
-  assert.equal(count(f.gateLog), 2);
+  assert.equal(count(f.gateLog), 0);
   const beforeGate = count(f.gateLog);
   const recheck = loop(f.repo, ["开工", f.batch, "--recheck", "--json"]);
   assert.equal(recheck.status, 0, recheck.stderr);
   assert.ok((jsonOf(recheck).methods as Record<string, unknown>).selfCheck, "--recheck 重新执行了 selfCheck");
   assert.equal(count(f.selfLog), 3, "--recheck 重新执行 selfCheck");
-  assert.equal(count(f.gateLog), beforeGate + 1, "--recheck 也重新空跑门禁");
+  assert.equal(count(f.gateLog), beforeGate, "--recheck 只重新检查方法，不运行 gate");
 });
 
 test("A6 运行版不在发布分支时不开工，项目根、分支和 worktree 都不变", () => {
@@ -186,11 +186,19 @@ test("显式 cwd 的本仓库 worktree 同样做脏检查和方法自测", () =>
   assert.equal(count(f.selfLog), 1, "显式 cwd 也要跑方法自测");
 });
 
-test("候选门禁通过时按树哈希记入 methods.json（供开工识别基线已有失败）", () => {
+test("开工不再记录门禁树；旧 gate 只提醒并忽略，仍登记队列", () => {
   const f = fixture();
-  const tree = git(f.repo, ["rev-parse", "HEAD^{tree}"]);
-  assert.equal(recordGateTree(f.repo, tree, process.env), true);
-  assert.deepEqual(readMethodsRecord(f.repo, process.env)?.gateTrees, [tree]);
+  const opened = loop(f.repo, ["开工", f.batch, "--json"]);
+  assert.equal(opened.status, 0, opened.stderr);
+  assert.match(opened.stderr, /gate 已停用并忽略/);
+  assert.equal(count(f.gateLog), 0);
+  const record = readMethodsRecord(f.worktree, process.env)!;
+  assert.equal(Object.hasOwn(record, "gateTrees"), false);
+  const path = methodsRecordPath(f.worktree, process.env);
+  writeFileSync(path, JSON.stringify({ ...record, gateTrees: ["old-tree"] }));
+  assert.equal(Object.hasOwn(readMethodsRecord(f.worktree, process.env)!, "gateTrees"), false);
+  assert.equal(readMethodsRecord(f.worktree, process.env)!.fingerprint, record.fingerprint);
+  assert.equal((jsonOf(loop(f.repo, ["状态", "--dry-run", "--json"])).ok), true);
 });
 
 test("A9 子命令 --json 可解析；--dry-run 不改文件、分支或 worktree", () => {
