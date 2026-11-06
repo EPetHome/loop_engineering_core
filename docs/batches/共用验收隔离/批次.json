@@ -19,7 +19,7 @@
       "workflow": "with-acceptance",
       "acceptance": { "guide": "../../prompt/验收说明-共用验收隔离.md", "timeoutMin": 20 },
       "scope": {
-        "allow": ["acceptance-tools/isolated-loop.mjs", "acceptance-tools/isolated-loop.md", "test/acceptance-isolation.test.ts", "docs/batches/共用验收隔离/结果.md"]
+        "allow": ["acceptance-tools/isolated-loop.mjs", "acceptance-tools/isolated-loop.md", "test/acceptance-isolation.test.ts", "docs/batches/共用验收隔离/结果.md", "merge-queue.ts", "test/batch-queue-publish-locks.test.ts", "docs/batches/共用验收隔离/批次.json"]
       }
     }
   },

@@ -2,7 +2,8 @@
 import "./test-env.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
@@ -10,6 +11,70 @@ import { queueBatchComplete, queueBatchRecheck, queueDir } from "../merge-queue.
 import { readJson, writeJsonAtomic } from "../pipeline-core.ts";
 import { processStartTime } from "../procs.ts";
 import { ROOT, fixture, autoConfig, autoComplete, automaticMerged, multiReady } from "./helpers/merge-queue-fixture.ts";
+
+test("发布锁／EEXIST 后锁消失则重试，仍拒绝无效身份且保持等待上限", async (t) => {
+  const f = fixture(1);
+  try {
+    const { file } = multiReady(f); await f.idle();
+    const path = join(queueDir(f.repo), "publish.lock");
+    const cases = [
+      { name: "抢锁失败到读取之间正常释放", mode: "released" },
+      { name: "仍存在但身份字段无效", mode: "invalid" },
+      { name: "仍存在但 JSON 损坏", mode: "corrupt" },
+      { name: "锁虽消失但原等待上限已到", mode: "expired" },
+    ];
+    for (const { name, mode } of cases) await t.test(name, (t) => {
+      const link = fs.linkSync, holder = join(f.root, `publish-holder-${mode}.json`);
+      let attempts = 0, released = false, clock = Date.now();
+      if (mode === "expired") t.mock.method(Date, "now", () => clock);
+      t.mock.method(fs, "linkSync", (source: Parameters<typeof link>[0], destination: Parameters<typeof link>[1]) => {
+        if (destination !== path || ++attempts !== 1) return link(source, destination);
+        const contender = readJson<{ pid: number; started: string; token: string }>(String(source))!;
+        assert.ok(contender.started && contender.token);
+        const owner = { ...contender, token: `${contender.token}-holder` };
+        let contents = JSON.stringify(owner);
+        if (mode === "invalid") contents = JSON.stringify({ ...owner, pid: 0 });
+        if (mode === "corrupt") contents = "{invalid-json";
+        writeFileSync(holder, contents, { flag: "wx" });
+        link(holder, path); // 原子发布本测试拥有的锁，再制造真实的 EEXIST。
+        try { return link(source, destination); }
+        catch (error) {
+          assert.equal((error as NodeJS.ErrnoException).code, "EEXIST");
+          assert.equal(readFileSync(path, "utf8"), contents);
+          if (mode === "released" || mode === "expired") {
+            assert.equal(readJson<{ token: string }>(path)!.token, owner.token);
+            fs.unlinkSync(path); // 持有者在 EEXIST 与产品读取之间按身份正常释放。
+            released = true;
+            if (mode === "expired") clock += 15_001;
+          }
+          throw error;
+        }
+      });
+      syncBuiltinESMExports();
+      try {
+        const before = f.queue().batches.find((batch) => batch.file === file)!.integrationEpoch;
+        if (mode === "released") {
+          const epoch = queueBatchRecheck(f.repo, file);
+          assert.ok(epoch && epoch !== before, "正常释放后必须重新抢锁并完成重验换代");
+          assert.equal(f.queue().batches.find((batch) => batch.file === file)!.integrationEpoch, epoch);
+          assert.equal(attempts, 2, "必须确实经历 EEXIST 后再次抢锁，不靠调度概率");
+          assert.equal(released, true); assert.equal(existsSync(path), false);
+        } else {
+          const expected = mode === "expired" ? /合入发布或资格更新正在执行/ : /队列锁身份不明/;
+          assert.throws(() => queueBatchRecheck(f.repo, file), expected);
+          assert.equal(attempts, 1, "无效身份或已耗尽预算均不能重新占锁");
+          assert.equal(f.queue().batches.find((batch) => batch.file === file)!.integrationEpoch, before);
+          assert.equal(existsSync(path), mode !== "expired");
+          if (mode !== "expired") assert.equal(readFileSync(path, "utf8"), readFileSync(holder, "utf8"), "无效锁原样保留，不删除接管");
+        }
+      } finally {
+        t.mock.restoreAll(); syncBuiltinESMExports();
+        // 只释放本子场景创建、仍与其源文件同一 inode 的锁；不触碰未知锁。
+        if (existsSync(path) && existsSync(holder) && fs.lstatSync(path).ino === fs.lstatSync(holder).ino) fs.unlinkSync(path);
+      }
+    });
+  } finally { await f.close(); }
+});
 
 test("发布竞争／最终资格检查后、取得发布资格前发生整合重验，旧执行器不能发布", async (t) => {
   for (const completed of [false, true]) await t.test(completed ? "重验已提交部分验证" : "重验尚未结束", async () => {

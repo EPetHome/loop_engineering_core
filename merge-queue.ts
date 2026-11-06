@@ -153,6 +153,11 @@ function lock(dir: string, name: string, wait = false): (() => void) | undefined
         return () => { const owner = readJson<LockOwner>(path); if (owner?.token === token) rmSync(path); };
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       const old = readJson<LockOwner>(path);
+      // 持有者可在 EEXIST 与读取之间正常释放；仅在锁确已消失时重新争用。
+      if (!old && !existsSync(path)) {
+        if (Date.now() >= deadline) return undefined;
+        continue;
+      }
       if (!old?.started || !old.token || !Number.isInteger(old.pid) || old.pid < 2) throw new Error(`队列锁身份不明，未删除：${path}`);
       if (deadOwner(old)) {
         // 竞争回收者也须串行；拿到回收锁后重读，不能删掉另一执行器刚获得的锁。
