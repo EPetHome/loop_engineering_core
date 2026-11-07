@@ -4,10 +4,10 @@ import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSyn
 import { dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { digest, inside, type NodeName } from "./development-card.ts";
-import { findProjectRoot, loadProjectLayout, parseAcceptanceConfig, parseContext, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
+import { findProjectRoot, loadProjectLayout, parseAcceptanceConfig, parseContext, parseDeploymentConfig, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
 import { outOfScope } from "./scope.ts";
-import { gitResult, gitText, worktrees } from "./workspace.ts";
-import { taskDefinition, taskView, type Candidate, type KernelRun } from "./node-ledger.ts";
+import { gitResult, gitText, worktrees, worktreeForBranch } from "./workspace.ts";
+import { taskDefinition, taskView, type Candidate, type KernelRun, type DeploymentPlan } from "./node-ledger.ts";
 import { authorizationStatus, forUser, type AcceptanceItemResult } from "./acceptance-core.ts";
 
 const nul = (s: string): string[] => s.split("\0").filter(Boolean);
@@ -99,6 +99,18 @@ function verifyUserReferences(run: KernelRun, files: Record<string, string>, pat
 }
 export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: string; files: Record<string, string>; paths: Record<string, string>; observedFiles: Record<string, string>; publicationChanges: string[]; requirement: string } {
   const files: Record<string, string> = {}, paths: Record<string, string> = {}, contents: Record<string, string> = {};
+  if (node === "部署") return deploymentInputs(run);
+  if (run.card.nature === "评审") {
+    const r = run.card.review!, config = managedConfig(run.repo, true);
+    const texts: Record<string, { text?: string }> = {};
+    for (const key of ["requirement", "criteria", "note"] as const) if (r[key]) {
+      texts[key] = {}; sourceHashes(r[key]!, files, key, paths, contents, texts[key]);
+    }
+    const requirement = texts.requirement?.text ?? "未提供需求；仅评审指定已有提交差异";
+    const hash = digest(JSON.stringify([run.reviewComparison, Object.entries(files).sort(), config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审.timeoutMin]));
+    if (run.reviewInputs && run.reviewInputs.hash !== hash) throw new Error("只评审需求/标准/说明、模型或时限变化；旧结论无效。请用「改卡 --from」明确确认当前输入版本，再只重跑评审；不会静默采用新输入");
+    return { hash, files, paths, observedFiles: { ...files }, publicationChanges: [], requirement };
+  }
   const collect = (path: string, label: string): void => sourceHashes(path, files, label, paths, contents);
   collect(run.file, "卡");
   const prompt: { text?: string } = {};
@@ -140,7 +152,7 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
   const requirement = run.publication?.inputSnapshot?.requirement ?? [prompt.text!, ...run.userInputs].join("\n\n");
   const observedFiles = { ...files }, publicationChanges = publicationInputChanges(run, files, paths);
   verifyUserReferences(run, files, paths, contents, observedFiles, publicationChanges);
-  const config = managedConfig(existsSync(run.worktree) ? run.worktree : run.repo);
+  const config = managedConfig(existsSync(run.worktree) ? run.worktree : run.repo, run.inputVersion === 2);
   const identityFiles = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
   let identity: unknown = [identityFiles, run.userVersion, run.userInputs, config.configurationHash, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审];
   if (run.inputVersion === 2) {
@@ -169,6 +181,31 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
       : [review, testing, acceptance, run.card.flow, run.cardRevision ?? 0, run.cardHash];
   }
   return { hash: digest(JSON.stringify(identity)), files, paths, observedFiles, publicationChanges, requirement };
+}
+export function freezeDeploymentPlan(repo: string): DeploymentPlan {
+  const config = parseDeploymentConfig(readMarker(repo).deployment);
+  if (!config.enabled || !config.cmd || !config.check) throw new Error("卡安排部署但 deployment 未启用或缺 cmd/check；请配置 .autoreview.json.deployment.enabled:true、cmd、check，或移除部署节点（未创建资源）");
+  const holder = worktreeForBranch(repo, "dev");
+  if (!holder) throw new Error("部署需要已检出的 dev 运行目录；请先准备 dev worktree，未创建本卡资源");
+  return { config, cwd: realpathSync(holder.path), common: realpathSync(gitText(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"])) };
+}
+export function deploymentInputs(run: KernelRun) {
+  const plan = run.deploymentPlan;
+  if (!plan || !run.card.flow.includes("部署")) throw new Error("当前卡没有冻结部署授权");
+  const actual = freezeDeploymentPlan(run.repo);
+  if (JSON.stringify(actual) !== JSON.stringify(plan)) throw new Error("已冻结 deployment 配置或执行目录身份变化；未执行旧/新命令。发布前请受控改卡确认，发布后恢复冻结配置再只重跑部署");
+  const attempt = run.deploymentAttempts?.at(-1);
+  const rolledBack = attempt?.binding && ["applied", "recovered", "failed"].includes(attempt.rollback?.state ?? "") && gitText(plan.cwd, ["rev-parse", "HEAD"]) === attempt.rollback!.to;
+  const files: Record<string, string> = {}, paths: Record<string, string> = {}, contents: Record<string, string> = {};
+  const methods = parseMethodsConfig(readMarker(plan.cwd).methods, plan.cwd);
+  for (const path of methods?.paths ?? []) sourceHashes(resolve(plan.cwd, path), files, `部署方法/${path}`, paths, contents);
+  for (const p of run.localFiles.filter((p) => p !== ".autoreview.json")) sourceHashes(join(plan.cwd, p), files, `部署本机/${p}`, paths, contents);
+  const observedFiles = { ...files };
+  // 仅按 Git 证明归一化已登记反向 CAS 的方法文件变化；本机/忽略方法变化绝不借回退洗白。
+  const publicationChanges = rolledBack ? publicationInputChanges({ ...run, publication: { ...run.publication!, local: "merged", commit: attempt!.rollback!.to, targetBefore: attempt!.rollback!.from,
+    inputRoot: plan.cwd, inputSnapshot: { ...attempt!.binding!, requirement: "登记回退转换" } } }, files, paths) : [];
+  const hash = digest(JSON.stringify([run.publication && { commit: run.publication.commit, tree: run.publication.tree }, plan, Object.entries(files).sort()]));
+  return { hash, files, paths, observedFiles, publicationChanges, requirement: "按卡在发布之后部署；不包含开发检查" };
 }
 export function acceptanceSignature(run: KernelRun): string {
   const checked = checkInputs(run, "验收");
@@ -202,8 +239,11 @@ export function frozenCardProblem(run: KernelRun): string | undefined {
   try { if (digest(readFileSync(run.file)) === run.cardHash) return undefined; } catch { /* 明确报卡变化 */ }
   return "开发卡文件已直接修改；不会自动采用。请先保存当前内容、恢复 frozen-card.json 中原卡，再用「改卡 --from」受控提出变更或「续跑」";
 }
-export function managedConfig(cwd: string) {
-  return resolveProjectConfig(findProjectRoot(cwd), { env: { ...process.env, AUTOREVIEW_SINGLE_NODE: "1", AUTOREVIEW_BATCH_FILE: "", AUTOREVIEW_STAGE: "" } });
+export function managedConfig(cwd: string, independentDeployment = false) {
+  const root = findProjectRoot(cwd);
+  // v2 检查消费者不解析无关的部署块；部署由卡启动/自身边界严格校验。旧完整指纹完全保留。
+  return resolveProjectConfig(root, { ...(independentDeployment ? { marker: { ...(root ? readMarker(root) : {}), deployment: undefined } } : {}),
+    env: { ...process.env, AUTOREVIEW_SINGLE_NODE: "1", AUTOREVIEW_BATCH_FILE: "", AUTOREVIEW_STAGE: "" } });
 }
 export function localCopyPlan(repo: string, base: string): string[] {
   const { root, layout } = loadProjectLayout(repo);
@@ -227,7 +267,7 @@ export function localCopyPlan(repo: string, base: string): string[] {
 export function assertWorkspace(run: KernelRun): void {
   if (!run.workspaceCreated || !existsSync(run.worktree) || realpathSync(run.worktree) !== resolve(run.worktree)) throw new Error("任务工作区归属未确认");
   const actual = worktrees(run.repo).find((w) => resolve(w.path) === run.worktree);
-  if (actual?.branch !== run.branch || gitText(run.worktree, ["branch", "--show-current"]) !== run.branch
+  if ((run.card.nature === "评审" ? !actual?.detached : actual?.branch !== run.branch) || gitText(run.worktree, ["branch", "--show-current"]) !== run.branch
     || realpathSync(gitText(run.worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"])) !== run.common) throw new Error("任务工作区、分支或仓库身份变化");
   const hidden = nul(gitRaw(run.worktree, ["ls-files", "-v", "-z"])).filter((line) => !line.startsWith("H "));
   if (hidden.length) throw new Error(`索引含 assume-unchanged、skip-worktree 或未解决状态，不能隐藏候选改动：${hidden.join("、")}`);
@@ -236,7 +276,7 @@ export function createWorkspace(run: KernelRun): void {
   if (existsSync(run.worktree)) throw new Error("隐藏路径已存在，未认领或覆盖");
   if (existsSync(dirname(run.worktree))) throw new Error("隐藏任务父目录已存在，未认领或覆盖");
   mkdirSync(dirname(run.worktree), { recursive: true, mode: 0o700 }); run.workspaceParentCreated = true;
-  gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", run.branch, run.worktree, run.base]);
+  gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", ...(run.card.nature === "评审" ? ["--detach"] : ["-b", run.branch]), run.worktree, run.card.nature === "评审" ? run.reviewComparison!.head.commit : run.base]);
   for (const path of run.localFiles) {
     const source = resolve(run.repo, path), target = resolve(run.worktree, path);
     // worktree 中的路径也不能沿基础树的符号链接逃逸。
@@ -257,9 +297,9 @@ export function dirtyPaths(run: KernelRun): string[] {
     ...nul(gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"]))])].filter((p) => !local(run, p));
 }
 /** 包括索引和原始字节；HEAD 相同或 clean filter 归一化相同不足以证明工作区没变。 */
-export function workspaceGuard(run: KernelRun, headIdentity?: string): string {
+export function workspaceGuard(run: KernelRun, headIdentity?: string, includeIgnored = true): string {
   assertWorkspace(run);
-  const paths = [...new Set(nul(gitRaw(run.worktree, ["ls-files", "--cached", "--others", "-z"])))].sort();
+  const paths = [...new Set([...nul(gitRaw(run.worktree, ["ls-files", "--cached", "--others", ...(includeIgnored ? [] : ["--exclude-standard"]), "-z"])), ...(!includeIgnored ? run.localFiles : [])])].sort();
   const directories = new Set<string>([run.worktree]);
   const metadata = (path: string): string => { const s = lstatSync(path, { bigint: true }); return `${s.ino}:${s.mode}:${s.mtimeNs}:${s.ctimeNs}`; };
   const files = paths.map((p) => {
@@ -268,7 +308,7 @@ export function workspaceGuard(run: KernelRun, headIdentity?: string): string {
   });
   const dirs = [...directories].sort().map((p) => [p, existsSync(p) ? metadata(p) : "缺失"]);
   // ctime/inode 不能靠把字节写回或 utimes 还原；同时覆盖瞬时写入和创建后删除，避免只靠异步 FS 通知漏检。
-  return digest(JSON.stringify([headIdentity ?? gitText(run.worktree, ["rev-parse", "HEAD"]), gitRaw(run.worktree, ["ls-files", "--stage", "-z"]), files, dirs]));
+  return digest(JSON.stringify([headIdentity ?? gitText(run.worktree, ["rev-parse", "HEAD"]), gitRaw(run.worktree, ["ls-files", "--stage", "-z"]), files, includeIgnored ? dirs : []]));
 }
 const ancestor = (repo: string, a: string, b: string): boolean => gitResult(repo, ["merge-base", "--is-ancestor", a, b]).status === 0;
 const treeEntry = (repo: string, commit: string, path: string): string => gitRaw(repo, ["--literal-pathspecs", "ls-tree", "-z", commit, "--", path]);

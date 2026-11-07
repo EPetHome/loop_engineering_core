@@ -21,7 +21,10 @@ import { createChildExec } from "./hosts/review-hook.ts";
 import { consumerProblem, readLocalQueue } from "./local-node-queue.ts";
 import { validResult } from "./node-ledger.ts";
 import { integrateTask, prepareExceptionCandidate } from "./batch-integration.ts";
+import { gitText } from "./workspace.ts";
 import { runAcceptanceNode } from "./acceptance-node.ts";
+import { runReviewNode } from "./review-node.ts";
+import { deploymentUncertainty, runDeploymentNode } from "./deployment-node.ts";
 
 export const MANAGED_CONVENTION = ["【Loop 受管开发任务】", "开发评审是一个原子节点；修复仍在本会话。最后一行写【交付完成】；需要用户决定写【需要你决定】。",
   "不要自行 git add/commit/merge/push；交付边界由程序仅提交卡上范围内改动。不要暂存本机文件或用户既有改动。",
@@ -32,12 +35,15 @@ export function managedLedger(cwd: string, env: NodeJS.ProcessEnv = process.env)
   if (!path) return undefined;
   const run = readTaskRun(path, env.AUTOREVIEW_KERNEL_TASK);
   if (run.taskRecords && !run.taskId) throw new Error("多任务宿主缺少显式 AUTOREVIEW_KERNEL_TASK");
-  if (run.id !== env.AUTOREVIEW_KERNEL_RUN || realpathSync(cwd) !== run.worktree || run.release.status === "已释放") throw new Error("受管任务身份不符，拒绝采用用户工作区");
+  const releasedPublication = run.release.status === "已释放" && run.publication?.local === "merged";
+  const actual = releasedPublication && !existsSync(cwd) ? resolve(cwd) : realpathSync(cwd);
+  if (run.id !== env.AUTOREVIEW_KERNEL_RUN || actual !== run.worktree || run.release.status === "已释放" && !releasedPublication) throw new Error("受管任务身份不符，拒绝采用用户工作区");
   return path;
 }
 export function attachSession(path: string, host: "pi" | "claude" | "codex", id: string, log?: string, task?: string): void {
   if (!id.trim() || id === "unknown" || /[\0\r\n]/.test(id)) throw new Error("宿主没有可精确恢复的会话身份，未认领任务");
   updateTaskRun(path, task, (r) => {
+    if (r.card.nature === "评审" || r.publication) throw new Error("只评审/已发布任务不启动开发宿主；仅查询或接续已安排部署");
     if (r.stopped || r.abandoned) throw new Error("本任务已停止；需显式续跑");
     if (r.session?.id && r.session.id !== id) throw new Error("不允许新会话冒充原开发会话；请精确恢复原 ID");
     const owner = host !== "pi" && r.launch ? { pid: r.launch.pid, started: r.launch.processStarted } : { pid: process.pid, started: processStartTime(process.pid) };
@@ -56,6 +62,7 @@ export function prepareManagedContinuation(path: string, task: string): void {
 }
 export function developerActive(path: string, task?: string): void {
   updateTaskRun(path, task, (r) => {
+    if (r.card.nature === "评审") throw new Error("只评审不允许开发、返修或修改候选");
     if (r.stopped || r.publication || r.abandoned) throw new Error("任务已停止或已发布，不再自动开发");
     if (r.blockedNode === "验收" && r.acceptanceState?.plan?.repairTasks.includes(taskIdentity(r))) throw new Error("验收返修等待真实用户提高本任务额度并续跑、移出或放弃；不能用开启开发绕过额度记账");
     if (r.activity && !["starting", "developing"].includes(r.activity.kind) && activityAlive(r.activity) !== false) throw new Error("测试/检查仍执行或归属未确认，停止并确认释放后才能编辑源码");
@@ -69,6 +76,9 @@ export function pauseManaged(path: string, reason: string, task?: string): void 
   updateTaskRun(path, task, (r) => { r.activity = undefined; r.stopReason = reason; r.stopped = true; r.epoch = (r.epoch ?? 0) + 1; });
   writeKernelSummary(path);
 }
+export function managedMergeRequest(run: KernelRun, raw: string): boolean {
+  return new RegExp(`^合入(?:本批|这批|[「"']?${run.card.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[」"']?)(?:\\s*(?:--接受未验证|接受未验证|按现状))?[。！!\\s]*$`).test(typedByUser(raw).trim());
+}
 /** 仅适配层已核对来源为 interactive/rpc 或宿主 UserPromptSubmit 时调用；机器消息/文件块不授权。 */
 export function recordManagedUserInput(path: string, raw: string, source: string, materials?: { text: string; files: { path: string; text: string }[] }, shown?: Pick<UserDecision, "candidate" | "inputs" | "userVersion" | "missing">, task?: string): UserDecision | undefined {
   if (consumeManagedRepair(path, raw, materials, task)) return undefined;
@@ -80,8 +90,9 @@ export function recordManagedUserInput(path: string, raw: string, source: string
   if (!text || !["pi:interactive", "pi:rpc", "claude:UserPromptSubmit", "codex:UserPromptSubmit", "terminal:tty"].includes(source)) return undefined;
   if (recordCardControl(path, text, source)) return undefined;
   let run = readRun(path);
-  const merge = new RegExp(`^合入(?:本批|这批|[「"']?${run.card.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[」"']?)(?:\\s*(?:--接受未验证|接受未验证|按现状))?[。！!\\s]*$`);
-  if (merge.test(text) || source === "terminal:tty" && /^合入 [0-9a-f]{8}$/.test(text)) {
+  if (managedMergeRequest(run, text) || source === "terminal:tty" && /^合入 [0-9a-f]{8}$/.test(text)) {
+    if (run.card.nature === "评审") throw new Error("只评审卡仅出报告，不支持合入（包括接受未验证）");
+    if (run.publication) return undefined; // 发布事实不需要新的例外决定；适配层直接接续剩余节点。
     prepareExceptionCandidate(path); run = readRun(path);
     const q = qualification(run), candidate = currentCandidate(run);
     if (!q.inputs) throw new Error("检查输入无法冻结，修复输入后才能确认例外合入");
@@ -118,8 +129,10 @@ export function recordManagedUserInput(path: string, raw: string, source: string
   return undefined;
 }
 export async function mergeManaged(path: string, options: { accept?: boolean; decision?: UserDecision; automatic?: boolean; dryRun?: boolean } = {}): Promise<NodeOutput> {
-  const run = readRun(path), q = qualification(run);
-  if (run.publication) return { status: run.publication.push === "成功" ? "通过" : "没验证", reason: `本地发布记录已存在；推送 ${queryKernel(path).publication?.push}，不自动重试。${run.publication.reason ?? ""}`, evidence: [], operations: [], released: true };
+  const run = readRun(path);
+  if (run.card.nature === "评审") throw new Error("只评审卡仅出报告，不能合入（接受未验证也不允许）");
+  if (run.publication) return options.dryRun ? { status: "没验证", reason: "已有发布；只读查询部署，未执行", evidence: [], operations: [], released: true } : deployManaged(path);
+  const q = qualification(run);
   // 例外只豁免缺少结论；卡、候选、目标、资源身份始终不能豁免。
   if (!q.candidate) throw new Error(`合入身份核对失败：\n${q.missing.join("\n")}`);
   currentCandidate(run);
@@ -156,7 +169,35 @@ export async function mergeManaged(path: string, options: { accept?: boolean; de
         ...(options.accept && decision ? [`用户接受未验证：${decision.source}；${decision.at}；${decision.text}`, ...decision.missing] : [])] }, process.env.AUTOREVIEW_KERNEL_ROOT ? join(kernelRoot(), "交付记录.md") : undefined); }
     catch (error) { updateRun(path, (r) => { (r.notes ??= []).push(`合入索引写入失败：${String(error)}`); }); }
   }
-  writeKernelSummary(path); return result;
+  writeKernelSummary(path);
+  if (published?.local === "merged" && published.push === "成功" && run.card.flow.includes("部署")) return deployManaged(path);
+  return result;
+}
+/** 发布后的唯一接续入口；不会再次评审/提交/推送。 */
+export async function deployManaged(path: string, signal?: AbortSignal, exec?: Exec, retryAttempt?: string): Promise<NodeOutput> {
+  const run = readRun(path), p = run.publication;
+  if (!run.card.flow.includes("部署")) return { status: p?.push === "成功" ? "通过" : "没验证", reason: `本地发布记录已存在；推送 ${queryKernel(path).publication?.push ?? "未开始"}，不自动重试推送。${p?.reason ?? ""}；部署：没验证（本次未安排）`, evidence: [], operations: [], released: true };
+  if (p?.local !== "merged" || p.push !== "成功") return { status: "没验证", reason: `部署未执行：发布/推送未成功（${p?.push ?? "无发布身份"}）；不自动重推`, evidence: [], operations: [], released: true };
+  const prior = run.deploymentAttempts?.at(-1), uncertain = deploymentUncertainty(prior);
+  if (uncertain) throw new Error(uncertain);
+  const existing = validResult(run, "部署", { commit: p.commit, tree: p.tree }, checkInputs(run, "部署").hash);
+  if (!existing && prior && retryAttempt !== prior.id) {
+    if (retryAttempt) throw new Error("部署重跑意图已过期；当前尝试已变化，请按当前记录重新明确重跑");
+    const result = run.results.find((r) => r.node === "部署" && r.id === prior.id);
+    return { status: result?.status ?? "没验证", reason: `${prior.reason ?? "已有部署尝试，结果待核对"}；自动回调/普通续跑不重复执行。明确重跑：${kernelCommand("重跑", run.file, "--node", "部署", "--json")}`,
+      evidence: result?.evidence ?? [prior.log], operations: ["保留已有部署尝试；未重做命令/检查/回退"], released: prior.released };
+  }
+  if (!prior && retryAttempt) throw new Error("部署重跑绑定的原尝试已不存在，未执行");
+  if (!existing && gitText(run.repo, ["rev-parse", "refs/heads/dev"]) !== p.commit) throw new Error(`当前本地 dev ${gitText(run.repo, ["rev-parse", "refs/heads/dev"])} 已不在本批发布 ${p.commit}；远端本次推送 ${p.remoteCommit ?? "未确认"}；保留回退/发布记录，不自动重发旧版本`);
+  const output = await executeNode(path, "部署", (input) => runDeploymentNode(input, exec ?? createChildExec(input.procsFile), retryAttempt), { signal });
+  await reportManaged(path);
+  await (await import("./kernel-runtime.ts")).releaseKernelWorkspace(path);
+  return output;
+}
+export async function reviewManaged(path: string, options: { signal?: AbortSignal; exec?: Exec; callReviewer?: ReviewerCall } = {}): Promise<NodeOutput> {
+  if (readRun(path).card.nature !== "评审") throw new Error("当前不是只评审卡");
+  const output = await executeNode(path, "评审", (input) => runReviewNode(input, options.exec ?? createChildExec(input.procsFile), options.callReviewer), { signal: options.signal });
+  await reportManaged(path); return output;
 }
 export interface DeliveryOptions { exec: Exec; signal?: AbortSignal; callReviewer?: ReviewerCall; testExec?: Exec; acceptanceExec?: Exec; task?: string }
 export function consumeManagedRepair(path: string, raw: string, materials?: { files: { path: string; text: string }[] }, task?: string): boolean {
@@ -306,10 +347,12 @@ export async function advanceBatch(path: string, options: { signal?: AbortSignal
   await reportManaged(path); return output;
 }
 /** 固定直线推进，节点之间仅通过账本交换结果。 */
-export async function advanceManaged(path: string, options: { signal?: AbortSignal; testExec?: Exec; acceptanceExec?: Exec; task?: string } = {}): Promise<NodeOutput> {
+export async function advanceManaged(path: string, options: { signal?: AbortSignal; testExec?: Exec; acceptanceExec?: Exec; task?: string; deploymentRetry?: string } = {}): Promise<NodeOutput> {
   applyPendingCardChange(path);
   const task = options.task, read = () => readTaskRun(path, task), change = <T>(fn: (r: KernelRun) => T) => updateTaskRun(path, task, fn);
   let run = read();
+  if (run.card.nature === "评审") return reviewManaged(path, options);
+  if (run.publication) return deployManaged(path, options.signal, undefined, options.deploymentRetry);
   if (run.taskRecords && !task) return advanceBatch(path, options);
   if (run.stopped || run.abandoned || run.publication) throw new Error("任务已停止/放弃/发布，不能自动推进");
   const candidate = currentCandidate(run);
@@ -357,6 +400,7 @@ export async function advanceManaged(path: string, options: { signal?: AbortSign
 export async function completeManagedDelivery(path: string, text: string, options: DeliveryOptions): Promise<NodeOutput> {
   const task = options.task, read = () => readTaskRun(path, task), change = <T>(fn: (r: KernelRun) => T) => updateTaskRun(path, task, fn);
   let run = read();
+  if (run.card.nature === "评审") throw new Error("只评审不接受开发交付，不创建任务提交");
   if (run.stopped || run.abandoned || run.publication || run.activity && !["starting", "developing"].includes(run.activity.kind)) return { status: "中断", reason: run.stopReason ?? "已有节点执行或任务停止", evidence: [], operations: [], released: true };
   if (run.blockedNode === "验收" && run.acceptanceState?.plan?.repairTasks.includes(taskIdentity(run))) return { status: "中断", reason: "验收返修额度尚未通过受控继续登记；请提高本任务额度后续跑，不能绕过旧次数", evidence: [], operations: [], released: true };
   if (classifyMarker(text) === "decision") { pauseManaged(path, "开发方需要你决定", task); return { status: "中断", reason: "开发方需要你决定", evidence: [], operations: [], released: true }; }
@@ -376,7 +420,7 @@ export async function completeManagedDelivery(path: string, text: string, option
     });
     if (!handoff) return { ...output, status: "中断", reason: "交接前输入或活动变化", message: undefined, stale: true };
     applyPendingCardChange(path);
-    if (output.status === "通过") { const next = await advanceManaged(path, options); return run.taskRecords || run.card.flow.includes("测试") || run.card.flow.includes("验收") ? next : output; }
+    if (output.status === "通过") { const next = await advanceManaged(path, options); return run.taskRecords || run.card.flow.includes("测试") || run.card.flow.includes("验收") || run.card.flow.includes("部署") ? next : output; }
     if (!output.message) await reportManaged(path); else writeKernelSummary(path);
     return output;
   } catch (error) {

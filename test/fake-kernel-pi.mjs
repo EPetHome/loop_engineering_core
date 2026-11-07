@@ -31,7 +31,10 @@ else {
     writeFileSync(join(process.cwd(), run.taskId ? `${run.card.tasks.find((t) => t.name === run.taskRecords.find((r) => r.id === run.taskId).name).name}.txt` : "file.txt"), `fake-model-round-${i}\n`);
     entries.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "小改动已交付\n【交付完成】" }] } });
     const result = await events.get("agent_before_settle")({ outcome: "completed", entries: [], continue: false }, ctx);
-    if (!result?.continue) break;
+    if (!result?.continue) {
+      if (process.env.KERNEL_FAKE_REPEAT_SETTLE) await events.get("agent_before_settle")({ outcome: "completed", entries: [], continue: false }, ctx);
+      break;
+    }
     writeFileSync(join(run.dir, `repair-${i}.json`), JSON.stringify(result));
   }
   await events.get("agent_settled")({ aborted: false }, ctx);

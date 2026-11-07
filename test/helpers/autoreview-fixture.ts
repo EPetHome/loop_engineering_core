@@ -11,6 +11,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import autoreview from "../../autoreview.ts";
 import { createChildExec } from "../../hosts/review-hook.ts";
+import { ReviewerCallFailure } from "../../static-review.ts";
 import type { Exec, ExecResult } from "../../git.ts";
 import { readMergeQueue } from "../../merge-queue.ts";
 
@@ -116,7 +117,12 @@ export function harness(options: { empty?: boolean; restored?: Record<string, un
       const external = externalExec?.(call);
       if (external !== undefined) return external;
       if (basename(command) === "osascript") return notifier(call);
-      if (command === "/fake-reviewer") { inputs.push(readFileSync(args[1], "utf8")); return reviewer(call); }
+      if (command === "/fake-reviewer") {
+        inputs.push(readFileSync(args[1], "utf8"));
+        // 内存模型替身不启动子进程；显式未知/失败证明仍原样保留，真命令走 externalExec/createChildExec。
+        try { return { processStarted: false, processesReleased: true, ...await reviewer(call) }; }
+        catch (error) { throw error instanceof ReviewerCallFailure ? error : new ReviewerCallFailure(error, true, true); }
+      }
       if (command === "/bin/sh") { accepts.push(call); return acceptor(call); }
       if (command === "/usr/bin/env" || basename(command).startsWith("fake-")) {
         // 真正启动的替身必须复用受管执行器来停止独立工具组并提供释放证明，不能由测试自报已释放。

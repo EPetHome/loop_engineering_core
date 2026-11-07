@@ -100,13 +100,14 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
     return { ...next, command, change };
   }
   if (command === "续跑" || command === "重跑") {
-    if (command === "重跑" && !args.node) throw new Error("重跑需要 --node 开发评审|测试|验收");
+    if (command === "重跑" && !args.node) throw new Error("重跑需要 --node 开发评审|评审|测试|验收|部署");
     return { ...await resumeManaged(path, args.json || args.launcher === "background", args.node, args.dryRun, args.task), command };
   }
   const run = readRun(path);
+  if (run.card.nature === "评审") throw new Error("只评审卡仅出报告，不能合入（包括接受未验证）；请查询报告或重跑 --node 评审");
   const q = qualification(run);
   const currentDecision = contributionProblems(run, false).length ? undefined : findUserDecision(run, q.candidate, q.inputs, q.missing);
-  const decision = args.acceptUnverified && !args.dryRun ? currentDecision ?? ttyDecision(path) : undefined;
+  const decision = args.acceptUnverified && !args.dryRun && !run.publication ? currentDecision ?? ttyDecision(path) : undefined;
   const output = await mergeManaged(path, { accept: args.acceptUnverified, decision, dryRun: args.dryRun });
   if (!args.dryRun && readRun(path).publication?.local === "merged") await releaseKernelWorkspace(path);
   return { ...queryKernel(path), ok: output.status === "通过", command, outcome: output, dryRun: args.dryRun };

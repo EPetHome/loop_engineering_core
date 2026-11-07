@@ -1,6 +1,281 @@
 # Loop 内核与节点编排实施方案
 
-当前阶段：**外层第 2 次评审的一条必须修改已返修并完成程序验证，待外层复审**（不是独立评审通过、业务验收通过或真实发布）。最新记录见下文「第 2 次评审返修」，第 1 次三项返修保留；此前首次交付记录保留原始时态。本开发会话收到本页关联提示词后在 `step3` 实施；前台准备/启动的历史原样保留，不把准备记录当产品交付。2026-11-06 用户要求开始第三步、分支为 `step3`，由协调方写好方案与 Loop 任务并在可见终端前台启动。下文第三步方案是本次执行依据；后面的第一、二步章节保留历史，不再代表当前进度或本次授权。
+当前阶段：**第四步外层第 2 次评审的唯一必须修改已返修并完成真实进程定向验证，待外层复审；未提交、发布或真实部署**。2026-11-07 用户要求完成第四步、用最新 Loop、新分支 `refactor/xxxx-step4`。已从本机已发布 dev `5f23127` 建立 `refactor/loop-kernel-step4`，前三步历史记录保留，不把其中“待复审”等旧时态当作当前进度。dev 与本机 origin/dev 记录同为 `5f23127`；本次没有通过联网或业务复跑补验历史发布。
+
+本次唯一任务文件：[第 4 步提示词](prompt/提示词-Loop内核与节点编排-4部署与只评审.md)。权威需求只读：`/Users/Admin/Desktop/loop/issues/【req】Loop内核与节点编排.md`。五步名称与顺序不变，第五步删除旧路径及旧 worktree 须另列清单确认，不在本步执行。
+
+## 第 4 步实施方案
+
+### 目标、入口与边界
+
+本步将部署和只评审接入开发卡。开发卡写部署才在提交之后部署；只评审卡只检查明确的已有提交并出报告。完成以两条真实产品路径、统一账本/控制/释放及相关回归成立为准，不以新增解析字段或启动开发会话代替交付。
+
+- 产品工作目录 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step4`，分支 `refactor/loop-kernel-step4`，基线 `5f23127`。
+- 按权威需求继续 **Pi + Loop 单会话开发评审**，不是用尚未实现的第四步卡开发自己。外层从 `/Users/Admin/Desktop/loop/bin/loop 开发 pi` 加载当前 `autoreview.ts`；本工作区代码仅用于产品修改和隔离验证。
+- 主目录已有的 `loop.ts`、`merge-queue.ts`、文档等改动保留，不带入新分支；仅复制本机 `.autoreview.json`，不改旧 gate、不恢复全量测试。原需求、稳定规则、旧 worktree、temp/ 和全局配置不修改。
+- 本次开发和定向检查已授权；真实仓库 add/commit/合入/推送、真实部署尚未授权。产品部署、推送、回退只用系统临时 Git 和本地 bare origin 验证。普通步骤自检通过就继续，最终交外层静态评审。
+
+### 已核对源码与改动顺序
+
+1. `development-card.ts` 已有六个固定节点名字，但只接受开发性质和开发评审/测试/验收/提交。先扩为部署及单任务只评审的合法组合，完整只读校验后才建资源；开发多任务必带验收、纯测试底线继续保留。
+2. `config.ts` 已有 `DeploymentConfig`（enabled/cmd/check/timeoutMin）；`merge-queue.ts/runDeployment` 有项目互斥、版本守卫、cmd/check 和检查失败回退。抽出最小必要能力，不让新节点读旧队列状态，不复制整套旧编排。
+3. `kernel-session.ts/mergeManaged`、`kernel-runtime.ts/resumeManaged` 和 CLI/宿主收尾存在 publication 早退或随即释放。必须统一接续“发布 → 已安排部署 → 收尾”，部署绑定压缩后的实际发布提交，不能被已合入状态或提前释放吞掉。
+4. `kernel-workspace.ts/checkInputs` 的新版配置投影主动排除 deployment，`node-ledger.ts` 的 activity/结果/任务字段仍偏开发检查。只增加本步必要部署/只评审输入与状态，保留真实旧账本指纹，不使改部署连带重评审。
+5. `review-only.ts` 现有入口经 `runReviewRound` 走旧组合层；新卡改复用 `static-review.ts` 的调用/解析/证据与既有报告格式。受评 base/head 固定，隐藏隔离检出，不形成开发提交、不派返修、不获取合入资格。
+6. `kernel.ts` 的五态、结论行、外部合入识别、工作区守卫，及 `kernel-controls.ts`、`kernel-cli.ts`、`kernel-pi.ts`、`hosts/kernel-hook.ts` 要逐条处理新性质和发布后活动。最后同步帮助/README/运行与维护及受影响测试，不清理旧实现。
+
+### 本步必须处理的行为
+
+开发卡只有安排部署且本次本地合入和 origin/dev 推送成功，才执行项目部署。缺配置在建资源前拒绝；没安排就不执行。每个部署动作绑定真实发布身份、配置、目录和进程；按项目与其他检查互斥，排队不伪报运行。成功只执行一次；中断且副作用未知时保留现场，不盲目重试。仅重跑部署不重新开发、评审、测试、验收或推送。
+
+沿用旧部署的明确失败语义：cmd 失败停止；cmd 成功、check 失败且目标仍为本批、上一版明确且用户内容安全时，回退本机版本并重新部署上一版。目标前进、脏文件、停止或资源未知则保留现场。不强推远端，不将本地回退说成远端回退；本地、远端、运行版本分别展示。原发布/检查记录保留，回退事务的预期版本变化与未授权源码写入分开核对。
+
+只评审卡为单任务 `nature:评审`、`flow:[评审]`，明确已有 base/head，文件输入只读。不混开发或部署节点，不新增多任务底线例外。需求/标准、比较范围、模型和输入版本都进结论身份；分支后来移动不换对象。只出必须修改/建议报告，无开发宿主和返修；正常结束释放隔离检出。查询不能因为受评提交已经在 dev 上就称已合入，也不能出现可合入；在既有五态中明确“只评审已结束”和真实报告结果。
+
+所有控制入口按性质接受合法操作：只评审仅重跑评审，部署仅在安全明确状态重跑；停止/改卡/迟到结果不覆盖新控制决定。已发布后停止只取消余下动作，不撤销历史发布。卡没安排的节点继续标没验证。清理只认本批登记，未知/脏目录保留；报告/证据与分支历史不删除。
+
+### 验证与完成条件
+
+新增验收 A11—A17 位于第四步提示词：部署成功/不重复、非法卡及推送失败不部署、失败安全回退、停止/配置/中断竞态及互斥、只评审纯报告/不写用户区、非法只评审与候选固定、前三步及旧入口回归。原需求 A1—A10 原文不变。
+
+开发按卡与输入 → 部署执行和发布接续 → 只评审执行 → 控制/查询/释放 → 三宿主受影响集成顺序做最小充分验证，复用 node:test、kernel fixture 和现有部署/recipe 测试。系统临时根隔离 Git/bare origin、模型替身、队列、资源及通知；禁全量和真实业务/远端部署，不改 test/e2e.mjs。旧“尚未支持”断言按新需求改变时逐条记录；不删测试、不弱化安全断言。
+
+完成后开发方在本节追加实际命令、日志、结果、资源、断言变化和未验证项，交外层 Loop 静态评审返修；不自行提交/发布。源码、自检、外层评审、真实部署及业务验收分列。与旧问题单的关系仅作证据对照，不自动关单，不补记前三步未验项。
+
+### 第 4 步准备与启动记录
+
+已建上述分支/目录，原主目录文件指纹保存于 `/Users/Admin/.pi-autoreview/preparations/loop-kernel-step4-20261107/before.json`。没有提交、合入或推送。任务按源码核对后编写；启动与权限检查结果以该 preparation 目录及本节后续实际记录为准。
+
+本次重新核实的 Pi：入口 `/Users/Admin/.local/bin/pi`，真实包 `@earendil-works/pi-coding-agent` 1.3.0（安装目录名仍是 1.2.0，不能据目录名认版本）；当前参数解析支持 offline、显式扩展、工具名单、会话名、session-id 和本次 approve。权限扩展为 `/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts`；Ponytail 为 `/Users/Admin/.codex/plugins/cache/ponytail/ponytail/4.13.0/pi-extension/index.js`，均实际存在。
+
+按本次开发阶段选择 read/edit/write/bash，加载权限、当前 autoreview、Ponytail full；不加载不相关浏览器/MCP/其他开发 Agent，不卸载任何插件。全局 yoloMode=true，新目录无项目覆盖；不改持久配置。`--offline` 仅关闭启动联网检查，正常模型连接保留。运行前用真实权限处理器模拟四工具，再核对正式入口参数和启动后会话实际状态；启动成功不等于第四步完成。
+
+准备检查实际结果：真实权限扩展处理器模拟 read/edit/write/bash 均放行、0 次询问，没有执行这些探针工具或调用模型；正式入口 dry-run 正确指向三项扩展、本任务文件及精确新会话 `1042a590-6ddd-4c14-a827-03110cc4052d`；启动脚本语法与文档 diff 检查通过。第四步 7 条标准能由现有解析器完整提取：本页文档 A11—A17 对应会话运行编号 A1—A7。第一次错误地期望解析器保留文档编号的检查失败，随后依据现有规则修正检查并明确映射，没有修改产品解析器或标准内容。
+
+原始结果：上述 preparation 目录的 `permission-handler-check.json`、`launch-dry-run.log`、`prompt-check.json`；前台启动脚本 `start-step4.sh`，实际启动状态另记 `startup.json`。准备没有运行产品测试/构建、真实部署或远端发布。
+
+## 第 4 步实施与验证记录
+
+工作目录 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step4`；分支 `refactor/loop-kernel-step4`；真实 HEAD 仍为 `5f2312782ad59e3f0bb63f0b4fa38029bb9b455a`。保留本轮原有方案/提示词准备改动，未 add/commit/stash/reset/merge/push 真实仓库，未修改桌面运行版或本机 deployment 配置。未启动嵌套真实开发/评审 Agent；独立静态评审交外层已发布 Loop。
+
+### 实际实现
+
+- **卡和输入**：保留 version:1、前三步开发卡及真实旧 v1/v2 指纹；开发固定顺序扩到提交后的可选部署。无提交的部署卡、缺失/禁用/非法配置在资源前拒绝，无部署卡不隐含部署。单任务只评审为 `nature:评审, flow:[评审], tasks:[{name}], review:{base,head,requirement?,criteria?,note?}`；不要求开发 prompt/scope/target/host 或存在 dev，不 fetch。多任务只评审、混入开发/检查/发布及纯测试卡仍拒绝。
+- **独立身份**：只评审首次冻结明确 commit/tree，分支移动不换对象，同树换 HEAD 也拒绝；文件、模型和时限有已确认快照，变化须受控改卡确认，查询不迁移、不采用新输入。部署有独立 deploymentPlan/输入指纹，绑定实际压缩发布 commit/tree、配置、方法文件及执行 cwd/Git 共用目录；修改 deployment 不重跑未变的前置检查，旧算法不通过迁移伪造结论。
+- **部署执行及生命周期**：`deployment-exec.ts` 抽取新旧共用命令、日志、进程和资源执行边界；`deployment-node.ts` 不引用其他节点或旧队列状态。`kernel-session.ts` 统一发布后的接续，CLI、worker、Pi 和两类 Hook 的 publication 路径均核对部署后收尾。推送失败、未完成提交意图及 Loop 外合入不自动部署/重推；同一成功部署只复用，安全失败仅重跑部署，不重新开发/评审/测试/验收/提交/推送。
+- **实际互斥及回退**：`project-execution.ts` 用 Git 共用目录的短锁登记检查读租约/部署独占租约，接通新节点与旧静态评审、组合评审、验收、队列发布和部署的实际执行边界；部署不占全机测试槽。每个 cmd/check/重部署前后核对版本、目录、origin、源码/索引、配置与消费者。cmd 失败只停部署；check 失败且条件完整时，用登记意图、反向 CAS 和私有索引回退本机 dev，再以原 cmd 执行上一版方法。只归一化 Git 可证明的预期方法转换；脏内容、挡路文件、目标前进、停止/超时、未知消费者或副作用不自动回退/重做。没有远端强推/撤回或再次自动推送；本地、最近远端推送确认、最近成功部署命令和回退分列，未知不冒充实时业务结果。
+- **只评审执行**：`review-node.ts` 直接复用 `static-review.ts` 的调用、格式解析和最多一次失败重试，不调用 runReviewRound、开发交付、准备或队列。隐藏分离检出中保留范围、base/head/tree、必须修改/建议、模型、耗时、调用原文、快照和证据。有必修只记不通过，不发返修；调用失败记没验证。Git 取证也登记实际消费者；取证失败且已确认释放可正常收尾，缺释放证明不能凭空登记洗白。目录/索引/输入守卫使迟到结论无效，用户原工作区的暂存/未暂存/未跟踪内容不进入候选、不被改动。
+- **控制/展示/释放**：只评审从不取得合入资格，普通/接受未验证合入及整合均拒绝；五态中用“等你决定”明确显示“只评审已结束”、结果、报告及资源，不误判 Loop 外合入，不显示成开发交付。已发布停止/放弃只取消剩余活动，不撤销发布事实。发布后禁止改卡及追加部署授权，冻结配置变更先拒绝；未知在途命令、回退意图和释放未知保留现场，不能盲重跑。正常结束按登记释放干净空间，分支/历史/报告/证据保留。
+- **使用说明**：README、工具清单、运行与维护及 CLI 帮助同步第 4 步字段、完整示例、补救命令和真实验证边界。旧直接评审/部署入口保留，第五步旧路径/工作目录删除未实施；稳定规则、原需求、用户标准及 `test/e2e.mjs` 未修改。
+
+### 原始命令、日志与结果
+
+证据根：`/tmp/loop-step4-checks-kmykqT/`。程序用例各有独立系统临时 Git、本地 bare origin、kernel/projects/resources/local-queue、通知配置和模型/宿主替身；不使用真实远端、真实部署或业务模型。以下均在本工作目录运行，日志保留原失败/中断，不将初检改成通过。
+
+| 原始命令 | 日志与结果 |
+|---|---|
+| `node --test test/kernel-step4.test.ts` | `step4-foundation.log` 初检 9/13（只评审快照指纹构造错误）；修复后 `review-foundation-2.log` 定向通过。`step4-integrated-1.log` 30/33（含父用例，回退后重跑未在派发前明确拒绝）；修复后 `new-integration-2.log` 对该项通过，但新增两项夹具错误，后续如下。阶段完整集 `step4-final.log` **41/41**。之后只新增两项释放证明反例，按影响定向验证，不重复扩大完整集。 |
+| `node --test --test-name-pattern='A14 真实进程\|A14 停止部署\|A13/A14\|A14 配置\|A16 只评审运行' test/kernel-step4.test.ts` | `boundaries-1.log` 14/17：停止与进程返回竞争误记 blocked 而非 cancelled，已修。`node --test --test-name-pattern='A14 停止部署' test/kernel-step4.test.ts` → `stops-2.log` 通过。真实进程屏障记录读者开始/结束、部署开始/结束及后续读者开始/结束，双向实际互斥，不靠固定等待或 Promise.all 声称互斥。 |
+| `node --test --test-name-pattern='A13 check\|第四步 README\|已登记的部署方法\|A17 CLI\|A17 Pi' test/kernel-step4.test.ts` | `new-integration-2.log` 8/10：新增帮助测试误期望 exit 0（既有帮助为 2），方法回退夹具误用了成功 check；修正夹具而非产品语义。`node --test --test-name-pattern='第四步 README\|已登记的部署方法' test/kernel-step4.test.ts` → `fixtures-3.log` **2/2**，实际解析 README 两张完整卡示例，方法回退执行新/旧各自脚本。 |
+| `node --test --test-concurrency=1 test/kernel-controls.test.ts test/kernel-test-node.test.ts` | `prior-nodes.log` 首次检查受工具 120 秒总时限中断；`prior-nodes-2.log` 17/18：项目执行边界新增 await 期间过早标 waiting，导致旧 pending 改卡断言失败。改为真实竞争才标等待，未启动旧命令的边界拒绝 pending；`node --test --test-name-pattern='活动边界 pending' test/kernel-controls.test.ts` → `control-boundary-3.log` 通过，旧断言未改。 |
+| `node --test --test-concurrency=1 test/kernel.test.ts test/kernel-controls.test.ts test/kernel-test-node.test.ts test/local-node-queue.test.ts` | `kernel-regression.log` 66/68（含父用例）：仅旧推送失败复用提示缺少“不自动重试”原文，已保留原 Git 原因及该提示。`node --test --test-name-pattern='目标前进产生未检查树' test/kernel.test.ts` → `push-compat-2.log` **4/4**；其余通过项不重复执行。 |
+| `node --test --test-concurrency=1 test/kernel-batch.test.ts test/acceptance-recheck.test.ts test/acceptance-recovery.test.ts` | `batch-regression.log` 前 **43 个顶层场景通过**，包括旧单任务真实旧指纹、普通/例外合入、精确重验、双宿主屏障和旧验收恢复；随后达到工具 480 秒总时限，并非产品判定失败。`node --test --test-name-pattern='集成 CAS 后中断\|多任务 Claude/Codex' test/kernel-batch.test.ts` → `batch-remaining.log` **4/4**，只补剩余场景。 |
+| `node --test --test-concurrency=1 test/batch-delivery-deployment.test.ts test/batch-delivery-deployment-wait.test.ts test/recipes.test.ts` | `legacy-deployment-review.log` **24/24**，保留旧部署等待/边界/失败回退及旧直接只评审行为。 |
+| `node --test --test-name-pattern='A12/A16\|A11 发布\|A15/A16\|第四步 README\|A17 Pi\|A14 停止部署\|A16 只评审' test/kernel-step4.test.ts` | `final-boundaries.log` **20/20**：收尾控制版本、只评审展示/精确对象及三入口受影响边界复核。 |
+| `node --test --test-name-pattern='缺少消费者释放证明\|只评审运行中' test/kernel-step4.test.ts` | `review-release-final.log` **5/5**：补“空登记不等于释放证明；停止不能洗白后重跑”。 |
+| `node --test --test-name-pattern='A15\|A16 只评审\|A17 CLI' test/kernel-step4.test.ts` | `review-proof-final.log` **12/12**：最后补取证失败的已释放/未知释放区别，以及实际 CLI、固定对象、模型替身三种报告和运行中失效。 |
+
+诊断原始命令：
+
+```bash
+node /tmp/loop-step3-checks-hWvPgT/types-check.mjs development-card.ts node-ledger.ts kernel.ts kernel-workspace.ts kernel-session.ts kernel-runtime.ts kernel-cli.ts kernel-controls.ts kernel-pi.ts hosts/kernel-hook.ts submission-node.ts static-review.ts development-node.ts test-node.ts acceptance-node.ts review-node.ts deployment-node.ts deployment-exec.ts project-execution.ts merge-queue.ts acceptance.ts review.ts stop.ts loop.ts test/kernel-step4.test.ts
+# types-final.jsonl：25 个受影响入口，affectedErrors=0、otherBaselineDiagnostics=0。
+node /tmp/loop-step4-checks-kmykqT/types-check.mjs review-node.ts kernel-runtime.ts test/kernel-step4.test.ts
+# types-proof-final.jsonl：最终释放证明增量，3 个入口及依赖 0 诊断。
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs development-card.ts node-ledger.ts kernel.ts kernel-workspace.ts kernel-session.ts kernel-runtime.ts kernel-cli.ts kernel-controls.ts kernel-pi.ts hosts/kernel-hook.ts submission-node.ts static-review.ts development-node.ts test-node.ts acceptance-node.ts review-node.ts deployment-node.ts deployment-exec.ts project-execution.ts merge-queue.ts acceptance.ts review.ts stop.ts loop.ts test/kernel-step4.test.ts
+# lens-final.jsonl / .err：真实 LSP touchFile/collectDiagnostics 请求，非空缓存；禁安装，finally shutdown。
+node /tmp/loop-step4-checks-kmykqT/lens-check.mjs review-node.ts test/kernel-step4.test.ts
+# lens-proof-final.jsonl / .err：最终增量实际请求。
+git diff --check
+```
+
+复用已安装 TypeScript/Node/Pi 类型，不安装/升级依赖。pi-lens 推断工程仍报缺 Node/Pi 类型的真实诊断，**不冒称 LSP 清零**；显式既有类型依赖的 strict 检查为 0。初次新增测试的可选断言说明参数及闭包可空类型错误分别保留于 `types-nodes.jsonl`、`types-current.jsonl`，均已修复。诊断脚本和 loader 的只读副本已保留在本证据根，便于复核。
+
+### A11—A17 对应与断言边界
+
+文档 A11—A17 对应本会话解析编号 A1—A7，顺序不变，未为保留文档编号改通用抽取器或原需求 A1—A10。
+
+| 文档 / 会话 | 隔离程序依据 |
+|---|---|
+| A11 / A1 | 单任务真正发布/推 bare dev 后 cmd/check，各用实际压缩提交；CLI/Pi/Hook 重复接续不再部署；分支/历史可查，干净空间释放。 |
+| A12 / A2 | 未安排不部署；部署无提交、非法配置/比较/多任务只评审在资源前拒绝；真实 bare hook 拒推时本地事实及 Git 原因保留，无部署/重推。 |
+| A13 / A3 | cmd 失败及只重跑部署；check 失败、本地回退/重新部署/恢复失败；目标前进、脏源码、消费者未释放、超时、停止、写后还原均不回退。另验证已检查方法随回退切换到上一版，远端仍为发布提交。 |
+| A14 / A4 | 实际进程屏障双向互斥、排队不占测试槽；排队/部署/check 停止，check 返回后停止和持久回退意图中断；直接改配置/卡暂停，恢复冻结输入后仅部署；发布前受控确认、发布后拒绝改卡。未知副作用不盲重做。 |
+| A15 / A5 | 无必修、有必修/建议、格式失败三种报告；原用户文件/索引逐字不变，无开发/返修/测试/验收/提交/部署；正常释放。取证失败已释放可结束，缺证明/未知消费者保留。 |
+| A16 / A6 | 非法输入资源前拒绝；分支后来移动仍固定原对象，同树换头拒绝；标准/文件/模型/目录变化使旧结论失效，需受控确认；普通/接受未验证合入拒绝，不判 Loop 外合入；查询不写迁移，有效通过报告复用。 |
+| A17 / A7 | 上述当前单/多任务、普通/例外发布、真实旧账本、精确重验、三宿主替身适配及旧直接只评审/部署回归；节点未互相引用。 |
+
+既有测试断言 **零删除、零修改**；只扩展 `test/fake-kernel-pi.mjs` 的可选重复 settle 场景，缺省行为不变。新增 `test/kernel-step4.test.ts`，包括 README 示例/帮助的实际解析行为。上述新夹具修正不是削弱旧断言；`test/e2e.mjs` 场景及断言零差异、未运行。新测试当前 43 个计数项以阶段完整集加最后两项定向增量覆盖，不声称最后重跑了全文件或全仓。
+
+### 资源及中断收尾
+
+各正常夹具在 finally 按自身临时根释放；消费者按随机 owner、PID 启动时间、run/task/attempt、Git common-dir 和登记路径核对。未知/脏目录反例验证产品保留，夹具只清自己的模拟资料。成功场景核对空本机队列、登记消费者结束、任务/批次/分离 worktree 删除，分支/ref/日志在运行中保留供断言。
+
+两次工具总时限中断留下的样本，不按名字/年龄/PID 猜删：由 TAP 的 62290 / 69221、账本中相同 PID 的完整启动时间和 run UUID 反查，核对原仓库/本地 bare origin、随机进程 owner 及 Git 共用目录后，执行 `/tmp/loop-step4-checks-kmykqT/settle-interrupted.mjs`。两个 run：`d182f13b-9eba-46a9-b490-17d0df83e2af`、`5e9be967-6ba4-4755-9aef-4b32c200bd9e`。先保留原账本/失败材料及 candidate-history.bundle，再用统一放弃/停止按身份释放假宿主、全部 worktree/票据和资源，确认释放后只删除这两个已证明归属的临时根；不是清理旧开发工作区。`interrupted-release.log`、`interrupted-<run>/release.json` 和前后账本保留真实释放证明。最终 `final-consumer-check.json` 的精确本次标记匹配为 0；未杀同名进程、端口占用者或其他任务。
+
+实际开发 worktree 是用户指定空间，仍保留；没有清理旧 worktree、历史资料、真实全局状态或用户 temp/。pi-lens 均 finally shutdown。证据根有意保留，临时测试运行空间/消费者已结清；没有未确认的本次测试消费者。
+
+### 旧问题单相关部分逐项依据（只读对照，不关单）
+
+只读核对桌面原单相关描述/边界，不回写或关闭它们；早年拟方案不覆盖本次权威内核需求，不把本步程序替身当原业务复现。
+
+| 旧问题标题 | 本步依据与不冒领的范围 |
+|---|---|
+| 开工全量基线测试阻断批次启动 | 新卡在资源前只读校验，无隐含基线；A12/A16 与旧 gate 忽略回归保留。未重放原项目全量基线事故。 |
+| 基线门禁报错难以定位 | 新节点各保留原始调用/命令日志和下一步，非法卡不半开工；不修原项目门禁脚本，也不补验旧开工诊断。 |
+| 全量测试同时运行导致门禁假失败 | 保留卡命令、本机测试/验收槽；部署用另一项目执行边界，真实屏障证明不抢测试槽。不恢复旧 gate，也不声称手工全量负载已治理。 |
+| 队列通过后合入仍重复评审 | 发布绑定原检查，重复部署/续跑/宿主回调不再评审或推送；旧同树、旧账本及多任务映射回归通过。原历史业务仍待核销。 |
+| 自动评审完成提示与合入条件不一致 | 本地发布、远端记录、部署/回退、资源和只评审报告分别显示；不能用报告取得合入资格。真实通知体验/原业务请求配对未复演。 |
+| 非产品失败阻断整批合入 | 部署失败不扣开发/测试/验收次数、不抹通过/发布；只评审有必修也不返修；前三步普通/真实用户例外回归保留。原环境/方法案例未实操。 |
+| 批次已合入但状态仍显示运行中 | 状态按同账本活动；发布后停部署不隐藏，版本分列；只评审即使 head 在 dev 也不判已合入。旧外部合入只读识别回归通过，不批量改历史 running。 |
+| 配置错误发现晚且暂停无通知 | 部署/比较合法性资源前拒绝，冻结变更在边界拦下，原因/日志/补救可查；不扩修浏览器、过期 guide 语义及项目准备缺口。 |
+| 运行中改批次配置导致整批验收不启动 | 受控变更及相关输入投影保留；deployment 独立，直接改卡/配置不启动旧命令。原单 scope 扩大要求与当前冻结 scope 不同，本步不新增扩大 scope 能力或宣称旧事故修复。 |
+| 合入队列锁在持有者释放瞬间误报身份不明 | 保留旧锁逻辑及旧部署等待边界回归；新项目租约用短锁/精确 token。未单独复现原 record/publish 瞬时锁窗口，不冒领本步修复。 |
+| 启动命令截断导致流水线空等 | 保留 argv/精确会话与有界宿主确认；实际 CLI/Pi 替身及只评审独立 worker 通过。未操作真实 Terminal 或验证旧队列长命令业务。 |
+| 门禁误把测试失败判为磁盘不足 | 分类器未改，当前测试节点 ENOSPC/冲突/未知定向回归保留；部署是部署失败，不转成开发产品返修。原 PA 事故未回放。 |
+| 升级后缺少项目迁移提示 | 当前帮助/README/工具清单/运行维护同步，新卡旧格式拒绝与真实示例解析回归；不代迁接入项目、不更新真实插件/信任或做宿主采样。 |
+| 验收超时丢弃已有证据 | 仅新增项目执行互斥包装，旧恢复/证据/预算定向回归通过；不实施原单独立报告预算、时长预估等内部余项，不称已解决。 |
+| 验收演示数据写入真实状态目录 | 复用隔离夹具，所有本轮状态/通知/证据落私有临时根，按归属结清中断消费者。没有处理原历史污染记录，未据此验收其全部共用方法。 |
+| 测试写死等待秒数在机器繁忙时误判失败 | 新用例以进程/文件屏障验证，不靠固定等待宣称并行；两次总检查时限中断如实保留并只补剩余。未改旧墙钟断言、未做禁止的双全量压力运行。 |
+| 调用链排查遗漏子组件 | 本步核对卡→运行/会话→内核/账本/工作区、CLI/Pi/Hook 及旧执行复用边界；不扩为原业务准备流程或授权范围治理。 |
+| 协调汇报反复要求用户决策 | 普通实现及自检直接推进，仅业务授权/未知外部副作用留人工；没有改项目模板/稳定规则，不当作本步产品修复。 |
+
+### 分层交付结论
+
+- **源码、自检**：上述两条产品路径、控制/查询/资源及受影响回归已实现并验证；没有全仓测试、真实模型业务验收、真实远端推送或真实部署。
+- **独立静态评审**：待外层 Loop；开发自检不冒称独立评审通过。有必须修改仍在本原会话返修。
+- **【必须修改】**：自检已发现项均已修复、失败反例闭环；当前没有已知未解决的必须修改。不把外部条件或未验业务当代码缺陷，也不降低用户标准制造通过。
+- **【建议】**：后续可改善未知副作用的人工核对引导；本步不添加强制忽略/远端撤回策略，不阻断此次源码交付。
+- **未验证**：真实 Pi/Claude/Codex 模型质量、实际宿主安装/信任装配、真实系统通知体验、真实部署/回退及远端状态、真实浏览器/后端/账号业务验收、Loop 自身 dev 自举发布。前三步原有未验项继续保留；本轮没有自行提交/发布授权。
+
+### 第 4 步外层第 1 次评审返修
+
+来源：本原会话收到的四项必须修改；外层记录的小问题本轮不处理。原工作区、分支、真实 HEAD 及提交/发布边界不变。以下更新覆盖初次交付时“无已知未解决必须项”的时态，不改写之前失败日志或前三步历史。
+
+- **第 1 条：已修。** `deployManaged()` 区分首次自动接续、已有终态复用和明确单节点重跑。Pi/Hook 重复回调、普通续跑与已发布合入不再重做已失败命令；成功仍复用，未知副作用仍拒绝。只有 `重跑 --node 部署` 派发绑定上一尝试 ID 的重跑意图，前台/后台 worker 均传递该身份；`deployment-node.ts` 在登记新尝试的同一账本短锁再核对原 ID/控制身份，防止迟到或重复意图重做，并以 `retryOf` 留史。测试中 cmd 先记录外部操作再退出 1，Pi 重复 settle 和两类 Hook 重复 Stop 都只执行一次；合入/普通续跑不重做，明确后台重跑才新增一次，前置检查及发布记录不变。
+- **第 2 条：已修。** 宿主监督器读同一份批次快照，再投影任务状态；收尾同时核对任务活动、批次活动，以及已安排且推送成功的部署是否已结束。提交到部署登记之间的安全接续空隙也不提前停宿主。新增真实双 Pi 宿主/测试/统一验收/推 bare dev 后的部署屏障：最后一个任务承载批次部署，部署进程产生跨越 500ms 监督器轮询的 1500ms 检查点，核对批次执行 PID 对应原 session、原进程组及监督器仍存活，放开屏障后 cmd/check 成功才释放全部空间。不是用任务 activity 为空推断批次无活动。
+- **第 3 条：已修。** `createChildExec` 明确记录 `processStarted`：不存在的程序保留 ENOENT 原文，明确未启动时没有消费者，可提供已释放证明；已启动或证据未知不据空登记补通过。共享静态调用把执行/租约等待纳入本次剩余时限，以结构化失败保留释放/可重试事实；未知释放立即结束自动重试，不能申请自己留下的 blocked 租约继续等待。项目租约遇 blocked 明确拒绝并保留原 token/登记，不自动删除。只评审报告保留真实调用原文及没验证终态。三条真实执行反例覆盖“程序不存在（最多两次有界调用，无 blocked）”“程序确实启动、返回时模拟丢释放证明”“实际执行后抛错丢失回执”；后两者只调用一次，未知租约逐字保留，目录/结论不洗白。
+- **第 4 条：已修。** 发布后路径不再读取任务级测试/验收返修状态，`postNode` 分支不会调用 `taskDefinition(batch)`。含测试的多任务批次部署失败后，普通续跑只返回原失败；批次级 `重跑 --node 部署` 可用，成功后两种重复入口均只复用。测试冻结原任务候选/次数/测试/验收/提交结果及 publication，核对全部不变，并用 bare origin 的真实 pre-receive 记录证明只推送一次。多任务覆盖还发现 `nodeCheckLines` 把部署误作任务身份、导致含部署的多任务卡创建/查询报错，已按同一批次级身份修复；这是四项必修的实际入口阻断，不是扩修小问题。
+
+#### 本轮命令、原始失败与闭环
+
+证据根 `/tmp/loop-step4-review1-uasQGd/`；全部 Git/bare origin、假宿主/模型、部署产物及状态仍在各自系统临时根。不调用真实业务模型/浏览器/后端，不嵌套真实开发或评审 Agent。
+
+```bash
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/reproduce-evidence node --test test/kernel-step4-review1.test.ts
+# reproduce.log：首轮新夹具单任务重复空提交的设置错误；同时暴露多任务部署展示身份错误和第 3 条超时自等待，原始失败保留。
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/reproduce2-evidence node --test --test-name-pattern='第1条|第2条|第4条' test/kernel-step4-review1.test.ts
+# reproduce2.log：修正夹具及必要的展示身份后，实际复现重复部署、监督器提前结束承载者、发布后两个批次命令均报 taskDefinition 错误。
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/fix124-evidence node --test --test-name-pattern='第1条|第2条|第4条' test/kernel-step4-review1.test.ts
+# fix124.log：6/6。
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/fix3-evidence node --test --test-name-pattern='第3条' test/kernel-step4-review1.test.ts
+# fix3.log：4/4。
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/final-evidence node --test test/kernel-step4-review1.test.ts
+# review1-final.log：10/10；随后增加一项内存替身显式释放失败的兼容反例，当前文件共 11 个计数项，按后续增量验证。
+node --test test/kernel-step4.test.ts
+# step4-regression.log：43/43。
+node --test --test-concurrency=1 test/review.test.ts test/procs.test.ts test/hook-process.test.ts test/recipes.test.ts
+# shared-review-regression.log：52/56；仅旧 Hook 验收 cleanup 三个信号及其父用例失败：测试进程继承外层 AUTOREVIEW_SINGLE_NODE=1，验收本就未安排。未改断言或生产行为。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='Hook 验收中收到可捕获信号' test/hook-process.test.ts
+# hook-cleanup-isolated.log：4/4，按旧兼容场景清除单会话身份后实际执行验收/cleanup。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='真实 bin/loop|新卡会话空闲|非受管|新单会话|新卡无需|旧账本|目标前进产生未检查树' test/kernel.test.ts
+# kernel-targeted.log：7/7。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='A5：真实两个宿主|A6：只退甲|真实旧指纹' test/kernel-batch.test.ts
+# batch-targeted.log：3/3，真实双宿主、精确重验和真实旧账本保留。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='旧单会话保护|没有释放证明' test/kernel.test.ts
+# legacy-pi-proof.log：初检 1/2，纯内存评审替身未声明消费者事实；明确声明“未启动、无消费者”后 legacy-pi-proof-fixed.log 2/2。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='G17 Ponytail|配置核对 A6/A7' test/autoreview-delivery.test.ts
+# pi-mock-regression.log：5/6，内存替身抛异常同样缺已知未启动证明；未通过清除未知租约放行。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='配置核对 A6/A7' test/autoreview-delivery.test.ts
+# pi-mock-error-fixed.log：1/1，声明内存异常未启动且保留原异常类别/全文后，原后续完成及历史证据断言通过。
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/proof-evidence node --test --test-name-pattern='第2条|第3条' test/kernel-step4-review1.test.ts
+# proof-compat-final.log：6/6，最终屏障与已知/未知释放、内存显式释放失败。
+LOOP_STEP4_REVIEW1_EVIDENCE=/tmp/loop-step4-review1-uasQGd/proof-final-evidence node --test --test-name-pattern='第3条' test/kernel-step4-review1.test.ts
+# retry-proof-final.log：5/5，最后明确异常证明传递的增量复核。
+node /tmp/loop-step4-checks-kmykqT/types-check.mjs kernel-session.ts kernel-runtime.ts kernel.ts git.ts static-review.ts project-execution.ts review-node.ts deployment-node.ts node-ledger.ts hosts/review-hook.ts test/kernel-step4-review1.test.ts test/helpers/autoreview-fixture.ts
+# types-delivery.jsonl：12 个受影响入口及依赖 0 诊断，otherBaselineDiagnostics=0。
+node /tmp/loop-step4-checks-kmykqT/lens-check.mjs kernel-session.ts kernel-runtime.ts kernel.ts git.ts static-review.ts project-execution.ts review-node.ts deployment-node.ts node-ledger.ts hosts/review-hook.ts test/kernel-step4-review1.test.ts
+node /tmp/loop-step4-checks-kmykqT/lens-check.mjs static-review.ts test/helpers/autoreview-fixture.ts
+# lens-final / lens-proof-final：实际 LSP touchFile/collectDiagnostics，禁安装，finally shutdown；推断工程缺 Node/Pi 类型的诊断仍保留，不称空缓存或 LSP 清零。
+git diff --check
+```
+
+没有删除、跳过或放宽既有测试断言；新增 `test/kernel-step4-review1.test.ts`，复用既有 fixture/假宿主/假验收方。`test/helpers/autoreview-fixture.ts` 仅为**纯内存**模型回执/异常明确声明没有启动进程，显式 `processesReleased:false` 或结构化未知异常原样保留；真实命令仍走原 externalExec/createChildExec，不能由该默认值补造释放。本轮新增专门反例验证显式失败仍暂停且只调用一次，未通过改生产保护迁就夹具。`test/e2e.mjs` 零修改、未运行。
+
+#### 资源和分层结论
+
+新夹具的正常及失败路径先按原登记停止，再核对 launch/supervisor/worker 随机 owner/PID 启动时间和命令 procs，确认实际消费者结束后才清自己的临时根；原账本、命令输出、部署屏障/原宿主检查点及 `release-proof.json` 保存在本证据根的各 `*-evidence/<run>/`。未知释放反例故意保留产品的 blocked/未确认记录，夹具用原真实执行器已释放的独立观察证明模拟丢回执；不会修改产品账本把它补成通过。初始化失败的临时资料不按名字/年龄猜删；初始化阶段尚未派发消费者。没有清理旧 worktree 或用户 temp/，没有操作真实部署配置、真实 dev、真实远端或全局权限。所有实际启动的本轮消费者按登记结清，LSP 服务均 shutdown。最终 `final-release-check.json` 核对 7 份新收尾证明及相应临时根已移除，本工作树精确启动标记的剩余消费者为 0；逻辑未知反例仍保持未确认记录，不冒充产品已恢复。
+
+【必须修改】四条均已修复并完成上述程序验证；待外层复审，不自行宣布独立评审通过。
+
+【建议】本轮外层明确无需处理的小问题未实施；原建议及未知副作用人工核对边界保留。
+
+未验证项不变：真实模型质量、实际宿主安装/信任与业务装配、真实通知体验、真实远端/部署/回退、真实账号/浏览器/后端业务验收、Loop 自身 dev 自举发布；前三步原有未验项继续保留。未提交、推送或发布真实仓库。
+
+### 第 4 步外层第 2 次评审返修
+
+来源：本原会话收到的唯一必须修改；本轮小问题不处理。工作目录、分支和真实 HEAD 仍与本页开头相同，未提交或发布。本节是第 1 次返修之后的新事实，不将此前“待复审”改成已经独立评审通过。
+
+**第 1 条：已修。** 真实进程反例确认该静态推断：旧 Pi 的 `wrappedExec()` 在生命周期取消后丢弃已经返回的执行回执，导致静态调用把“旧结论失效”误当成“消费者释放未知”。只修改适配层的回执传递：
+
+- 执行器尚未被调用时已取消，明确没有本次新消费者，以结构化失败记录这一事实，不继续执行或重试。
+- 执行器返回后才发现生命周期/输入已撤销，仍抛错阻止旧结果进入结论；同时通过既有 `ReviewerCallFailure` 携带严格的 `res.processesReleased === true` 事实，`retryable:false`。确认释放只用于归还本次租约，绝不授予旧结论资格。
+- 没有回执的执行异常、缺少或否定的释放证明仍为未知。没有修改项目租约的 blocked 保留/回收规则，没有调用恢复清理去“洗白”未知，没有删除真实历史租约，也没有扩大或迁移旧结论。
+- 运行维护说明同步这一区分；原用户标准、授权、稳定规则、前三步历史和本轮小问题均未修改。
+
+#### 实际验证、原始失败和结果
+
+证据根 `/tmp/loop-step4-review2-YENOsv/`。新增 `test/kernel-step4-review2.test.ts` 复用既有 Pi 事件夹具及真实 `createChildExec`；模型是普通 Node 脚本替身，不启动真实 Agent。所有 HOME、Git、资源、模型脚本和通知配置都在各自系统临时根；清除外层受管身份，明确按旧单会话开发评审行为验证。
+
+真实进程屏障先确认模型进程已启动、随机 owner 与 `.procs.json` 相同、启动时间/进程组可核对且实际存活，并确认组合评审和静态调用的两个读租约都在。分别在评审中更新标准、quit、reload；观察执行器真实回执 `processesReleased:true` 和原进程组已结束，再验证旧结论没有通过、没有产品返修、关闭后旧任务不调用 Pi/ctx。正常取消的租约归零，同项目部署互斥边界可取得并归还（**没有执行部署命令**），原会话恢复后第二次评审成功；更新标准的第二次输入明确是当前第 2 版，用户 HEAD/未提交文件不被自动提交或改写。
+
+另两项反例在真实命令已结束后模拟调用方丢失/否定释放回执：即使进程登记为空，产品仍保存 blocked；再次 `/review` 不调用模型，租约 token/内容不变。真实原始回执单独留证，不拿夹具观察到的物理结束去伪造产品已经收到证明。
+
+```bash
+LOOP_STEP4_REVIEW2_EVIDENCE=/tmp/loop-step4-review2-YENOsv/reproduce-evidence node --test test/kernel-step4-review2.test.ts
+# reproduce.log：2/5；三个“实际已释放”的取消场景按原断言失败，两个未知保护反例通过。每例原回执/租约、输入及状态材料保留。
+LOOP_STEP4_REVIEW2_EVIDENCE=/tmp/loop-step4-review2-YENOsv/fixed-evidence node --test test/kernel-step4-review2.test.ts
+# fixed.log：5/5；未改弱反例或断言。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='G8 B7|总结关闭边界|G7 B6|G9 无标记|手动评审基线' test/autoreview.test.ts
+# lifecycle-regression.log：18/18，旧关闭、UI 能力撤销、手动/自动评审和异常收尾保留。
+env -u AUTOREVIEW_SINGLE_NODE node --test --test-name-pattern='done 接受新来源|检查中修改上级配置' test/autoreview-sources.test.ts
+# input-regression.log：7/7，标准/授权与配置失效保护不变。
+node --test --test-name-pattern='第3条' test/kernel-step4-review1.test.ts
+# unknown-proof-regression.log：5/5，第 1 次返修的明确未启动/未知释放、blocked 保护及内存显式失败继续有效。
+node /tmp/loop-step4-checks-kmykqT/types-check.mjs autoreview.ts test/kernel-step4-review2.test.ts
+# types.jsonl：ES2023 工具配置不包含既有 Promise.withResolvers，两个库级诊断原样保留；没有改产品代码回避。
+node /tmp/loop-step4-review2-YENOsv/types-check.mjs autoreview.ts test/kernel-step4-review2.test.ts
+# types-es2024.jsonl：按实际 Node v22.23.1 及已有 Promise.withResolvers 的 ES2024 API 检查，strict affectedErrors=0、otherBaselineDiagnostics=0；TypeScript 5.9.3 为已安装版本。仅在系统临时根调整验证脚本，未改项目/全局配置，未安装/升级依赖。
+node /tmp/loop-step4-checks-kmykqT/lens-check.mjs autoreview.ts test/kernel-step4-review2.test.ts
+# lens.jsonl / lens.err：真实 LSP touchFile/collectDiagnostics，禁安装并 finally shutdown；原推断工程缺 Node/Pi 类型的诊断不冒称清零，不用空缓存报告通过。
+git diff --check
+```
+
+旧测试/夹具断言零修改、零删除，本轮只新增上述反例并改 `autoreview.ts` 的生命周期回执适配；`static-review.ts`、`project-execution.ts`、提交/部署节点及第 1 次返修行为本轮没有修改。受影响检查通过后未重复扩大到全仓或真实业务；`test/e2e.mjs` 零修改、未运行。
+
+#### 资源与分层交付
+
+各场景先取消其原任务并等待真实执行回执，再按原 owner/PID 启动时间确认进程组结束、登记消费者为空、租约已正常归还或明确保留 blocked。`reproduce-evidence/` 和 `fixed-evidence/` 保存输入、真实回执、原状态/报告与 `release-proof.json`；负例的逻辑未知仍保留在证据中，实际夹具消费者由真实执行器确认结束后，才删除自身临时根。没有按名称、年龄、端口或裸 PID 猜测清理，没有清理其他 worktree、用户 temp/ 或真实全局状态。最终 `final-release-check.json` 按原随机 owner/启动时间复核五组实际消费者已结束、五个夹具根已释放；负例的逻辑 blocked 仍保留在证据中，未补造产品恢复。LSP 服务已 shutdown。
+
+【必须修改】本轮唯一项已修并完成上述真实进程与定向程序验证，待外层复审；不自行宣告独立评审通过。
+
+【建议】本轮明确无需处理的小问题未实施。
+
+未验证项沿用：真实 Pi/Claude/Codex 模型业务质量、实际宿主安装/信任及业务装配、真实系统通知体验、真实远端/部署/回退、真实账号/浏览器/后端业务验收、Loop 自身 dev 自举发布；前三步未验项不变。本轮没有真实 add/commit/stash/reset/merge/push 或部署。
+
+## 前三步历史记录（保留原时态）
+
+第三步历史记录中的阶段：**外层第 2 次评审的一条必须修改已返修并完成程序验证，待外层复审**（不是独立评审通过、业务验收通过或真实发布）。最新记录见下文「第 2 次评审返修」，第 1 次三项返修保留；此前首次交付记录保留原始时态。本开发会话收到本页关联提示词后在 `step3` 实施；前台准备/启动的历史原样保留，不把准备记录当产品交付。2026-11-06 用户要求开始第三步、分支为 `step3`，由协调方写好方案与 Loop 任务并在可见终端前台启动。下文第三步方案是当时执行依据；后面的第一、二步章节保留历史，不再代表当前进度或本次授权。
 
 前两步发布事实：第一步 `f014331`、第二步 `d8408fa` 的成果已压缩合入 `dev` 的 `b97e154`，真实 origin/dev 推送和本次发布 worktree 释放有记录；第二步外层第 4 轮静态评审通过、无必须修改。发布卡按用户接受未验证处理，没有伪造本卡开发评审/测试结论。完整“新卡启动真实开发至普通自动合入”及第二步真实业务验收仍未验证，不在第三步准备中补记通过。证据：`/Users/Admin/.pi-autoreview/deployments/loop-kernel-step2-20261106-92fe5a24/plan.json` 及其中账本/检查日志。
 

@@ -479,6 +479,13 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
 
 /** 准备和自动恢复有自己的有限预算；不进入用户接管路径，不清零业务计数。 */
 export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
+  const { acquireProjectExecution } = await import("./project-execution.ts");
+  const { consumerProblem } = await import("./local-node-queue.ts");
+  const release = await acquireProjectExecution(deps.cwd, "check", deps.procsFile ?? "", deps.signal, deps.checkLive);
+  try { return await runReviewRoundOwned(deps); }
+  finally { release(!consumerProblem(deps.procsFile ?? "") && !consumerProblem(`${deps.procsFile}.cleanup`)); }
+}
+async function runReviewRoundOwned(deps: ReviewDeps): Promise<ReviewOutcome> {
   auditLoopConfig(deps.state, deps.cwd);
   if (deps.sink === "report") {
     // 复用同一评审调用/解析/预算；不运行项目方法、不采用开发队列资格。

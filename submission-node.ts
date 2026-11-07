@@ -7,6 +7,7 @@ import { contributionProblems, currentCandidate, kernelCommand, qualification, t
 import { atomicRun, findUserDecision, readRun, updateRun, validResult, taskIds, taskView, type UserDecision } from "./node-ledger.ts";
 import { checkInputs, fileDigest, frozenCardProblem, gitRaw } from "./kernel-workspace.ts";
 import { digest, inside, type NodeName } from "./development-card.ts";
+import { acquireProjectExecution } from "./project-execution.ts";
 import { gitResult, gitText, worktreeForBranch } from "./workspace.ts";
 
 const intersects = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
@@ -19,11 +20,17 @@ function protectedTarget(cwd: string, touched: string[]): string {
 }
 
 export async function submitCandidate(input: NodeInput, decision?: UserDecision): Promise<NodeOutput> {
-  const release = eventLock(join(input.run.common, "loop-kernel-dev.lock"));
+  if (input.run.card.nature === "评审") throw new Error("只评审卡不允许提交或合入");
+  const projectRelease = await acquireProjectExecution(input.run.repo, "deploy", input.procsFile!, input.signal, () => input.signal?.throwIfAborted(), () => updateRun(input.ledger, (r) => {
+    if (r.activity?.id === input.attempt) r.activity.kind = "waiting";
+  }));
+  let release: (() => void) | undefined;
   const evidence = join(input.run.dir, `submission-${input.attempt}.log`), operations: string[] = [];
   let targetIndex: { fd: number; file: string; lock: string; scratch: string; installed: boolean } | undefined;
   const log = (s: string): void => { operations.push(s); writeFileSync(evidence, `${operations.join("\n")}\n`); };
   try {
+    release = eventLock(join(input.run.common, "loop-kernel-dev.lock"));
+    updateRun(input.ledger, (r) => { input.signal?.throwIfAborted(); if (r.activity?.id !== input.attempt || r.stopped || r.pendingCard) throw new Error("提交等待期间停止/改卡或执行身份变化"); r.activity.kind = "submitting"; });
     const run = readRun(input.ledger);
     if (run.card.target !== "dev" || frozenCardProblem(run) || run.stopped || run.abandoned) throw new Error("目标或卡/停止身份变化，未合入");
     if (run.publication) throw new Error("已有发布意图/结果；禁止重复合入或自动重试推送，请查询记录");
@@ -133,7 +140,7 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     log(`$ git ${args.join(" ")}`);
     const pushed = gitResult(run.repo, args);
     log(`${pushed.stdout}\n${pushed.stderr}`);
-    updateRun(input.ledger, (r) => { r.publication!.push = pushed.status === 0 ? "成功" : "失败"; r.publication!.reason = pushed.status === 0 ? undefined : (pushed.stderr || pushed.stdout).trim(); });
+    updateRun(input.ledger, (r) => { r.publication!.push = pushed.status === 0 ? "成功" : "失败"; if (pushed.status === 0) r.publication!.remoteCommit = commit; r.publication!.reason = pushed.status === 0 ? undefined : (pushed.stderr || pushed.stdout).trim(); });
     return { status: pushed.status === 0 ? "通过" : "不通过", failure: pushed.status === 0 ? undefined : "environment",
       reason: pushed.status === 0 ? "已本地合入并推送 origin/dev" : `本地已合入，推送失败；保留提交，不自动重试：${pushed.stderr || pushed.stdout}`, evidence: [evidence], operations, released: true };
   } catch (error) {
@@ -142,6 +149,6 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     return { status: "没验证", reason: String(error), failure: "environment", evidence: [evidence], operations, released: true };
   } finally {
     if (targetIndex) { closeSync(targetIndex.fd); if (!targetIndex.installed) rmSync(targetIndex.lock); rmSync(targetIndex.scratch, { force: true }); rmSync(`${targetIndex.scratch}.lock`, { force: true }); }
-    release();
+    release?.(); projectRelease(true);
   }
 }

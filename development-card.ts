@@ -13,8 +13,10 @@ export const NODE_NAMES = ["开发评审", "评审", "测试", "验收", "提交
 export type NodeName = typeof NODE_NAMES[number];
 export interface CheckLimit { maxRepairs: number; timeoutMin: number; maxRecoveries: number }
 export interface DevelopmentTask { name: string; prompt: string; scope: StageScope; test?: string; limits?: { 验收: { maxRepairs: number } } }
+export interface ReviewComparison { base: string; head: string; requirement?: string; criteria?: string; note?: string }
 export interface DevelopmentCard {
-  version: 1; name: string; nature: "开发"; base: string; target: "dev"; flow: NodeName[];
+  version: 1; name: string; nature: "开发" | "评审"; base: string; target: "dev"; flow: NodeName[];
+  review?: ReviewComparison;
   host: "pi" | "claude" | "codex"; tasks: DevelopmentTask[]; acceptance?: string;
   limits: { 开发评审: { maxRepairs: number; timeoutMin: number }; 测试: CheckLimit; 验收: CheckLimit };
 }
@@ -62,16 +64,35 @@ export function parseDevelopmentCard(content: string, file: string, repo: string
   const raw = object(JSON.parse(content), "开发卡");
   if (["stages", "workflow", "steps", "workspaces", "recipe"].some((k) => Object.hasOwn(raw, k))) throw new Error("旧批次格式已停用：请新建 version:1 开发卡；stages 改为 tasks（prompt、scope），workflow/steps 改为 flow:[开发评审,提交]，不再填写 workspaces；不回退旧引擎");
   if (raw.version !== 1) throw new Error("开发卡 version 必须是 1");
-  for (const key of Object.keys(raw)) if (!["version", "name", "nature", "base", "target", "host", "flow", "tasks", "limits", "acceptance"].includes(key)) throw new Error(`开发卡字段尚不支持：${key}`);
+  for (const key of Object.keys(raw)) if (!["version", "name", "nature", "base", "target", "host", "flow", "tasks", "limits", "acceptance", "review"].includes(key)) throw new Error(`开发卡字段尚不支持：${key}`);
   if (!Array.isArray(raw.flow) || !raw.flow.length) throw new Error("flow 必须是非空节点数组");
   const flow = raw.flow.map((v: unknown) => text(v, "flow 节点")) as NodeName[];
   if (!flow.some((v) => v === "开发评审" || v === "评审")) throw new Error("底线违规：必须包含开发评审或评审；开发卡请以开发评审开始");
   if (new Set(flow).size !== flow.length) throw new Error("编排不合法：flow 节点重复");
   for (const v of flow) if (!(NODE_NAMES as readonly string[]).includes(v)) throw new Error(`未知节点：${v}；固定节点：${NODE_NAMES.join("、")}`);
-  const order = ["开发评审", "测试", "验收", "提交"];
-  const unavailable = flow.filter((v) => !order.includes(v));
-  if (unavailable.length) throw new Error(`本版本尚未支持节点：${unavailable.join("、")}`);
-  if (flow[0] !== "开发评审" || flow.some((v, i) => i > 0 && order.indexOf(v) < order.indexOf(flow[i - 1]))) throw new Error("底线违规：必须开发评审 → 可选测试 → 可选验收 → 可选提交，检查必须在开发评审之后，不能逆序");
+  if (raw.nature === "评审") {
+    if (flow.length !== 1 || flow[0] !== "评审") throw new Error('只评审卡只能 flow:["评审"]；不能混入开发、测试、验收、提交或部署');
+    if (!Array.isArray(raw.tasks) || raw.tasks.length !== 1) throw new Error("只评审卡本步限定单任务；多任务必须统一验收，不能豁免底线");
+    if (["base", "target", "host", "acceptance"].some((k) => Object.hasOwn(raw, k))) throw new Error("只评审不需要开发分支/宿主/验收；请用 review.base/head 和 review.criteria");
+    const task = object(raw.tasks[0], "评审任务");
+    if (Object.keys(task).some((k) => k !== "name")) throw new Error("只评审任务只填 name，不填开发提示词、scope 或测试命令");
+    const r = object(raw.review, "review"), review: ReviewComparison = { base: text(r.base, "review.base"), head: text(r.head, "review.head") };
+    for (const key of Object.keys(r)) if (!["base", "head", "requirement", "criteria", "note"].includes(key)) throw new Error(`未知只评审字段：${key}`);
+    for (const key of ["base", "head"] as const) gitText(repo, ["rev-parse", "--verify", "--end-of-options", `${review[key]}^{commit}`], `review.${key} 须为本地已有提交（不 fetch）`);
+    for (const key of ["requirement", "criteria", "note"] as const) if (r[key] !== undefined) review[key] = relativeText(r[key], file, repo, `review.${key}`);
+    if (review.criteria && !extractCriteria(readFileSync(review.criteria, "utf8"))?.length) throw new Error("review.criteria 须包含 ## 验收标准 和条目");
+    const limits = raw.limits === undefined ? {} : object(raw.limits, "limits");
+    if (Object.keys(limits).some((k) => k !== "评审")) throw new Error("只评审限额仅支持 limits.评审.timeoutMin");
+    const l = limits.评审 === undefined ? {} : object(limits.评审, "评审限额"), timeoutMin = l.timeoutMin ?? 60;
+    if (Object.keys(l).some((k) => k !== "timeoutMin") || !Number.isSafeInteger(timeoutMin) || timeoutMin < 1) throw new Error("评审仅支持 timeoutMin 正整数；不安排产品返修");
+    // 内部统一任务视图保留空开发字段；不要求用户伪造文件，也绝不进入开发执行路径。
+    return { content, hash: digest(content), card: { version: 1, name: text(raw.name, "name"), nature: "评审", review, base: review.base, target: "dev", host: "pi", flow,
+      tasks: [{ name: text(task.name, "任务名"), prompt: "", scope: { allow: [] } }], limits: { 开发评审: { maxRepairs: 0, timeoutMin }, 测试: checkLimit(undefined, "测试"), 验收: checkLimit(undefined, "验收") } } };
+  }
+  if (raw.review !== undefined || flow.includes("评审")) throw new Error('只评审请使用 nature:"评审"、flow:["评审"]、review.base/head');
+  const order = ["开发评审", "测试", "验收", "提交", "部署"];
+  if (flow[0] !== "开发评审" || flow.some((v, i) => i > 0 && order.indexOf(v) < order.indexOf(flow[i - 1]))) throw new Error("底线违规：必须开发评审 → 可选测试 → 可选验收 → 可选提交 → 可选部署，不能逆序");
+  if (flow.includes("部署") && !flow.includes("提交")) throw new Error("部署必须位于提交之后；请在 flow 部署前加入提交，或移除部署");
   if (!Array.isArray(raw.tasks) || !raw.tasks.length) throw new Error("tasks 必须是非空任务数组");
   const names: string[] = raw.tasks.map((v: unknown) => text(object(v, "任务").name, "任务名"));
   if (new Set(names).size !== names.length) throw new Error("任务重名");

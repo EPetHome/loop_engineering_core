@@ -10,6 +10,8 @@ export interface ExecResult {
   killed: boolean;
   /** 受管执行器是否已确认原进程组和独立工具组全部停止；缺省表示执行器未提供此证明。 */
   processesReleased?: boolean;
+  /** 执行器明确确认是否创建了子进程；缺省为未知，不能据此推断未启动。 */
+  processStarted?: boolean;
 }
 export type Exec = (
   command: string,

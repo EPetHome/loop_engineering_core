@@ -21,7 +21,7 @@ export async function reviewDevelopment(input: NodeInput, options: { exec: Exec;
     const current = readTaskRun(input.ledger, input.taskId);
     if (current.activity?.id !== input.attempt || current.stopped || current.userVersion !== run.userVersion) throw new Error("检查已停止或真实用户输入变化");
   };
-  const config = managedConfig(run.worktree), limit = run.card.limits.开发评审;
+  const config = managedConfig(run.worktree, run.inputVersion === 2), limit = run.card.limits.开发评审;
   const timeoutMs = limit.timeoutMin * 60_000, started = Date.now();
   const before = await git.snapshot(); live();
   const sameInputs = state.inputs === input.inputs;
@@ -39,7 +39,7 @@ export async function reviewDevelopment(input: NodeInput, options: { exec: Exec;
   const snapshot = await saveReviewSnapshot({ exec: options.exec, cwd: run.worktree, session: `${run.id}:${run.taskId ?? "single"}`, round, baseline: base,
     candidate: before, input: text, inputPath, root: join(run.dir, "review-snapshots"), signal: options.signal });
   const output = await executeStaticReview({ session: deriveReviewerSessionId(`${run.id}:${run.taskId ?? "single"}`), developer: `${run.id}:${run.taskId ?? "single"}`, round, input: inputPath,
-    deadline: started + timeoutMs, timeoutMs, keepOutput: true, requireRelease: true, live, call: options.callReviewer ?? staticReviewer({ cwd: run.worktree, config, exec: options.exec, signal: options.signal }), write });
+    deadline: started + timeoutMs, timeoutMs, keepOutput: true, requireRelease: true, live, call: options.callReviewer ?? staticReviewer({ cwd: run.worktree, config, exec: options.exec, signal: options.signal, procsFile: input.procsFile }), write });
   const parsed = output.parsed;
   if (parsed?.mustFix.length) parsed.mustFixRaw = markExperienceRecurrence(run.repo, run.id, parsed.mustFixRaw);
   const record: RoundRecord = { round, startedAt: new Date(started).toISOString(), durationMs: Date.now() - started, conclusion: parsed?.conclusion ?? "未评审",

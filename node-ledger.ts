@@ -7,6 +7,8 @@ import { canonicalBatchFile, eventLock } from "./events.ts";
 import { digest, type DevelopmentCard, type DevelopmentTask, type NodeName } from "./development-card.ts";
 import type { AcceptanceRecord, Criteria, Grants } from "./acceptance-core.ts";
 import { gitText } from "./workspace.ts";
+import type { RunResource } from "./resources.ts";
+import type { DeploymentConfig } from "./config.ts";
 import type { FailureKind } from "./failure.ts";
 import { processStartTime, type SessionGroup } from "./procs.ts";
 
@@ -17,9 +19,18 @@ export interface NodeResult {
   failure?: FailureKind; reason?: string; evidence: string[]; operations: string[]; released: boolean;
   acceptance?: AcceptanceRecord;
 }
+export interface DeploymentPlan { config: DeploymentConfig; cwd: string; common: string }
+export interface DeploymentAttempt {
+  id: string; inputs: string; publication: Candidate; config: DeploymentConfig; cwd: string; started: string; ended?: string;
+  status: "waiting" | "deploying" | "checking" | "rolling-back" | "redeploying" | "succeeded" | "failed" | "rolled-back" | "blocked" | "cancelled";
+  category?: "command" | "check" | "timeout" | "cancelled" | "release" | "identity" | "unknown"; reason?: string; released: boolean;
+  log: string; procs: string; running?: string; retryOf?: string; binding?: { hash: string; files: Record<string, string>; paths: Record<string, string> };
+  calls: { command: string; phase: string; commit: string; started: string; ended?: string; code?: number; killed?: boolean; released?: boolean; resource?: RunResource }[];
+  rollback?: { from: string; to: string; state: "intent" | "applied" | "recovered" | "failed"; at: string; reason?: string };
+}
 export interface CardChange {
   id: string; source: string; authorization?: string; userVersion: number; at: string; expectedHash: string; content: string; card: DevelopmentCard;
-  before: string; removeTasks?: string[]; acceptanceVersion?: { path: string; hash: string }; installed?: boolean; state: "pending" | "prepared" | "applied" | "rejected"; appliedAt?: string; reason?: string;
+  before: string; deploymentPlan?: DeploymentPlan; reviewInputs?: { hash: string; files: Record<string, string> }; removeTasks?: string[]; acceptanceVersion?: { path: string; hash: string }; installed?: boolean; state: "pending" | "prepared" | "applied" | "rejected"; appliedAt?: string; reason?: string;
 }
 export interface RepairEnvelope {
   id: string; token: string; session: string; host: string; attempt: string; candidate: Candidate; inputs: string; userVersion: number; epoch: number;
@@ -32,6 +43,10 @@ export interface KernelRun {
   v: 1; revision: number; id: string; repo: string; common: string; file: string; dir: string;
   card: DevelopmentCard; cardHash: string; base: string; targetAtStart: string; created: string;
   branch: string; worktree: string; workspaceCreated: boolean; workspaceParentCreated?: boolean; localFiles: string[]; localHashes: Record<string, string>;
+  reviewComparison?: { base: Candidate; head: Candidate };
+  reviewInputs?: { hash: string; files: Record<string, string> };
+  reviewReport?: { report: string; json: string; attempt: string };
+  deploymentPlan?: DeploymentPlan; deploymentAttempts?: DeploymentAttempt[];
   candidate?: Candidate; results: NodeResult[]; repairs: number; userVersion: number; userInputs: string[]; userFiles?: string[];
   /** 最近一次真实用户引用时确认的原始文本内容哈希；不凭磁盘的新内容自动更新。 */
   userFileVersions?: Record<string, string>;
@@ -50,13 +65,13 @@ export interface KernelRun {
   repair?: RepairEnvelope;
   native?: { launch: string; command: string; childPid: number; childStarted: string; binding: string };
   abandonment?: { at: string; source: string; head?: string; history?: string };
-  activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting" | "waiting" | "testing" | "accepting"; pid: number; started: string; session?: string; procs?: string; ticket?: string; deadline?: number };
+  activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting" | "waiting" | "testing" | "accepting" | "deploying"; pid: number; started: string; session?: string; procs?: string; ticket?: string; deadline?: number };
   session?: { host: "pi" | "claude" | "codex"; id: string; log?: string; pid: number; started: string; launchId?: string };
   launch?: SessionGroup; supervisor?: SessionGroup; stopReason?: string; stopped?: boolean; abandoned?: boolean;
   decisions: UserDecision[]; notes?: string[];
   integrations?: { at: string; from: Candidate; target: Candidate; candidate: Candidate; scopeBase: string; imported: string[]; evidence: string }[];
   publication?: { candidate: Candidate; inputs: string; targetBefore: string; commit: string; tree: string; history: string;
-    inputSnapshot?: InputSnapshot; inputRoot?: string;
+    inputSnapshot?: InputSnapshot; inputRoot?: string; remoteCommit?: string;
     /** 发布边界绑定的实际通过记录；没有 result 表示该节点作为用户例外欠项保留。 */
     nodeChecks?: Partial<Record<NodeName, { inputs: string; result?: string }>>;
     taskChecks?: { task: string; candidate: Candidate; checks: { node: NodeName; inputs: string; result?: string }[] }[]; mapping?: Contribution[];
@@ -138,7 +153,7 @@ export function findUserDecision(run: KernelRun, candidate: Candidate | undefine
     && (!d.mapping || JSON.stringify(d.mapping) === JSON.stringify(run.batch?.contributions)));
 }
 export function validResult(run: KernelRun, node: NodeName, candidate: Candidate, inputs: string): NodeResult | undefined {
-  return [...run.results].reverse().find((r) => r.task === (node === "验收" || node === "提交" ? run.taskRecords ? run.id : taskIdentity(run) : taskIdentity(run)) && r.node === node && r.candidate.tree === candidate.tree
+  return [...run.results].reverse().find((r) => r.task === (node === "验收" || node === "提交" || node === "部署" ? run.taskRecords ? run.id : taskIdentity(run) : taskIdentity(run)) && r.node === node && r.candidate.tree === candidate.tree
     && r.inputs === inputs && r.status === "通过" && Boolean(r.ended) && r.released && r.evidence.length > 0 && r.evidence.every((p) => existsSync(p)));
 }
 /** 迟到结果仍留历史，但绝不清掉新执行身份或覆盖新候选。 */

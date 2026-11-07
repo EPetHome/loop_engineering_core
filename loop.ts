@@ -1362,9 +1362,13 @@ const USAGE = `用法：
   loop 合入 <开发卡.json> [--接受未验证] [--dry-run] [--json]
   loop 续跑 <开发卡.json> [--launcher background] [--dry-run] [--json]
   loop 整合 <开发卡.json> [--dry-run] [--json]
-  loop 重跑 <开发卡.json> --node 开发评审|测试|验收 [--task 任务名] [--launcher background] [--dry-run] [--json]
+  loop 重跑 <开发卡.json> --node 开发评审|评审|测试|验收|部署 [--task 任务名] [--launcher background] [--dry-run] [--json]
   loop 改卡 <开发卡.json> (--remove-node 测试|验收 | --remove-task 任务名 | --from 替换卡.json) [--dry-run] [--json]
-  新卡续跑/停止/整合可加 --task 任务名；验收为批次级，不接受 --task。
+  新卡续跑/停止/整合可加 --task 任务名；验收/部署为批次级，不接受 --task。
+  开发卡 flow: 开发评审 → 可选测试 → 可选验收 → 可选提交 → 可选部署（部署必须在提交后）。
+  只评审卡: {"version":1,"name":"报告","nature":"评审","flow":["评审"],"tasks":[{"name":"报告"}],"review":{"base":"dev~1","head":"dev"}}
+  review.base/head 必填本地已有对象；可选 review.requirement/criteria/note 为相对卡目录的仓库内文本文件。
+  limits.评审.timeoutMin 缺省 60；只评审不需要 prompt/scope/target/host，只出报告，禁止合入或接受未验证。
   loop 放弃 <开发卡.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]

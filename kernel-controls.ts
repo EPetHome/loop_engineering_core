@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { digest, ownedCriteria, parseDevelopmentCard } from "./development-card.ts";
 import { activityAlive, atomicRun, readRun, taskIds, taskView, updateRun, validResult, type CardChange } from "./node-ledger.ts";
-import { acceptanceBasis, acceptanceSignature, checkInputs, frozenCardProblem } from "./kernel-workspace.ts";
+import { acceptanceBasis, acceptanceSignature, checkInputs, frozenCardProblem, freezeDeploymentPlan } from "./kernel-workspace.ts";
 import { writeKernelSummary } from "./kernel.ts";
 import { consumerProblem, readLocalQueue, releaseLocalSlot } from "./local-node-queue.ts";
 import { rebuildBatch } from "./batch-integration.ts";
@@ -54,6 +54,9 @@ export function requestCardChange(path: string, options: { removeNode?: string; 
   const retained = run.card.tasks.filter((t) => !removed.includes(t));
   if (["base", "target", "nature", "host"].some((k) => (card as any)[k] !== (run.card as any)[k])
     || JSON.stringify(card.tasks.map(({ test: _test, limits: _limits, ...task }) => task)) !== JSON.stringify(retained.map(({ test: _test, limits: _limits, ...task }) => task))) throw new Error("改卡不能替换启动时任务身份、prompt/scope、顺序、分支或宿主；请另建卡");
+  if (JSON.stringify(card.review && [card.review.base, card.review.head]) !== JSON.stringify(run.card.review && [run.card.review.base, run.card.review.head])) throw new Error("改卡不能更换受评 base/head；对象已固定，请另建只评审卡");
+  const deploymentPlan = card.flow.includes("部署") ? freezeDeploymentPlan(run.repo) : undefined;
+  const reviewInputs = card.nature === "评审" ? checkInputs({ ...run, card, reviewInputs: undefined }, "评审") : undefined;
   if (run.card.flow.includes("验收") && card.limits.验收.maxRepairs > (run.card.limits.验收?.maxRepairs ?? 3)) throw new Error("继续修只能提高指定 tasks[].limits.验收.maxRepairs，不自动扩大其他任务额度");
   const actions: { action: "remove-test" | "remove-acceptance" | "remove-task" | "raise-acceptance" | "change-acceptance"; task?: string; acceptance?: { path: string; hash: string } }[] = [];
   const acceptanceVersion = card.flow.includes("验收") && card.acceptance ? { path: card.acceptance, hash: digest(readFileSync(card.acceptance)) } : undefined;
@@ -65,7 +68,7 @@ export function requestCardChange(path: string, options: { removeNode?: string; 
   const authorizations = actions.map((action) => [...(run.controlDecisions ?? [])].reverse().find((d) => !d.used && d.cardHash === run.cardHash && d.userVersion === run.userVersion && d.action === action.action && d.task === action.task && (!action.acceptance || JSON.stringify(d.acceptance) === JSON.stringify(action.acceptance))));
   if (actions.length && options.source !== "terminal:tty" && authorizations.some((d) => !d)) throw new Error("移除必需测试/验收、移出任务或提高验收额度须真实用户决定：交互终端执行，或原会话亲手输入「移除本批测试节点」「移出任务甲」「继续修任务甲」「确认本批验收标准」；机器返修不能代选或降低标准");
   const authorization = authorizations.find(Boolean);
-  const change: CardChange = { id: randomUUID(), source: options.source, authorization: authorization?.id, userVersion: run.userVersion, at: now(), before, expectedHash: run.cardHash, card, content, acceptanceVersion, removeTasks: removed.map((t) => run.taskRecords!.find((r) => r.name === t.name)!.id), state: "pending" };
+  const change: CardChange = { id: randomUUID(), source: options.source, authorization: authorization?.id, userVersion: run.userVersion, at: now(), before, expectedHash: run.cardHash, card, content, acceptanceVersion, deploymentPlan, ...(reviewInputs ? { reviewInputs: { hash: reviewInputs.hash, files: reviewInputs.files } } : {}), removeTasks: removed.map((t) => run.taskRecords!.find((r) => r.name === t.name)!.id), state: "pending" };
   if (options.dryRun) return change;
   updateRun(path, (r) => {
     if (r.cardHash !== change.expectedHash || r.pendingCard || frozenCardProblem(r) || r.abandoned || r.publication) throw new Error("请求边界卡版本或任务状态变化");
@@ -108,6 +111,10 @@ export function applyPendingCardChange(path: string): boolean {
     if (c.acceptanceVersion && digest(readFileSync(c.acceptanceVersion.path)) !== c.acceptanceVersion.hash) {
       c.state = "rejected"; c.reason = "验收标准在确认/请求后又变化，未采用；请真实用户按当前版本重新确认"; r.pendingCard = undefined; r.stopped = true; r.stopReason = c.reason; return false;
     }
+    if (c.reviewInputs && checkInputs({ ...r, card: c.card, reviewInputs: undefined }, "评审").hash !== c.reviewInputs.hash) {
+      c.state = "rejected"; c.reason = "只评审输入在改卡确认后又变化，未采用；请重新受控确认"; r.pendingCard = undefined; r.stopped = true; r.stopReason = c.reason; return false;
+    }
+    if (c.deploymentPlan && JSON.stringify(freezeDeploymentPlan(r.repo)) !== JSON.stringify(c.deploymentPlan)) throw new Error("改卡确认后部署配置又变化，保留请求；未采用旧/新命令");
     if (c.installed) { rebuilding = c.id; return true; }
     // v1 仅在完整旧指纹仍有效且证据存在时可证明地转投影；不改写旧历史。
     if (r.inputVersion !== 2) {
@@ -125,7 +132,7 @@ export function applyPendingCardChange(path: string): boolean {
     for (const view of [r, ...(r.taskRecords ?? []).filter((t) => !t.removed)]) if (view.activity?.kind === "waiting") { if (view.activity.ticket) oldTickets.push(view.activity.ticket); view.activity = undefined; if (view !== r) view.epoch = (view.epoch ?? 0) + 1; }
     const changedTasks = c.card.tasks.filter((t) => t.test !== r.card.tasks.find((o) => o.name === t.name)?.test || c.card.flow.includes("测试") !== r.card.flow.includes("测试")).map((t) => t.name);
     const acceptanceChanged = c.card.acceptance && (c.card.acceptance !== r.card.acceptance || digest(readFileSync(c.card.acceptance)) !== r.acceptanceState?.hash);
-    r.card = c.card; r.cardHash = nextHash; r.cardRevision = (r.cardRevision ?? 0) + 1; r.epoch = (r.epoch ?? 0) + 1;
+    r.card = c.card; r.reviewInputs = c.reviewInputs; r.deploymentPlan = c.deploymentPlan; r.cardHash = nextHash; r.cardRevision = (r.cardRevision ?? 0) + 1; r.epoch = (r.epoch ?? 0) + 1;
     if (acceptanceChanged) {
       const standard = ownedCriteria(r.card.acceptance!, r.taskRecords?.map((t) => t.name) ?? r.card.tasks.map((t) => t.name));
       r.acceptanceState = { criteria: { source: "用户", items: standard.items, version: (r.acceptanceState?.criteria.version ?? 0) + 1, updatedAt: now() }, hash: standard.hash, owners: standard.owners, round: r.acceptanceState?.round ?? 0 };
