@@ -35,6 +35,7 @@ import { systemNotify } from "./notify.ts";
 import { runPreparation } from "./preparation.ts";
 import { methodEnv } from "./method-env.ts";
 import { createChildExec, expandFileRefs } from "./hosts/review-hook.ts";
+import { ReviewerCallFailure } from "./static-review.ts";
 import { appendLedgerRecord, appendPARelayRecord, deliveryLedgerPath, pendingItems, projectRootOf, resultLine, taskTitle, type PendingItem } from "./ledger.ts";
 import { createRunResource, managedShell, reapRunResources, releaseRunResource, resourceLine, type RunResource } from "./resources.ts";
 import { materialSession, recordMaterialSession, slimCompletedSession } from "./materials.ts";
@@ -149,9 +150,14 @@ export default function autoreviewExtension(pi: ExtensionAPI, execOverride?: Exe
   };
   // Pi 与 Hook 共用进程组执行器；测试可注入现有执行器，不改变宿主 API。
   const wrappedExec = (ctx: ExtensionContext, life: Lifecycle, signal?: AbortSignal): Exec => async (cmd, args, options) => {
-    checkLive(life, signal);
+    try { checkLive(life, signal); }
+    catch (error) { throw new ReviewerCallFailure(error, true, false); } // 尚未调用执行器，没有新消费者。
     const res = await (execOverride ?? createChildExec(procsPath(ctx)))(cmd, args, options);
-    checkLive(life, signal);
+    try { checkLive(life, signal); }
+    catch (error) {
+      // 撤销旧结论不能丢掉真实释放事实；缺失/否定的证明仍按未知保留，取消不自动重试。
+      throw new ReviewerCallFailure(error, res.processesReleased === true, false);
+    }
     return res;
   };
   const evidence = (ctx: ExtensionContext, life: Lifecycle, signal?: AbortSignal) =>

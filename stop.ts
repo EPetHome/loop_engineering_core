@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { batchInfo, batchInfoPath, canonicalBatchFile, eventReason, phasePath, pushEvent, writePhase, type BatchInfo, type PhaseRecord } from "./events.ts";
+import { settleProjectExecution } from "./project-execution.ts";
 import { registeredQueueBatch, stopQueueBatch, type QueueBatch } from "./merge-queue.ts";
 import { readJson, statusPath, writeStageStatus, type StageStatus } from "./pipeline-core.ts";
 import { ownedProcessGroupAlive, processStartTime, readProcs, releaseProc, stopSessionGroup } from "./procs.ts";
@@ -163,6 +164,7 @@ export async function stopBatch(file: string, options: { stage?: string; dryRun?
     const path = join(phase.evidence.acceptance, "cleanup-task.json"), cleanup = readJson<{ status: string; reason?: string }>(path);
     if (cleanup && cleanup.status !== "released") skipped.push({ path, reason: `外部资源释放未确认：${cleanup.status}；${cleanup.reason ?? ""}` });
   }
+  if (!options.dryRun && !skipped.length && fallback.status === 0) settleProjectExecution(fallback.stdout.trim(), [...registries, ...queue.procs]);
   const result = { v: 1, ok: skipped.length === 0, action: "停止", command: "停止", dryRun: Boolean(options.dryRun), batch: resolve(file),
     stage: options.stage ?? null, stopped, skipped, resources, queueStatus: queue.entries.length || queue.deployments.length ? "stopped" : null, queueEntries: queue.entries, reason };
   if (!options.dryRun) {

@@ -121,7 +121,7 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
     if (reapTimer) clearTimeout(reapTimer);
     // 同一个 signal 会给很多次调用用：结束后摘掉监听，免得堆积，也免得事后误杀复用的进程组号。
     if (onAbort) options.signal?.removeEventListener("abort", onAbort);
-    let processesReleased: boolean | undefined;
+    let processesReleased: boolean | undefined = child?.pid ? undefined : true;
     if (options.role && child?.pid) {
       let released = false;
       try {
@@ -138,7 +138,7 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
     resolvePromise({
       stdout: Buffer.concat(stdout).toString("utf8"),
       stderr: Buffer.concat(stderr).toString("utf8"),
-      code, killed: killedFlag,
+      code, killed: killedFlag, processStarted: Boolean(child?.pid),
       ...(processesReleased !== undefined ? { processesReleased } : {}),
     });
   };
@@ -150,7 +150,8 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
       cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true,
     });
   } catch (error) {
-    process.stderr.write(`autoreview hook: 无法启动 ${command}：${errorText(error)}\n`);
+    const detail = `autoreview hook: 无法启动 ${command}：${errorText(error)}\n`;
+    process.stderr.write(detail); stderr.push(Buffer.from(detail));
     finish(1, false);
     return;
   }
@@ -173,6 +174,7 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
   child.stdout?.on("data", collect(stdout));
   child.stderr?.on("data", collect(stderr));
   child.on("error", (error) => {
+    stderr.push(Buffer.from(`无法启动/执行 ${command}：${errorText(error)}\n`));
     const aborted = (error as NodeJS.ErrnoException).name === "AbortError";
     finish(1, killed || aborted);
   });

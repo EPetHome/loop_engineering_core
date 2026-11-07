@@ -6,6 +6,9 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { executeDeploymentCommand } from "./deployment-exec.ts";
+import { acquireProjectExecution } from "./project-execution.ts";
+import { consumerProblem } from "./local-node-queue.ts";
 import { LOOP_TEST_STATUS, loadDeploymentConfig, loadProjectLayout, PROJECT_CONFIG_ENV, projectConfigArgs, type DeploymentConfig, type ProjectConfigOverrides } from "./config.ts";
 import { commitBatch, pushBatch, workingTree, type BatchCommit } from "./commit-batch.ts";
 import { batchInfo, eventReason, phasePath, pushEvent, recordBatchInfo, reportUncommittedBatch, writePhase, type BatchInfo, type PhaseRecord } from "./events.ts";
@@ -932,8 +935,9 @@ function deliverReturns(state: MergeQueue, batch: QueueBatch, entry: QueueEntry)
 export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise<void> {
   const initial = readMergeQueue(repo);
   if (!initial) return;
+  const projectRelease = await acquireProjectExecution(repo, "check", join(initial.dir, "gate.procs.json"), signal);
   const release = lock(initial.dir, "worker");
-  if (!release) return;
+  if (!release) { projectRelease(true); return; }
   let retry = false;
   const waitingReleases = new Set<string>();
   try {
@@ -1026,7 +1030,7 @@ export async function runMergeQueue(repo: string, signal?: AbortSignal): Promise
     if (entry) update(state.dir, entry.id, { reason: String(error) });
     throw error;
   } finally {
-    release();
+    release(); projectRelease(!consumerProblem(join(initial.dir, "gate.procs.json")));
     const state = load(initial.dir);
     retry = state.entries.some((entry) => entry.status === "pending" && !waitingReleases.has(state.batches.find((batch) => batch.id === entry.batch)!.release)) && !state.entries.some((entry) => ["checking", "returning", "merging", "withdrawing"].includes(entry.status));
     if (retry) kickMergeQueue(state.repo);
@@ -1103,13 +1107,14 @@ function mergeLocked(state: MergeQueue, batch: QueueBatch, dryRun: boolean,
 export async function mergeQueuedBatch(repo: string, batch: QueueBatch, dryRun: boolean,
   apply: (entry: QueueEntry, save: (patch: Partial<QueueEntry>) => void) => void): Promise<QueueEntry> {
   const state = readMergeQueue(repo)!;
+  const projectRelease = dryRun ? undefined : await acquireProjectExecution(repo, "check", join(state.dir, "gate.procs.json"));
   const release = dryRun ? () => {} : lock(state.dir, "worker");
-  if (!release) throw new Error("合入队列正在核对或处理其他合入，请稍后查看 loop 状态");
+  if (!release) { projectRelease?.(true); throw new Error("合入队列正在核对或处理其他合入，请稍后查看 loop 状态"); }
   try {
     const entry = mergeLocked(state, batch, dryRun, apply);
     if (!dryRun && !entry.mergeNotified && (entry.automatic || (entry.issues ?? batch.issues)?.length)) finishLegacyMerge(load(state.dir), batch, entry);
     return entry;
-  } finally { release(); if (!dryRun) kickMergeQueue(repo); }
+  } finally { release(); projectRelease?.(true); if (!dryRun) kickMergeQueue(repo); }
 }
 
 function withdrawLocked(state: MergeQueue, batch: QueueBatch, dryRun: boolean,
@@ -1145,10 +1150,11 @@ function withdrawLocked(state: MergeQueue, batch: QueueBatch, dryRun: boolean,
 export async function withdrawQueuedBatch(repo: string, batch: QueueBatch, dryRun: boolean,
   apply: (entry: QueueEntry, save: (patch: Partial<QueueEntry>) => void, begin: () => void) => void): Promise<QueueEntry> {
   const state = readMergeQueue(repo)!;
+  const projectRelease = dryRun ? undefined : await acquireProjectExecution(repo, "check", join(state.dir, "gate.procs.json"));
   const release = dryRun ? () => {} : lock(state.dir, "worker");
-  if (!release) throw new Error("合入队列正在执行，请稍后撤回");
+  if (!release) { projectRelease?.(true); throw new Error("合入队列正在执行，请稍后撤回"); }
   try { return dryRun ? withdrawLocked(state, batch, true, apply) : publication(state.dir, () => withdrawLocked(state, batch, false, apply)); }
-  finally { release(); }
+  finally { release(); projectRelease?.(true); }
 }
 
 /** 部署是独立消费者：等待检查结束时不占队列执行锁。 */
@@ -1182,7 +1188,7 @@ async function runDeployment(state: MergeQueue, entryId: string, signal?: AbortS
   const batch = state.batches.find((item) => item.id === entry.batch)!;
   const release = lock(state.dir, `deploy-${hash(projectKey(batch))}`);
   if (!release) return;
-  let worker: (() => void) | undefined;
+  let worker: (() => void) | undefined, projectRelease: ((released: boolean) => void) | undefined, projectReleased = true;
   let deployment = entry.deployment!;
   const stopped = new AbortController();
   const deploymentSignal = signal ? AbortSignal.any([signal, stopped.signal]) : stopped.signal;
@@ -1233,6 +1239,7 @@ async function runDeployment(state: MergeQueue, entryId: string, signal?: AbortS
       if (!deployment.reason) save({ reason: "部署：等待同项目的评审、队列核对、验收结束" });
       await sleep(pollMs(process.env, 1000), undefined, { signal: deploymentSignal });
     }
+    projectRelease = await acquireProjectExecution(batch.project, "deploy", procs, deploymentSignal, checkActive);
     // 部署只能使用准确的发布版本，不能把用户未提交代码一起部署出去。
     const checkVersion = (commit: string): void => {
       const current = workingTree(runtimeRoot(batch), state.dir);
@@ -1244,10 +1251,11 @@ async function runDeployment(state: MergeQueue, entryId: string, signal?: AbortS
     writeFileSync(deployment.log, "");
     const { createChildExec } = await import("./hosts/review-hook.ts");
     const command = async (cmd: string, status: QueueDeployment["status"], commit: string): Promise<string | undefined> => {
-      let resource: RunResource | undefined, result;
-      try {
+      let result;
+      {
         let running;
         for (;;) {
+          projectRelease ??= await acquireProjectExecution(batch.project, "deploy", procs, deploymentSignal, checkActive);
           // 与整批验收登记、停止共用发布锁：最终资格核对、登记和 spawn 之间不留新验收插入的窗口。
           running = publication(state.dir, () => {
             checkActive();
@@ -1256,22 +1264,22 @@ async function runDeployment(state: MergeQueue, entryId: string, signal?: AbortS
             if (!worker) return;
             checkVersion(commit); save({ status, procs });
             appendFileSync(deployment.log!, `\n$ ${cmd}\n版本：${commit}\n`);
-            resource = createRunResource(`deployment:${entry.id}:${status}`, undefined, procs);
-            return createChildExec(procs)("/bin/sh", ["-c", managedShell(`exec 2>&1\n${cmd}`, resource)], { cwd: batch.project,
-              timeout: deployment.config.timeoutMin * 60_000, signal: deploymentSignal, role: `部署 ${status}`, env: { AUTOREVIEW_BATCH_FILE: batch.file, AUTOREVIEW_DEPLOY_COMMIT: commit },
-              onOutput: (chunk) => appendFileSync(deployment.log!, chunk) });
+            return executeDeploymentCommand({ command: cmd, phase: status, commit, cwd: batch.project, timeoutMin: deployment.config.timeoutMin,
+              procs, log: deployment.log!, label: `deployment:${entry.id}:${status}`, exec: createChildExec(procs), signal: deploymentSignal, env: { AUTOREVIEW_BATCH_FILE: batch.file }, live: () => { checkActive(); checkVersion(commit); } });
           });
           if (running) break;
           // 前置等待之后又出现检查时回到等待，不占着队列锁，也不把正常并发判为部署失败。
           const held = worker; worker = undefined; held?.();
+          const heldProject = projectRelease; projectRelease = undefined; heldProject?.(projectReleased && !consumerProblem(procs));
           if (held) kickMergeQueue(state.repo);
           const reason = "部署：等待同项目的评审、队列核对、验收结束";
           if (deployment.reason !== reason) save({ reason });
           await sleep(pollMs(process.env, 1000), undefined, { signal: deploymentSignal });
         }
         result = await running;
-      } finally { if (resource) releaseRunResource(resource); }
-      if (resource?.status !== "released" || result.processesReleased !== true) throw new Error("部署资源释放未确认，不再执行部署、检查或回退");
+      }
+      projectReleased &&= result.processesReleased === true;
+      if (!projectReleased) throw new Error("部署资源释放未确认，不再执行部署、检查或回退");
       checkActive();
       return result.code !== 0 || result.killed ? `${status === "checking" ? "部署后检查" : "部署命令"}${result.killed ? `超过时限（${deployment.config.timeoutMin} 分钟）` : `失败（退出码 ${result.code}）`}：${`${result.stdout}${result.stderr}`.trim().split(/\r?\n/).slice(-40).join("\n")}` : undefined;
     };
@@ -1295,6 +1303,7 @@ async function runDeployment(state: MergeQueue, entryId: string, signal?: AbortS
     } else finish("blocked", `部署暂停：${String(error)}`);
   } finally {
     clearInterval(watchStop);
+    projectRelease?.(projectReleased && !consumerProblem(procs));
     worker?.(); release();
     if (worker) kickMergeQueue(state.repo);
     else dispatchDeployments(load(state.dir), entry.id); // 等待者退出也须接棒同项目的后续待办。

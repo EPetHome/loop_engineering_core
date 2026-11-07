@@ -34,7 +34,7 @@ export async function runAcceptanceNode(input: NodeInput, exec: Exec): Promise<N
     operations.push(`统一验收第 ${state.round} 轮；实测 ${plan.ids.join("、")}；沿用 ${retained.map((i) => i.id).join("、") || "无"}；树 ${input.candidate.tree}；deadline ${deadline}`);
     try {
       const result = await runAcceptanceOnce({ workDir: run.worktree, devSessionId: `${run.id}:batch`, round: state.round, deliveryNote: "", state: { requirement: checkInputs(run).requirement, criteria, grants: state.grants },
-        config, reviewerModel: managedConfig(run.worktree).reviewerModel, reviewerThinking: managedConfig(run.worktree).reviewerThinking,
+        config, reviewerModel: managedConfig(run.worktree, true).reviewerModel, reviewerThinking: managedConfig(run.worktree, true).reviewerThinking,
         exec: execute, cleanupExec: execute, runDir, procsFile: input.procsFile, deadline, now: Date.now, previousFailed: state.previous?.items.filter((i) => i.verdict !== "通过" && i.verdict !== "需人工").map((i) => i.id) ?? [],
         explicitScope: { ids: plan.ids, retained }, boundedDeadline: true, signal: input.signal, checkLive: live, saveState: () => {},
         upstreamEpochs: { candidate: input.candidate, mapping: run.batch?.contributions, inputs: input.inputs, criteria: state.hash, grants: state.grants, round: state.round, ids: plan.ids },

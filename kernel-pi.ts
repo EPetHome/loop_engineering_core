@@ -5,7 +5,7 @@ import { classifyMarker } from "./core.ts";
 import { dirtyPaths } from "./kernel-workspace.ts";
 import { queryKernel } from "./kernel.ts";
 import { readTaskRun, updateTaskRun, type KernelRun } from "./node-ledger.ts";
-import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, managedLedger, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "./kernel-session.ts";
+import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, deployManaged, managedLedger, managedMergeRequest, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "./kernel-session.ts";
 import { createChildExec, expandFileRefsWithSources } from "./hosts/review-hook.ts";
 import type { Exec } from "./git.ts";
 import { experienceInjection } from "./experience.ts";
@@ -25,7 +25,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
   const show = (ctx: ExtensionContext): void => { if (path) ctx.ui.notify(queryKernel(path).lines.join("\n"), "info"); };
   const merge = async (ctx: ExtensionContext, accept: boolean): Promise<void> => {
     if (!path) return;
-    const decision = accept ? recordManagedUserInput(path, "合入本批", "pi:interactive") : undefined;
+    const decision = accept && !readRun(path).publication ? recordManagedUserInput(path, "合入本批", "pi:interactive") : undefined;
     await mergeManaged(path, { accept, decision }); show(ctx);
   };
   for (const name of ["review-status", "loop-status"]) pi.registerCommand(name, { description: "读取单任务内核统一状态", handler: async (_a, ctx) => show(ctx) });
@@ -60,6 +60,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     if (!path || !["interactive", "rpc"].includes(event.source)) return { action: "continue" };
     const materials = expandFileRefsWithSources(event.text, ctx.cwd);
     if (consumeManagedRepair(path, event.text, materials, task)) return { action: "continue" };
+    if (readRun(path).publication && managedMergeRequest(readRun(path), event.text)) { await mergeManaged(path); show(ctx); return { action: "handled" }; }
     const decision = recordManagedUserInput(path, event.text, `pi:${event.source}`, materials, undefined, task);
     if (decision) { await mergeManaged(path, { accept: true, decision }); show(ctx); return { action: "handled" }; }
     controller?.abort(); await pending;
@@ -80,11 +81,11 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     if (!path || pending) return;
     if (event.outcome !== "completed") { pauseManaged(path, "开发回合中断，等待用户决定", task); return; }
     const run = readRun(path), text = assistantText(ctx);
-    if (run.stopped || run.publication) return;
-    if (classifyMarker(text) === "none" && !dirtyPaths(run).length) { updateRun(path, (r) => { r.activity = undefined; }); return; }
+    if (run.stopped) return;
+    if (!run.publication && classifyMarker(text) === "none" && !dirtyPaths(run).length) { updateRun(path, (r) => { r.activity = undefined; }); return; }
     controller = new AbortController();
     const watch = setInterval(() => { if (path && readRun(path).stopped) controller?.abort(); }, 250);
-    const work = completeManagedDelivery(path, text, { exec: execOverride ?? createChildExec(join(run.dir, "review.procs.json")), signal: controller.signal, task });
+    const work = run.publication ? deployManaged(path, controller.signal) : completeManagedDelivery(path, text, { exec: execOverride ?? createChildExec(join(run.dir, "review.procs.json")), signal: controller.signal, task });
     pending = work;
     try {
       const result = await work; show(ctx);

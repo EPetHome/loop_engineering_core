@@ -53,7 +53,7 @@ export async function runTestNode(input: NodeInput, exec: Exec): Promise<NodeOut
         counters.recoveries++; return true;
       });
       if (!allowed) break;
-      const preparation = managedConfig(input.run.worktree).preparation;
+      const preparation = managedConfig(input.run.worktree, input.run.inputVersion === 2).preparation;
       if (preparation) {
         // 复用已登记方法，但不进入可写产品的方法修复分支，也不展开准备服务的另一个重试循环。
         if (failure.kind === "environment" && preparation.recover && preparation.maxRecoveries > 0) {

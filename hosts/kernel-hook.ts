@@ -5,7 +5,7 @@ import { classifyMarker } from "../core.ts";
 import { queryKernel } from "../kernel.ts";
 import { dirtyPaths } from "../kernel-workspace.ts";
 import { readTaskRun, updateTaskRun, type KernelRun } from "../node-ledger.ts";
-import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, managedLedger, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "../kernel-session.ts";
+import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, deployManaged, managedLedger, managedMergeRequest, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "../kernel-session.ts";
 import { createChildExec, expandFileRefsWithSources, lastAssistantMessage, sessionIdOf } from "./review-hook.ts";
 import { detectHost, type HookEvent } from "./hook.ts";
 import { experienceInjection } from "../experience.ts";
@@ -34,6 +34,7 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
       // 不根据引用前缀猜测启动消息；每条真实输入（包括再次引用原提示词）都登记完整材料。
       const materials = expandFileRefsWithSources(raw, event.cwd ?? root);
       if (consumeManagedRepair(path, raw, materials, task)) { developerActive(path, task); return context(`${MANAGED_CONVENTION}\n机器返修信封已核对；用户标准、授权与次数保持原值`); }
+      if (readRun(path).publication && managedMergeRequest(readRun(path), raw)) { await mergeManaged(path); return JSON.stringify({ decision: "block", reason: queryKernel(path).lines.join("\n") }); }
       const decision = recordManagedUserInput(path, raw, `${host}:UserPromptSubmit`, materials, undefined, task);
       if (decision) {
         await mergeManaged(path, { accept: true, decision });
@@ -46,8 +47,8 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
     }
     if (event.hook_event_name !== "Stop") return undefined;
     const run = readRun(path), text = lastAssistantMessage(event);
-    if (run.stopped || run.publication) return context(queryKernel(path).lines.join("\n"));
-    if (classifyMarker(text) === "none" && !dirtyPaths(run).length) { updateRun(path, (r) => { r.activity = undefined; }); return undefined; }
+    if (run.stopped) return context(queryKernel(path).lines.join("\n"));
+    if (!run.publication && classifyMarker(text) === "none" && !dirtyPaths(run).length) { updateRun(path, (r) => { r.activity = undefined; }); return undefined; }
     const controller = new AbortController();
     const stop = (): void => { controller.abort(); pauseManaged(path, "评审被宿主中断，成果和证据保留", task); };
     const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
@@ -55,7 +56,7 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
     const version = run.userVersion;
     const watch = setInterval(() => { const current = readRun(path); if (current.stopped || current.userVersion !== version) controller.abort(); }, 250);
     try {
-      const result = await completeManagedDelivery(path, text, { exec: createChildExec(join(run.dir, "review.procs.json")), signal: controller.signal, task });
+      const result = run.publication ? await deployManaged(path, controller.signal) : await completeManagedDelivery(path, text, { exec: createChildExec(join(run.dir, "review.procs.json")), signal: controller.signal, task });
       if (result.message) { consumeManagedRepair(path, result.message, undefined, task); developerActive(path, task); return JSON.stringify({ decision: "block", reason: result.message }); }
       return context(queryKernel(path).lines.join("\n"));
     } finally { clearInterval(watch); for (const s of signals) process.off(s, stop); }

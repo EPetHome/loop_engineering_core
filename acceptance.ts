@@ -789,6 +789,13 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
 export async function runAcceptanceOnce(deps: AcceptanceDeps): Promise<AcceptanceStage> { return requireAutomaticPass(await runAcceptanceAttempt(deps)); }
 
 async function runAcceptanceAttempt(deps: AcceptanceDeps): Promise<AcceptanceStage> {
+  const { acquireProjectExecution } = await import("./project-execution.ts");
+  const { consumerProblem } = await import("./local-node-queue.ts");
+  const release = await acquireProjectExecution(deps.workDir, "check", deps.procsFile ?? "", deps.signal, deps.checkLive);
+  try { return await runAcceptanceAttemptOwned(deps); }
+  finally { release(!consumerProblem(deps.procsFile ?? "") && !consumerProblem(`${deps.procsFile}.cleanup`)); }
+}
+async function runAcceptanceAttemptOwned(deps: AcceptanceDeps): Promise<AcceptanceStage> {
   const groups = findObjections(deps.deliveryNote);
   // 同一条旧回复只处理一次：记下回复指纹，用户回复后重复验收不再因它暂停。
   const replyKey = createHash("sha256").update(deps.deliveryNote).digest("hex");
