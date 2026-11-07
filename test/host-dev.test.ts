@@ -12,6 +12,8 @@ import { checkPlugin, launchArgs, resolveHost } from "../hosts/dev.ts";
 test("宿主参数：自动审批、精确续接、含空格的任务仍为文件引用", () => {
   assert.deepEqual(launchArgs("claude", "/tmp/任务 a.md", "session-1"), ["--permission-mode", "auto", "--resume", "session-1", '请读取并执行 @"/tmp/任务 a.md"']);
   assert.deepEqual(launchArgs("codex", "/tmp/任务 a.md", "session-2", ["--model", "chosen"]), ["resume", "session-2", "--approve-for-me", "--model", "chosen", '请读取并执行 @"/tmp/任务 a.md"']);
+  assert.deepEqual(launchArgs("codex", "/tmp/任务 a.md", "session-2", [], true), ["exec", "--approve-for-me", "resume", "session-2", '请读取并执行 @"/tmp/任务 a.md"']);
+  assert.deepEqual(launchArgs("codex", "/tmp/任务 a.md", undefined, [], true), ["exec", "--approve-for-me", '请读取并执行 @"/tmp/任务 a.md"']);
   assert.throws(() => launchArgs("claude", '/tmp/a"b.md'), /双引号/);
 });
 

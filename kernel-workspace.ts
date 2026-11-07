@@ -4,10 +4,11 @@ import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSyn
 import { dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { digest, inside, type NodeName } from "./development-card.ts";
-import { findProjectRoot, loadProjectLayout, parseContext, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
+import { findProjectRoot, loadProjectLayout, parseAcceptanceConfig, parseContext, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
 import { outOfScope } from "./scope.ts";
 import { gitResult, gitText, worktrees } from "./workspace.ts";
-import type { Candidate, KernelRun } from "./node-ledger.ts";
+import { taskDefinition, taskView, type Candidate, type KernelRun } from "./node-ledger.ts";
+import { authorizationStatus, forUser, type AcceptanceItemResult } from "./acceptance-core.ts";
 
 const nul = (s: string): string[] => s.split("\0").filter(Boolean);
 /** 路径按原始 NUL 字节拆分，不 trim 文件名中的首尾空白。 */
@@ -101,7 +102,12 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
   const collect = (path: string, label: string): void => sourceHashes(path, files, label, paths, contents);
   collect(run.file, "卡");
   const prompt: { text?: string } = {};
-  sourceHashes(run.card.tasks[0].prompt, files, "提示词", paths, contents, prompt);
+  const definitions = run.taskRecords && !run.taskId ? run.card.tasks : [taskDefinition(run)];
+  for (const definition of definitions) sourceHashes(definition.prompt, files, run.taskRecords ? `提示词/${definition.name}` : "提示词", paths, contents, prompt);
+  if ((node === "验收" || node === "提交") && run.card.flow.includes("验收") && run.card.acceptance) {
+    collect(run.card.acceptance, "验收标准");
+    if (run.acceptanceState && digest(readFileSync(run.card.acceptance)) !== run.acceptanceState.hash) throw new Error("验收标准文件已变化；请用改卡 --from 确认当前版本，旧授权不沿用");
+  }
   for (const path of run.userFiles ?? []) collect(path, `用户检查输入/${path}`);
   for (const [label, root] of [["原目录", run.repo], ["任务目录", run.worktree]] as const) {
     if (!existsSync(root)) continue;
@@ -114,6 +120,15 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
     const methods = parseMethodsConfig(readMarker(root).methods, root);
     for (const path of methods?.paths ?? []) collect(resolve(root, path), `测试方法/${label}/${path}`);
   }
+  const acceptanceConfigs = (node === "验收" || node === "提交") && run.card.flow.includes("验收") ? [run.repo, run.worktree].filter(existsSync).map((root) => {
+    const config = parseAcceptanceConfig(readMarker(root).acceptance, root, process.env);
+    if (!config) throw new Error("验收方法缺失；项目须显式配置 acceptance");
+    for (const field of ["guide", "actions"] as const) if (config[field]) {
+      if (!existsSync(config[field]!)) throw new Error(`验收方法 ${field} 缺失：${config[field]}；补齐并登记 localFiles 或提交到开工树后再启动`);
+      collect(config[field]!, `验收方法/${root === run.repo ? "原目录" : "任务目录"}/${field}`);
+    }
+    return config;
+  }) : [];
   const context = parseContext(raw.context, configRoot);
   if (context) for (const s of context.sources.filter((s) => s.role !== "code")) {
     const path = resolve(context.root, s.path);
@@ -121,7 +136,7 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
     collect(path, `来源/${s.id}`);
     if (inside(run.repo, path) && existsSync(run.worktree)) collect(resolve(run.worktree, relative(run.repo, path)), `任务来源/${s.id}`);
   }
-  if (prompt.text === undefined && !run.publication?.inputSnapshot) throw new Error(`提示词无法形成输入快照：${run.card.tasks[0].prompt}`);
+  if (prompt.text === undefined && !run.publication?.inputSnapshot) throw new Error(`提示词无法形成输入快照：${definitions.map((t) => t.prompt).join("、")}`);
   const requirement = run.publication?.inputSnapshot?.requirement ?? [prompt.text!, ...run.userInputs].join("\n\n");
   const observedFiles = { ...files }, publicationChanges = publicationInputChanges(run, files, paths);
   verifyUserReferences(run, files, paths, contents, observedFiles, publicationChanges);
@@ -135,16 +150,53 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
     const operational = configs.map((data) => {
       return Object.fromEntries(Object.entries(data).filter(([k]) => !["gate", "acceptance", "deployment", "preparation", "maxRepairs", "reviewTimeoutMin", "reviewerModel", "reviewerThinking", "reviewerCmd"].includes(k)));
     });
-    const common = [commonFiles, operational, run.userVersion, run.userInputs, run.card.tasks[0].name];
-    const review = [common, configs.map((c) => [c.reviewerModel, c.reviewerThinking, c.reviewerCmd]), run.card.tasks[0].prompt, run.card.tasks[0].scope, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审.timeoutMin];
+    const definition = run.taskRecords && !run.taskId ? undefined : taskDefinition(run);
+    const common = [commonFiles.filter(([k]) => !k.startsWith("验收标准：")), operational, run.userVersion, run.userInputs, definition?.name];
+    const review = [common, configs.map((c) => [c.reviewerModel, c.reviewerThinking, c.reviewerCmd]), definition?.prompt, definition?.scope, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审.timeoutMin];
     const prep = config.preparation;
     const testing = [common, identityFiles.filter(([key]) => key.startsWith("测试方法/")), configs.map((c) => {
       const p = c.preparation as any; return p ? [p.check, p.recover, p.maxRecoveries, p.timeoutMin] : null;
-    }), run.card.tasks[0].test, run.card.limits.测试?.timeoutMin ?? 20,
+    }), definition?.test, run.card.limits.测试?.timeoutMin ?? 20,
       prep ? { check: prep.check, recover: prep.recover, maxRecoveries: prep.maxRecoveries, timeoutMin: prep.timeoutMin } : null];
-    identity = node === "开发评审" ? review : node === "测试" ? testing : [review, testing, run.card.flow, run.cardRevision ?? 0, run.cardHash];
+    const tasks = run.taskRecords && !run.taskId ? run.taskRecords.filter((t) => !t.removed).map((t) => {
+      const view = taskView(run, t.id); return [t.id, t.candidate, checkInputs(view, "开发评审").hash, run.card.flow.includes("测试") ? checkInputs(view, "测试").hash : null];
+    }) : [];
+    const acceptance = [identityFiles.filter(([k]) => k.startsWith("验收标准：") || k.startsWith("验收方法/")), acceptanceConfigs, run.acceptanceState?.grants,
+      run.acceptanceState?.plan?.ids, run.batch?.version, run.batch?.targetSource, run.batch?.contributions, tasks, run.card.limits.验收?.timeoutMin ?? 20];
+    identity = node === "开发评审" ? review : node === "测试" ? testing : node === "验收" ? [common, acceptance]
+      // 前两步单任务完整指纹没有验收投影；保持字节级身份，不改写/重绑历史结论。
+      : !run.taskRecords && !run.card.flow.includes("验收") ? [review, testing, run.card.flow, run.cardRevision ?? 0, run.cardHash]
+      : [review, testing, acceptance, run.card.flow, run.cardRevision ?? 0, run.cardHash];
   }
   return { hash: digest(JSON.stringify(identity)), files, paths, observedFiles, publicationChanges, requirement };
+}
+export function acceptanceSignature(run: KernelRun): string {
+  const checked = checkInputs(run, "验收");
+  return digest(JSON.stringify([run.acceptanceState?.hash, run.acceptanceState?.grants, run.userVersion,
+    Object.entries(checked.files).filter(([k]) => !k.startsWith("卡：") && !k.startsWith("提示词/")), parseAcceptanceConfig(readMarker(run.worktree).acceptance, run.worktree, process.env)]));
+}
+export function taskAcceptanceInputs(run: KernelRun): string {
+  return digest(JSON.stringify([checkInputs(run, "开发评审").hash, run.card.flow.includes("测试") ? checkInputs(run, "测试").hash : null]));
+}
+/** 排除任务自身补充要求的版本，冻结不可借普通任务输入改变的标准、授权和共享方法。 */
+export function acceptanceBasis(run: KernelRun): string {
+  const checked = checkInputs(run, "验收"), state = run.acceptanceState!;
+  return digest(JSON.stringify([state.hash, state.criteria, state.owners, state.grants,
+    Object.entries(checked.files).filter(([k]) => !k.startsWith("卡：") && !k.startsWith("提示词/") && !k.startsWith("提示词：") && !k.startsWith("用户检查输入/")),
+    parseAcceptanceConfig(readMarker(run.worktree).acceptance, run.worktree, process.env)]));
+}
+/** 沿用结论仍须原实测证据及未变的责任任务输入；刷新派工签名不授予任何新通过结论。 */
+export function reusedAcceptanceItems(run: KernelRun): AcceptanceItemResult[] {
+  const state = run.acceptanceState!, plan = state.plan;
+  if (!plan) throw new Error("没有内核冻结的验收范围");
+  const active = new Set(run.card.tasks.map((t) => t.name)), denied = authorizationStatus(state.criteria, state.grants).denied;
+  return state.criteria.items.filter((i) => (!state.owners[i.id] || active.has(state.owners[i.id])) && !forUser(i) && !denied.includes(i.id) && !plan.ids.includes(i.id)).map((item) => {
+    const old = state.previous?.items.find((i) => i.id === item.id), binding = state.bindings?.[item.id];
+    const task = run.taskRecords?.find((t) => t.name === state.owners[item.id]), view = task ? taskView(run, task.id) : run;
+    if (!old || old.verdict !== "通过" || !old.source || !binding || binding.candidate !== view.candidate?.commit || binding.inputs !== taskAcceptanceInputs(view)
+      || !existsSync(join(old.source.runDir, "result.json")) || !existsSync(join(old.source.runDir, "evidence", `${item.id}.txt`))) throw new Error(`${item.id} 旧通过项缺少未变任务来源/原实测证据；不能冒充本树实测`);
+    return old;
+  });
 }
 export function frozenCardProblem(run: KernelRun): string | undefined {
   try { if (digest(readFileSync(run.file)) === run.cardHash) return undefined; } catch { /* 明确报卡变化 */ }
@@ -205,11 +257,18 @@ export function dirtyPaths(run: KernelRun): string[] {
     ...nul(gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"]))])].filter((p) => !local(run, p));
 }
 /** 包括索引和原始字节；HEAD 相同或 clean filter 归一化相同不足以证明工作区没变。 */
-export function workspaceGuard(run: KernelRun): string {
+export function workspaceGuard(run: KernelRun, headIdentity?: string): string {
   assertWorkspace(run);
   const paths = [...new Set(nul(gitRaw(run.worktree, ["ls-files", "--cached", "--others", "-z"])))].sort();
-  const files = paths.map((p) => [p, existsSync(join(run.worktree, p)) ? fileDigest(join(run.worktree, p)) : "缺失"]);
-  return digest(JSON.stringify([gitText(run.worktree, ["rev-parse", "HEAD"]), gitRaw(run.worktree, ["ls-files", "--stage", "-z"]), files]));
+  const directories = new Set<string>([run.worktree]);
+  const metadata = (path: string): string => { const s = lstatSync(path, { bigint: true }); return `${s.ino}:${s.mode}:${s.mtimeNs}:${s.ctimeNs}`; };
+  const files = paths.map((p) => {
+    let parent = dirname(join(run.worktree, p)); while (inside(run.worktree, parent)) { directories.add(parent); if (parent === run.worktree) break; parent = dirname(parent); }
+    const path = join(run.worktree, p); return [p, existsSync(path) ? [fileDigest(path), metadata(path)] : "缺失"];
+  });
+  const dirs = [...directories].sort().map((p) => [p, existsSync(p) ? metadata(p) : "缺失"]);
+  // ctime/inode 不能靠把字节写回或 utimes 还原；同时覆盖瞬时写入和创建后删除，避免只靠异步 FS 通知漏检。
+  return digest(JSON.stringify([headIdentity ?? gitText(run.worktree, ["rev-parse", "HEAD"]), gitRaw(run.worktree, ["ls-files", "--stage", "-z"]), files, dirs]));
 }
 const ancestor = (repo: string, a: string, b: string): boolean => gitResult(repo, ["merge-base", "--is-ancestor", a, b]).status === 0;
 const treeEntry = (repo: string, commit: string, path: string): string => gitRaw(repo, ["--literal-pathspecs", "ls-tree", "-z", commit, "--", path]);
@@ -217,21 +276,22 @@ const treeEntry = (repo: string, commit: string, path: string): string => gitRaw
 export function taskScopeBaseline(run: KernelRun, head: string): { target: string; base: string; imported: string[] } {
   const target = gitText(run.repo, ["rev-parse", "refs/heads/dev"]);
   const files = nul(gitRaw(run.worktree, ["diff", "--name-only", "--no-renames", "-z", run.base, head, "--"]));
-  const outside = outOfScope(files, run.card.tasks[0].scope);
+  const outside = outOfScope(files, taskDefinition(run).scope);
   const fresh = outside.filter((p) => !run.candidate || treeEntry(run.repo, head, p) !== treeEntry(run.repo, run.candidate.commit, p));
   if (!fresh.length) return { target, base: run.base, imported: outside };
   const reject = (paths: string[]): never => { throw new Error(`任务范围外变更，未自动提交（不是已核对 dev 来源）：${paths.join("、")}`); };
   if (!ancestor(run.repo, run.targetAtStart, target) || !ancestor(run.repo, run.base, head)) reject(fresh);
+  const sources = [target, ...(run.batch?.integrations ?? []).flatMap((i) => [i.after.commit, ...i.mapping.flatMap((c) => [c.candidate.commit, c.contribution])])].filter((s) => ancestor(run.repo, s, head));
   const base = gitText(run.repo, ["merge-base", head, target]);
-  const invalid = fresh.filter((p) => treeEntry(run.repo, head, p) !== treeEntry(run.repo, base, p));
+  const invalid = fresh.filter((p) => treeEntry(run.repo, head, p) !== treeEntry(run.repo, base, p) && !sources.some((s) => treeEntry(run.repo, head, p) === treeEntry(run.repo, s, p)));
   if (invalid.length) reject(invalid);
   const start = run.candidate && ancestor(run.repo, run.candidate.commit, head) ? run.candidate.commit : run.base;
   const commits = gitText(run.repo, ["rev-list", "--first-parent", "--reverse", `${start}..${head}`]).split("\n").filter(Boolean);
   for (const commit of commits) {
-    if (ancestor(run.repo, commit, target)) continue;
+    if (ancestor(run.repo, commit, target) || sources.some((s) => ancestor(run.repo, commit, s))) continue;
     const parents = gitText(run.repo, ["rev-list", "--parents", "-n", "1", commit]).split(" ").slice(1);
     const touched = nul(gitRaw(run.repo, ["diff", "--name-only", "--no-renames", "-z", parents[0], commit, "--"])).filter((p) => fresh.includes(p));
-    const incoming = parents.slice(1).filter((p) => ancestor(run.repo, p, target));
+    const incoming = parents.slice(1).filter((p) => ancestor(run.repo, p, target) || sources.some((s) => ancestor(run.repo, p, s)));
     const unauthorized = touched.filter((p) => !incoming.some((parent) => treeEntry(run.repo, commit, p) === treeEntry(run.repo, parent, p)));
     if (unauthorized.length) reject(unauthorized);
   }
@@ -250,7 +310,7 @@ function deliverWithIndex(run: KernelRun, fd: number, lock: string, target: stri
   const branchFiles = nul(gitRaw(run.worktree, ["diff", "--name-only", "--no-renames", "-z", run.base, head, "--"]));
   const imported = new Set(taskScopeBaseline(run, head).imported);
   const changed = dirtyPaths(run);
-  const outside = outOfScope([...new Set([...branchFiles.filter((p) => !imported.has(p)), ...changed])], run.card.tasks[0].scope);
+  const outside = outOfScope([...new Set([...branchFiles.filter((p) => !imported.has(p)), ...changed])], taskDefinition(run).scope);
   if (outside.length) throw new Error(`任务范围外变更，未自动提交：${outside.join("、")}`);
   if (branchFiles.some((p) => local(run, p))) throw new Error("任务历史夹带本机文件，未交付");
   if (gitText(run.worktree, ["diff", "--cached", "--name-only", "-z"])) throw new Error("索引有未经登记的用户暂存改动，未自动提交；请保留成果并取消暂存后在原会话重新交付");
@@ -267,7 +327,7 @@ function deliverWithIndex(run: KernelRun, fd: number, lock: string, target: stri
     const tree = runGit(["write-tree"]);
     if (before !== workspaceGuard(run)) throw new Error("提交期间工作区或索引变化，未更新分支");
     if (tree === gitText(run.worktree, ["rev-parse", `${head}^{tree}`])) return { commit: head, tree };
-    const commit = runGit(["commit-tree", tree, "-p", head, "-m", `chore: ${run.card.name}\n\n任务：${run.card.tasks[0].name}\n程序交付提交`]);
+    const commit = runGit(["commit-tree", tree, "-p", head, "-m", `chore: ${run.card.name}\n\n任务：${taskDefinition(run).name}\n程序交付提交`]);
     if (before !== workspaceGuard(run)) throw new Error("程序提交落盘前候选又变化，未更新分支");
     gitText(run.worktree, ["update-ref", `refs/heads/${run.branch}`, commit, head]);
     // 持有 Git 原生索引锁，不覆盖并发 git add；只原子安装已核对的私有索引，不改文件。

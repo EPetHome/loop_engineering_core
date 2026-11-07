@@ -1,10 +1,287 @@
 # Loop 内核与节点编排实施方案
 
+当前阶段：**外层第 2 次评审的一条必须修改已返修并完成程序验证，待外层复审**（不是独立评审通过、业务验收通过或真实发布）。最新记录见下文「第 2 次评审返修」，第 1 次三项返修保留；此前首次交付记录保留原始时态。本开发会话收到本页关联提示词后在 `step3` 实施；前台准备/启动的历史原样保留，不把准备记录当产品交付。2026-11-06 用户要求开始第三步、分支为 `step3`，由协调方写好方案与 Loop 任务并在可见终端前台启动。下文第三步方案是本次执行依据；后面的第一、二步章节保留历史，不再代表当前进度或本次授权。
+
+前两步发布事实：第一步 `f014331`、第二步 `d8408fa` 的成果已压缩合入 `dev` 的 `b97e154`，真实 origin/dev 推送和本次发布 worktree 释放有记录；第二步外层第 4 轮静态评审通过、无必须修改。发布卡按用户接受未验证处理，没有伪造本卡开发评审/测试结论。完整“新卡启动真实开发至普通自动合入”及第二步真实业务验收仍未验证，不在第三步准备中补记通过。证据：`/Users/Admin/.pi-autoreview/deployments/loop-kernel-step2-20261106-92fe5a24/plan.json` 及其中账本/检查日志。
+
+权威需求只读：`/Users/Admin/Desktop/loop/issues/【req】Loop内核与节点编排.md`。本次唯一任务文件：[第 3 步提示词](prompt/提示词-Loop内核与节点编排-3并行与统一验收.md)。用户的五步名称、顺序和验收原文不改；第四、五步不提前实施。
+
+## 第 3 步实施方案
+
+### 目标与实施方式
+
+本步把已可用的单任务路径扩展成多个任务各自开发、统一验收的批次。完成标志是两个任务真正并行、先完成者先汇入，只有责任任务收到验收返修，同轮全部返修汇入后按已确认范围重验，最终发布资格与证据一致。不是只增加 tasks 数组解析或模拟“并行”状态。
+
+开发工作区 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step3`，分支 `step3`，从已提交 dev `b97e154` 建出。外层仍用 `/Users/Admin/Desktop/loop/bin/loop 开发 pi` 加载桌面已发布 `autoreview.ts`；开发中的 step3 代码只在隔离夹具内运行，不负责评审自己。桌面未提交修改和前两步工作区只读。只复制原 `.autoreview.json`，旧 gate 仍忽略，不恢复全量测试。
+
+本轮已授权第三步开发及必要定向检查，先核对本方案后直接实施；每批最小充分自检通过即继续，外层 Loop 在交付时独立静态评审并回原会话返修。无需为普通实现选择重复请示。遇到真实业务取舍、越出本步权限或无法安全解释的来源才停下说明，不把可延期建议升级为前置门槛。
+
+### 1. 源码依据与最小改动位置
+
+| 已核对的第二步实现 | 第三步改动 |
+|---|---|
+| `DevelopmentCard.tasks` 为单元素 tuple，解析器拒绝验收/多任务 | 扩为任务列表和验收标准引用；先做底线与全部输入校验 |
+| `KernelRun` 顶层只有一套候选、worktree、session/activity、repair/计数；`validResult` 直接用 tasks[0] | 一份批次账本内保存显式任务记录与独立批次状态；全部调用者传任务身份，不能只扩大数组 |
+| `completeManagedDelivery → advanceManaged → mergeManaged` 直接发布单任务 | 任务就绪先进入批次集成，所有任务就绪才验收，再按 flow 提交 |
+| `local-node-queue.ts` 已有全本机 FIFO、身份与释放检查 | 测试/验收共用同一槽，不创建第二个验收队列 |
+| `pipeline.ts/dispatchBatches` 同仓库串行，`routeFailures` 已有归属分组逻辑 | 复用或抽出归属纯函数；不把旧串行调度当作新并行实现 |
+| `acceptance.ts/runAcceptanceStage` 会在定向复验成功后追加 full；内部仅保留旧通过项 | 新节点复用单轮执行能力，显式传实测/沿用集合，按责任任务纳入原已通过项，移除新卡路径的额外 full |
+| `submission-node.ts` 以单候选核对全部前置节点、压缩与 CAS 发布 | 绑定批次树和各任务的检查/集成来源映射，保留 dev 保护及发布后结论展示 |
+
+主要落点：`development-card.ts`、`node-ledger.ts`、`kernel.ts`、`kernel-workspace.ts`、`kernel-session.ts`、`kernel-runtime.ts`、`kernel-controls.ts`、`kernel-cli.ts`、`kernel-pi.ts`、`hosts/kernel-hook.ts`、`hosts/dev.ts` 及必要共享能力。可新增职责单一的 `batch-integration.ts` 与 `acceptance-node.ts`。验收内部仅抽本步必要接缝，旧入口保留行为直到第五步；不把旧 pipeline/review 组合层套进新节点。
+
+### 2. 卡、身份与旧记录兼容
+
+保留 version:1，新增 `acceptance` 字符串相对路径，继续用 `flow` 声明固定顺序。单任务保留四种现有组合且可选验收；两任务及以上必须带验收。仅开发性质，本步不开放部署、只评审或纯测试性质。
+
+标准沿用 `## 验收标准` 的 A 编号与 `[任务名]`。每条非人工项必须唯一归属存在的任务；授权项同时保留真实授权检查；跨任务条目必须指定一个责任任务。共享既有标签/条目解析，但补足启动时的缺归属、未知归属、多义归属拒绝，不能由模型推断归属。范围、提示词、标准、Git 分支、localFiles、配置和路径全部通过后才建资源。验收运行配置复用项目 acceptance，标准和顺序由卡明确指定；缺少必要方法要给具体诊断，不回退旧隐含验收。
+
+建议账本由批次记录和按稳定 ID 索引的任务记录组成；显示名不是唯一运行身份。每个任务保留自身 branch/worktree/candidate、session/activity、输入/用户版本、尝试、计数、返修信封和释放状态。批次保存共同 base、汇总 branch/worktree、集成清单、验收轮次/返修集合、控制代次、发布绑定与释放。任务节点通过小型上下文选中本任务，不创建“伪造的另一个批次账本”。新增必要类型即可，避免通用层。
+
+旧单任务账本按内存兼容视图读为一任务，只有明确写操作才做必要升级；查询不写迁移，不伪造新版结论。现有单任务 API 的默认任务只能用于确实只有一个任务的记录；多任务未指定身份应明确拒绝。停止某任务不把全批 stopped 置真；整批停止/放弃才影响全体。
+
+### 3. 并行、贡献与批次汇入
+
+全部任务从冻结共同基线开独立任务分支/隐藏目录并各自启动宿主。优先复用现有 argv 启动、进程登记、原会话恢复和返修通道。开发会话可以同时活动；开发评审不占测试/验收槽，测试和验收只有实际获得本机槽时才启动 deadline。
+
+任务完成卡上前置节点后马上提交内核的集成请求。集成按实际就绪顺序短暂串行；不把所有任务串行化。每次记录 task ID、任务候选/树、基线、相关输入、检查记录 ID、集成前后头/树、来源路径和顺序。CAS + 意图记录处理重复回调、崩溃恢复及并发提交，不在账本短锁中等待模型或长任务。
+
+集成只组合已检查的任务贡献，不编辑产品文件解决冲突。冲突退回本次请求任务原会话，带批次已纳入来源和冲突清单；其余任务继续，验收返修次数不变。开发方解决后重新提交/评审/测试。原 scope 与可证明来源保护要继续有效。
+
+关键约束：替换某任务候选或移出任务时必须消除旧贡献，不能把新头简单 merge 上去就算替换。以冻结基线和保留任务最新贡献重新组成候选，并保存旧批次 ref；任务为处理冲突吸收的其他任务来源必须登记，不能在移出甲后通过乙的历史把甲重新带回。用已有 Git 树/私有索引能力表达来源，无法证明安全时停具体任务，不静默丢数据。单任务可沿用现有目录作为批次候选，不为形式额外创建无用目录。
+
+任务评审/测试结论绑定其实际受测树；批次统一验收绑定集成树，附全部任务候选映射。不能要求两者树字面相同，也不能用“合并无冲突”冒充批次验收通过。原未变任务结论沿用的依据是来源映射和输入仍一致。
+
+### 4. 单轮验收与同轮返修
+
+`acceptance-node.ts` 只运行验收并返回统一结果和条目记录；节点不派返修、不读 ReviewState、不调用提交。内核在全部当前任务的有效候选已汇入且无在途改动时冻结一轮：batch candidate、任务映射、标准/授权哈希、轮次、实测条目与沿用条目，然后竞争本机槽。
+
+从 `acceptance.ts` 提取或增加新卡专用的单轮接缝；保留模型调用、报告校正、证据、被测系统资源收尾、人工/授权处理。新路径不调用“定向后完整验收”包装，传入的实测集合也不能再被内部“旧通过项全部沿用”缩小。旧路径到第五步前继续保持自己的接口。
+
+初次验收覆盖当前全部自动条目。产品失败只按失败条目责任任务派发；无归属的运行系统故障按已确认失败分类停验收，不随便归给所有开发方。每条回发绑定 task/session/attempt/候选/版本/随机 token，仅发该任务的条目和证据；sent/read/unknown 保持区分。
+
+本轮返修集合一经冻结，等待集合内全部任务重新开发评审、测试并汇入，才创建下一轮。不为每个返修返回单独验一次。下一轮实测集合严格为“不通过项 + 返修任务名下全部项”；未返修任务的通过项沿用原树/轮次/证据并写明原因，且核对其候选来源、标准、授权、相关方法输入没有变化。缺证据或输入变更不能补造通过，按真实缺项处理。
+
+定向重验通过后不在提交前追加完整验收。用户已明确接受可能漏掉被其他任务返修破坏的旧通过项，这不是实现者增设门槛的理由。环境/方法/未知只做有限恢复，不扣产品次数、不发产品返修、不推翻前面有效结论；仍失败则保留原轮次范围，通知只重跑验收/合法改卡/放弃的完整命令。
+
+验收缺省时限沿用现有 20 分钟，独立 maxRepairs=3、maxRecoveries=1。产品返修按责任任务计数，记录全批实测轮次但不把它当共享返修扣款；恢复、重试、校正、收尾共用本轮剩余 deadline，排队不计时。暂停/续跑/改卡不清零；超时、取消、消费者未释放或非开发节点写源码不能记产品失败或通过。
+
+### 5. 上限选择、移出和受控改卡
+
+达到某任务验收返修上限时，只让该任务等用户决定；通知列出继续修、移出任务、整批放弃，不能代选。继续修通过受控改卡提高该任务验收额度，保留旧计数和其他任务额度；建议最小字段为 `tasks[].limits.验收.maxRepairs`，其他限额仍继承批次节点缺省。实现可用同等简洁方式，但必须在卡、命令、帮助和测试中一致。
+
+扩展现有重跑/续跑/停止的 `--task`，验收重跑是批次级，不接受误导的任务级验收执行。`改卡 --remove-task <名>` 复用第二步真实用户决定、pending/prepared/applied 与下一边界生效机制。移出先保存成果和证据、停该任务并确认资源，再重建剩余候选；原标准不删写，移出条目标没验证，剩余条目完整重验一次。剩余多任务不能删验收；零任务需要明确整批放弃，不自动合入空批。
+
+直接改卡仍暂停；有活动节点的受控请求在下一边界生效，与取得执行权共用控制代次。改某任务测试只失效相关测试和依赖批次资格，不重评审其他未变任务；标准/授权变化按真实确认版本处理，旧例外决定作废。未知归属、脏目录和未保存成果不得强清。
+
+### 6. 状态、发布与完成判断
+
+五态保留，展示每个任务的实际活动、当前节点、排队、失败和原因；有任务在开发而另一个失败时不把全批写成停止。Pi/Hook/CLI 使用同一查询，不从旧 phase 推断状态，不借查询恢复队列。
+
+普通发布冻结当前批次树及每任务检查记录/贡献映射、验收结果/沿用明细；拿到目标锁再核对。未安排提交只给可合入，不暗加节点。dev 前进产生新树时返回具体缺项/整合入口，提交节点不偷偷检查；继续前两步只推 origin/dev、不强推、不自动重推及未提交目标工作区保护。例外只豁免真实用户接受的欠项，仍验证候选、版本、main 与资源边界，不将没验证改为通过。
+
+合入或放弃的资源释放扩展到本批全部任务与批次目录、消费者和本机票据。保存任务分支、旧汇总 ref、结果和失败证据；未确认归属或脏成果保留并逐项报告。发布后即使工作目录已删除，也按发布时绑定展示真实检查与沿用来源。
+
+### 7. 验证、边界与交付
+
+原需求 A4（非法卡）、A5（真并行与先完成先汇入）、A6（责任返修及精确重验）为本步主验收；A7—A10 保留结论复用、状态、例外和释放的跨任务回归。基于既有 `node:test` 与 kernel fixture 新增少量集成覆盖：两个消费者实际重叠、测试与验收无重叠、任务候选替换/吸收来源后移出、两任务同轮返修汇齐才验、旧通过责任项必重验、未返修任务不被重复派工、没有末尾 full、旧单任务账本兼容、真实用户决定与迟到回包。
+
+分批顺序：卡与任务账本兼容 → 独立任务启动/就绪集成 → 单轮验收与条目身份 → 责任回发/汇齐/精确重验 → 上限选择/移出/改卡 → 三宿主与统一发布/释放集成。依赖逻辑验证通过再继续；只跑受影响集合，不跑全量、不修改 `test/e2e.mjs`，不删弱既有断言。旧“不支持多任务/验收”断言按本步要求改为合法支持和非法拒绝，交付列明变化。
+
+程序检查全部使用系统临时 Git/bare origin、替身宿主/验收方、隔离的 kernel/resource/projects/local-queue 根；有界进程与屏障取证，不用固定长等待制造并行证据。真实模型质量、真实宿主业务路径、业务验收和真实发布单列未验证；本次外层模型用于开发与静态评审，不算业务验收。真实 dev 合入/推送、本机部署和旧目录清理留待后续明确授权，不继承上一轮发布授权。
+
+### 第 3 步准备与启动记录
+
+- 已创建分支 `step3` 和上文隐藏 worktree，基线 b97e154；只复制原 `.autoreview.json`，未提交/合入/推送，桌面既有改动保持。
+- 2026-11-06 重新核对：Pi 入口 `/Users/Admin/.local/bin/pi`，真实包 `@earendil-works/pi-coding-agent` 版本 1.3.0；目录仍名 `pi-versions/1.2.0`，不据目录名判断版本。已读当前 CLI 参数解析及正式启动器。
+- 按本任务选择 read/edit/write/bash；权限扩展、已发布 autoreview、Ponytail full 足够承担开发与外层评审。不启用全局后台任务、浏览器、MCP、额外子 Agent 或不相关技能；不卸载它们。
+- 权限扩展 `/Users/Admin/.pi/agent/npm/node_modules/@gotgenes/pi-permission-system/src/index.ts`；Ponytail `/Users/Admin/.codex/plugins/cache/ponytail/ponytail/4.13.0/pi-extension/index.js`。全局 yoloMode 当前 true；项目无覆盖。保持明确 deny 和本次任务边界，不修改持久配置。
+- 启动前用已有权限处理器模拟 read/edit/write/bash，不执行工具或模型；再核对正式入口 dry-run，之后在新 Terminal 窗口前台启动。结果和实际窗口/会话身份写 `/Users/Admin/.pi-autoreview/preparations/loop-kernel-step3-20261106/`，不把检查计划写成已通过。
+- `--offline` 只关闭 Pi 启动联网检查，模型仍正常连接；`--approve` 仅本次项目信任；不添加 accept-cmd、不使用 --json/--launcher background。开发会话命名“Loop内核第3步 · step3”。
+
+启动准备实际结果：已按真实权限处理器模拟四个工具，0 次询问；正式入口 dry-run 已通过，三项扩展、工具名单和任务路径正确。电脑控制工具禁止操作 Terminal，尚未启动 Pi，未改成后台。可复制前台命令：`bash /Users/Admin/.pi-autoreview/preparations/loop-kernel-step3-20261106/start-step3.sh`。原始检查和未启动状态见上述 preparation 目录；此记录不代表实际会话已加载。
+
+### 第 3 步实施与验证记录
+
+开发实施工作目录 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step3`，分支 `step3`，基线 `b97e1545053b588d0e1011da7f346096ddf9f6c8`。既有方案/本提示词未提交内容保留；未 add/commit/stash/reset/merge/push 真实仓库，未部署桌面运行版，未启动额外真实开发/评审 Agent。仅执行隔离程序验证及只读宿主 help。
+
+#### 已实施
+
+- `development-card.ts`：version:1 多任务、固定顺序、单任务可选验收、多任务必需验收，非人工条目唯一责任归属、标准/方法/路径前置检查；验收独立默认 3/20/1，任务级额度覆盖。提示词内容绑定每次节点输入；保持前两步真实用户文件引用后的确认版本保护，未真实引用的初始卡提示词仍按原路径内容进入首次检查，不额外改变单任务约定。
+- `node-ledger.ts`：一份账本的 `taskRecords` 保存稳定 ID、候选、工作区、原会话/进程、输入版本、尝试、次数、返修及释放；显式上下文投影仍写同一个短锁，不生成伪任务账本。顶层只作批次集成/验收/发布。旧单任务字段继续兼容，query 不迁移、不派工。
+- `kernel-runtime.ts`/三宿主适配：独立任务进程和隐藏空间真并行；Pi/Claude print、Codex exec 使用精确会话与受管继续信封，无共享 TUI/最近会话猜测。保留原单任务交互入口、auto/yolo 与已有 deny。Codex exec/resume 自动审批参数仅用已安装 CLI 的 help 只读核实，不代表真实模型装配通过。
+- `batch-integration.ts`：先就绪先装配已检查贡献，CAS + 意图/前后树 + 历史 ref + 输入/检查映射；重复候选幂等，候选替换/移出从冻结基线与保留贡献重建。直接或经批次吸收的其他任务来源会剥离；同文件混合无法证明时只暂停该任务，不猜删除。冲突只回本任务原会话，不扣验收次数。CAS 后中断按精确意图恢复，未知字节/索引/控制变化保留现场。其他任务在途时保留其上次有效贡献，不冒充它的新候选已就绪。
+- `acceptance.ts`/`acceptance-node.ts`：增加新卡单轮接缝，复用真实模型调用、证据、人工/授权、系统启动/释放；不走旧“定向后 full”包装。测试与验收共用同一 FIFO，取得槽后才起 deadline；恢复/报告/收尾共用剩余预算，1 分钟卡也不被旧最小预算门槛挡住。非开发节点写源码后还原也通过原始字节/索引、inode/ctime 与监测失效，证据保留。
+- 内核责任调度：同轮责任集合固定，汇齐才验“不通过项 + 返修任务名下全部项”；未返修项保留旧树/轮次/证据，核对标准、授权、相关方法及任务输入未变。非产品有限恢复不扣任务产品次数，不派产品返修，原范围与有效结论保留。
+- 控制/发布：CLI 加 `--task`、批次 `重跑 --node 验收`、`改卡 --remove-task`；原会话可记录继续修/移出/标准确认的真实决定，绑定版本和标准哈希，机器/文件不能代签。提高额度不清零、不自动扩张其他任务。标准改版清旧授权；改测试只失效该任务测试和依赖验收。移出先保留 ref/停消费者再重建，原标准不编辑，剩余完整重验、移出项记没验证。提交绑定各任务实测树/检查与汇总验收树的来源映射；dev 前进用内核逐任务整合并登记 dev 来源，不由提交节点偷偷检查。普通/例外均保留目标、候选及资源保护，只推 origin/dev。全部终态资源按登记释放，未知/脏内容保留。
+- 当前 README、工具清单及运行维护同步新字段、三种上限选择、标准确认、移出、查询与宿主执行模式；第四步节点、第五步旧路径删除均未实施，未修改 `test/e2e.mjs`、稳定规则或原需求。
+
+#### 原始检查与阶段结果（日志保留在系统临时目录）
+
+证据根：`/tmp/loop-step3-checks-hWvPgT/`，夹具的 Git/bare origin、kernel/projects/resources/local-queue、通知及假宿主均在每例自己的系统临时根，按归属 finally 释放；不复用外层身份/scope。检查脚本亦在此根，不是产品任务/报告副本。
+
+1. `node --test test/kernel-controls.test.ts` → 通过，`foundation.log`。
+2. `node --test test/kernel-test-node.test.ts` → 通过，`test-node-regression.log`。
+3. `node --test test/kernel.test.ts` → 初次有 2 项：旧“验收未上线”预期需按本步改为缺 acceptance 拒绝；查询理由回归遗漏输入缺项，已修复。原始 `kernel-regression.log` 保留，最终回归见下文。
+4. `node --test test/kernel-batch.test.ts` → `batch-1.log` 初次 6/7，A5 的假宿主设置覆盖了验收计数目录；修夹具，不改产品断言。`parallel-2.log` 同一已知失败保留；修复并加入真实双测试排队屏障后 `parallel-3.log` 通过。`batch-2.log` 的“写源码后还原”反例发现异步文件通知可合并，已补 inode/ctime/目录元数据守卫；`batch-target-3.log` 定向 5 例、`batch-4.log` 完整批次集合通过。
+5. `node --test test/kernel-controls.test.ts test/kernel-test-node.test.ts` → `regression-2.log` 中旧正文篡改真实输入用例发现拒收处理不能吞掉用户原文；修为不伪报已读/不授权但仍记录真实输入，`node --test --test-name-pattern='机器信封核对接收完整正文' test/kernel-test-node.test.ts` → `receipt-3.log` 通过。
+6. `node --test test/host-dev.test.ts` → `host-dev.log` 通过；只读 `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex --help`、`exec --help`、`exec resume --help`、`exec --approve-for-me resume --help` → `codex-*.txt`，均未调用业务模型或信任/配置变更。
+7. 实际调用已安装 pi-lens `LSPService.touchFile(...collectDiagnostics:true,clientScope:'primary')`，`PI_LENS_DISABLE_LSP_INSTALL=1`，在 finally shutdown。首次直接加载缺 Pi 包解析，`lens-1.err` 保留；用临时 ESM loader 指向已安装 Pi（不安装、不改全局）后 `lens-2.jsonl`/`lens-3.jsonl` 有真实 TypeScript 返回，不是空缓存。发现并修复 NodeName 类型与 prior 可空错误；原生推断工程缺 Node/Pi 类型的诊断不记为通过。复用已安装 TypeScript、显式指向已有 @types/node/Pi 类型的 `types-check.mjs`，17 个受影响产品入口 `types-1.jsonl` 为 0 诊断。交付前当前快照再复核见下文。
+
+#### 断言变化与未验证边界
+
+- 只改现有 `test/kernel.test.ts` 一条旧预期：`[开发评审,验收,提交]` 由“尚未支持”改为“缺 acceptance 路径拒绝”，因为本步已上线验收；其余非法卡无副作用底线保留。
+- `test/host-dev.test.ts` 仅新增 Codex 并行 exec/精确 resume 参数断言，不改旧单会话预期。`test/fake-kernel-pi.mjs` 仅扩为按任务身份的屏障/文件，旧单任务场景保留；fixture 清除外层任务/启动/scope 身份。新增 `test/kernel-batch.test.ts` 覆盖 A4—A10、并行区间/槽互斥、精确调用范围、贡献来源/移出、上限、改卡/授权、迟到、旧账本和三宿主适配，不删除旧测试。
+- `test/e2e.mjs` 场景和断言 **零修改**，未运行；旧验收入口的末尾 full 保留到第 5 步，本步只为新卡去掉额外 full。
+- 【必须修改】开发自检发现项已修复，当前没有已知未解决的必须修改；独立静态评审尚待外层 Loop，不将自检写成独立评审通过。
+- 【建议】同文件混合来源无法独立剥离时，当前按需求安全暂停，后续可改善原会话引导；不阻断本步，不为此建立通用平台。
+- 未验证：真实 Pi/Claude/Codex 模型的完整开发质量、实际账号/信任装配、真实浏览器/后端业务验收、真实远端 dev 发布与本机部署。前两步的真实自举/业务未验项原样保留，本次替身程序检查不替它们补验。
+
+#### 交付前集成复核与收尾
+
+实际工作目录仍为本页开头的 step3。原始命令与日志：
+
+```bash
+node --test --test-concurrency=1 test/kernel.test.ts test/kernel-controls.test.ts test/kernel-test-node.test.ts test/local-node-queue.test.ts test/host-dev.test.ts
+# integration-kernel.log：72 项，初检 68 通过/4 失败（含父用例）；未掩盖初检失败。
+node --test --test-concurrency=1 test/kernel-batch.test.ts test/acceptance-recheck.test.ts test/acceptance-recovery.test.ts
+# integration-batch.log：59/59 通过，新卡精确重验与旧入口 full/证据恢复语义分开覆盖。
+node --test --test-name-pattern='新卡无需手动提交卡|返修1：例外决定' test/kernel.test.ts
+# compat-repair.log：5/5。
+node --test --test-name-pattern='waiting 边界改卡' test/local-node-queue.test.ts
+# queue-repair.log：1/1。
+node --test --test-name-pattern='A6|单任务可选验收|头less|改任务测试|验收上限|真实授权|多任务 Claude/Codex' test/kernel-batch.test.ts
+# batch-compat.log：9/9。
+node --test --test-name-pattern='验收上限' test/kernel-batch.test.ts
+# limit-final.log：1/1，补充“开启开发也不能绕过上限记账”反例。
+node --test --test-name-pattern='真实授权' test/kernel-batch.test.ts
+# authorization-final.log：1/1，授权未决定不排队/不调用验收方/不增加实测轮次；真实撤权使旧结论失效。
+node /tmp/loop-step3-checks-hWvPgT/types-check.mjs development-card.ts node-ledger.ts kernel.ts kernel-workspace.ts kernel-session.ts kernel-runtime.ts kernel-cli.ts kernel-controls.ts kernel-pi.ts hosts/kernel-hook.ts hosts/dev.ts batch-integration.ts acceptance-node.ts acceptance.ts submission-node.ts development-node.ts test-node.ts
+node /tmp/loop-step3-checks-hWvPgT/types-check.mjs loop.ts
+# types-current.jsonl / types-cli.jsonl：受影响 18 个产品入口均 0 诊断，未安装依赖。
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs development-card.ts node-ledger.ts kernel.ts kernel-workspace.ts kernel-session.ts kernel-runtime.ts kernel-controls.ts batch-integration.ts acceptance-node.ts kernel-cli.ts kernel-pi.ts hosts/kernel-hook.ts hosts/dev.ts acceptance.ts submission-node.ts development-node.ts test-node.ts
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs kernel.ts kernel-session.ts kernel-controls.ts
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs kernel-session.ts
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs loop.ts
+# lens-final / lens-repair / lens-authorization / lens-cli：实际 LSP 请求；缺类型环境诊断仍原样保留，不作“LSP 清零”宣传。
+git diff --check
+# 通过；branch=step3，HEAD 仍 b97e1545053b588d0e1011da7f346096ddf9f6c8。
+```
+
+初检回归修复事实：新增的初始提示词确认快照误改变了前两步“未真实引用的卡提示词可在首次检查按当前内容采用”的约定，已撤回这部分扩张；真实用户引用后的确认保护保留。等待边界改卡把顶层 epoch 加了两次，已改为批次只加一次、各任务等待身份分别加一次。上述原测试断言均未修改；按失败与受影响范围定向复核闭环，不把初检日志改成通过，也不在无新疑点后重复扩大检查。
+
+资源：真实双宿主替身测试确认独立进程组同时存活/会话不同、双测试只一槽、验收不重叠、先乙后甲汇入；结束后按登记确认消费者死亡、队列为空、全部任务及批次 worktree 删除，任务分支与历史 ref 保留。旧验收测试也核对 procs/资源释放；脏/未知归属反例按产品约定保留，夹具最终仅清理自身系统临时根。pi-lens 服务均 finally shutdown；检查日志与复核脚本保留在证据根。实际本开发 worktree 是用户指定空间，未删除；未清理任何旧 worktree 或用户 temp/资料。
+
+分层结论：开发静态自检完成；独立静态评审交外层、尚未由开发方冒称通过。隔离程序验证及真实进程/Git/CLI/Hook 的替身装配已验证；真实模型质量、真实宿主信任/账号装配、用户业务验收及真实发布未验证。当前没有已知未解决的【必须修改】，建议仍仅为上文安全暂停情形的使用引导。
+
+旧问题单：不回写/关闭外层问题单，不把本次替身结果升级成关单依据；前两步逐单记录保留。本步按权威需求标题逐项对照新卡接缝（不是原业务复现）：
+
+| 旧问题标题 | 本步对照结果/依据 |
+| --- | --- |
+| 开工全量基线测试阻断批次启动 | 新卡仅前置只读校验，无隐含基线；非法卡无副作用、旧配置验收不被单会话执行的回归保留 |
+| 全量测试同时运行导致门禁假失败 | 卡上命令 + 测试/验收共用 FIFO；真实进程屏障与互斥反例通过，不治理旧全量套件 |
+| 队列通过后合入仍重复评审 | 同树/输入复用；A6 未返修任务分支与检查数不变，提交只核对映射 |
+| 自动评审完成提示与合入条件不一致 | CLI/Pi/Hook 共用 query/qualification；普通拒绝逐项补救，静态自检与业务结论分列 |
+| 非产品失败阻断整批合入 | 任务运行独立；验收非产品不派返修/不扣产品次数；用户例外仍绑定候选与资源 |
+| 批次已合入但状态仍显示运行中 | 发布事实与进程/推送/释放分列，保留 Loop 外合入只读识别回归 |
+| 配置错误发现晚且暂停无通知 | 标准/方法/卡前置校验，未决授权不启动验收；通知替身已验，真实系统通知未验 |
+| 运行中改批次配置导致整批验收不启动 | 受控事务、相关输入投影、等待边界接续及标准确认反例通过；直接改卡暂停 |
+| 合入队列锁在持有者释放瞬间误报身份不明 | 保留前两步目标锁/身份边界；本步未单独复现该旧队列瞬时态，不宣称修复旧路径 |
+| 启动命令截断导致流水线空等 | 新卡 argv 与精确会话登记、超时保护、双消费者屏障覆盖；真实宿主业务未验 |
+| 门禁误把测试失败判为磁盘不足 | 共用分类器未改，前两步 ENOSPC/产品断言定向回归保留，不新增旧门禁逻辑 |
+| 升级后缺少项目迁移提示 | 新卡拒绝旧格式、不回退；当前说明同步。不代项目迁移，真实升级未验 |
+| 验收超时丢弃已有证据 | 本步单轮接缝/旧恢复测试保留证据；原验收内部缺陷另留，不宣称本步关单 |
+| 验收演示数据写入真实状态目录 | 新夹具与运行身份/cwd 隔离；原业务场景未验，不扩修其内部缺陷 |
+| 测试写死等待秒数在机器繁忙时误判失败 | 新增屏障取证、不靠固定长等待宣称并行；旧测试治理未实施 |
+| 调用链排查遗漏子组件 | 本步核对显式任务调用链及三适配入口，不扩为全仓治理 |
+| 协调汇报反复要求用户决策 | 普通自检直接继续，仅真实授权/额度/移出等用户控制留决定；非本步代码关单 |
+
+关联历史“合入退回无通知且缺少例外入口”沿用统一普通/真实用户例外入口与历史记录；本步新增多任务来源映射/验收欠项例外的隔离反例，不替真实业务验收。
+
+### 第 1 次评审返修
+
+来源：本会话收到的外层「自动评审 · 第 1 次返修」三条必须修改；不处理本轮明确无需处理的小问题。工作区/分支/真实仓库边界不变。
+
+- **第 1 条：已修。** `prepareExceptionCandidate()` 仅在真实用户合入入口、终端显示确认内容之前，按全部当前登记候选冻结完整批次树和来源映射。测试失败任务也纳入当前贡献；已有旧贡献从基线重建替换，不与旧代码叠加。欠检查不伪造通过，但源码/候选/输入/装配记录与资源身份不可豁免。`contributionProblems(..., false)` 与发布 CAS 边界独立强制核对来源；`taskChecks` 仅绑定映射中实际通过的记录，决定/发布均留完整 mapping。冻结事务的 CAS 恢复允许如实保留未通过项，不授予发布决定。新增两种反例分别验证“从未汇入的甲”与“甲有旧贡献、当前测试失败”，都断言临时 bare `origin/dev` 实际含甲最新文件与乙文件、映射/检查候选一致、失败未改通过；再覆盖缺失/被篡改来源、确认后换候选及例外冻结恢复。
+- **第 2 条：已修。** 真实任务输入更新会在保留责任集合/等待集合/次数的同时标记计划待刷新、撤销旧派工。计划额外冻结标准、授权和共享方法的 basis；安全边界仅在全部新检查与贡献到齐、旧通过项的未变任务输入/原实测材料可证明时刷新签名，并记 `planRefreshes`。不取消签名校验、不清轮次/返修次数、不追加 full。新增/强化 Claude/Codex 实际 UserPromptSubmit 事件：验收只退甲后，用户再引用补充要求，甲完成正常修复后只验 A1/A2，乙分支/检查数与旧实测树/轮次不变；甲丙同轮补充要求仍汇齐才验一次。共享方法另有变化时拒绝借补充输入洗白，原范围和材料保留。
+- **第 3 条：已修。** 无任务记录的单任务继续使用旧 `提示词：路径` 键，无验收的第二步完整输入也保留旧 `[review, testing, flow, cardRevision, cardHash]` 元组；多任务/验收只在其实际消费者上扩展。不迁移、不重绑旧结论。`test/helpers/legacy-kernel-inputs.ts` 冻结 b97e154 前两步只读算法（与当前 `checkInputs` 独立），构造实际旧完整指纹/节点指纹的通过记录而非调用新节点生成记录，覆盖 v1/v2 查询不写、输入变化拒绝、无变化续跑复用、普通合入/推 bare dev、历史结果/次数不变及释放。
+
+本轮证据根 `/tmp/loop-step3-review1-xAPIn1/`。旧算法原始依据由只读 `git show HEAD:kernel-workspace.ts` / `git show HEAD:node-ledger.ts` 保存到此根，未修改真实 HEAD；所有业务/Git/资源/通知仍在各夹具自己的系统临时根。
+
+实际检查命令（在本工作目录执行）：
+
+```bash
+node --test --test-name-pattern='真实旧指纹' test/kernel-batch.test.ts
+# legacy-1.log：1/1。
+node --test --test-name-pattern='甲丙同轮返修|多任务 Claude/Codex' test/kernel-batch.test.ts
+# input-plan-1.log：4/4。
+node --test --test-name-pattern='例外发布包含|例外不能豁免|多任务普通拒绝' test/kernel-batch.test.ts
+# exception-1.log：5/5。
+node --test test/kernel-batch.test.ts
+# batch-integration.log：27/27，含最终新增的来源恢复与共享方法反例。
+node --test --test-concurrency=1 test/kernel.test.ts test/kernel-controls.test.ts test/kernel-test-node.test.ts test/local-node-queue.test.ts
+# kernel-integration.log：68/68；前次交付的单任务/等待改卡回归也在本次完整受影响集合中通过。
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs kernel-workspace.ts kernel-session.ts node-ledger.ts kernel-controls.ts kernel.ts batch-integration.ts kernel-cli.ts submission-node.ts acceptance-node.ts
+# lens.jsonl/lens.err：实际 pi-lens 请求，禁安装、finally shutdown；原生推断工程缺 Node/Pi 类型不冒称清零。
+node /tmp/loop-step3-checks-hWvPgT/types-check.mjs kernel-workspace.ts kernel-session.ts node-ledger.ts kernel-controls.ts kernel.ts batch-integration.ts kernel-cli.ts submission-node.ts acceptance-node.ts test/helpers/legacy-kernel-inputs.ts test/kernel-batch.test.ts
+# types.jsonl：11 个受影响入口 0 诊断（包含旧指纹夹具与行为测试），复用已安装类型依赖。
+git diff --check
+```
+
+【必须修改】本轮三项已修并通过上述隔离程序验证，当前无已知未修必须项；待外层静态复审，不自行宣布独立评审通过。
+
+【建议】未扩修外层本轮明确不用处理的小问题。没有修改 `test/e2e.mjs` 或降低旧断言；只新增反例、强化原“旧账本”及真实输入场景。当前 README/工具清单同步例外来源与计划刷新语义。夹具结束按登记停消费者、清空队列/释放空间；日志、旧算法依据与诊断证据保留在系统临时证据根。
+
+未验证项仍为真实模型质量、真实宿主账号/信任装配、真实业务验收、真实 dev/origin/dev 发布与部署；前两步未验项不变。未 add/commit/stash/reset/merge/push 真实仓库，未操作用户 temp/ 或旧 worktree。
+
+### 第 2 次评审返修
+
+来源：本会话外层「自动评审 · 第 2 次返修」唯一必须修改；本轮小问题仍不扩修。工作区仍为 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step3`，分支 `step3`。
+
+**第 1 条：已修。** 采用评审建议中的第二种方式：让后续替换、移出及其 CAS 恢复安全处理已登记但未通过的贡献，不另建待确认副账本。`batch-integration.ts` 统一 `verifyContribution()` 三种边界：
+
+- 新的普通任务汇入（ready）仍须当前候选/用户版本/控制代次/输入一致，且全部必需任务检查已有有效通过记录。
+- 保留的旧贡献（registered）必须与原已登记映射逐字一致；允许其尚缺通过项，但已声明的通过 ID 仍须有对应任务/节点/树/原输入、结束、释放和证据。只保留源码事实，不授予新通过资格，不检查其他任务的在途候选，更不覆盖其工作区。
+- 例外确认前的冻结（exception）仍核对全部当前来源及实际检查快照；确认取消不发布、不生成用户决定。正常替换/移出和中断恢复使用同一校验，不因保留未通过快照互相等待。`contributionProblems()`、普通验收入口及提交前/CAS 的资格门槛未放宽，未通过任务仍阻止普通验收与发布。
+
+新增完整真实 PTY 反例（系统临时 Git/bare origin，不调用真实模型）：两任务实际测试命令均产品失败 → CLI `合入 --接受未验证 --json` 显示冻结候选 → 输入“取消” → 断言无例外决定、无发布。分两路验证：① 甲修好先汇入，乙仍失败时直接执行验收/普通合入均拒绝，乙再修好后统一验收一次并普通自动合入，bare `origin/dev` 实际文件为甲乙各自修好内容；② 取消后受控移出甲，事务从 prepared 正常完成、无 pending，保留乙未通过快照，乙修好后仅完整验剩余 A3/A4 并普通发布，远端甲恢复冻结基线、乙为新内容。两路均断言原失败记录保留、发布不是例外、槽清空/工作区释放。
+
+原 CAS 反例另补“普通替换仍保留一个未通过快照”和“移出重建仍保留未通过快照”的中断/恢复，并检查控制事务不重复装配、不补成通过、不授予发布决定。既有例外漏代码、来源不一致、前轮精确重验、旧账本及 Hook 场景保留。
+
+本轮证据根 `/tmp/loop-step3-review2-FtVo1c/`，原始命令：
+
+```bash
+node --test --test-name-pattern='两任务测试失败后真实 TTY 取消例外' test/kernel-batch.test.ts
+# reproduce.log：修改产品前按原断言复现两路失败（替换未汇入、移出停 prepared）；没有弱化断言。
+# cancel-repair.log：修复后同命令 3/3（含父用例）通过。
+node --test --test-name-pattern='集成 CAS 后中断|例外发布包含|例外不能豁免' test/kernel-batch.test.ts
+# retained-recovery.log：5/5 通过，含普通替换/移出保留未通过快照的恢复。
+node --test test/kernel-batch.test.ts
+# batch-integration.log：30/30 通过，完整受影响集合。
+node --test --test-name-pattern='真实 PTY 例外入口' test/kernel.test.ts
+# single-tty.log：1/1，通过原单任务中文确认/取消/改输入竞态断言。
+node /tmp/loop-step3-checks-hWvPgT/lens-check.mjs batch-integration.ts test/kernel-batch.test.ts
+# lens.jsonl / lens.err：实际 pi-lens 检查，禁安装、finally shutdown，不用空缓存报通过；推断工程缺类型环境说明沿用。
+node /tmp/loop-step3-checks-hWvPgT/types-check.mjs batch-integration.ts test/kernel-batch.test.ts
+# types.jsonl：2 个受影响入口及依赖共 0 诊断，复用已安装 Node/Pi 类型。
+git diff --check
+```
+
+【必须修改】本轮唯一项已修并完成上述程序验证，待外层复审；不冒称独立评审通过。
+
+【建议】未处理本轮明确不要求处理的小问题。仅同步 README/工具清单的取消后语义；未改 `test/e2e.mjs`、原需求、验收标准或稳定规则。所有新夹具为系统临时根；PTY 子进程按本次 fork 归属等待/停止，测试消费者与队列按登记释放。保留原始复现失败日志及检查证据；未清理用户 temp/、旧 worktree 或开发工作区。未提交、合入、推送真实仓库，未部署。
+
+未验证项继续为真实模型/宿主业务装配、真实用户业务验收、真实远端发布与本机部署；不把本次替身流程补记为前两步业务通过。
+
+## 前两步历史记录
+
+以下为原第一、二步方案和交付前记录，保留原始时态以便追溯；其中“当前阶段”“待评审”“未合入”等不覆盖本文开头的最新发布事实，历史启动命令不用于本次。
+
 原稿日期：2026-11-06。当前阶段：**阶段 B 的第二步代码、ENOSPC 漏项、第 2 轮三项必须修改及本次 mc 存储水位兼容返修已补修并完成相关定向验证，待外层 Loop 评审当前最终代码**。方案阶段已由外层 Loop 静态评审通过、无必须修改，协调方已明确继续同一会话实施。开发起点仍为第一步 `refactor/loop-kernel-step1` 的 `f014331`；第一步运行工作区和桌面仓库保持只读。当前实际证据见下文「阶段 B 实施与验证记录」，不另建报告或任务书。第二步代码已收到外层第 2 轮三项必须修改，本轮均已补修；原评审及暂停历史保留，当前最终快照待外层重新评审，不能写成代码评审已通过。真实模型/宿主装配、真实远端发布、第一步真实自举及业务验收均未验证，不记为已完成。
 
 权威需求只读：[【req】Loop内核与节点编排](/Users/Admin/Desktop/loop/issues/【req】Loop内核与节点编排.md)。当前执行文件：[第 2 步提示词](prompt/提示词-Loop内核与节点编排-2测试节点.md)。第一步准备记录保留在本文历史章节；本方案不替代需求、用户授权或验收标准，字段、文件拆分和内部命令是实现设计。
 
-## 直接建议
+## 前两步推进建议（历史）
 
 按需求规定的五步迁移。第 1 步先打通单任务的「开发评审 → 提交」，把候选、结论、实际运行状态和合入资格交给内核；先解决“已经停了却显示运行中”“已经检查却重复检查”“没有队列记录就不能合入”。测试、并行验收、部署和旧代码清理按原顺序接入，不提前实现。
 

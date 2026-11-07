@@ -30,7 +30,7 @@ export function kernelFixture(flow = ["开发评审", "测试"], command = "prin
   Object.assign(process.env, { LOOP_PA_CONFIG: join(root, "pa.json"), AUTOREVIEW_KERNEL_ROOT: join(root, "kernel"), AUTOREVIEW_LOCAL_QUEUE_ROOT: join(root, "local-queue"),
     AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"), AUTOREVIEW_PROJECTS_ROOT: join(root, "projects"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
   // 不把外层开发会话的受管身份带到临时模型/CLI。
-  for (const key of ["AUTOREVIEW_KERNEL_LEDGER", "AUTOREVIEW_KERNEL_RUN", "AUTOREVIEW_KERNEL_REPAIR", "AUTOREVIEW_DEV_ROOT"]) delete process.env[key];
+  for (const key of ["AUTOREVIEW_KERNEL_LEDGER", "AUTOREVIEW_KERNEL_RUN", "AUTOREVIEW_KERNEL_REPAIR", "AUTOREVIEW_KERNEL_TASK", "AUTOREVIEW_KERNEL_LAUNCH", "AUTOREVIEW_KERNEL_NATIVE_BINDING", "AUTOREVIEW_DEV_ROOT", "AUTOREVIEW_SCOPE", "AUTOREVIEW_SCOPE_FILE"]) delete process.env[key];
   const git = (cwd: string, ...args: string[]): string => {
     const r = spawnSync("git", args, { cwd, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr || r.stdout); return r.stdout.trim();
   };

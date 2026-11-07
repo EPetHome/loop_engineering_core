@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { canonicalBatchFile, eventLock } from "./events.ts";
-import { digest, type DevelopmentCard, type NodeName } from "./development-card.ts";
+import { digest, type DevelopmentCard, type DevelopmentTask, type NodeName } from "./development-card.ts";
+import type { AcceptanceRecord, Criteria, Grants } from "./acceptance-core.ts";
 import { gitText } from "./workspace.ts";
 import type { FailureKind } from "./failure.ts";
 import { processStartTime, type SessionGroup } from "./procs.ts";
@@ -14,17 +15,19 @@ export interface NodeResult {
   id: string; task: string; node: NodeName; candidate: Candidate; inputs: string;
   started: string; ended?: string; status: "通过" | "不通过" | "没验证" | "中断";
   failure?: FailureKind; reason?: string; evidence: string[]; operations: string[]; released: boolean;
+  acceptance?: AcceptanceRecord;
 }
 export interface CardChange {
   id: string; source: string; authorization?: string; userVersion: number; at: string; expectedHash: string; content: string; card: DevelopmentCard;
-  before: string; state: "pending" | "prepared" | "applied" | "rejected"; appliedAt?: string; reason?: string;
+  before: string; removeTasks?: string[]; acceptanceVersion?: { path: string; hash: string }; installed?: boolean; state: "pending" | "prepared" | "applied" | "rejected"; appliedAt?: string; reason?: string;
 }
 export interface RepairEnvelope {
   id: string; token: string; session: string; host: string; attempt: string; candidate: Candidate; inputs: string; userVersion: number; epoch: number;
   message: string; hash: string; file: string; state: "pending" | "sent" | "read" | "unknown"; at: string; readAt?: string;
+  taskId?: string; node?: NodeName; batchVersion?: number;
 }
 export interface InputSnapshot { files: Record<string, string>; paths: Record<string, string>; requirement: string }
-export interface UserDecision { id: string; at: string; source: string; text: string; candidate: Candidate; inputs: string; userVersion: number; missing: string[] }
+export interface UserDecision { id: string; at: string; source: string; text: string; candidate: Candidate; inputs: string; userVersion: number; missing: string[]; mapping?: Contribution[] }
 export interface KernelRun {
   v: 1; revision: number; id: string; repo: string; common: string; file: string; dir: string;
   card: DevelopmentCard; cardHash: string; base: string; targetAtStart: string; created: string;
@@ -35,12 +38,19 @@ export interface KernelRun {
   inputVersion?: 2; cardRevision?: number; epoch?: number;
   counters?: Partial<Record<NodeName, { repairs: number; recoveries: number }>>;
   blockedNode?: NodeName; changes?: CardChange[]; pendingCard?: string;
-  controlDecisions?: { id: string; source: string; text: string; at: string; cardHash: string; userVersion: number; action: "remove-test"; used?: string }[];
+  controlDecisions?: { id: string; source: string; text: string; at: string; cardHash: string; userVersion: number; action: "remove-test" | "remove-acceptance" | "remove-task" | "raise-acceptance" | "change-acceptance"; acceptance?: { path: string; hash: string }; task?: string; used?: string }[];
+  /** 只在内存上下文出现，不写第二份账本。新多任务的任务运行字段唯一存于 taskRecords。 */
+  taskId?: string; taskRecords?: TaskRecord[];
+  batch?: { version: number; targetSource?: Candidate; contributions: Contribution[]; integrations: BatchIntegration[]; pending?: { id: string; before: string; after: string; version: number; entry?: BatchIntegration; guard?: string; epoch?: number }; removed: { id: string; name: string; at: string; source: string; history?: string }[] };
+  acceptanceState?: { criteria: Criteria; hash: string; owners: Record<string, string>; grants?: Grants; round: number;
+    plan?: { ids: string[]; repairTasks: string[]; mapping: string; signature: string; basis?: string; pendingInputs?: string[]; waitFor?: { task: string; candidate: string }[] }; previous?: AcceptanceRecord;
+    planRefreshes?: { at: string; from: string; to: string; tasks: string[]; ids: string[]; mapping: string }[];
+    bindings?: Record<string, { tree: string; round: number; task?: string; candidate?: string; inputs: string; reason?: string }> };
   worker?: SessionGroup; workerRequest?: string;
   repair?: RepairEnvelope;
   native?: { launch: string; command: string; childPid: number; childStarted: string; binding: string };
   abandonment?: { at: string; source: string; head?: string; history?: string };
-  activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting" | "waiting" | "testing"; pid: number; started: string; session?: string; procs?: string; ticket?: string; deadline?: number };
+  activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting" | "waiting" | "testing" | "accepting"; pid: number; started: string; session?: string; procs?: string; ticket?: string; deadline?: number };
   session?: { host: "pi" | "claude" | "codex"; id: string; log?: string; pid: number; started: string; launchId?: string };
   launch?: SessionGroup; supervisor?: SessionGroup; stopReason?: string; stopped?: boolean; abandoned?: boolean;
   decisions: UserDecision[]; notes?: string[];
@@ -49,8 +59,44 @@ export interface KernelRun {
     inputSnapshot?: InputSnapshot; inputRoot?: string;
     /** 发布边界绑定的实际通过记录；没有 result 表示该节点作为用户例外欠项保留。 */
     nodeChecks?: Partial<Record<NodeName, { inputs: string; result?: string }>>;
+    taskChecks?: { task: string; candidate: Candidate; checks: { node: NodeName; inputs: string; result?: string }[] }[]; mapping?: Contribution[];
     at: string; local: "intent" | "merged"; push: "未开始" | "进行中" | "成功" | "失败"; reason?: string; decision?: string; origin: string };
   release: { status: "未释放" | "已释放" | "未确认"; details: string[] };
+}
+/** 显式上下文投影：不是另一份 run；写回仍持同一个账本短锁。 */
+export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "userFiles", "userFileVersions", "epoch", "counters", "blockedNode", "worker", "workerRequest", "repair", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
+export type TaskRecord = Pick<KernelRun, typeof TASK_FIELDS[number]> & { id: string; name: string; definition?: DevelopmentTask; removed?: boolean };
+export interface Contribution { task: string; candidate: Candidate; base: string; patchBase: string; contribution: string; inputs: Record<string, string>; checks: string[]; epoch: number; userVersion: number }
+export interface BatchIntegration { id: string; task: string; at: string; before: Candidate; after: Candidate; mapping: Contribution[]; history: string; evidence: string; order: number; control?: string; targetSource?: Candidate }
+export function taskDefinition(run: KernelRun): DevelopmentTask {
+  const record = run.taskRecords?.find((r) => r.id === run.taskId);
+  const task = run.taskId ? run.card.tasks.find((t) => t.name === record?.name) ?? record?.definition : run.card.tasks.length === 1 ? run.card.tasks[0] : undefined;
+  if (!task) throw new Error("多任务节点必须显式指定任务身份 --task <任务名>");
+  return task;
+}
+export function taskIdentity(run: KernelRun): string { return run.taskId ?? taskDefinition(run).name; }
+export function taskIds(run: KernelRun): string[] { return run.taskRecords ? run.taskRecords.filter((t) => !t.removed).map((t) => t.id) : [taskDefinition(run).name]; }
+export function taskView(run: KernelRun, id?: string): KernelRun {
+  if (!run.taskRecords) { if (id && id !== taskDefinition(run).name) throw new Error(`未知任务：${id}`); return run; }
+  if (!id) return run;
+  const task = run.taskRecords.find((t) => t.id === id || t.name === id);
+  if (!task) throw new Error(`未知任务：${id}`);
+  const view = { ...run, taskId: task.id };
+  for (const key of TASK_FIELDS) (view as any)[key] = task[key];
+  view.stopped = run.stopped || task.stopped; view.abandoned = run.abandoned || task.abandoned || task.removed;
+  return view;
+}
+export function readTaskRun(path: string, task?: string): KernelRun { return taskView(readRun(path), task); }
+export function updateTaskRun<T>(path: string, task: string | undefined, change: (run: KernelRun) => T): T {
+  return updateRun(path, (run) => {
+    if (!run.taskRecords || !task) return change(run);
+    const view = taskView(run, task), before = view.userVersion, value = change(view);
+    const record = run.taskRecords.find((t) => t.id === view.taskId)!;
+    for (const key of TASK_FIELDS) (record as any)[key] = view[key];
+    for (const key of Object.keys(view)) if (key !== "taskId" && !(TASK_FIELDS as readonly string[]).includes(key)) (run as any)[key] = (view as any)[key];
+    if (before !== view.userVersion) { run.userVersion++; run.epoch = (run.epoch ?? 0) + 1; }
+    return value;
+  });
 }
 export function activityAlive(activity: KernelRun["activity"]): boolean | undefined {
   if (!activity) return false;
@@ -88,15 +134,16 @@ export function updateRun<T>(path: string, change: (run: KernelRun) => T): T {
 /** 历史决定保留，但只有本候选、本输入、本用户版本的决定仍有授权效力。 */
 export function findUserDecision(run: KernelRun, candidate: Candidate | undefined, inputs: string | undefined, missing: string[], id?: string): UserDecision | undefined {
   return [...run.decisions].reverse().find((d) => (!id || d.id === id) && d.userVersion === run.userVersion && typeof inputs === "string" && d.inputs === inputs
-    && d.candidate.commit === candidate?.commit && d.candidate.tree === candidate.tree && JSON.stringify(d.missing) === JSON.stringify(missing));
+    && d.candidate.commit === candidate?.commit && d.candidate.tree === candidate.tree && JSON.stringify(d.missing) === JSON.stringify(missing)
+    && (!d.mapping || JSON.stringify(d.mapping) === JSON.stringify(run.batch?.contributions)));
 }
 export function validResult(run: KernelRun, node: NodeName, candidate: Candidate, inputs: string): NodeResult | undefined {
-  return [...run.results].reverse().find((r) => r.task === run.card.tasks[0].name && r.node === node && r.candidate.tree === candidate.tree
+  return [...run.results].reverse().find((r) => r.task === (node === "验收" || node === "提交" ? run.taskRecords ? run.id : taskIdentity(run) : taskIdentity(run)) && r.node === node && r.candidate.tree === candidate.tree
     && r.inputs === inputs && r.status === "通过" && Boolean(r.ended) && r.released && r.evidence.length > 0 && r.evidence.every((p) => existsSync(p)));
 }
 /** 迟到结果仍留历史，但绝不清掉新执行身份或覆盖新候选。 */
-export function finishAttempt(path: string, expected: { id: string; candidate: Candidate; inputs: string; userVersion: number; epoch?: number }, result: NodeResult, current: { candidate: Candidate; inputs: string }): boolean {
-  return updateRun(path, (run) => {
+export function finishAttempt(path: string, expected: { id: string; candidate: Candidate; inputs: string; userVersion: number; epoch?: number; task?: string }, result: NodeResult, current: { candidate: Candidate; inputs: string }): boolean {
+  return updateTaskRun(path, expected.task, (run) => {
     const fresh = run.activity?.id === expected.id && !run.stopped && !run.abandoned && run.userVersion === expected.userVersion
       && (run.epoch ?? 0) === (expected.epoch ?? 0) && run.candidate?.tree === expected.candidate.tree && current.candidate.tree === expected.candidate.tree && current.inputs === expected.inputs;
     run.results.push(fresh ? result : { ...result, status: "中断", reason: "候选、输入、停止状态或尝试代次变化；迟到结果不可放行" });

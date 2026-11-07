@@ -5,12 +5,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { activityAlive, atomicRun, readRun, updateRun } from "./node-ledger.ts";
+import { activityAlive, atomicRun, readRun, readTaskRun, taskDefinition, taskIds, taskView, updateRun, updateTaskRun, type KernelRun } from "./node-ledger.ts";
 import { currentCandidate, kernelCommand, queryKernel, writeKernelSummary } from "./kernel.ts";
 import { assertWorkspace, dirtyPaths, fileDigest, frozenCardProblem, gitRaw, managedConfig, taskScopeBaseline, workspaceGuard } from "./kernel-workspace.ts";
 import { ownedProcessGroupAlive, processStartTime, readProcs, reapProcs, stopSessionGroup } from "./procs.ts";
 import { gitResult, gitText } from "./workspace.ts";
-import { advanceManaged, pauseManaged, reportManaged } from "./kernel-session.ts";
+import { advanceManaged, continueAcceptanceTask, pauseManaged, prepareManagedContinuation, reportManaged } from "./kernel-session.ts";
+import { recoverBatchIntegration } from "./batch-integration.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { runPreparation, type PreparationState } from "./preparation.ts";
 import { systemNotify } from "./notify.ts";
@@ -23,6 +24,10 @@ import { releaseProc } from "./procs.ts";
 import { sendNativeRepair } from "./hosts/native-inbox.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+function context(task?: string) {
+  return { readRun: (path: string) => readTaskRun(path, task), updateRun: <T>(path: string, change: (r: KernelRun) => T) => updateTaskRun(path, task, change),
+    pauseManaged: (path: string, reason: string) => pauseManaged(path, reason, task) };
+}
 function reapKnownProcs(file: string, details: string[]): void {
   try {
     if (existsSync(file)) {
@@ -34,21 +39,37 @@ function reapKnownProcs(file: string, details: string[]): void {
   } catch (error) { details.push(`未知归属进程登记保留：${file}；${String(error)}`); }
 }
 /** 新会话与恢复都使用既有正式宿主入口；不保存包含凭证的整个进程环境。 */
-export function managedLaunchArgs(path: string): { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv } {
+export function managedLaunchArgs(path: string, task?: string): { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv } {
+  const { readRun } = context(task);
   const run = readRun(path), session = run.session;
   const args = ["开发", run.card.host, "--cwd", run.worktree];
   if (session) {
     if (session.host !== run.card.host || (session.host === "pi" && !session.log)) throw new Error("无法精确恢复原会话，保留候选；原 Pi 会话日志未登记");
     args.push("--session", session.host === "pi" ? session.log! : session.id);
     if (run.repair && run.repair.state !== "read") args.push(`@${run.repair.file}`);
-  } else args.push(`@${run.card.tasks[0].prompt}`);
+  } else args.push(`@${taskDefinition(run).prompt}`);
+  if (run.taskRecords && run.card.host !== "codex") args.push("--", "-p");
   return { command: join(ROOT, "bin/loop"), args, cwd: run.worktree, env: { ...process.env,
-    LOOP_DIR: ROOT, AUTOREVIEW_KERNEL_REPAIR: run.repair?.id ?? "", AUTOREVIEW_KERNEL_LEDGER: path, AUTOREVIEW_KERNEL_RUN: run.id, AUTOREVIEW_SINGLE_NODE: "1",
+    LOOP_DIR: ROOT, AUTOREVIEW_KERNEL_TASK: run.taskId ?? "", AUTOREVIEW_KERNEL_REPAIR: run.repair?.id ?? "", AUTOREVIEW_KERNEL_LEDGER: path, AUTOREVIEW_KERNEL_RUN: run.id, AUTOREVIEW_SINGLE_NODE: "1",
     AUTOREVIEW_BATCH_FILE: "", AUTOREVIEW_STAGE: "", AUTOREVIEW_PIPELINE_DIR: "", AUTOREVIEW_PIPELINE_LAUNCH: "", AUTOREVIEW_BASE_REV: "" } };
 }
 /** 开发节点的受控基线整合：只引入可核对的 dev 来源，不改卡或扩大任务范围，不借旧评审放行新树。 */
-export async function integrateKernel(path: string, dryRun = false): Promise<Record<string, any>> {
+export async function integrateKernel(path: string, dryRun = false, task?: string): Promise<Record<string, any>> {
+  const { readRun, updateRun } = context(task);
   const run = readRun(path);
+  if (run.taskRecords && !task) {
+    if (run.pendingCard || [run.activity, ...run.taskRecords.map((t) => t.activity)].some((a) => activityAlive(a) !== false)) throw new Error("整合前须结束所有任务/批次活动与 pending 改卡；成果保留");
+    const results = [];
+    for (const id of taskIds(run)) { const result = await integrateKernel(path, dryRun, id); results.push(result); if (result.ok === false) return result; }
+    if (!dryRun) updateRun(path, (r) => {
+      const commit = gitText(r.repo, ["rev-parse", "refs/heads/dev"]);
+      if (r.pendingCard || taskIds(r).some((id) => { const t = taskView(r, id); return activityAlive(t.activity) !== false || gitResult(r.repo, ["merge-base", "--is-ancestor", commit, t.candidate!.commit]).status !== 0; })) throw new Error("整合期间 dev/任务活动变化，未采纳新来源；请重新整合");
+      r.batch!.targetSource = { commit, tree: gitText(r.repo, ["rev-parse", `${commit}^{tree}`]) }; r.batch!.version++; r.epoch = (r.epoch ?? 0) + 1;
+      if (r.acceptanceState) r.acceptanceState.plan = undefined;
+      r.stopped = false; r.stopReason = "已逐任务引入可核对 dev 来源；冻结开工依据不变，各原会话重新交付后装配新批次并验收";
+    });
+    return { ...queryKernel(path), dryRun, integrations: results.map((r) => r.integrations), lines: [dryRun ? "只读核对全部任务；未引入 dev 来源" : `已登记 dev 来源，请各原会话重新交付：${kernelCommand("续跑", run.file)}`, ...queryKernel(path).lines] };
+  }
   if (run.publication || run.abandoned || activityAlive(run.activity) !== false) throw new Error("已有发布意图、任务已放弃或节点仍活动；先处理发布记录/停止，再整合");
   const problem = frozenCardProblem(run); if (problem) throw new Error(problem);
   const unlock = eventLock(join(run.common, "loop-kernel-dev.lock"));
@@ -76,7 +97,7 @@ export async function integrateKernel(path: string, dryRun = false): Promise<Rec
       if (r.userVersion !== run.userVersion || activityAlive(r.activity) !== false || r.publication || workspaceGuard(r) !== guard
         || gitText(r.repo, ["rev-parse", "refs/heads/dev"]) !== targetCommit) throw new Error("整合边界输入、活动、候选或目标变化");
       r.activity = { id, node: "开发评审", kind: "developing", pid: process.pid, started: processStartTime(process.pid) };
-      atomicRun(path, r); // 被中断也保留真实活动/证据，不伪造完成。
+      if (!r.taskId) atomicRun(path, r); // 多任务绝不把上下文投影写成第二份账本。
       gitText(r.worktree, ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "merge", "--no-ff", "--no-verify", "-m", `chore: 整合 dev\n\nLoop 任务 ${r.id}\n来源 ${targetCommit}`, targetCommit]);
       const candidate = { commit: gitText(r.worktree, ["rev-parse", "HEAD"]), tree: gitText(r.worktree, ["rev-parse", "HEAD^{tree}"]) };
       if (candidate.tree !== tree || dirtyPaths(r).length || unknown() !== beforeUnknown) throw new Error("整合期间发生并发写入；成果保留，不授予新候选资格");
@@ -93,9 +114,15 @@ export async function integrateKernel(path: string, dryRun = false): Promise<Rec
     return { ...queryKernel(path), ok: false, error: String(error), lines: [String(error), ...queryKernel(path).lines] };
   } finally { unlock(); }
 }
-export async function releaseKernelWorkspace(path: string): Promise<void> {
+export async function releaseKernelWorkspace(path: string, task?: string): Promise<void> {
+  const { readRun, updateRun } = context(task);
   const run = readRun(path), reasons: string[] = [];
+  if (run.taskRecords && !task) {
+    for (const t of run.taskRecords) await releaseKernelWorkspace(path, t.id);
+    for (const t of readRun(path).taskRecords!) if (t.release.status !== "已释放") reasons.push(`${t.name}：${t.release.details.join("；") || t.release.status}`);
+  }
   if (run.publication?.local !== "merged" && !run.abandoned) return;
+  if (run.release.status === "已释放") return;
   if (run.activity) reasons.push("节点活动尚未结束");
   if (run.launch && ownedProcessGroupAlive(run.launch) !== false) reasons.push("原开发会话/工具进程释放未确认");
   if (run.session && !run.launch) reasons.push("宿主缺少本次独立进程组登记，归属与释放未确认");
@@ -126,16 +153,21 @@ export async function releaseKernelWorkspace(path: string): Promise<void> {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") reasons.push(`本批父目录保留（未知内容或释放失败）：${dirname(run.worktree)}；${String(error)}`); }
     }
   } catch (error) { reasons.push(String(error)); }
+  if (run.taskRecords && !task && !reasons.length) {
+    try { rmdirSync(dirname(dirname(run.worktree))); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") reasons.push(`本批根目录保留：${String(error)}`); }
+  }
   updateRun(path, (r) => { r.release = { status: reasons.length ? "未确认" : "已释放", details: reasons }; });
   writeKernelSummary(path);
 }
-export async function stopKernel(path: string, dryRun = false): Promise<Record<string, any>> {
+export async function stopKernel(path: string, dryRun = false, task?: string): Promise<Record<string, any>> {
+  const { readRun, updateRun, pauseManaged } = context(task);
   const initial = readRun(path);
   if (dryRun) return { ...queryKernel(path), dryRun: true, lines: ["只读核对，未停止、未删除候选或证据"] };
   if (initial.publication?.local === "merged" && initial.release.status === "已释放") return queryKernel(path);
   // 先撤销运行代次，迟到的模型返回无权推进。
   pauseManaged(path, "已停止：用户停止本任务，成果和证据保留；停止不是放弃");
   const details: string[] = [];
+  if (initial.taskRecords && !task) for (const t of initial.taskRecords.filter((t) => !t.removed)) { const result = await stopKernel(path, false, t.id); if (!result.ok) details.push(`${t.name} 停止未确认`); }
   for (const group of [initial.launch, initial.supervisor, initial.worker]) if (group) {
     const stopped = await stopSessionGroup({ pid: group.pid, processStarted: group.processStarted }, false, group);
     // 宿主退出会让启动器同时结束；释放边界竞争要重读身份，不能把已消失的原组误报未知。
@@ -144,7 +176,7 @@ export async function stopKernel(path: string, dryRun = false): Promise<Record<s
   const procs = join(initial.dir, "review.procs.json");
   for (let i = 0; i < 20 && readProcs(procs).length; i++) await sleep(100); // 等已取消执行器自行确认释放，不猜测身份。
   reapKnownProcs(procs, details);
-  for (const ticket of readLocalQueue().items.filter((t) => t.ledger === path && t.run === initial.id)) {
+  for (const ticket of readLocalQueue().items.filter((t) => t.ledger === path && t.run === initial.id && (!task || t.task === initial.taskId))) {
     for (const file of [ticket.procs, `${ticket.procs}.cleanup`]) {
       const problem = consumerProblem(file);
       if (problem?.includes("损坏") || problem?.includes("未知归属")) { details.push(problem); continue; }
@@ -160,19 +192,28 @@ export async function stopKernel(path: string, dryRun = false): Promise<Record<s
   writeKernelSummary(path); return { ...queryKernel(path), ok: details.length === 0 };
 }
 /** --launcher background 使用独立组；默认前台保持原生宿主终端。 */
-export async function launchKernel(path: string, background = false): Promise<Record<string, any>> {
-  const unlock = eventLock(`${path}.launch.lock`);
-  try { return await launchKernelOwned(path, background); }
+export async function launchKernel(path: string, background = false, task?: string): Promise<Record<string, any>> {
+  const batch = readRun(path);
+  if (batch.taskRecords && !task && !batch.publication) {
+    updateRun(path, (r) => { if (r.abandoned) throw new Error("已放弃"); r.stopped = false; });
+    const work = taskIds(batch).map((id) => launchKernel(path, background, id));
+    const results = await Promise.allSettled(work);
+    const failed = results.filter((r) => r.status === "rejected");
+    return { ...queryKernel(path), ok: !failed.length, launchErrors: failed.map((r) => String((r as PromiseRejectedResult).reason)) };
+  }
+  const unlock = eventLock(`${path}.${task ?? "batch"}.launch.lock`);
+  try { return await launchKernelOwned(path, background, task); }
   finally { unlock(); }
 }
-async function launchKernelOwned(path: string, background: boolean): Promise<Record<string, any>> {
+async function launchKernelOwned(path: string, background: boolean, task?: string): Promise<Record<string, any>> {
+  const { readRun, updateRun, pauseManaged } = context(task);
   const run = readRun(path), problem = frozenCardProblem(run);
   if (problem) throw new Error(problem);
   if (!run.publication || run.publication.local === "intent") {
     const active = activityAlive(run.activity);
     if (active === undefined) throw new Error("原活动归属无法确认，不能猜测重启；请先核对停止记录");
     if (active === false && [run.launch, run.supervisor].some((g) => g && ownedProcessGroupAlive(g) !== false)) {
-      const stopped = await stopKernel(path);
+      const stopped = await stopKernel(path, false, task);
       if (!stopped.ok) throw new Error(`原会话停止未确认：${JSON.stringify(stopped.release)}`);
     }
   }
@@ -198,10 +239,10 @@ async function launchKernelOwned(path: string, background: boolean): Promise<Rec
   assertWorkspace(run);
   for (const group of [run.launch, run.supervisor]) if (group && ownedProcessGroupAlive(group) !== false) throw new Error("原会话/启动器仍活着或归属未确认，不重复启动；先停止");
   updateRun(path, (r) => { r.stopped = false; r.stopReason = undefined; });
-  if (!background) { await superviseKernel(path); return queryKernel(path); }
+  if (!background) { await superviseKernel(path, task); return queryKernel(path); }
   const token = randomUUID(), log = join(run.dir, "launch.log"), fd = openSync(log, "a", 0o600);
   try {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--supervise", path, run.id], { detached: true, cwd: run.repo,
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--supervise", path, run.id, task ?? ""], { detached: true, cwd: run.repo,
       stdio: ["ignore", fd, fd], env: { ...process.env, AUTOREVIEW_PROCESS_OWNER: token } });
     await new Promise<void>((ok, no) => { child.once("spawn", ok); child.once("error", no); });
     const group = { pid: child.pid!, processStarted: processStartTime(child.pid!), token };
@@ -211,7 +252,8 @@ async function launchKernelOwned(path: string, background: boolean): Promise<Rec
   } catch (error) { pauseManaged(path, `启动失败：${String(error)}；恢复入口：${kernelCommand("续跑", run.file)}`); throw error; }
   finally { closeSync(fd); }
 }
-async function superviseKernel(path: string): Promise<void> {
+async function superviseKernel(path: string, task?: string): Promise<void> {
+  const { readRun, updateRun, pauseManaged } = context(task);
   const initial = readRun(path);
   let child: ReturnType<typeof spawn> | undefined, timer: ReturnType<typeof setInterval> | undefined;
   const controller = new AbortController();
@@ -230,7 +272,8 @@ async function superviseKernel(path: string): Promise<void> {
       if (!result.ok) throw new Error(`准备阻塞：${result.reason}；证据 ${result.log}`);
     }
     if (readRun(path).stopped) return;
-    const launch = managedLaunchArgs(path), token = randomUUID();
+    if (task) prepareManagedContinuation(path, task);
+    const launch = managedLaunchArgs(path, task), token = randomUUID();
     child = spawn(launch.command, launch.args, { cwd: launch.cwd, env: { ...launch.env, AUTOREVIEW_PROCESS_OWNER: token, AUTOREVIEW_KERNEL_LAUNCH: token }, detached: true, stdio: "inherit" });
     await new Promise<void>((ok, no) => { child!.once("spawn", ok); child!.once("error", no); });
     const group = { pid: child.pid!, processStarted: processStartTime(child.pid!), token };
@@ -248,7 +291,9 @@ async function superviseKernel(path: string): Promise<void> {
     }, 500);
     const code = await new Promise<number | null>((ok) => child!.once("close", (status) => ok(status)));
     const current = readRun(path);
-    if (!current.publication && !current.stopped) pauseManaged(path, `${!current.session || current.session.launchId !== token ? `启动失败（退出码 ${code}），未取得宿主会话身份；日志 ${join(current.dir, "launch.log")}` : `开发会话已退出（退出码 ${code}），节点不再执行`}；恢复入口：${kernelCommand("续跑", current.file)}`);
+    const integrated = current.batch?.contributions.some((c) => c.task === current.taskId && c.candidate.commit === current.candidate?.commit);
+    if (integrated && !current.activity) updateRun(path, (r) => { r.stopReason = "任务已汇入，等待统一验收或原会话返修"; });
+    else if (!current.publication && !current.stopped) pauseManaged(path, `${!current.session || current.session.launchId !== token ? `启动失败（退出码 ${code}），未取得宿主会话身份；日志 ${join(current.dir, "launch.log")}` : `开发会话已退出（退出码 ${code}），节点不再执行`}；恢复入口：${kernelCommand("续跑", current.file)}`);
   } catch (error) { pauseManaged(path, `启动失败：${String(error)}；恢复入口：${kernelCommand("续跑", initial.file)}`); }
   finally {
     if (timer) clearInterval(timer); clearInterval(cancelWatch);
@@ -258,12 +303,13 @@ async function superviseKernel(path: string): Promise<void> {
     await systemNotify("Loop 单任务", queryKernel(path).lines.join("\n"));
   }
 }
-export async function deliverManagedRepair(path: string): Promise<void> {
+export async function deliverManagedRepair(path: string, task?: string): Promise<void> {
+  const { readRun, updateRun } = context(task);
   const run = readRun(path), repair = run.repair;
   if (!repair || repair.state === "read" || !run.session) return;
   if (run.stopped || run.abandoned || run.userVersion !== repair.userVersion) return;
   const groupState = run.launch ? ownedProcessGroupAlive(run.launch) : undefined;
-  if (groupState === false) { await launchKernel(path, true); return; }
+  if (groupState === false) { await launchKernel(path, true, task); return; }
   if (run.session.host === "pi" && groupState === true) return; // session_start 的私有收件轮询负责接受。
   try {
     const native = run.native;
@@ -278,19 +324,20 @@ export async function deliverManagedRepair(path: string): Promise<void> {
     await reportManaged(path);
   }
 }
-async function runManagedWorker(path: string, request: string): Promise<void> {
+async function runManagedWorker(path: string, request: string, task?: string): Promise<void> {
+  const { readRun, updateRun, pauseManaged } = context(task);
   const controller = new AbortController();
   const stop = (): void => { controller.abort(); pauseManaged(path, "测试 worker 被中断，成果/证据保留"); };
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, stop);
   try {
     if (readRun(path).workerRequest !== request) throw new Error("worker 派发身份过期");
-    let before = readRun(path), output = await advanceManaged(path, { signal: controller.signal });
+    let before = readRun(path), output = await advanceManaged(path, { signal: controller.signal, task });
     for (;;) {
       const current = readRun(path);
       if (!output.stale || current.stopped || current.abandoned || current.activity || current.cardRevision === before.cardRevision) break;
-      before = current; output = await advanceManaged(path, { signal: controller.signal });
+      before = current; output = await advanceManaged(path, { signal: controller.signal, task });
     }
-    if (output.message) await deliverManagedRepair(path);
+    if (output.message) await deliverManagedRepair(path, task);
   } catch (error) {
     const r = readRun(path);
     if (r.workerRequest === request && !r.activity) pauseManaged(path, String(error));
@@ -301,28 +348,39 @@ async function runManagedWorker(path: string, request: string): Promise<void> {
     writeKernelSummary(path);
   }
 }
-export async function resumeManaged(path: string, background = false, node?: string, dryRun = false): Promise<Record<string, any>> {
+export async function resumeManaged(path: string, background = false, node?: string, dryRun = false, task?: string): Promise<Record<string, any>> {
+  const { readRun, updateRun, pauseManaged } = context(task);
   const initial = readRun(path);
-  if (node && !["开发评审", "测试"].includes(node)) throw new Error("重跑仅接受 --node 开发评审|测试；提交请用统一合入，不自动重推");
+  if (node && !["开发评审", "测试", "验收"].includes(node)) throw new Error("重跑仅接受 --node 开发评审|测试|验收；提交请用统一合入，不自动重推");
+  if (node === "验收" && task) throw new Error("验收为批次级，不接受 --task");
+  if (initial.taskRecords && !task && node !== "验收" && !initial.publication) {
+    if (dryRun) return queryKernel(path);
+    const results = await Promise.allSettled(taskIds(initial).map((id) => resumeManaged(path, background, node, false, id)));
+    return { ...queryKernel(path), ok: results.every((r) => r.status === "fulfilled") };
+  }
   if (initial.abandoned) throw new Error("已放弃，不恢复或重新派工");
   if (dryRun) return { ...queryKernel(path), dryRun: true, lines: ["只读核对，未启动节点或创建票据"] };
+  if (readRun(path).batch?.pending) recoverBatchIntegration(path);
   applyPendingCardChange(path);
+  if (task && readTaskRun(path, task).stopped && !readTaskRun(path, task).abandoned) updateTaskRun(path, undefined, (r) => { r.stopped = false; });
+  if (node !== "验收" && (!initial.taskRecords || task)) continueAcceptanceTask(path, task);
   let run = readRun(path);
-  if (run.publication) return launchKernel(path, background);
+  if (run.publication) return launchKernel(path, background, task);
   if (frozenCardProblem(run)) throw new Error(frozenCardProblem(run));
   if (run.release.status === "未确认") throw new Error("资源释放未确认；先用停止入口核对，不能重跑抢槽");
   if (run.activity && activityAlive(run.activity) !== false) throw new Error("节点仍执行/排队或归属未确认，不重复派工");
-  let reviewed = false;
-  try { reviewed = !!validResult(run, "开发评审", currentCandidate(run), checkInputs(run, "开发评审").hash); }
+  let reviewed = node === "验收";
+  if (node !== "验收") try { reviewed = !!validResult(run, "开发评审", currentCandidate(run), checkInputs(run, "开发评审").hash); }
   catch (error) { if (node === "测试") throw error; }
   if (node === "测试" && !run.card.flow.includes("测试")) throw new Error("当前卡未安排测试");
   if (node === "测试" && !reviewed) throw new Error(`测试前缺当前开发评审；${kernelCommand("续跑", run.file)}`);
   if (node === "开发评审" && reviewed) return { ...queryKernel(path), lines: ["开发评审同树同输入，复用原通过结论", ...queryKernel(path).lines] };
-  const last = run.results.filter((r) => r.node === "测试").at(-1);
-  if (node === "开发评审" || !reviewed || !node && run.card.flow.includes("测试") && last?.failure === "product" && run.repair?.attempt === last.id && run.repair.inputs === checkInputs(run, "测试").hash) {
+  if (node === "验收" && !run.card.flow.includes("验收")) throw new Error("当前卡未安排验收");
+  const last = node === "验收" ? undefined : run.results.filter((r) => r.node === "测试" && r.task === (run.taskId ?? taskDefinition(run).name)).at(-1);
+  if (node === "开发评审" || !reviewed || !node && run.repair?.node === "验收" && run.acceptanceState?.plan?.waitFor?.some((w) => w.task === (run.taskId ?? taskDefinition(run).name) && w.candidate === run.candidate?.commit) || !node && run.card.flow.includes("测试") && last?.failure === "product" && run.repair?.attempt === last.id && run.repair.inputs === checkInputs(run, "测试").hash) {
     updateRun(path, (r) => { r.stopped = false; });
-    if (run.launch && ownedProcessGroupAlive(run.launch) === true && run.repair) { await deliverManagedRepair(path); return queryKernel(path); }
-    return launchKernel(path, background);
+    if (run.launch && ownedProcessGroupAlive(run.launch) === true && run.repair) { await deliverManagedRepair(path, task); return queryKernel(path); }
+    return launchKernel(path, background, task);
   }
   const request = randomUUID();
   updateRun(path, (r) => {
@@ -330,16 +388,37 @@ export async function resumeManaged(path: string, background = false, node?: str
     r.stopped = false; r.stopReason = undefined; r.workerRequest = request;
   });
   run = readRun(path);
-  if (!background) { await runManagedWorker(path, request); return queryKernel(path); }
+  if (!background) { await runManagedWorker(path, request, task); return queryKernel(path); }
   const token = randomUUID(), fd = openSync(join(run.dir, "node-worker.log"), "a", 0o600);
   try {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--advance", path, run.id, request], { cwd: run.repo, detached: true,
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--advance", path, run.id, request, task ?? ""], { cwd: run.repo, detached: true,
       env: { ...process.env, AUTOREVIEW_PROCESS_OWNER: token }, stdio: ["ignore", fd, fd] });
     await new Promise<void>((ok, no) => { child.once("spawn", ok); child.once("error", no); });
     updateRun(path, (r) => { if (r.workerRequest === request) r.worker = { pid: child.pid!, processStarted: processStartTime(child.pid!), token }; });
     child.unref(); return { ...queryKernel(path), dispatched: request, lines: [`已派发节点 worker（不代表通过）：${request}`, `日志：${join(run.dir, "node-worker.log")}`, ...queryKernel(path).lines] };
   } catch (error) { pauseManaged(path, `节点派发失败：${String(error)}`); throw error; }
   finally { closeSync(fd); }
+}
+/** 已授权移出事务：先保存原 HEAD/ref，按任务身份停消费者，再允许边界重建。 */
+export async function settleTaskRemoval(path: string): Promise<Record<string, any>> {
+  const run = readRun(path), c = run.changes?.find((c) => c.id === run.pendingCard);
+  if (!c?.removeTasks?.length) return queryKernel(path);
+  for (const id of c.removeTasks) {
+    updateRun(path, (r) => {
+      if (r.pendingCard !== c.id || r.userVersion !== c.userVersion) throw new Error("移出意图/真实用户版本已变化");
+      const t = r.taskRecords!.find((t) => t.id === id)!;
+      const head = existsSync(t.worktree) ? gitText(t.worktree, ["rev-parse", "HEAD"]) : t.candidate?.commit;
+      if (head && !t.abandonment) {
+        const history = `refs/loop/kernel/${r.id}/removed/${id}/${c.id}`; gitText(r.repo, ["update-ref", history, head, "0".repeat(40)]);
+        t.abandonment = { at: new Date().toISOString(), source: c.source, head, history };
+      }
+    });
+    const stopped = await stopKernel(path, false, id);
+    if (!stopped.ok) return { ...queryKernel(path), ok: false, reason: "移出任务资源停止未确认，事务与成果保留" };
+  }
+  applyPendingCardChange(path);
+  for (const id of c.removeTasks) if (readRun(path).taskRecords!.find((t) => t.id === id)?.removed) await releaseKernelWorkspace(path, id);
+  return queryKernel(path);
 }
 export async function abandonKernel(path: string, source: string, dryRun = false): Promise<Record<string, any>> {
   const run = readRun(path);
@@ -350,6 +429,12 @@ export async function abandonKernel(path: string, source: string, dryRun = false
     const history = head ? `refs/loop/kernel/${r.id}/abandoned/${randomUUID()}` : undefined;
     if (history) gitText(r.repo, ["update-ref", history, head!, "0".repeat(40)]);
     r.abandonment = { at: new Date().toISOString(), source, head, history }; r.abandoned = true; r.stopped = true; r.epoch = (r.epoch ?? 0) + 1;
+    for (const t of r.taskRecords ?? []) {
+      const head = existsSync(t.worktree) ? gitText(t.worktree, ["rev-parse", "HEAD"]) : t.candidate?.commit;
+      const history = head ? `refs/loop/kernel/${r.id}/abandoned/${t.id}/${randomUUID()}` : undefined;
+      if (history) gitText(r.repo, ["update-ref", history, head!, "0".repeat(40)]);
+      t.abandonment = { at: r.abandonment.at, source, head, history }; t.abandoned = true; t.stopped = true; t.epoch = (t.epoch ?? 0) + 1;
+    }
   });
   const stopped = await stopKernel(path);
   await releaseKernelWorkspace(path); await reportManaged(path);
@@ -358,5 +443,5 @@ export async function abandonKernel(path: string, source: string, dryRun = false
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [, , action, path, id] = process.argv;
   if (!["--supervise", "--advance"].includes(action) || readRun(path).id !== id) throw new Error("启动器身份不匹配");
-  void (action === "--advance" ? runManagedWorker(path, process.argv[5]) : superviseKernel(path)).catch((error) => { process.stderr.write(`${String(error)}\n`); process.exitCode = 1; });
+  void (action === "--advance" ? runManagedWorker(path, process.argv[5], process.argv[6] || undefined) : superviseKernel(path, process.argv[5] || undefined)).catch((error) => { process.stderr.write(`${String(error)}\n`); process.exitCode = 1; });
 }
