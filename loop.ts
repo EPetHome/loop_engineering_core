@@ -47,13 +47,19 @@ export class LoopError extends Error {
   constructor(message: string, data: Record<string, unknown> = {}) { super(message); this.data = data; }
 }
 
-interface ParsedArgs { acceptUnverified?: boolean; reviewTimeoutMin?: string; base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
+interface ParsedArgs { node?: string; from?: string; removeNode?: string; acceptUnverified?: boolean; reviewTimeoutMin?: string; base?: string; head?: string; requirement?: string; criteria?: string; note?: string; command?: string; batch?: string; all?: boolean; json: boolean; dryRun: boolean; apply: boolean; recheck: boolean; launcher?: string; round?: number; stage?: string; id?: string; textFile?: string; grantFile?: string; wait?: number; rest: string[] }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { json: false, dryRun: false, apply: false, recheck: false, rest: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--接受未验证") result.acceptUnverified = true;
+    if (["--node", "--from", "--remove-node"].includes(arg)) {
+      const key = ({ "--node": "node", "--from": "from", "--remove-node": "removeNode" } as const)[arg as "--node" | "--from" | "--remove-node"];
+      const value = argv[++i];
+      if (!value || value.startsWith("--") || result[key] !== undefined) throw new LoopError(`${arg} 需要一个值且不能重复`);
+      result[key] = value;
+    }
+    else if (arg === "--接受未验证") result.acceptUnverified = true;
     else if (arg === "--json") result.json = true;
     else if (arg === "--all") result.all = true;
     else if (arg === "--dry-run") result.dryRun = true;
@@ -97,6 +103,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (!result.batch) result.batch = arg;
     else result.rest.push(arg);
   }
+  if (result.node !== undefined && result.command !== "重跑") throw new LoopError("--node 只用于新卡重跑");
+  if ((result.from !== undefined || result.removeNode !== undefined) && result.command !== "改卡") throw new LoopError("--from、--remove-node 只用于新卡改卡");
   if (result.acceptUnverified && result.command !== "合入") throw new LoopError("--接受未验证 只用于新卡的统一合入入口，且需真实用户决定");
   if (result.reviewTimeoutMin !== undefined && !["开工", "启动"].includes(result.command ?? "")) throw new LoopError("--autoreview-review-timeout-min 只用于 loop 开工/启动");
   if (result.stage !== undefined && !["送话", "停止"].includes(result.command ?? "")) throw new LoopError("--stage 只用于 loop 送话/停止");
@@ -1353,6 +1361,9 @@ const USAGE = `用法：
   loop 合入 <开发卡.json> [--接受未验证] [--dry-run] [--json]
   loop 续跑 <开发卡.json> [--launcher background] [--dry-run] [--json]
   loop 整合 <开发卡.json> [--dry-run] [--json]
+  loop 重跑 <开发卡.json> --node 开发评审|测试 [--launcher background] [--dry-run] [--json]
+  loop 改卡 <开发卡.json> (--remove-node 测试 | --from 替换卡.json) [--dry-run] [--json]
+  loop 放弃 <开发卡.json> [--dry-run] [--json]
   loop 撤回 <批次.json> [--dry-run] [--json]
   loop 清理 [--apply | --dry-run] [--json]
   loop 归档问题单 <项目目录> [--dry-run] [--json]

@@ -4,9 +4,9 @@ import { spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 import { eventLock } from "./events.ts";
 import { currentCandidate, kernelCommand, qualification, type NodeInput, type NodeOutput } from "./kernel.ts";
-import { atomicRun, findUserDecision, readRun, updateRun, type UserDecision } from "./node-ledger.ts";
+import { atomicRun, findUserDecision, readRun, updateRun, validResult, type UserDecision } from "./node-ledger.ts";
 import { checkInputs, fileDigest, frozenCardProblem, gitRaw } from "./kernel-workspace.ts";
-import { digest, inside } from "./development-card.ts";
+import { digest, inside, type NodeName } from "./development-card.ts";
 import { gitResult, gitText, worktreeForBranch } from "./workspace.ts";
 
 const intersects = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
@@ -78,7 +78,15 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
       const checked = checkInputs(r);
       if (r.stopped || r.activity?.id !== input.attempt || r.userVersion !== input.run.userVersion || currentCandidate(r).tree !== candidate.tree || checked.hash !== input.inputs) throw new Error("发布前输入/停止状态变化");
       if (decision && !findUserDecision(r, candidate, checked.hash, qualification(r).missing, decision.id)) throw new Error("发布边界用户决定已失效");
-      r.publication = { candidate, inputs: input.inputs, targetBefore: target, commit, tree: candidate.tree, history, origin,
+      const nodeChecks: Partial<Record<NodeName, { inputs: string; result?: string }>> = {};
+      const beforeSubmit = r.card.flow.includes("提交") ? r.card.flow.slice(0, r.card.flow.indexOf("提交")) : r.card.flow;
+      for (const node of beforeSubmit) {
+        const inputs = checkInputs(r, node).hash, passed = validResult(r, node, candidate, inputs);
+        nodeChecks[node] = { inputs, result: passed?.id };
+        if (!passed && !decision) throw new Error(`发布边界 ${node} 通过结论已变化，未合入`);
+      }
+      if (checkInputs(r).hash !== checked.hash) throw new Error("发布节点输入绑定期间检查输入变化，未合入");
+      r.publication = { candidate, inputs: input.inputs, targetBefore: target, commit, tree: candidate.tree, history, origin, nodeChecks,
         inputSnapshot: { files: checked.files, paths: checked.paths, requirement: checked.requirement }, inputRoot: holder?.path,
         at: new Date().toISOString(), local: "intent", push: "未开始", ...(decision ? { decision: decision.id } : {}) };
       if (holder && protectedTarget(holder.path, touched) !== protectedBefore) throw new Error("发布前目标用户文件/索引发生并发变化，未覆盖");

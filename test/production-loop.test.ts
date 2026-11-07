@@ -123,7 +123,7 @@ test("A3/A7 编辑与 Bash 重定向都复用开工报错、同会话去重，�
       const event = bash ? h.event(host, "Bash", { command: `printf '%s' '{"name":"x"}' > '${batchFile}'` }) : h.editEvent(host, batchFile);
       const env = dev ? { AUTOREVIEW_DEV_ROOT: h.repo } : {};
       const text = h.context(h.run(event, env).stdout);
-      assert.ok(text.includes(error), text); assert.ok(text.includes(join(ROOT, "README.md"))); assert.match(text, /「单任务开发卡（第1步）/);
+      assert.ok(text.includes(error), text); assert.ok(text.includes(join(ROOT, "README.md"))); assert.match(text, /「单任务开发卡（第2步）/);
       assert.equal((text.match(/Loop 规则按需读/g) ?? []).length, 1);
       assert.equal(h.run(event, env).stdout, "");
       h.write(promptFile, "# 提示词\n"); h.write(batchFile, h.valid());

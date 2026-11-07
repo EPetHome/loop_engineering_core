@@ -15,6 +15,14 @@ export interface NodeResult {
   started: string; ended?: string; status: "通过" | "不通过" | "没验证" | "中断";
   failure?: FailureKind; reason?: string; evidence: string[]; operations: string[]; released: boolean;
 }
+export interface CardChange {
+  id: string; source: string; authorization?: string; userVersion: number; at: string; expectedHash: string; content: string; card: DevelopmentCard;
+  before: string; state: "pending" | "prepared" | "applied" | "rejected"; appliedAt?: string; reason?: string;
+}
+export interface RepairEnvelope {
+  id: string; token: string; session: string; host: string; attempt: string; candidate: Candidate; inputs: string; userVersion: number; epoch: number;
+  message: string; hash: string; file: string; state: "pending" | "sent" | "read" | "unknown"; at: string; readAt?: string;
+}
 export interface InputSnapshot { files: Record<string, string>; paths: Record<string, string>; requirement: string }
 export interface UserDecision { id: string; at: string; source: string; text: string; candidate: Candidate; inputs: string; userVersion: number; missing: string[] }
 export interface KernelRun {
@@ -24,13 +32,23 @@ export interface KernelRun {
   candidate?: Candidate; results: NodeResult[]; repairs: number; userVersion: number; userInputs: string[]; userFiles?: string[];
   /** 最近一次真实用户引用时确认的原始文本内容哈希；不凭磁盘的新内容自动更新。 */
   userFileVersions?: Record<string, string>;
-  activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting"; pid: number; started: string; session?: string };
+  inputVersion?: 2; cardRevision?: number; epoch?: number;
+  counters?: Partial<Record<NodeName, { repairs: number; recoveries: number }>>;
+  blockedNode?: NodeName; changes?: CardChange[]; pendingCard?: string;
+  controlDecisions?: { id: string; source: string; text: string; at: string; cardHash: string; userVersion: number; action: "remove-test"; used?: string }[];
+  worker?: SessionGroup; workerRequest?: string;
+  repair?: RepairEnvelope;
+  native?: { launch: string; command: string; childPid: number; childStarted: string; binding: string };
+  abandonment?: { at: string; source: string; head?: string; history?: string };
+  activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting" | "waiting" | "testing"; pid: number; started: string; session?: string; procs?: string; ticket?: string; deadline?: number };
   session?: { host: "pi" | "claude" | "codex"; id: string; log?: string; pid: number; started: string; launchId?: string };
   launch?: SessionGroup; supervisor?: SessionGroup; stopReason?: string; stopped?: boolean; abandoned?: boolean;
   decisions: UserDecision[]; notes?: string[];
   integrations?: { at: string; from: Candidate; target: Candidate; candidate: Candidate; scopeBase: string; imported: string[]; evidence: string }[];
   publication?: { candidate: Candidate; inputs: string; targetBefore: string; commit: string; tree: string; history: string;
     inputSnapshot?: InputSnapshot; inputRoot?: string;
+    /** 发布边界绑定的实际通过记录；没有 result 表示该节点作为用户例外欠项保留。 */
+    nodeChecks?: Partial<Record<NodeName, { inputs: string; result?: string }>>;
     at: string; local: "intent" | "merged"; push: "未开始" | "进行中" | "成功" | "失败"; reason?: string; decision?: string; origin: string };
   release: { status: "未释放" | "已释放" | "未确认"; details: string[] };
 }
@@ -77,10 +95,10 @@ export function validResult(run: KernelRun, node: NodeName, candidate: Candidate
     && r.inputs === inputs && r.status === "通过" && Boolean(r.ended) && r.released && r.evidence.length > 0 && r.evidence.every((p) => existsSync(p)));
 }
 /** 迟到结果仍留历史，但绝不清掉新执行身份或覆盖新候选。 */
-export function finishAttempt(path: string, expected: { id: string; candidate: Candidate; inputs: string; userVersion: number }, result: NodeResult, current: { candidate: Candidate; inputs: string }): boolean {
+export function finishAttempt(path: string, expected: { id: string; candidate: Candidate; inputs: string; userVersion: number; epoch?: number }, result: NodeResult, current: { candidate: Candidate; inputs: string }): boolean {
   return updateRun(path, (run) => {
     const fresh = run.activity?.id === expected.id && !run.stopped && !run.abandoned && run.userVersion === expected.userVersion
-      && run.candidate?.tree === expected.candidate.tree && current.candidate.tree === expected.candidate.tree && current.inputs === expected.inputs;
+      && (run.epoch ?? 0) === (expected.epoch ?? 0) && run.candidate?.tree === expected.candidate.tree && current.candidate.tree === expected.candidate.tree && current.inputs === expected.inputs;
     run.results.push(fresh ? result : { ...result, status: "中断", reason: "候选、输入、停止状态或尝试代次变化；迟到结果不可放行" });
     if (run.activity?.id === expected.id) { run.activity = undefined; if (!fresh) run.stopReason = "检查期间候选或输入变化，旧结果无效"; }
     return fresh;

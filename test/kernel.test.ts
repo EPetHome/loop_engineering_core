@@ -28,7 +28,7 @@ function fixture(flow = ["开发评审", "提交"]) {
   mkdirSync(repo);
   const saved = { ...process.env };
   writeFileSync(join(root, "pa.json"), JSON.stringify({ pa: { localNotify: false } }));
-  Object.assign(process.env, { LOOP_PA_CONFIG: join(root, "pa.json"), AUTOREVIEW_KERNEL_ROOT: join(root, "kernel"), AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"), AUTOREVIEW_PROJECTS_ROOT: join(root, "projects"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
+  Object.assign(process.env, { LOOP_PA_CONFIG: join(root, "pa.json"), AUTOREVIEW_KERNEL_ROOT: join(root, "kernel"), AUTOREVIEW_LOCAL_QUEUE_ROOT: join(root, "local-queue"), AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"), AUTOREVIEW_PROJECTS_ROOT: join(root, "projects"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
   const git = (cwd: string, ...args: string[]): string => {
     const r = spawnSync("git", args, { cwd, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr || r.stdout); return r.stdout.trim();
   };
@@ -60,7 +60,8 @@ test("卡校验：缺评审、多任务缺验收、未上线、逆序、旧格�
   try {
     const cases = [ [{ ...f.card, flow: ["提交"] }, /必须包含/],
       [{ ...f.card, tasks: [...f.card.tasks, { ...f.card.tasks[0], name: "乙" }] }, /并行批次必须带验收/],
-      [{ ...f.card, flow: ["开发评审", "测试", "提交"] }, /本版本尚未支持/],
+      [{ ...f.card, flow: ["开发评审", "测试", "提交"] }, /必须填写.*测试命令/],
+      [{ ...f.card, flow: ["开发评审", "验收", "提交"] }, /本版本尚未支持/],
       [{ ...f.card, flow: ["提交", "开发评审"] }, /底线违规/],
       [{ stages: {} }, /旧批次格式/], [{ ...f.card, target: "main" }, /必须是 dev/],
       [{ ...f.card, tasks: [{ ...f.card.tasks[0], prompt: "../../no.md" }] }, /ENOENT|越出/],

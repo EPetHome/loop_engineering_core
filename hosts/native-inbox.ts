@@ -58,6 +58,16 @@ export function nativeCommand(command: string, args: string[], cwd: string, env:
   });
 }
 
+/** 内核把明确拒绝或不认识的非空应答当作投递未确认，不把退出 0 当成已收件。 */
+function checkKernelReply(output: string): void {
+  for (const line of output.trim().split(/\r?\n/).filter(Boolean)) {
+    if (/^(?:accepted|queued|ok)$/i.test(line.trim())) continue;
+    const reply: unknown = JSON.parse(line);
+    if (!reply || typeof reply !== "object" || Array.isArray(reply)) throw new Error(`原生收件应答不是对象：${line.slice(0, 600)}`);
+    const data = reply as Record<string, unknown>;
+    if (data.error || data.ok === false || data.success === false || /error|denied|failed|rejected/i.test(String(data.type ?? data.status ?? ""))) throw new Error(`原生收件明确拒绝：${line.slice(0, 600)}`);
+  }
+}
 export async function sendNativeRepair(options: { command: string; host: string; cwd: string; env: NodeJS.ProcessEnv; sessionId: string; message: string;
   id: string; from?: string; claude?: ClaudeInbox; childPid: number; childStarted: string; signal: AbortSignal }): Promise<void> {
   const { signal } = options;
@@ -65,7 +75,10 @@ export async function sendNativeRepair(options: { command: string; host: string;
   if (processStartTime(options.childPid) !== options.childStarted) throw new Error("原宿主进程身份已变化，未发送到其他会话");
   if (options.host === "codex") {
     const output = await nativeCommand(options.command, ["queue", "--thread", options.sessionId, "--message", options.message, "--cd", options.cwd], options.cwd, options.env, signal);
-    if (options.from === "loop-pa" && output.trim().startsWith("{")) {
+    if (options.from === "loop-kernel") {
+      try { checkKernelReply(output); }
+      catch (error) { throw new Error(`原生 queue 投递结果不明：${String(error)}`); }
+    } else if (options.from === "loop-pa" && output.trim().startsWith("{")) {
       try {
         const response = JSON.parse(output);
         if (response.error || response.ok === false || response.success === false) throw new Error("原生 queue 未确认投递成功");
@@ -93,7 +106,10 @@ export async function sendNativeRepair(options: { command: string; host: string;
     });
     const confirm = () => {
       if (!connected) { fail(new Error("原生收件未建立连接，投递结果不明")); return; }
-      if (options.from === "loop-pa" && response.trim()) {
+      if (options.from === "loop-kernel") {
+        try { checkKernelReply(response); }
+        catch (error) { fail(new Error(`原生收件应答不明：${String(error)}`)); return; }
+      } else if (options.from === "loop-pa" && response.trim()) {
         try {
           for (const line of response.trim().split("\n")) {
             const reply = JSON.parse(line);

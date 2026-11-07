@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { digest, inside } from "./development-card.ts";
-import { findProjectRoot, loadProjectLayout, parseContext, readMarker, resolveProjectConfig } from "./config.ts";
+import { digest, inside, type NodeName } from "./development-card.ts";
+import { findProjectRoot, loadProjectLayout, parseContext, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
 import { outOfScope } from "./scope.ts";
 import { gitResult, gitText, worktrees } from "./workspace.ts";
 import type { Candidate, KernelRun } from "./node-ledger.ts";
@@ -96,7 +96,7 @@ function verifyUserReferences(run: KernelRun, files: Record<string, string>, pat
     if (mismatch) throw new Error(`引用检查输入已变化或缺少确认快照：${reference}；请在原开发会话重新引用确认（发送 ${/\s/.test(reference) ? `@"${reference}"` : `@${reference}`}），再交付；仅续跑不会自动采用新标准`);
   }
 }
-export function checkInputs(run: KernelRun): { hash: string; files: Record<string, string>; paths: Record<string, string>; observedFiles: Record<string, string>; publicationChanges: string[]; requirement: string } {
+export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: string; files: Record<string, string>; paths: Record<string, string>; observedFiles: Record<string, string>; publicationChanges: string[]; requirement: string } {
   const files: Record<string, string> = {}, paths: Record<string, string> = {}, contents: Record<string, string> = {};
   const collect = (path: string, label: string): void => sourceHashes(path, files, label, paths, contents);
   collect(run.file, "卡");
@@ -109,6 +109,11 @@ export function checkInputs(run: KernelRun): { hash: string; files: Record<strin
   }
   const configRoot = findProjectRoot(run.repo) ?? run.repo;
   const raw = existsSync(join(configRoot, ".autoreview.json")) ? readMarker(configRoot) : {};
+  if (run.inputVersion === 2) for (const [label, root] of [["原目录", run.repo], ["任务目录", run.worktree]] as const) {
+    if (!existsSync(root)) continue;
+    const methods = parseMethodsConfig(readMarker(root).methods, root);
+    for (const path of methods?.paths ?? []) collect(resolve(root, path), `测试方法/${label}/${path}`);
+  }
   const context = parseContext(raw.context, configRoot);
   if (context) for (const s of context.sources.filter((s) => s.role !== "code")) {
     const path = resolve(context.root, s.path);
@@ -122,11 +127,28 @@ export function checkInputs(run: KernelRun): { hash: string; files: Record<strin
   verifyUserReferences(run, files, paths, contents, observedFiles, publicationChanges);
   const config = managedConfig(existsSync(run.worktree) ? run.worktree : run.repo);
   const identityFiles = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
-  return { hash: digest(JSON.stringify([identityFiles, run.userVersion, run.userInputs, config.configurationHash, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审])), files, paths, observedFiles, publicationChanges, requirement };
+  let identity: unknown = [identityFiles, run.userVersion, run.userInputs, config.configurationHash, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审];
+  if (run.inputVersion === 2) {
+    // 原文仍留完整证据；运行卡和已知配置仅按真正消费者投影，不间接耦合测试与评审。
+    const commonFiles = identityFiles.filter(([key]) => !key.startsWith("卡：") && !key.startsWith("测试方法/") && !["原目录/.autoreview.json：", "任务目录/.autoreview.json："].some((prefix) => key.startsWith(prefix)));
+    const configs = [run.repo, run.worktree].filter(existsSync).map((root) => readMarker(root));
+    const operational = configs.map((data) => {
+      return Object.fromEntries(Object.entries(data).filter(([k]) => !["gate", "acceptance", "deployment", "preparation", "maxRepairs", "reviewTimeoutMin", "reviewerModel", "reviewerThinking", "reviewerCmd"].includes(k)));
+    });
+    const common = [commonFiles, operational, run.userVersion, run.userInputs, run.card.tasks[0].name];
+    const review = [common, configs.map((c) => [c.reviewerModel, c.reviewerThinking, c.reviewerCmd]), run.card.tasks[0].prompt, run.card.tasks[0].scope, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审.timeoutMin];
+    const prep = config.preparation;
+    const testing = [common, identityFiles.filter(([key]) => key.startsWith("测试方法/")), configs.map((c) => {
+      const p = c.preparation as any; return p ? [p.check, p.recover, p.maxRecoveries, p.timeoutMin] : null;
+    }), run.card.tasks[0].test, run.card.limits.测试?.timeoutMin ?? 20,
+      prep ? { check: prep.check, recover: prep.recover, maxRecoveries: prep.maxRecoveries, timeoutMin: prep.timeoutMin } : null];
+    identity = node === "开发评审" ? review : node === "测试" ? testing : [review, testing, run.card.flow, run.cardRevision ?? 0, run.cardHash];
+  }
+  return { hash: digest(JSON.stringify(identity)), files, paths, observedFiles, publicationChanges, requirement };
 }
 export function frozenCardProblem(run: KernelRun): string | undefined {
   try { if (digest(readFileSync(run.file)) === run.cardHash) return undefined; } catch { /* 明确报卡变化 */ }
-  return "开发卡文件已直接修改；本步不自动采用。恢复冻结原卡后用「续跑」；受控改卡在第 2 步上线";
+  return "开发卡文件已直接修改；不会自动采用。请先保存当前内容、恢复 frozen-card.json 中原卡，再用「改卡 --from」受控提出变更或「续跑」";
 }
 export function managedConfig(cwd: string) {
   return resolveProjectConfig(findProjectRoot(cwd), { env: { ...process.env, AUTOREVIEW_SINGLE_NODE: "1", AUTOREVIEW_BATCH_FILE: "", AUTOREVIEW_STAGE: "" } });

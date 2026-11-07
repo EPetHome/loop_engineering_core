@@ -5,7 +5,7 @@ import { classifyMarker } from "./core.ts";
 import { dirtyPaths } from "./kernel-workspace.ts";
 import { queryKernel } from "./kernel.ts";
 import { readRun, updateRun } from "./node-ledger.ts";
-import { attachSession, completeManagedDelivery, developerActive, managedLedger, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "./kernel-session.ts";
+import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, managedLedger, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "./kernel-session.ts";
 import { createChildExec, expandFileRefsWithSources } from "./hosts/review-hook.ts";
 import type { Exec } from "./git.ts";
 import { experienceInjection } from "./experience.ts";
@@ -19,7 +19,7 @@ function assistantText(ctx: ExtensionContext): string {
   return "";
 }
 export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
-  let path: string | undefined, controller: AbortController | undefined, pending: Promise<unknown> | undefined;
+  let path: string | undefined, controller: AbortController | undefined, pending: Promise<unknown> | undefined, inbox: ReturnType<typeof setInterval> | undefined;
   const show = (ctx: ExtensionContext): void => { if (path) ctx.ui.notify(queryKernel(path).lines.join("\n"), "info"); };
   const merge = async (ctx: ExtensionContext, accept: boolean): Promise<void> => {
     if (!path) return;
@@ -44,12 +44,26 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     attachSession(path, "pi", ctx.sessionManager.getSessionId(), file);
     if (!pi.getCommands().some((c) => c.name === "ponytail")) ctx.ui.notify("未加载 Ponytail（开发角色要求加载）", "warning");
     show(ctx);
+    if (inbox) clearInterval(inbox);
+    inbox = setInterval(() => {
+      if (!path || pending || !ctx.isIdle()) return;
+      const run = readRun(path), repair = run.repair;
+      if (!repair || !["pending", "sent"].includes(repair.state) || run.stopped || run.activity || !pi.sendMessage) return;
+      try {
+        if (consumeManagedRepair(path, repair.message)) pi.sendMessage({ customType: "loop-repair", content: repair.message, display: true }, { triggerTurn: true });
+      } catch (error) { ctx.ui.notify(String(error), "warning"); }
+    }, 250);
   });
   pi.on("input", async (event, ctx) => {
     if (!path || !["interactive", "rpc"].includes(event.source)) return { action: "continue" };
-    const decision = recordManagedUserInput(path, event.text, `pi:${event.source}`, expandFileRefsWithSources(event.text, ctx.cwd));
+    const materials = expandFileRefsWithSources(event.text, ctx.cwd);
+    if (consumeManagedRepair(path, event.text, materials)) return { action: "continue" };
+    const decision = recordManagedUserInput(path, event.text, `pi:${event.source}`, materials);
     if (decision) { await mergeManaged(path, { accept: true, decision }); show(ctx); return { action: "handled" }; }
-    controller?.abort(); return { action: "continue" };
+    controller?.abort(); await pending;
+    const until = Date.now() + 5000;
+    while (readRun(path).activity && ["waiting", "testing"].includes(readRun(path).activity!.kind) && Date.now() < until) await new Promise((ok) => setTimeout(ok, 50));
+    return { action: "continue" };
   });
   pi.on("before_agent_start", async (event, ctx) => {
     if (!path) return;
@@ -73,6 +87,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     try {
       const result = await work; show(ctx);
       if (result.message) {
+        consumeManagedRepair(path, result.message);
         developerActive(path);
         return { entries: [{ type: "custom_message" as const, customType: "loop-repair", content: result.message, display: true }], continue: true };
       }
@@ -85,6 +100,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     }
   });
   pi.on("session_shutdown", async () => {
+    if (inbox) clearInterval(inbox); inbox = undefined;
     controller?.abort(); await pending;
     if (path && readRun(path).activity) pauseManaged(path, "会话已关闭；候选和证据保留");
   });

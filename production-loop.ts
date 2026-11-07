@@ -13,7 +13,7 @@ const LOOP_ROOT = dirname(fileURLToPath(import.meta.url));
 /** 标题用真实完整标题，测试逐一核对；指路卡正文只维护这一份。 */
 export const PRODUCTION_RULES = [
   { file: "README-验收标准.md", sections: ["起草需求时写验收标准（自动验收 v7）", "起草任务提示词（自动评审 v2）"], description: "任务提示词与验收标准" },
-  { file: "README.md", sections: ["单任务开发卡（第1步）"], description: "新卡、启动、状态与统一合入（旧批次仅内部保留）" },
+  { file: "README.md", sections: ["单任务开发卡（第2步）"], description: "新卡、测试、重跑/改卡/放弃与统一合入（旧批次仅内部保留）" },
   { file: "项目文档/运行与维护.md", sections: ["项目配置示例", "迁移与检查"], description: "项目配置、方法与迁移" },
 ] as const;
 const ruleLine = (index: number): string => {

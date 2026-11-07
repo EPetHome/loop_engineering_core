@@ -1,4 +1,4 @@
-/** 第 1 步开发卡；全部校验都是只读，必须早于创建任何运行资源。 */
+/** 单任务开发卡；全部校验只读，早于创建任何运行资源。 */
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -10,8 +10,8 @@ export type NodeName = typeof NODE_NAMES[number];
 export interface DevelopmentCard {
   version: 1; name: string; nature: "开发"; base: string; target: "dev"; flow: NodeName[];
   host: "pi" | "claude" | "codex";
-  tasks: [{ name: string; prompt: string; scope: StageScope }];
-  limits: { 开发评审: { maxRepairs: number; timeoutMin: number } };
+  tasks: [{ name: string; prompt: string; scope: StageScope; test?: string }];
+  limits: { 开发评审: { maxRepairs: number; timeoutMin: number }; 测试: { maxRepairs: number; timeoutMin: number; maxRecoveries: number } };
 }
 export const digest = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 const object = (v: unknown, label: string): Record<string, any> => {
@@ -27,7 +27,10 @@ export function inside(root: string, path: string): boolean {
   return rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel);
 }
 export function readDevelopmentCard(file: string, repo: string): { card: DevelopmentCard; hash: string; content: string } {
-  const content = readFileSync(file, "utf8"), raw = object(JSON.parse(content), "开发卡");
+  return parseDevelopmentCard(readFileSync(file, "utf8"), file, repo);
+}
+export function parseDevelopmentCard(content: string, file: string, repo: string): { card: DevelopmentCard; hash: string; content: string } {
+  const raw = object(JSON.parse(content), "开发卡");
   if (["stages", "workflow", "steps", "workspaces", "recipe"].some((k) => Object.hasOwn(raw, k))) {
     throw new Error("旧批次格式已停用：请新建 version:1 开发卡；stages 改为 tasks（prompt、scope），workflow/steps 改为 flow:[开发评审,提交]，不再填写 workspaces；不回退旧引擎");
   }
@@ -47,18 +50,18 @@ export function readDevelopmentCard(file: string, repo: string): { card: Develop
   const names = raw.tasks.map((v: unknown) => text(object(v, "任务").name, "任务名"));
   if (new Set(names).size !== names.length) throw new Error("任务重名");
   if (raw.tasks.length > 1 && !flow.includes("验收")) throw new Error("底线违规：并行批次必须带验收节点；第 3 步上线后才能运行多任务卡");
-  const unavailable = flow.filter((v: string) => !["开发评审", "提交"].includes(v));
-  if (unavailable.length) throw new Error(`本版本尚未支持节点：${unavailable.join("、")}；第 1 步只支持 [开发评审] 或 [开发评审,提交]`);
+  const unavailable = flow.filter((v: string) => !["开发评审", "测试", "提交"].includes(v));
+  if (unavailable.length) throw new Error(`本版本尚未支持节点：${unavailable.join("、")}；仅支持单任务开发评审、可选测试及提交`);
   if (raw.tasks.length !== 1) throw new Error("本版本尚未支持多任务（第 3 步上线）");
   if (raw.nature !== "开发") throw new Error("本版本只支持 nature:开发；测试性质与底线例外尚未上线");
-  if (flow[0] !== "开发评审" || flow.length > 2) throw new Error("编排不合法：第 1 步只支持 [开发评审] 或 [开发评审,提交]");
-  if (raw.target !== "dev") throw new Error("第 1 步 target 必须是 dev；禁止 main，不覆盖其他发布分支");
+  if (flow[0] !== "开发评审" || flow.length > 3) throw new Error("编排不合法：必须开发评审 → 可选测试 → 可选提交");
+  if (raw.target !== "dev") throw new Error("target 必须是 dev；禁止 main，不覆盖其他发布分支");
   const base = text(raw.base ?? raw.target, "base");
   if (/^(?:refs\/heads\/)?main$/.test(base) || gitResult(repo, ["check-ref-format", "--branch", base]).status !== 0) throw new Error(`base 分支非法或受保护：${base}`);
   gitText(repo, ["rev-parse", "--verify", "--end-of-options", `refs/heads/${base}^{commit}`]);
   gitText(repo, ["rev-parse", "--verify", "refs/heads/dev^{commit}"]);
   const task = object(raw.tasks[0], "任务");
-  for (const key of Object.keys(task)) if (!["name", "prompt", "scope"].includes(key)) throw new Error(`本版本尚不支持任务字段：${key}`);
+  for (const key of Object.keys(task)) if (!["name", "prompt", "scope", "test"].includes(key)) throw new Error(`本版本尚不支持任务字段：${key}`);
   const rawPrompt = text(task.prompt, "prompt");
   if (isAbsolute(rawPrompt)) throw new Error("prompt 必须相对卡文件目录");
   const prompt = realpathSync(resolve(dirname(file), rawPrompt));
@@ -66,13 +69,23 @@ export function readDevelopmentCard(file: string, repo: string): { card: Develop
   const scope = parseStageScope(Array.isArray(task.scope) ? { allow: task.scope } : task.scope, "任务 scope");
   if (!scope?.allow?.length || scope.allow.some((v) => !v)) throw new Error("任务 scope 必须明确列出非空允许路径（数组或 {allow,deny}），不能默认提交整个工作区");
   const limits = raw.limits === undefined ? {} : object(raw.limits, "limits");
-  for (const key of Object.keys(limits)) if (key !== "开发评审") throw new Error(`本版本尚不支持限额：${key}`);
+  for (const key of Object.keys(limits)) if (!["开发评审", "测试"].includes(key)) throw new Error(`本版本尚不支持限额：${key}`);
   const limit = limits.开发评审 === undefined ? {} : object(limits.开发评审, "开发评审限额");
   for (const key of Object.keys(limit)) if (!["maxRepairs", "timeoutMin"].includes(key)) throw new Error(`未知限额字段：${key}`);
   const maxRepairs = limit.maxRepairs ?? 4, timeoutMin = limit.timeoutMin ?? 60;
   if (!Number.isSafeInteger(maxRepairs) || maxRepairs < 0 || !Number.isSafeInteger(timeoutMin) || timeoutMin < 1) throw new Error("开发评审 maxRepairs 须为非负整数，timeoutMin 须为正整数");
+  if (task.test !== undefined) text(task.test, "任务 test 测试命令");
+  // 命令字节原样保留（例如末尾转义空格有语义）；只有“无测试”标签规范化空白。
+  const test: string | undefined = task.test === undefined ? undefined : /^无\s*[:：]/.test(task.test.trim()) ? task.test.trim() : task.test;
+  if (flow.includes("测试") && !test) throw new Error("测试节点必须填写任务 test 测试命令或「无：原因」");
+  if (test && /^无\s*[:：]/.test(test) && !/^无[:：]\s*\S/.test(test)) throw new Error("无测试必须填写「无：非空原因」");
+  const testLimit = limits.测试 === undefined ? {} : object(limits.测试, "测试限额");
+  for (const key of Object.keys(testLimit)) if (!["maxRepairs", "timeoutMin", "maxRecoveries"].includes(key)) throw new Error(`未知测试限额字段：${key}`);
+  const testing = { maxRepairs: testLimit.maxRepairs ?? 3, timeoutMin: testLimit.timeoutMin ?? 20, maxRecoveries: testLimit.maxRecoveries ?? 1 };
+  if (!Number.isSafeInteger(testing.maxRepairs) || testing.maxRepairs < 0 || !Number.isSafeInteger(testing.maxRecoveries) || testing.maxRecoveries < 0
+    || !Number.isSafeInteger(testing.timeoutMin) || testing.timeoutMin < 1) throw new Error("测试 maxRepairs/maxRecoveries 须为非负整数，timeoutMin 须为正整数");
   const host = raw.host ?? "pi";
   if (!["pi", "claude", "codex"].includes(host)) throw new Error("host 必须是 pi、claude 或 codex");
   return { content, hash: digest(content), card: { version: 1, name: text(raw.name, "name"), nature: "开发", base, target: "dev", flow: flow as NodeName[], host,
-    tasks: [{ name: names[0], prompt, scope }], limits: { 开发评审: { maxRepairs, timeoutMin } } } };
+    tasks: [{ name: names[0], prompt, scope, ...(test ? { test } : {}) }], limits: { 开发评审: { maxRepairs, timeoutMin }, 测试: testing } } };
 }

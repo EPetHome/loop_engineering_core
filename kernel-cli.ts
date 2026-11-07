@@ -4,11 +4,12 @@ import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createKernelRun, qualification, queryKernel } from "./kernel.ts";
 import { findUserDecision, kernelRoot, ledgerPath, readRun } from "./node-ledger.ts";
-import { integrateKernel, launchKernel, releaseKernelWorkspace, stopKernel } from "./kernel-runtime.ts";
+import { abandonKernel, integrateKernel, launchKernel, releaseKernelWorkspace, resumeManaged, stopKernel } from "./kernel-runtime.ts";
 import { mergeManaged, recordManagedUserInput } from "./kernel-session.ts";
 import { gitResult } from "./workspace.ts";
+import { controlSource, requestCardChange } from "./kernel-controls.ts";
 
-interface Args { reviewTimeoutMin?: string; recheck?: boolean; command?: string; batch?: string; dryRun: boolean; json: boolean; acceptUnverified?: boolean; launcher?: string; rest: string[]; stage?: string; id?: string; all?: boolean }
+interface Args { node?: string; from?: string; removeNode?: string; reviewTimeoutMin?: string; recheck?: boolean; command?: string; batch?: string; dryRun: boolean; json: boolean; acceptUnverified?: boolean; launcher?: string; rest: string[]; stage?: string; id?: string; all?: boolean }
 export function findKernelLedger(file: string, cwd = process.cwd()): string | undefined {
   const probe = gitResult(dirname(resolve(file)), ["rev-parse", "--show-toplevel"]);
   try {
@@ -47,17 +48,19 @@ function ttyDecision(path: string): ReturnType<typeof recordManagedUserInput> {
 }
 export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record<string, any> | undefined> {
   const command = args.command;
-  if (!command || !["启动", "状态", "查询", "停止", "续跑", "整合", "合入"].includes(command)) return undefined;
+  if (!command || !["启动", "状态", "查询", "停止", "续跑", "整合", "合入", "重跑", "改卡", "放弃"].includes(command)) return undefined;
   if (!args.batch) {
     if (command === "状态") {
       const batches = queryKernelRuns();
       return { ok: true, kernel: 1, batches, lines: batches.length ? batches.flatMap((b) => b.lines ?? [b.reason]) : ["没有新卡内核登记；旧版历史使用 loop 查询 --all --json（不恢复旧队列）"] };
     }
+    if (["重跑", "改卡", "放弃"].includes(command)) throw new Error(`${command} 需要已登记的开发卡路径`);
     return undefined;
   }
   const file = resolve(args.batch), path = findKernelLedger(file, cwd);
   // 启动始终先校验新版，不允许旧批次偷偷回退；其余旧历史命令暂保留。
   if (command !== "启动" && !path) {
+    if (["重跑", "改卡", "放弃"].includes(command)) throw new Error("开发卡尚未登记，未调用旧引擎");
     if (existsSync(file)) {
       let raw: any; try { raw = JSON.parse(readFileSync(file, "utf8")); } catch { /* 明确新卡文件名仍不能回退旧路径 */ }
       if (file.endsWith("/开发卡.json") || raw && ["version", "nature", "tasks", "flow"].some((k) => Object.hasOwn(raw, k))) {
@@ -69,7 +72,7 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
   }
   if (args.rest.length || args.stage || args.id) throw new Error("第 1 步单任务卡不接受段、PA 续跑编号或额外位置参数");
   if (args.reviewTimeoutMin !== undefined || args.recheck) throw new Error("新卡不采用旧批次预算/重检开关；开发评审限额须写在 limits.开发评审");
-  if (args.launcher && !["启动", "续跑"].includes(command)) throw new Error("新卡 --launcher 只用于启动/续跑");
+  if (args.launcher && !["启动", "续跑", "重跑"].includes(command)) throw new Error("新卡 --launcher 只用于启动/续跑/重跑");
   if (args.launcher && args.launcher !== "background") throw new Error("新卡默认在当前终端前台启动；后台可用 --launcher background，不经过终端长文本粘贴");
   if (command === "启动") {
     const result = createKernelRun(file, cwd, args.dryRun);
@@ -80,9 +83,20 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
   if (["状态", "查询"].includes(command)) return { ...queryKernel(path), command };
   if (command === "停止") return { ...await stopKernel(path, args.dryRun), command };
   if (command === "整合") return { ...await integrateKernel(path, args.dryRun), command };
-  if (command === "续跑") {
-    if (args.dryRun) return { ...queryKernel(path), dryRun: true, command };
-    return { ...await launchKernel(path, args.json || args.launcher === "background"), command };
+  if (command === "放弃") return { ...await abandonKernel(path, controlSource(), args.dryRun), command };
+  if (command === "改卡") {
+    const change = requestCardChange(path, { removeNode: args.removeNode, from: args.from ? resolve(args.from) : undefined, source: controlSource(), dryRun: args.dryRun });
+    if (args.dryRun || change.state !== "applied") return { ...queryKernel(path), command, change, dryRun: args.dryRun };
+    const r = readRun(path);
+    if (r.workerRequest) return { ...queryKernel(path), command, change, dispatched: r.workerRequest, lines: ["改卡已应用，原登记 worker 在边界接续新卡", ...queryKernel(path).lines] };
+    const candidate = r.candidate;
+    if (!candidate || qualification(r).missing.some((s) => s.includes("/ 开发评审 /"))) return { ...queryKernel(path), command, change };
+    const next = await resumeManaged(path, true, r.card.flow.includes("测试") ? "测试" : undefined);
+    return { ...next, command, change };
+  }
+  if (command === "续跑" || command === "重跑") {
+    if (command === "重跑" && !args.node) throw new Error("重跑需要 --node 开发评审|测试");
+    return { ...await resumeManaged(path, args.json || args.launcher === "background", args.node, args.dryRun), command };
   }
   const run = readRun(path);
   const q = qualification(run);
