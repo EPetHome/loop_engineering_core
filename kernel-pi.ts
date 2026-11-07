@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { classifyMarker } from "./core.ts";
 import { dirtyPaths } from "./kernel-workspace.ts";
 import { queryKernel } from "./kernel.ts";
-import { readRun, updateRun } from "./node-ledger.ts";
+import { readTaskRun, updateTaskRun, type KernelRun } from "./node-ledger.ts";
 import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, managedLedger, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "./kernel-session.ts";
 import { createChildExec, expandFileRefsWithSources } from "./hosts/review-hook.ts";
 import type { Exec } from "./git.ts";
@@ -19,6 +19,8 @@ function assistantText(ctx: ExtensionContext): string {
   return "";
 }
 export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
+  const task = process.env.AUTOREVIEW_KERNEL_TASK || undefined;
+  const readRun = (path: string) => readTaskRun(path, task), updateRun = <T>(path: string, fn: (r: KernelRun) => T) => updateTaskRun(path, task, fn);
   let path: string | undefined, controller: AbortController | undefined, pending: Promise<unknown> | undefined, inbox: ReturnType<typeof setInterval> | undefined;
   const show = (ctx: ExtensionContext): void => { if (path) ctx.ui.notify(queryKernel(path).lines.join("\n"), "info"); };
   const merge = async (ctx: ExtensionContext, accept: boolean): Promise<void> => {
@@ -32,7 +34,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     await merge(ctx, args.trim() === "--接受未验证");
   } });
   for (const name of ["review-off", "loop-stop"]) pi.registerCommand(name, { description: "停止本任务，保留成果", handler: async (_a, ctx) => {
-    if (path) pauseManaged(path, "已停止：用户停止本任务"); controller?.abort(); ctx.abort(); show(ctx);
+    if (path) pauseManaged(path, "已停止：用户停止本任务", task); controller?.abort(); ctx.abort(); show(ctx);
   } });
   pi.registerCommand("review-on", { description: "原会话继续开发评审，不清零次数", handler: async (_a, ctx) => {
     if (path) updateRun(path, (r) => { if (r.publication || r.abandoned) throw new Error("任务已发布或放弃"); r.stopped = false; r.stopReason = undefined; }); show(ctx);
@@ -41,7 +43,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     path = managedLedger(ctx.cwd);
     if (!path) throw new Error("缺少受管任务登记");
     const file = ctx.sessionManager.getSessionFile?.() ?? process.env.PI_SESSION_FILE;
-    attachSession(path, "pi", ctx.sessionManager.getSessionId(), file);
+    attachSession(path, "pi", ctx.sessionManager.getSessionId(), file, task);
     if (!pi.getCommands().some((c) => c.name === "ponytail")) ctx.ui.notify("未加载 Ponytail（开发角色要求加载）", "warning");
     show(ctx);
     if (inbox) clearInterval(inbox);
@@ -50,15 +52,15 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
       const run = readRun(path), repair = run.repair;
       if (!repair || !["pending", "sent"].includes(repair.state) || run.stopped || run.activity || !pi.sendMessage) return;
       try {
-        if (consumeManagedRepair(path, repair.message)) pi.sendMessage({ customType: "loop-repair", content: repair.message, display: true }, { triggerTurn: true });
+        if (consumeManagedRepair(path, repair.message, undefined, task)) pi.sendMessage({ customType: "loop-repair", content: repair.message, display: true }, { triggerTurn: true });
       } catch (error) { ctx.ui.notify(String(error), "warning"); }
     }, 250);
   });
   pi.on("input", async (event, ctx) => {
     if (!path || !["interactive", "rpc"].includes(event.source)) return { action: "continue" };
     const materials = expandFileRefsWithSources(event.text, ctx.cwd);
-    if (consumeManagedRepair(path, event.text, materials)) return { action: "continue" };
-    const decision = recordManagedUserInput(path, event.text, `pi:${event.source}`, materials);
+    if (consumeManagedRepair(path, event.text, materials, task)) return { action: "continue" };
+    const decision = recordManagedUserInput(path, event.text, `pi:${event.source}`, materials, undefined, task);
     if (decision) { await mergeManaged(path, { accept: true, decision }); show(ctx); return { action: "handled" }; }
     controller?.abort(); await pending;
     const until = Date.now() + 5000;
@@ -68,7 +70,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
   pi.on("before_agent_start", async (event, ctx) => {
     if (!path) return;
     try {
-      developerActive(path);
+      developerActive(path, task);
       const existing = event.systemPromptOptions.appendSystemPrompt ?? "";
       event.systemPromptOptions.appendSystemPrompt = `${existing}\n\n${MANAGED_CONVENTION}\n${experienceInjection(readRun(path).repo)}`;
     } catch (error) { ctx.ui.notify(String(error), "warning"); ctx.abort(); }
@@ -76,32 +78,32 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
   // actionable 边界回送原会话；不用 notification-only 的 agent_settled 请求续跑。
   pi.on("agent_before_settle", async (event, ctx) => {
     if (!path || pending) return;
-    if (event.outcome !== "completed") { pauseManaged(path, "开发回合中断，等待用户决定"); return; }
+    if (event.outcome !== "completed") { pauseManaged(path, "开发回合中断，等待用户决定", task); return; }
     const run = readRun(path), text = assistantText(ctx);
     if (run.stopped || run.publication) return;
     if (classifyMarker(text) === "none" && !dirtyPaths(run).length) { updateRun(path, (r) => { r.activity = undefined; }); return; }
     controller = new AbortController();
     const watch = setInterval(() => { if (path && readRun(path).stopped) controller?.abort(); }, 250);
-    const work = completeManagedDelivery(path, text, { exec: execOverride ?? createChildExec(join(run.dir, "review.procs.json")), signal: controller.signal });
+    const work = completeManagedDelivery(path, text, { exec: execOverride ?? createChildExec(join(run.dir, "review.procs.json")), signal: controller.signal, task });
     pending = work;
     try {
       const result = await work; show(ctx);
       if (result.message) {
-        consumeManagedRepair(path, result.message);
-        developerActive(path);
+        consumeManagedRepair(path, result.message, undefined, task);
+        developerActive(path, task);
         return { entries: [{ type: "custom_message" as const, customType: "loop-repair", content: result.message, display: true }], continue: true };
       }
     } finally { clearInterval(watch); pending = undefined; controller = undefined; }
   });
   pi.on("agent_settled", async (event) => {
     if (path && !pending && readRun(path).activity?.kind === "developing") {
-      if (event.aborted) pauseManaged(path, "开发回合已中断");
+      if (event.aborted) pauseManaged(path, "开发回合已中断", task);
       else updateRun(path, (r) => { r.activity = undefined; });
     }
   });
   pi.on("session_shutdown", async () => {
     if (inbox) clearInterval(inbox); inbox = undefined;
     controller?.abort(); await pending;
-    if (path && readRun(path).activity) pauseManaged(path, "会话已关闭；候选和证据保留");
+    if (path && readRun(path).activity) pauseManaged(path, "会话已关闭；候选和证据保留", task);
   });
 }

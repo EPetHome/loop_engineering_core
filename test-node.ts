@@ -6,10 +6,10 @@ import type { NodeInput, NodeOutput } from "./kernel.ts";
 import { classifyFailure, type Failure } from "./failure.ts";
 import { createRunResource, managedShell, releaseRunResource, resourceLine } from "./resources.ts";
 import { managedConfig, workspaceGuard } from "./kernel-workspace.ts";
-import { readRun, updateRun } from "./node-ledger.ts";
+import { readTaskRun, updateTaskRun, taskDefinition } from "./node-ledger.ts";
 
 export async function runTestNode(input: NodeInput, exec: Exec): Promise<NodeOutput> {
-  const command = input.run.card.tasks[0].test!, log = join(input.evidenceDir, "test.log"), report = join(input.evidenceDir, "test.json");
+  const command = taskDefinition(input.run).test!, log = join(input.evidenceDir, "test.log"), report = join(input.evidenceDir, "test.json");
   const operations: string[] = [], calls: unknown[] = [], evidence = [log, report];
   writeFileSync(log, "", { mode: 0o600 });
   if (/^无[:：]/.test(command)) {
@@ -23,7 +23,7 @@ export async function runTestNode(input: NodeInput, exec: Exec): Promise<NodeOut
   const guard = workspaceGuard(input.run);
   const live = (): void => {
     input.signal?.throwIfAborted();
-    const r = readRun(input.ledger);
+    const r = readTaskRun(input.ledger, input.taskId);
     if (r.stopped || r.abandoned || r.activity?.id !== input.attempt || r.userVersion !== input.run.userVersion || (r.epoch ?? 0) !== (input.run.epoch ?? 0)) throw new Error("测试已取消或输入版本变化");
     if (workspaceGuard(r) !== guard) throw new Error("测试/恢复期间产品工作区或索引变化，当前结果无效");
   };
@@ -32,7 +32,7 @@ export async function runTestNode(input: NodeInput, exec: Exec): Promise<NodeOut
     const started = new Date().toISOString(); operations.push(`$ ${cmd}（cwd ${input.run.worktree}；${role}；${started}）`);
     appendFileSync(log, `\n${started} [${role}] $ ${cmd}\ncwd: ${input.run.worktree}\n`);
     const result = await exec("/bin/sh", ["-c", managedShell(cmd, resource)], { cwd: input.run.worktree, timeout: Math.max(1, deadline - Date.now()), signal: input.signal,
-      role, env: { AUTOREVIEW_RUN_DIR: input.evidenceDir, AUTOREVIEW_BASE_REV: input.run.base, AUTOREVIEW_BATCH_FILE: input.run.file, AUTOREVIEW_TASK: input.run.card.tasks[0].name },
+      role, env: { AUTOREVIEW_RUN_DIR: input.evidenceDir, AUTOREVIEW_BASE_REV: input.run.base, AUTOREVIEW_BATCH_FILE: input.run.file, AUTOREVIEW_TASK: taskDefinition(input.run).name },
       onOutput: (chunk) => appendFileSync(log, chunk) });
     consumersReleased &&= result.processesReleased === true;
     appendFileSync(log, `\nexit=${result.code}; interrupted=${result.killed}; released=${result.processesReleased}\n${result.stdout}\n${result.stderr}\n`);
@@ -47,7 +47,7 @@ export async function runTestNode(input: NodeInput, exec: Exec): Promise<NodeOut
       if (result.code === 0 && !result.killed) { failure = undefined; output = { status: "通过", evidence, operations, released: true }; break; }
       failure = classifyFailure(result.code, `${result.stdout}\n${result.stderr}`, result.killed);
       if (failure.kind === "product" || input.signal?.aborted || Date.now() >= deadline) break;
-      const allowed = updateRun(input.ledger, (r) => {
+      const allowed = updateTaskRun(input.ledger, input.taskId, (r) => {
         const counters = (r.counters ??= {}).测试 ??= { repairs: 0, recoveries: 0 };
         if (r.stopped || r.activity?.id !== input.attempt || counters.recoveries >= r.card.limits.测试.maxRecoveries) return false;
         counters.recoveries++; return true;

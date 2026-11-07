@@ -3,8 +3,8 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync,
 import { spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 import { eventLock } from "./events.ts";
-import { currentCandidate, kernelCommand, qualification, type NodeInput, type NodeOutput } from "./kernel.ts";
-import { atomicRun, findUserDecision, readRun, updateRun, validResult, type UserDecision } from "./node-ledger.ts";
+import { contributionProblems, currentCandidate, kernelCommand, qualification, type NodeInput, type NodeOutput } from "./kernel.ts";
+import { atomicRun, findUserDecision, readRun, updateRun, validResult, taskIds, taskView, type UserDecision } from "./node-ledger.ts";
 import { checkInputs, fileDigest, frozenCardProblem, gitRaw } from "./kernel-workspace.ts";
 import { digest, inside, type NodeName } from "./development-card.ts";
 import { gitResult, gitText, worktreeForBranch } from "./workspace.ts";
@@ -28,6 +28,7 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     if (run.card.target !== "dev" || frozenCardProblem(run) || run.stopped || run.abandoned) throw new Error("目标或卡/停止身份变化，未合入");
     if (run.publication) throw new Error("已有发布意图/结果；禁止重复合入或自动重试推送，请查询记录");
     const q = qualification(run), candidate = currentCandidate(run);
+    const sources = contributionProblems(run, false); if (sources.length) throw new Error(`批次来源核对失败（例外不能豁免）：${sources.join("；")}`);
     if (candidate.tree !== input.candidate.tree || checkInputs(run).hash !== input.inputs || run.activity?.id !== input.attempt) throw new Error("提交排队期间候选、输入或执行代次变化");
     if (decision && !findUserDecision(run, candidate, input.inputs, q.missing, decision.id)) throw new Error("真实用户决定已过期，须按当前候选和完整检查输入重新确认");
     if (q.missing.length && !decision) throw new Error(`合入资格不足：\n${q.missing.join("\n")}`);
@@ -69,7 +70,7 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     const history = `${prefix}${sequence}`;
     gitText(run.repo, ["update-ref", history, candidate.commit, "0".repeat(40)]);
     const commit = gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "commit-tree", candidate.tree, "-p", target, "-m",
-      `chore: ${run.card.name}\n\n任务：${run.card.tasks[0].name}\n${decision ? "用户接受未验证（不改写检查结论）" : "按开发卡前置结论合入"}\n历史：${history}`]);
+      `chore: ${run.card.name}\n\n任务：${run.card.tasks.map((t) => t.name).join("、")}\n${decision ? "用户接受未验证（不改写检查结论）" : "按开发卡前置结论合入"}\n历史：${history}`]);
     log(`候选 ${candidate.commit} / ${candidate.tree}；目标 dev ${target}；压缩历史 ${history}；发布提交 ${commit}`);
     checkout(["update-index", "-q", "--refresh"]);
     checkout(["read-tree", "-n", "-m", "-u", target, commit]);
@@ -78,15 +79,30 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
       const checked = checkInputs(r);
       if (r.stopped || r.activity?.id !== input.attempt || r.userVersion !== input.run.userVersion || currentCandidate(r).tree !== candidate.tree || checked.hash !== input.inputs) throw new Error("发布前输入/停止状态变化");
       if (decision && !findUserDecision(r, candidate, checked.hash, qualification(r).missing, decision.id)) throw new Error("发布边界用户决定已失效");
+      const sourceProblems = contributionProblems(r, false); if (sourceProblems.length) throw new Error(`发布边界来源已变化（例外不能豁免）：${sourceProblems.join("；")}`);
       const nodeChecks: Partial<Record<NodeName, { inputs: string; result?: string }>> = {};
+      const taskChecks: NonNullable<typeof r.publication>["taskChecks"] = [];
       const beforeSubmit = r.card.flow.includes("提交") ? r.card.flow.slice(0, r.card.flow.indexOf("提交")) : r.card.flow;
       for (const node of beforeSubmit) {
-        const inputs = checkInputs(r, node).hash, passed = validResult(r, node, candidate, inputs);
-        nodeChecks[node] = { inputs, result: passed?.id };
-        if (!passed && !decision) throw new Error(`发布边界 ${node} 通过结论已变化，未合入`);
+        if (r.taskRecords && ["开发评审", "测试"].includes(node)) {
+          for (const id of taskIds(r)) {
+            const view = taskView(r, id), c = currentCandidate(view), inputs = checkInputs(view, node).hash;
+            const source = r.batch!.contributions.find((c) => c.task === id)!, result = validResult(view, node, c, inputs);
+            const passed = result && source.checks.includes(result.id) ? result : undefined;
+            let bound = taskChecks.find((t) => t.task === id);
+            if (!bound) taskChecks.push(bound = { task: id, candidate: c, checks: [] });
+            bound.checks.push({ node, inputs, result: passed?.id });
+            if (!passed && !decision) throw new Error(`发布边界任务 ${id}/${node} 结论变化，未合入`);
+          }
+        } else {
+          const inputs = checkInputs(r, node).hash, passed = validResult(r, node, candidate, inputs);
+          nodeChecks[node] = { inputs, result: passed?.id };
+          if (!passed && !decision) throw new Error(`发布边界 ${node} 通过结论已变化，未合入`);
+        }
       }
+      if (!decision && qualification(r).missing.length) throw new Error("发布边界任务来源映射已变化，未合入");
       if (checkInputs(r).hash !== checked.hash) throw new Error("发布节点输入绑定期间检查输入变化，未合入");
-      r.publication = { candidate, inputs: input.inputs, targetBefore: target, commit, tree: candidate.tree, history, origin, nodeChecks,
+      r.publication = { candidate, inputs: input.inputs, targetBefore: target, commit, tree: candidate.tree, history, origin, nodeChecks, taskChecks, mapping: r.batch ? structuredClone(r.batch.contributions) : undefined,
         inputSnapshot: { files: checked.files, paths: checked.paths, requirement: checked.requirement }, inputRoot: holder?.path,
         at: new Date().toISOString(), local: "intent", push: "未开始", ...(decision ? { decision: decision.id } : {}) };
       if (holder && protectedTarget(holder.path, touched) !== protectedBefore) throw new Error("发布前目标用户文件/索引发生并发变化，未覆盖");

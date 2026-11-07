@@ -16,7 +16,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   buildAcceptanceInput, buildCorrectionInput, buildCriteriaDraftInput, buildRecoveryInput, classifySystemExit, dataStateNote, extractCriteria, hasEvidence,
   authorizationHint, authorizationStatus, findObjections, mergeAcceptanceReports, forUser, judgeAcceptance, parseAcceptanceReport, parseCriteriaDraft,
-  scanLogs, type AcceptanceRecord, type Criteria, type Grants, type ParsedAcceptance,
+  scanLogs, type AcceptanceRecord, type AcceptanceItemResult, type Criteria, type Grants, type ParsedAcceptance,
 } from "./acceptance-core.ts";
 import { EXT_DIR, HERMES_BIN, MARKER_FILE, PERMISSION_EXT, PI_BIN, resolveTestCmd, type AcceptanceConfig } from "./config.ts";
 import { deriveSessionId } from "./core.ts";
@@ -83,6 +83,10 @@ export interface AcceptanceDeps {
   previous?: AcceptanceRecord;
   /** 完成前的完整验收不沿用任何条目结论。 */
   fullCheck?: boolean;
+  /** 新卡只执行内核冻结的本次集合；不会在末尾追加完整验收。 */
+  explicitScope?: { ids: string[]; retained: AcceptanceItemResult[] };
+  boundedDeadline?: boolean;
+  registerResource?: (resource: RunResource) => void;
   signal?: AbortSignal;
   checkLive?: () => void;
   onProgress?: (text: string) => void;
@@ -570,7 +574,9 @@ async function runReset(deps: AcceptanceDeps, label: string, cleanup = false): P
   const command = cleanup ? config.cleanup : config.reset;
   if (!command) return "";
   if (!cleanup) deps.onProgress?.(`自动验收：重置数据（第 ${deps.round} 轮${label}）`);
-  const timeout = Math.max(1000, Math.min(config.resetTimeoutSec * 1000, cleanup ? Infinity : deps.deadline - deps.now()));
+  const remaining = deps.deadline - deps.now();
+  if (deps.boundedDeadline && remaining <= 0) return "本轮 deadline 已耗尽，资源收尾未确认";
+  const timeout = Math.max(deps.boundedDeadline ? 1 : 1000, Math.min(config.resetTimeoutSec * 1000, cleanup && !deps.boundedDeadline ? Infinity : remaining));
   const env = [
     `PATH=${HERMES_BIN}:${process.env.PATH ?? ""}`,
     ...Object.entries(config.env).map(([key, value]) => `${key}=${value}`),
@@ -591,6 +597,7 @@ async function runReset(deps: AcceptanceDeps, label: string, cleanup = false): P
     return `重置命令无法执行：${tailText(errorText(error), 300)}`;
   }
   log([`退出码：${result.code}${result.killed ? "（超时或被终止）" : ""}`, "--- 标准输出", result.stdout.trimEnd(), "--- 标准错误", result.stderr.trimEnd()].join("\n"));
+  if (deps.boundedDeadline && result.processesReleased !== true) return "重置/收尾消费者释放未确认";
   if (result.killed) return `重置命令超时或被终止（时限 ${config.resetTimeoutSec} 秒）`;
   if (result.code !== 0) return `重置命令退出码 ${result.code}：${tailText(result.stderr || result.stdout, 300)}`;
   return "";
@@ -641,7 +648,7 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
       && preview.items.find((entry) => entry.id === item.id)?.verdict === "无法验证").map(({ id }) => id);
     if (!ids.length) { recovery.error = "没有待补判的有效证据；已提交结果仍按证据核对"; return; }
     const remaining = deps.deadline - deps.now();
-    if (remaining < 60_000) { recovery.error = "剩余验收预算不足 1 分钟，未补写报告；已有报告和检查点照常按证据判定"; return; }
+    if (remaining < (deps.boundedDeadline ? 1 : 60_000)) { recovery.error = deps.boundedDeadline ? "本轮剩余预算耗尽，未补写报告；已有证据保留" : "剩余验收预算不足 1 分钟，未补写报告；已有报告和检查点照常按证据判定"; return; }
     if (systemDown() || deps.signal?.aborted) return;
     const recoveryPath = join(deps.runDir, "recovery.md");
     writeFileSync(recoveryPath, buildRecoveryInput(criteria, deps.runDir, ids));
@@ -674,7 +681,7 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
       input = join(deps.runDir, "strong.md");
       writeFileSync(input, `${readFileSync(inputPath, "utf8")}\n## 说明\n上一位验收方没按要求留证据或输出格式不对，请你从头逐条实测；evidence/ 里已有的证据可以参考，但每条都要自己用工具再验一次。${dataStateNote(resetConfigured)}\n`);
     }
-    if (deps.deadline - deps.now() < 60_000) {
+    if (deps.deadline - deps.now() < (deps.boundedDeadline ? 1 : 60_000)) {
       error ||= "验收时间用完";
       break;
     }
@@ -695,7 +702,7 @@ async function runTester(deps: AcceptanceDeps, criteria: Criteria, inputPath: st
     if (resetFailure) return { report, error, escalated, resetFailure };
     if (systemDown()) break;
     const remaining = deps.deadline - deps.now();
-    if (remaining < 60_000) {
+    if (remaining < (deps.boundedDeadline ? 1 : 60_000)) {
       error ||= "验收时间用完";
       break;
     }
@@ -778,6 +785,9 @@ export async function runAcceptanceStage(deps: AcceptanceDeps): Promise<Acceptan
   return requireAutomaticPass({ ...final, attempts: [first.record, ...(final.kind === "judged" ? [final.record] : [])] });
 }
 
+/** 新卡执行接缝：没有旧的“定向后 full”编排。 */
+export async function runAcceptanceOnce(deps: AcceptanceDeps): Promise<AcceptanceStage> { return requireAutomaticPass(await runAcceptanceAttempt(deps)); }
+
 async function runAcceptanceAttempt(deps: AcceptanceDeps): Promise<AcceptanceStage> {
   const groups = findObjections(deps.deliveryNote);
   // 同一条旧回复只处理一次：记下回复指纹，用户回复后重复验收不再因它暂停。
@@ -803,13 +813,15 @@ async function runAcceptanceAttempt(deps: AcceptanceDeps): Promise<AcceptanceSta
   const signature = createHash("sha256").update(JSON.stringify([frozen, auth, deps.state.requirement, deps.config])).digest("hex");
   const previous = deps.previous?.scope?.signature === signature ? deps.previous : undefined;
   // 只有已确认通过的条目可暂时沿用；缺项、无法验证和历史无身份记录都要实测。
-  const passed = previous?.items.filter((item) => item.verdict === "通过" && !forUser(item)
+  const passed = deps.explicitScope?.retained ?? previous?.items.filter((item) => item.verdict === "通过" && !forUser(item)
     && allCriteria.items.some((criterion) => criterion.id === item.id && criterion.text === item.text)) ?? [];
   const unresolved = allCriteria.items.filter((item) => !forUser(item) && !passed.some((entry) => entry.id === item.id));
-  const retry = !deps.fullCheck && passed.length > 0 && unresolved.length > 0
+  const retry = deps.explicitScope ? deps.explicitScope.retained.length > 0 : !deps.fullCheck && passed.length > 0 && unresolved.length > 0
     && previous?.blocker !== "系统被关掉" && !previous?.failureKind;
-  const retained = retry ? passed : [];
-  const criteria: Criteria = retry ? { ...allCriteria, items: allCriteria.items.filter((item) => forUser(item) || unresolved.includes(item)) } : allCriteria;
+  const retained = deps.explicitScope ? deps.explicitScope.retained : retry ? passed : [];
+  if (deps.explicitScope && allCriteria.items.some((item) => !forUser(item) && !deps.explicitScope!.ids.includes(item.id) && !retained.some((r) => r.id === item.id && r.text === item.text && r.verdict === "通过"))) throw new Error("本轮范围之外缺少可证明沿用的条目，未缩小验收标准");
+  const criteria: Criteria = deps.explicitScope ? { ...allCriteria, items: allCriteria.items.filter((item) => forUser(item) || deps.explicitScope!.ids.includes(item.id)) }
+    : retry ? { ...allCriteria, items: allCriteria.items.filter((item) => forUser(item) || unresolved.includes(item)) } : allCriteria;
   const stamp = (record: AcceptanceRecord): AcceptanceRecord => {
     record.scope = { kind: retry ? "retry" : "full", round: deps.round, signature,
       tested: criteria.items.filter((item) => !forUser(item)).map((item) => item.id), reused: retained.map((item) => item.id) };
@@ -864,6 +876,7 @@ async function runAcceptanceAttempt(deps: AcceptanceDeps): Promise<AcceptanceSta
   let resource: RunResource;
   try { resource = createRunResource(`acceptance:${deps.devSessionId}:r${deps.round}`, undefined, deps.procsFile); }
   catch (error) { return { kind: "paused", reason: `验收环境阻塞：${errorText(error)}`, hint: "释放已授权的资源或恢复容量后继续，业务返修次数保持不变。", failureKind: "environment" }; }
+  deps.registerResource?.(resource);
   deps = { ...deps, resource };
   let cleanupDone = (): void => {};
   const cleanupPath = join(runDir, "cleanup-task.json");
@@ -922,7 +935,7 @@ async function runAcceptanceAttempt(deps: AcceptanceDeps): Promise<AcceptanceSta
   } finally {
     try {
       try { await system?.stop(); } catch (error) { cleanup.push(`资源释放未确认：${errorText(error)}`); }
-      cleanup.push(...(system ? await cleanupPort(config, wallStart, exitDuringTest ? WATCH_PORT_MS : 0, resource.id) : []));
+      cleanup.push(...(system ? await cleanupPort(config, wallStart, exitDuringTest ? deps.boundedDeadline ? Math.max(0, Math.min(WATCH_PORT_MS, deps.deadline - deps.now())) : WATCH_PORT_MS : 0, resource.id) : []));
     } finally {
       try {
         if (config.cleanup) {
