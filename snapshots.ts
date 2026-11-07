@@ -45,7 +45,7 @@ export interface ReviewSnapshot {
 
 // 引擎加载时固定版本；不能误读接入项目的 GIT_DIR，或在稍后发布分支移动后才取版本。
 const loopCommit = (() => {
-  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   for (const key of Object.keys(env)) if (key.startsWith("GIT_") && !["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"].includes(key)) delete env[key];
   try { return execFileSync("git", ["-C", EXT_DIR, "rev-parse", "--verify", "HEAD"], { env, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim(); }
   catch { return ""; }

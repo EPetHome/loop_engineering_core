@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN } from "../config.ts";
@@ -12,6 +12,8 @@ import { launchHookHost } from "./inbox-bridge.ts";
 import { registeredQueueBatch } from "../merge-queue.ts";
 import { readJson } from "../pipeline-core.ts";
 import { processStartTime } from "../procs.ts";
+import { nativeLaunch } from "./native-inbox.ts";
+import { readRun, updateRun } from "../node-ledger.ts";
 
 const HELP = `用法：bin/loop-dev <claude|codex> [任务文件] [选项] [-- 宿主参数…]
   --cwd <目录>       开发目录，默认当前目录
@@ -143,7 +145,16 @@ export function main(argv = process.argv.slice(2)): void {
   const batch = process.env.AUTOREVIEW_BATCH_FILE && process.env.AUTOREVIEW_STAGE
     ? registeredQueueBatch(cwd, process.env.AUTOREVIEW_BATCH_FILE) : undefined;
   const stage = batch?.stages.find((item) => item.name === process.env.AUTOREVIEW_STAGE && realpathSync(item.cwd) === cwd);
-  if (batch && stage) {
+  if (process.env.AUTOREVIEW_KERNEL_LEDGER) {
+    const path = process.env.AUTOREVIEW_KERNEL_LEDGER, run = readRun(path), launch = process.env.AUTOREVIEW_KERNEL_LAUNCH;
+    if (run.id !== process.env.AUTOREVIEW_KERNEL_RUN || cwd !== run.worktree || !launch) throw new Error("新卡原生宿主启动身份不符");
+    const native = nativeLaunch(command, args, host, cwd, env);
+    const binding = native.socket ? join(dirname(native.socket), "kernel-binding.json") : join(run.dir, `native-${launch}.json`);
+    const child = spawn(command, native.args, { cwd, stdio: "inherit", env: { ...native.env, AUTOREVIEW_KERNEL_NATIVE_BINDING: binding } });
+    if (child.pid) updateRun(path, (r) => { r.native = { launch, command, childPid: child.pid!, childStarted: processStartTime(child.pid!), binding }; });
+    child.on("error", (error) => { native.cleanup(); console.error(error.message); process.exitCode = 1; });
+    child.on("exit", (code, signal) => { native.cleanup(); finished(code, signal); });
+  } else if (batch && stage) {
     launchHookHost({ command, args, cwd, env, dir: batch.dir, stage: stage.name, host, token: runId, onExit: finished,
       isIdle: (status) => {
         const paths = hookPaths(root ?? cwd, host, status.sessionId);

@@ -237,6 +237,9 @@ test("工具清单与代码一致：bin/loop 子命令", () => {
   const source = read("loop.ts");
   const code = new Set([...source.matchAll(/args\.command === "([^"]+)"/g)].map((match) => match[1]));
   for (const match of read("bin/loop").matchAll(/\$\{1:-\}" == "([^"]+)"/g)) code.add(match[1]);
+  const kernel = /!\[([^\]]+)\]\.includes\(command\)/.exec(read("kernel-cli.ts"));
+  assert.ok(kernel, "新卡命令白名单形状变化，需同步提取规则");
+  for (const match of kernel[1].matchAll(/"([^"]+)"/g)) code.add(match[1]);
   const doc = tableFirstColumn(section(read("工具清单.md"), "### 子命令"));
   compare("bin/loop 子命令", code, doc);
 });

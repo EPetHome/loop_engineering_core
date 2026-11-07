@@ -1,9 +1,14 @@
 # 测试组织与覆盖去向
 
-Loop 不运行项目测试；开发方按影响范围执行定向文件，例如 `node --test test/review.test.ts test/config.test.ts`。场景按功能拆分到独立测试进程；可变 HOME、Git 仓库、队列和环境不在并行用例间共享。临时材料由夹具释放，`e2e.mjs` 的场景和断言不属于本轮整理范围。
+Loop 不运行卡外/全量测试；开发卡安排测试节点时仅执行任务 test 命令，普通单会话仍只有开发评审。开发方按影响范围执行定向文件，例如 `node --test test/review.test.ts test/config.test.ts`。场景按功能拆分到独立测试进程；可变 HOME、Git 仓库、队列和环境不在并行用例间共享。临时材料由夹具释放，`e2e.mjs` 的场景和断言不属于本轮整理范围。
 
 ## 功能入口
 
+- `kernel-test-node.test.ts`：测试独立计数/时限/恢复、产品回流、环境单节点重跑、精确命令、缺释放证明/写源码、真实 Hook、同树发布和用户例外，以及完整机器正文/可信包装/追加撤权反例。
+- `local-node-queue.test.ts`：跨仓库真实 CLI worker FIFO 和起止区间、排队状态纯读、等待/执行取消、死亡 worker 的未知消费者保护。
+- `kernel-controls.test.ts`：四种 flow、按节点输入复用、改卡来源/真实用户决定、pending/prepared 恢复和直接编辑拒绝、放弃的干净释放/未保存与未知内容保护。
+- `kernel.test.ts` / `fake-kernel-pi.mjs`：新开发卡真实 CLI/受管 Git/本地 bare origin、Pi 生命周期替身、实际 Claude/Codex Hook；候选/输入/授权版本、停止/资源、发布输入转换、dev 整合来源正反例。替身不证明真实模型质量或宿主安装/信任。
+- `loop-fixture.ts`、`config-launch.test.ts`、`recipes.test.ts` 中的旧批次启动明确调用 `main(..., {legacyCompatibility:true})`，保留旧内部场景断言；公开新卡与旧卡迁移拒绝由 `kernel.test.ts` 调用真实 `bin/loop`，不以兼容入口冒充新 CLI。
 - `hook*.test.ts`：Hook 会话、评审、验收、输入、进程、并发、经验及交付。
 - `autoreview*.test.ts`：Pi 会话、必需／附加验收命令、验收、来源、授权、队列、经验及交付。
 - `acceptance*.test.ts`：解析和证据、系统、格式更正、检查点、资源、断线、实测工具及定向复验。

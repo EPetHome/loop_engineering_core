@@ -8,6 +8,9 @@ if [[ "${1:-}" == "接入" ]]; then
   exec node "$here/setup-acceptance.ts" "$@"
 fi
 if [[ "${1:-}" == "开发" ]]; then
+  # 新单会话只有开发评审节点；迁移期旧流水线直接调用原脚本，不受此标志影响。
+  export AUTOREVIEW_SINGLE_NODE=1
+  unset AUTOREVIEW_BATCH_FILE AUTOREVIEW_STAGE AUTOREVIEW_PIPELINE_DIR AUTOREVIEW_PIPELINE_LAUNCH AUTOREVIEW_PIPELINE_LAUNCH_TOKEN AUTOREVIEW_BASE_REV
   shift
   host="${1:-}"
   [[ $# -eq 0 ]] || shift
