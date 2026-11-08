@@ -106,7 +106,7 @@ test("评审／首次与重试预算：预处理、后置预留和重试共用�
   } finally { h.close(); }
 });
 
-test("旧 gate 任意内容只警告并忽略；预算只校验验收", () => {
+test("旧 gate 任意内容静默忽略；重复解析不提醒，预算只校验验收", () => {
   const warnings: string[] = [], original = console.error;
   console.error = (...args) => { warnings.push(args.join(" ")); };
   try {
@@ -114,9 +114,8 @@ test("旧 gate 任意内容只警告并忽略；预算只校验验收", () => {
       const config = resolveProjectConfig(undefined, { marker: { gate, reviewTimeoutMin: 21, acceptance: {} }, env: {} });
       assert.equal(Object.hasOwn(config, "gate"), false);
       assert.equal(parseProjectLayout({ gate }, "/p").release, "main");
-      assert.match(warnings.at(-1)!, /gate 已停用并忽略/);
     }
-    assert.equal(warnings.length, 12);
+    assert.equal(warnings.length, 0);
     const acceptance = parseAcceptanceConfig({}, "/p", {})!;
     assert.throws(() => checkRoundBudget(20, acceptance), /acceptance.timeoutMin/);
     checkRoundBudget(21, acceptance);

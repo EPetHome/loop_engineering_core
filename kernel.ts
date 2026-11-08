@@ -1,5 +1,5 @@
 /** 内核：卡、显式任务身份、候选、统一节点结果。查询不迁移、不派工。 */
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, watch as watchFiles, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, watch as watchFiles, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -185,17 +185,18 @@ export function queryKernel(path: string): Record<string, any> {
     const t = taskView(run, id), a = t.activity, live = activityAlive(a);
     let queue; if (a?.ticket) { try { queue = localTicketView(a.ticket); } catch { /* 只读 */ } }
     return { id, name: taskDefinition(t).name, status: !t.stopped && live === true && a?.kind !== "waiting" ? "进行中" : "等你决定", node: a?.node ?? t.blockedNode ?? (onlyReview ? "评审" : "开发评审"),
-      reason: a?.kind === "waiting" && live ? a.ticket && queue?.ticket?.state === "waiting" ? `本机排队第 ${queue.position} 位（自动等待，无需操作）` : "等待同项目检查/部署/发布执行边界（自动等待，无需操作）" : t.stopReason ?? (a && live !== true ? "登记节点已不执行或身份无法确认" : "无节点执行"),
-      activity: !t.stopped && live ? a : null, processIdentity: live === undefined ? "未确认" : live ? "存活" : "无活动", queue, candidate: t.candidate, branch: t.branch, worktree: t.worktree, session: t.session,
+      reason: a?.kind === "waiting" && live ? a.ticket && queue?.ticket?.state === "waiting" ? `本机排队第 ${queue.position} 位（自动等待，无需操作）` : "等待同项目检查/部署/发布执行边界（自动等待，无需操作）" : !t.stopped && a && live === true ? `${a.kind === "developing" ? "原会话开发" : a.node}正在执行` : !t.stopped && !run.activity && !q.missing.length && !onlyReview ? "本任务已交付；卡上检查已完成" : t.stopReason ?? (a && live !== true ? "登记节点已不执行或身份无法确认" : run.batch?.contributions.some((c) => c.task === id && c.candidate.commit === t.candidate?.commit) ? "已汇入，等待批次统一验收/原会话返修" : "无节点执行"),
+      activity: !t.stopped && live ? a : null, processIdentity: live === undefined ? "未确认" : live ? "存活" : "无活动", queue, candidate: t.candidate, branch: t.branch, worktree: t.worktree, session: t.session, launchMode: t.launchMode ?? null, consumerReleases: t.consumerReleases ?? [],
       integrated: !!run.batch?.contributions.some((c) => c.task === id && c.candidate.commit === t.candidate?.commit), counters: onlyReview ? {} : { ...t.counters, 开发评审: { repairs: t.repairs, recoveries: 0 } }, release: t.release, repairReceipt: t.repair };
   });
   const active = !run.stopped && ([run.activity, ...(run.taskRecords ?? []).map((t) => t.activity)].some((a) => activityAlive(a) === true && a?.kind !== "waiting"));
   const submission = [...run.results].reverse().find((r) => r.node === "提交"), blockedPublication = submission && submission.status !== "通过" && submission.reason === run.stopReason;
-  const status = merged || external ? "已合入" : run.abandoned ? "已放弃" : active ? "进行中" : onlyReview || blockedPublication || q.missing.length ? "等你决定" : "可合入";
+  const resourceUnknown = run.release.status === "未确认" || run.taskRecords?.some((t) => !t.removed && t.release.status === "未确认");
+  const status = merged || external ? "已合入" : run.abandoned ? "已放弃" : active ? "进行中" : onlyReview || blockedPublication || resourceUnknown || q.missing.length ? "等你决定" : "可合入";
   const first = tasks.find((t) => t.activity) ?? tasks.find((t) => t.reason !== "无节点执行") ?? tasks[0];
   const deployment = run.deploymentAttempts?.at(-1);
   const node = run.activity?.node ?? (merged ? run.card.flow.includes("部署") ? "部署" : "提交" : run.blockedNode ?? first?.node ?? (onlyReview ? "评审" : "开发评审"));
-  const reason = onlyReview ? `${active ? "只评审执行中" : lastReview ? "只评审已结束" : "只评审待执行"}；${active ? "静态评审正在执行" : lastReview ? reviewValid ? `${lastReview.status}；${lastReview.reason ?? ""}` : "没验证（旧结论失效）" : run.stopReason ?? q.missing[0] ?? "无节点执行"}；仅供查看报告，无自动返修/合入` : external ? "已合入（Loop 外）；没有伪造检查通过，远端与释放需另行核实" : merged ? `已合入（本地）；推送：${publication?.push ?? "未确认"}；${publication?.push === "未确认" ? "推送执行已不活动或归属未确认，远端结果未知，不自动重试；" : ""}${run.publication?.reason ?? ""}${run.stopped ? `；剩余节点已停止：${run.stopReason ?? "用户停止"}` : ""}` : run.stopReason || (first?.reason !== "无节点执行" ? first?.reason : undefined) || q.missing[0] || "卡上前置结论均有效";
+  const reason = onlyReview ? `${active ? "只评审执行中" : lastReview ? "只评审已结束" : "只评审待执行"}；${active ? "静态评审正在执行" : lastReview ? reviewValid ? `${lastReview.status}；${lastReview.reason ?? ""}` : "没验证（旧结论失效）" : run.stopReason ?? q.missing[0] ?? "无节点执行"}；仅供查看报告，无自动返修/合入` : external ? "已合入（Loop 外）；没有伪造检查通过，远端与释放需另行核实" : merged ? `已合入（本地）；推送：${publication?.push ?? "未确认"}；${publication?.push === "未确认" ? "推送执行已不活动或归属未确认，远端结果未知，不自动重试；" : ""}${run.publication?.reason ?? ""}${run.stopped ? `；剩余节点已停止：${run.stopReason ?? "用户停止"}` : ""}` : !active && resourceUnknown ? `资源释放未确认；请先核对：${kernelCommand("停止", run.file, "--json")}；不能冒称完成或直接重跑` : !active && !run.stopped && !q.missing.length && !blockedPublication ? "卡上前置结论均有效；本任务已交付，可用统一合入入口（不暗加提交）" : run.stopReason || (first?.reason !== "无节点执行" ? first?.reason : undefined) || q.missing[0] || "卡上前置结论均有效";
   let queue; if (run.activity?.ticket) { try { queue = localTicketView(run.activity.ticket); } catch { /* 只读 */ } } else queue = first?.queue;
   const acceptanceItems = run.acceptanceState?.criteria.items.map((item) => {
     const owner = run.acceptanceState!.owners[item.id], removed = (run.batch?.removed ?? []).some((t) => t.name === owner);
@@ -219,9 +220,9 @@ export function queryKernel(path: string): Record<string, any> {
     ...(blockedPublication && !merged ? [`处理上述原因后：${kernelCommand(run.publication ? "续跑" : "合入", run.file)}`] : []),
     ...(!merged ? taskIds(run).flatMap((id) => { const t = taskView(run, id); return t.blockedNode === "测试" && t.stopped ? testRemedies(t) : []; }) : []),
     ...(run.blockedNode === "验收" && run.stopped && !merged ? testRemedies(run) : []), `资源：${run.release.status}；${run.release.details.join("；")}`, `总结：${join(run.dir, "summary.md")}`];
-  return { ok: true, kernel: 1, id: run.id, card: run.file, name: run.card.name, status, task: run.taskRecords ? "批次" : first?.name, tasks, node, reason, checks, queue, counters: onlyReview ? {} : { ...run.counters, 开发评审: { repairs: run.repairs, recoveries: 0 } }, limits: onlyReview ? { 评审: { timeoutMin: run.card.limits.开发评审.timeoutMin } } : run.card.limits,
+  return { ok: true, kernel: 1, id: run.id, card: run.file, name: run.card.name, status, launchMode: run.launchMode ?? null, task: run.taskRecords ? "批次" : first?.name, tasks, node, reason, checks, queue, counters: onlyReview ? {} : { ...run.counters, 开发评审: { repairs: run.repairs, recoveries: 0 } }, limits: onlyReview ? { 评审: { timeoutMin: run.card.limits.开发评审.timeoutMin } } : run.card.limits,
     cardRevision: run.cardRevision ?? 0, pendingCardChange: run.pendingCard ?? null, cardChanges: run.changes ?? [], repairReceipt: run.repair, abandonment: run.abandonment, candidate: run.candidate, missing: q.missing,
-    activity: alive && !run.stopped ? run.activity : null, reviewReport: run.reviewReport, reviewComparison: run.reviewComparison, reviewValid, deployment: deployment ?? null, versions, externalMerge: external ?? null, publication, release: run.release, notes: run.notes ?? [], decisions: run.decisions, controlDecisions: run.controlDecisions ?? [], integrations: run.batch?.integrations ?? run.integrations ?? [], acceptance: run.acceptanceState, acceptanceItems, removedTasks: run.batch?.removed ?? [], attempts, results: run.results, summary: join(run.dir, "summary.md"), ledger: path, lines };
+    activity: alive && !run.stopped ? run.activity : null, reviewReport: run.reviewReport, reviewComparison: run.reviewComparison, reviewValid, deployment: deployment ?? null, versions, externalMerge: external ?? null, publication, release: run.release, notes: run.notes ?? [], decisions: run.decisions, controlDecisions: run.controlDecisions ?? [], integrations: run.batch?.integrations ?? run.integrations ?? [], acceptance: run.acceptanceState, acceptanceItems, removedTasks: run.batch?.removed ?? [], attempts, testWorkspaces: run.testWorkspaces ?? [], consumerReleases: run.consumerReleases ?? [], results: run.results, summary: join(run.dir, "summary.md"), ledger: path, lines };
 }
 export async function executeNode(path: string, node: NodeName, executor: NodeExecutor, options: { signal?: AbortSignal; localSlot?: boolean; task?: string } = {}): Promise<NodeOutput> {
   const task = options.task, read = () => readTaskRun(path, task), change = <T>(cb: (r: KernelRun) => T) => updateTaskRun(path, task, cb);
@@ -240,6 +241,12 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
   }
   const previous = validResult(initial, node, candidate, inputs);
   if (previous) return { status: "通过", evidence: previous.evidence, operations: ["同树、同输入复用原结论"], released: true, acceptance: previous.acceptance };
+  const inputPaths = Object.values(checkInputs(initial, node).paths);
+  const inputMetadata = (): string => JSON.stringify(inputPaths.map((p) => {
+    const path = existsSync(p) ? p : dirname(p);
+    try { const s = lstatSync(path, { bigint: true }); return [p, path, `${s.dev}:${s.ino}:${s.mode}:${s.mtimeNs}:${s.ctimeNs}`]; } catch { return [p, "未知/缺失"]; }
+  }));
+  const inputGuard = inputMetadata(), readOnlyCheck = ["开发评审", "评审", "测试", "验收"].includes(node); // 提交/部署的预期输入转换由各自事务守卫核对。
   const id = randomUUID(), token = randomUUID(), started = stamp(), guard = node === "部署" ? "发布后部署" : workspaceGuard(initial), epoch = initial.epoch ?? 0;
   const evidenceDir = join(initial.dir, "attempts", id), procsFile = node === "开发评审" || node === "评审" ? join(initial.dir, "review.procs.json") : join(evidenceDir, "test.procs.json");
   const run = change((r) => {
@@ -252,20 +259,34 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
   });
   mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
   const identity = node === "验收" || node === "提交" || node === "部署" ? run.taskRecords ? run.id : taskIdentity(run) : taskIdentity(run);
-  const request = join(evidenceDir, "attempt.json"); writeFileSync(request, JSON.stringify({ id, node, task: identity, candidate, inputs, started, epoch }, null, 2));
-  const controller = new AbortController(), abort = (): void => controller.abort();
+  const request = join(evidenceDir, "attempt.json"), requestData = { id, node, task: identity, candidate, inputs, started, epoch, invoked: false, workspaceGuard: guard, inputMetadata: JSON.parse(inputGuard) };
+  writeFileSync(request, JSON.stringify(requestData, null, 2));
+  const controller = new AbortController();
   let changed = false;
-  const invalidate = (): void => { changed = true; controller.abort(); };
+  const interruption: NonNullable<NodeResult["interruption"]> = { validity: { candidate: "未知", inputs: "未知", control: true } };
+  const cancel = (kind: string, reason: string, path?: string, event?: string): void => {
+    interruption.trigger ??= { kind, reason, path, event, at: stamp() }; controller.abort(reason);
+  };
+  const abort = (): void => cancel("cancel", read().stopReason ?? String(options.signal?.reason ?? "调用方取消"));
+  const invalidate = (kind: string, event: string, file?: string): void => {
+    (interruption.observations ??= []).push({ kind, event, path: file, at: stamp() });
+    changed = true; cancel(kind, `${kind === "index" ? "索引" : "候选文件"}事件：${file ?? "路径未知"}`, file, event);
+  };
   let fileWatch: ReturnType<typeof watchFiles> | undefined, indexWatch: ReturnType<typeof watchFiles> | undefined;
-  if (options.signal?.aborted) controller.abort(); else options.signal?.addEventListener("abort", abort, { once: true });
-  const live = (): void => { const r = read(); if (changed || r.stopped || r.abandoned || r.activity?.id !== id || r.userVersion !== run.userVersion || (r.epoch ?? 0) !== epoch || checkInputs(r, node).hash !== inputs) throw new Error("节点已取消或用户/控制/输入版本变化"); };
-  const watch = setInterval(() => { try { live(); } catch { controller.abort(); } }, 100);
+  if (options.signal?.aborted) abort(); else options.signal?.addEventListener("abort", abort, { once: true });
+  const live = (): void => {
+    const r = read();
+    if (changed) throw new Error(interruption.trigger?.reason ?? "候选/索引变化");
+    if (r.stopped || r.abandoned || r.activity?.id !== id || r.userVersion !== run.userVersion || (r.epoch ?? 0) !== epoch) throw new Error(r.stopReason ?? "节点已取消或用户/控制版本变化");
+    if (checkInputs(r, node).hash !== inputs || readOnlyCheck && inputMetadata() !== inputGuard) throw new Error("已登记输入/卡/配置/标准/授权文件变化（含瞬时写回）");
+  };
+  const watch = setInterval(() => { try { live(); } catch (error) { cancel("control/input", String(error)); } }, 100);
   let output: NodeOutput, acquired = false, invoked = false, projectRelease: ((released: boolean) => void) | undefined;
   try {
     if (node !== "部署") {
-      fileWatch = watchFiles(run.worktree, { recursive: true }, invalidate);
+      fileWatch = watchFiles(run.worktree, { recursive: true }, (event, file) => invalidate("workspace", event, file ? join(run.worktree, file.toString()) : undefined));
       const index = gitText(run.worktree, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
-      indexWatch = watchFiles(dirname(index), (_event, file) => { if (file === "index" || file === "index.lock") invalidate(); });
+      indexWatch = watchFiles(dirname(index), (event, file) => { if (!file || file === "index" || file === "index.lock") invalidate("index", event, file ? join(dirname(index), file.toString()) : undefined); });
     }
     if (options.localSlot) {
       await acquireLocalSlot({ id, token, ledger: path, run: run.id, common: run.common, task: identity, node: node === "验收" ? "验收" : "测试", tree: candidate.tree, inputs, epoch,
@@ -284,17 +305,25 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
         if (options.localSlot) { if (node === "验收") r.acceptanceState!.round++; r.activity!.deadline = Date.now() + (node === "验收" ? r.card.limits.验收 : r.card.limits.测试).timeoutMin * 60_000; }
       });
     }
-    live(); controller.signal.throwIfAborted(); invoked = true;
+    live(); controller.signal.throwIfAborted(); requestData.invoked = true; writeFileSync(request, JSON.stringify(requestData, null, 2)); invoked = true;
     output = await executor({ ledger: path, taskId: run.taskId, attempt: id, evidenceDir, run: read(), candidate, inputs, signal: controller.signal, deadline: read().activity?.deadline, procsFile, registerResource: options.localSlot ? (resource) => bindLocalResource(id, token, resource) : undefined });
   } catch (error) { output = { status: "没验证", reason: String(error), failure: controller.signal.aborted ? "environment" : "unknown", evidence: [request], operations: [], released: !invoked && !consumerProblem(procsFile) }; }
   finally { await new Promise<void>((ok) => setImmediate(ok)); clearInterval(watch); fileWatch?.close(); indexWatch?.close(); options.signal?.removeEventListener("abort", abort); }
   projectRelease?.(output.released);
   if (acquired) releaseLocalSlot(id, token, output.released, output.reason);
   let current = { candidate, inputs: "失效" };
-  try { if (changed || node !== "部署" && workspaceGuard(read()) !== guard || frozenCardProblem(read())) throw new Error("检查期间工作区、索引或卡变化"); current = { candidate: node === "部署" ? candidate : currentCandidate(read()), inputs: checkInputs(read(), node).hash }; }
-  catch (error) { output = { ...output, status: "中断", reason: String(error) }; }
-  const fresh = finishAttempt(path, { id, candidate, inputs, userVersion: run.userVersion, epoch, task }, { id, task: identity, node, candidate, inputs, started, ended: stamp(), status: output.status, reason: output.reason, failure: output.failure, evidence: output.evidence, operations: output.operations, released: output.released, acceptance: output.acceptance }, current);
-  if (!fresh) output = { ...output, status: "中断", reason: "候选、输入或尝试身份已变化；旧结果无效", message: undefined, stale: true };
+  interruption.executorReason = output.reason;
+  try {
+    interruption.validity.candidate = !changed && (node === "部署" || workspaceGuard(read()) === guard);
+    interruption.validity.inputs = !frozenCardProblem(read()) && checkInputs(read(), node).hash === inputs && (!readOnlyCheck || inputMetadata() === inputGuard);
+    if (!interruption.validity.candidate || !interruption.validity.inputs) throw new Error(interruption.trigger?.reason ?? "检查期间候选/索引或已登记输入变化");
+    current = { candidate: node === "部署" ? candidate : currentCandidate(read()), inputs: checkInputs(read(), node).hash };
+  } catch (error) { cancel("guard", String(error)); output = { ...output, status: "中断", reason: [interruption.trigger?.reason, output.reason].filter(Boolean).join("；") }; }
+  if (controller.signal.aborted) output = { ...output, status: "中断", reason: [interruption.trigger?.reason ?? "节点已取消", output.reason].filter(Boolean).join("；"), message: undefined };
+  const diagnostic = join(evidenceDir, "interruption.json"); output.evidence = [...new Set([...output.evidence, diagnostic])];
+  const fresh = finishAttempt(path, { id, candidate, inputs, userVersion: run.userVersion, epoch, task }, { id, task: identity, node, candidate, inputs, started, ended: stamp(), status: output.status, reason: output.reason, failure: output.failure, evidence: output.evidence, operations: output.operations, released: output.released, acceptance: output.acceptance, interruption }, current);
+  writeFileSync(diagnostic, JSON.stringify(interruption, null, 2));
+  if (!fresh) output = { ...output, status: "中断", reason: [output.reason, interruption.protectionReason].filter(Boolean).join("；"), message: undefined, stale: true };
   if (node === "评审") {
     const report = join(evidenceDir, "report.md"), json = join(evidenceDir, "report.json");
     const previous = existsSync(json) ? JSON.parse(readFileSync(json, "utf8")) : { baseline: run.reviewComparison!.base.commit, candidate: candidate.commit, comparison: run.reviewComparison, inputs, evidence: output.evidence };

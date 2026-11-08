@@ -1360,9 +1360,9 @@ const USAGE = `用法：
   loop 续跑 <批次.json> --id <编号> [--grant-file <文件|->] --json
   loop 推送 <批次.json> [--dry-run] [--json]
   loop 合入 <开发卡.json> [--接受未验证] [--dry-run] [--json]
-  loop 续跑 <开发卡.json> [--launcher background] [--dry-run] [--json]
+  loop 续跑 <开发卡.json> [--launcher terminal|background] [--dry-run] [--json]
   loop 整合 <开发卡.json> [--dry-run] [--json]
-  loop 重跑 <开发卡.json> --node 开发评审|评审|测试|验收|部署 [--task 任务名] [--launcher background] [--dry-run] [--json]
+  loop 重跑 <开发卡.json> --node 开发评审|评审|测试|验收|部署 [--task 任务名] [--launcher terminal|background] [--dry-run] [--json]
   loop 改卡 <开发卡.json> (--remove-node 测试|验收 | --remove-task 任务名 | --from 替换卡.json) [--dry-run] [--json]
   新卡续跑/停止/整合可加 --task 任务名；验收/部署为批次级，不接受 --task。
   开发卡 flow: 开发评审 → 可选测试 → 可选验收 → 可选提交 → 可选部署（部署必须在提交后）。

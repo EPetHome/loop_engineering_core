@@ -1,10 +1,10 @@
 /** 贡献与批次 Git 装配；不调用模型、测试、验收或提交节点。 */
 import { spawnSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import { eventLock } from "./events.ts";
-import { digest, type NodeName } from "./development-card.ts";
+import { digest, inside, type NodeName } from "./development-card.ts";
 import { batchAssemblyProblem, contributionProblems, currentCandidate, kernelCommand } from "./kernel.ts";
 import { checkInputs, dirtyPaths, fileDigest, frozenCardProblem, gitRaw, taskScopeBaseline, workspaceGuard } from "./kernel-workspace.ts";
 import { activityAlive, atomicRun, readRun, taskDefinition, taskIds, taskView, updateRun, validResult, type Candidate, type Contribution, type KernelRun } from "./node-ledger.ts";
@@ -57,6 +57,28 @@ function compose(run: KernelRun, mapping: Contribution[]): Candidate {
     if (merged.status !== 0) throw new Error(`任务 ${c.task} 汇入冲突；已集成来源 ${mapping.slice(0, mapping.indexOf(c)).map((s) => `${s.task}:${s.candidate.commit}`).join("、") || "冻结基线"}\n${merged.stdout}\n${merged.stderr}`);
     const tree = merged.stdout.split("\n")[0].trim();
     head = gitText(run.repo, ["commit-tree", tree, "-p", head, "-p", c.contribution, "-m", `Loop 批次贡献 ${c.task}\n候选 ${c.candidate.commit}\n检查 ${c.checks.join(",")}`]);
+  }
+  // 仅同步已登记的受控卡元数据；未知候选卡内容不覆盖，任务贡献仍独立核对。
+  const cardPath = relative(run.repo, run.file).replace(/\\/g, "/");
+  if (inside(run.repo, run.file) && gitResult(run.repo, ["cat-file", "-e", `${head}:${cardPath}`]).status === 0) {
+    const current = gitRaw(run.repo, ["show", `${head}:${cardPath}`]);
+    if (digest(current) !== run.cardHash) {
+      const baseline = gitResult(run.repo, ["show", `${run.base}:${cardPath}`]);
+      const known = baseline.status === 0 && digest(baseline.stdout) === digest(current) || run.changes?.some((c) => c.state === "applied" && digest(c.before) === digest(current));
+      if (!known || frozenCardProblem(run)) throw new Error("候选卡不是冻结基线或已登记旧版本，不能同步未知元数据");
+      const index = join(run.dir, `card-index-${randomUUID()}`), env = { ...process.env, GIT_INDEX_FILE: index };
+      const git = (args: string[], input?: string): string => {
+        const result = spawnSync("git", args, { cwd: run.repo, env, input, encoding: "utf8" });
+        if (result.status !== 0) throw new Error(`同步冻结卡失败：${result.stderr}`); return result.stdout.trim();
+      };
+      try {
+        git(["read-tree", head]); const blob = git(["hash-object", "-w", "--stdin"], readFileSync(run.file, "utf8"));
+        const mode = gitText(run.repo, ["ls-tree", head, "--", cardPath]).split(" ")[0];
+        if (!["100644", "100755"].includes(mode)) throw new Error("冻结卡不是普通跟踪文件，未同步");
+        git(["update-index", "--add", "--cacheinfo", mode, blob, cardPath]);
+        head = git(["commit-tree", git(["write-tree"]), "-p", head, "-m", `Loop 同步受控卡版本 ${run.cardRevision ?? 0}\n冻结输入 ${run.cardHash}`]);
+      } finally { rmSync(index, { force: true }); rmSync(`${index}.lock`, { force: true }); }
+    }
   }
   return { commit: head, tree: gitText(run.repo, ["rev-parse", `${head}^{tree}`]) };
 }

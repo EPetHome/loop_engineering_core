@@ -25,12 +25,12 @@ export function staticReviewer(options: { cwd: string; config: StaticConfig; exe
       signal.throwIfAborted(); invoked = true; released = false;
       const remaining = Math.max(1, deadline - Date.now());
       const result = await (options.config.reviewerCmd
-        ? options.exec(resolveTestCmd(options.config.reviewerCmd), [String(round), input, session], { cwd: options.cwd, timeout: remaining, signal, role: "评审" })
+        ? options.exec(resolveTestCmd(options.config.reviewerCmd), [String(round), input, session], { cwd: options.cwd, timeout: remaining, signal, role: "评审", env: { ...options.env, GIT_OPTIONAL_LOCKS: "0" } })
         : options.exec(options.env?.PI_BIN || PI_BIN, ["--offline", "-p", "--session-id", session,
           "--model", options.config.reviewerModel, "--thinking", options.config.reviewerThinking,
           "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--tools", "read,grep,find,ls,bash",
           "-e", PERMISSION_EXT, "--append-system-prompt", REVIEW_PROMPT_PATH, `@${input}`],
-        { cwd: options.cwd, timeout: remaining, signal, role: "评审" }));
+        { cwd: options.cwd, timeout: remaining, signal, role: "评审", env: { ...options.env, GIT_OPTIONAL_LOCKS: "0" } }));
       released = result.processesReleased === true;
       if (!released) throw new Error(`评审消费者释放未确认，未继续调用：${result.stdout}\n${result.stderr}`);
       return result;

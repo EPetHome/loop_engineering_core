@@ -260,7 +260,7 @@ test("项目配置复用布局/acceptance/gate/评审解析；程序报错原文
         assert.equal(h.run(h.editEvent(host, ".autoreview.json")).stdout, "");
       }
       h.write(".autoreview.json", '{"gate":{}}');
-      const ignored = h.run(h.editEvent(host, ".autoreview.json"), {}, false, /gate 已停用并忽略/);
+      const ignored = h.run(h.editEvent(host, ".autoreview.json"));
       assert.equal(ignored.stdout, "");
       h.write(".autoreview.json", "{}"); assert.equal(h.run(h.editEvent(host, ".autoreview.json")).stdout, "");
     } finally { h.close(); }

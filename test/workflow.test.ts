@@ -72,7 +72,7 @@ test("旧 gate 配置随开工进入开发空间但不执行，开发交付后�
       exec: createChildExec(join(f.root, "procs.json")), acceptanceDir: join(f.root, "acceptance"), saveState: () => {},
       writeInput: (name, text) => { const path = join(f.root, name); writeFileSync(path, text); return path; }, callReviewer: async () => ({ stdout: PASS, stderr: "", code: 0, killed: false }) });
     assert.equal(result.kind, "done");
-    assert.match(opened.stderr, /gate 已停用并忽略/);
+    assert.doesNotMatch(opened.stderr, /gate.*已停用/);
     assert.equal(existsSync(join(f.root, "gate-hit")), false);
     assert.equal(Object.hasOwn(state.rounds[0], "gate"), false);
     const summary = renderSummary({ cwd: f.workspace, devSessionId: "developer", reviewerSessionId: "reviewer", status: "完成", rounds: state.rounds, repairs: state.repairs,

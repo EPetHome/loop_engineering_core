@@ -13,6 +13,8 @@ export interface LocalTicket {
   tree: string; inputs: string; epoch: number; pid: number; started: string; procs: string;
   seq: number; at: string; state: "waiting" | "active" | "checking" | "blocked"; reason?: string; checker?: { pid: number; started: string; token: string };
   resource?: RunResource;
+  /** 执行器明确未提供释放证明且没有可追踪消费者；死亡/空登记不补造证明。 */
+  releaseUnproven?: boolean;
 }
 interface Queue { v: 1; next: number; items: LocalTicket[] }
 export const localQueueRoot = (): string => resolve(process.env.AUTOREVIEW_LOCAL_QUEUE_ROOT || join(homedir(), ".pi-autoreview", "local-node-queue"));
@@ -23,6 +25,7 @@ export function readLocalQueue(): Queue {
   if (q.v !== 1 || !Number.isSafeInteger(q.next) || q.next < 1 || !Array.isArray(q.items) || q.items.some((t) =>
     [t.id, t.token, t.ledger, t.run, t.common, t.task, t.tree, t.inputs, t.started, t.procs].some((v) => typeof v !== "string" || !v)
     || !Number.isSafeInteger(t.pid) || t.pid < 2 || !Number.isSafeInteger(t.seq) || t.seq < 1 || !Number.isSafeInteger(t.epoch) || t.epoch < 0
+    || t.releaseUnproven !== undefined && typeof t.releaseUnproven !== "boolean"
     || !["测试", "验收"].includes(t.node) || !["waiting", "active", "checking", "blocked"].includes(t.state)
     || t.checker && (!Number.isSafeInteger(t.checker.pid) || t.checker.pid < 2 || !t.checker.started || !t.checker.token))) throw new Error("本机队列身份损坏，保留队列，未派工");
   return q;
@@ -55,7 +58,7 @@ export function consumerProblem(file: string): string | undefined {
 /** 仅有副作用的派工/停止入口调用，查询绝不调用。 */
 export function recoverLocalQueue(): void {
   for (const item of readLocalQueue().items) {
-    if (alive(item) !== false) continue;
+    if (item.releaseUnproven || alive(item) !== false) continue;
     const checkToken = randomUUID();
     const claimed = change((q) => {
       const t = q.items.find((v) => v.id === item.id && v.token === item.token);
@@ -83,16 +86,18 @@ export function recoverLocalQueue(): void {
 }
 export function releaseLocalSlot(id: string, token: string, released: boolean, reason?: string): void {
   const saved = readLocalQueue().items.find((t) => t.id === id && t.token === token);
-  let resourceProblem: string | undefined;
-  if (released && saved?.resource && !consumerProblem(saved.procs) && !consumerProblem(`${saved.procs}.cleanup`)) {
+  let resourceProblem: string | undefined = saved?.releaseUnproven ? "缺少原消费者/资源释放证明；不能据所有者退出或空登记核销" : undefined;
+  if (released && !resourceProblem && saved?.resource && !consumerProblem(saved.procs) && !consumerProblem(`${saved.procs}.cleanup`)) {
     const resource = releaseRunResource(saved.resource);
     if (resource.status !== "released") resourceProblem = resource.detail ?? "临时资源释放未确认";
   }
   change((q) => {
     const ticket = q.items.find((t) => t.id === id && t.token === token);
     if (!ticket) return;
-    const problem = consumerProblem(ticket.procs) ?? consumerProblem(`${ticket.procs}.cleanup`) ?? resourceProblem;
-    if (released && !problem) q.items = q.items.filter((t) => t !== ticket);
+    const consumers = consumerProblem(ticket.procs) ?? consumerProblem(`${ticket.procs}.cleanup`);
+    if (!released && (!consumers || /损坏|未知归属/.test(consumers))) ticket.releaseUnproven = true;
+    const problem = consumers ?? resourceProblem;
+    if (released && !ticket.releaseUnproven && !problem) q.items = q.items.filter((t) => t !== ticket);
     else { ticket.state = "blocked"; ticket.reason = problem ?? reason ?? "资源释放未确认"; }
   });
 }

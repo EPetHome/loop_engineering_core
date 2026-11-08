@@ -1,11 +1,9 @@
 /** 新卡宿主适配：只使用内核结果，Stop 的 block 继续原宿主会话。 */
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
-import { classifyMarker } from "../core.ts";
 import { queryKernel } from "../kernel.ts";
-import { dirtyPaths } from "../kernel-workspace.ts";
 import { readTaskRun, updateTaskRun, type KernelRun } from "../node-ledger.ts";
-import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, deployManaged, managedLedger, managedMergeRequest, mergeManaged, pauseManaged, recordManagedUserInput, MANAGED_CONVENTION } from "../kernel-session.ts";
+import { attachSession, completeManagedDelivery, consumeManagedRepair, developerActive, deployManaged, managedLedger, managedMergeRequest, mergeManaged, pauseManaged, recordManagedUserInput, managedDeliveryIntent, MANAGED_CONVENTION } from "../kernel-session.ts";
 import { createChildExec, expandFileRefsWithSources, lastAssistantMessage, sessionIdOf } from "./review-hook.ts";
 import { detectHost, type HookEvent } from "./hook.ts";
 import { experienceInjection } from "../experience.ts";
@@ -48,7 +46,8 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
     if (event.hook_event_name !== "Stop") return undefined;
     const run = readRun(path), text = lastAssistantMessage(event);
     if (run.stopped) return context(queryKernel(path).lines.join("\n"));
-    if (!run.publication && classifyMarker(text) === "none" && !dirtyPaths(run).length) { updateRun(path, (r) => { r.activity = undefined; }); return undefined; }
+    const intent = managedDeliveryIntent(run, text);
+    if (!intent.advance) { updateRun(path, (r) => { if (r.activity?.kind === "developing") r.activity = undefined; r.stopReason = intent.reason; }); return context(queryKernel(path).lines.join("\n")); }
     const controller = new AbortController();
     const stop = (): void => { controller.abort(); pauseManaged(path, "评审被宿主中断，成果和证据保留", task); };
     const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;

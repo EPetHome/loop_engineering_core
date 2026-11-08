@@ -74,7 +74,7 @@ test("第1条：cmd 部分副作用后失败，Pi/Hook 重复回调和普通续�
     try {
       if (host === "pi") {
         fakeKernelLauncher(f); process.env.KERNEL_FAKE_REPEAT_SETTLE = "1";
-        const cli = spawnSync(BIN, ["启动", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" }); assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+        const cli = spawnSync(BIN, ["启动", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" }); assert.equal(cli.status, 0, cli.stdout + cli.stderr);
         path = JSON.parse(cli.stdout).ledger;
         await until(() => readRun(path!).release.status === "已释放", "失败部署及 Pi 回调收尾");
         await until(() => readRun(path!).taskRecords?.every((r) => !r.supervisor || ownedProcessGroupAlive(r.supervisor) === false) ?? (!readRun(path!).supervisor || ownedProcessGroupAlive(readRun(path!).supervisor!) === false), "Pi supervisor 已退出");
