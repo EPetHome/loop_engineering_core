@@ -43,18 +43,18 @@ export function staticReviewer(options: { cwd: string; config: StaticConfig; exe
 
 export async function executeStaticReview(options: {
   session: string; developer: string; round: number; input: string; deadline: number; timeoutMs: number;
-  reservedMs?: number; keepOutput?: boolean; requireRelease?: boolean; now?: () => number; live?: () => void; progress?: (text: string) => void;
+  keepOutput?: boolean; requireRelease?: boolean; now?: () => number; live?: () => void; progress?: (text: string) => void;
   call: ReviewerCall; write: (name: string, text: string) => string;
 }): Promise<{ parsed?: ParsedReview; error: string; timedOut: boolean; logs: string[]; released: boolean }> {
   const now = options.now ?? Date.now, logs: string[] = [];
   let parsed: ParsedReview | undefined, error = "", timedOut = false, released = true;
   for (let attempt = 1; attempt <= 2 && !parsed; attempt += 1) {
-    const remaining = options.deadline - (options.reservedMs ?? 0) - now();
+    const remaining = options.deadline - now();
     if (remaining <= 0 || (attempt > 1 && remaining < 60_000)) {
       timedOut = true;
       error = attempt > 1
         ? `第 ${attempt} 次评审不再重试：两次尝试共用 ${Math.round(options.timeoutMs / 60_000)} 分钟已用完（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`
-        : `为验收预留预算后，首次评审预算已用完（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`;
+        : `首次静态评审预算已用完（剩余 ${Math.max(0, Math.round(remaining / 1000))} 秒）`;
       break;
     }
     let raw = "", retryable = true;

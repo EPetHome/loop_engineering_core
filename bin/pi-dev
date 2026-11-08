@@ -20,7 +20,7 @@
 #   PERMISSION_EXTENSION 权限扩展路径（默认下面的固定版本）
 #   PONYTAIL_EXTENSION  Ponytail 原生扩展路径（默认下面的固定版本）
 #   PI_BIN / PI_NODE_BIN  pi 入口与 node 目录
-# 提示词以外的 pi 参数（如 --autoreview-accept-cmd）放在 -- 之后原样传给 pi。
+# 提示词以外的 pi 参数放在 -- 之后；旧 accept-cmd 参数只返回迁移说明。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,6 +55,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+for arg in ${extra[@]+"${extra[@]}"}; do
+  case "$arg" in
+    --autoreview-accept-cmd|--autoreview-accept-cmd=*|--autoreview-accept-mode|--autoreview-accept-mode=*|--autoreview-accept-timeout-min|--autoreview-accept-timeout-min=*)
+      die '旧独立验收命令已停用；请用 version:1 开发卡的 flow「测试」和 tasks[].test；单会话只做开发评审，不执行旧命令' ;;
+  esac
+done
+
 [[ -n "${prompt}" || -n "$session" ]] || die "缺提示词路径（恢复会话时可只给 --session）"
 [[ -d "${cwd}" ]] || die "开发目录不存在：${cwd}"
 cwd="$(cd "${cwd}" && pwd)"
@@ -85,8 +92,6 @@ if [[ $dry -eq 0 ]]; then
   [[ -x "${node_bin}" ]] || node_bin="$(command -v node)"
   "${node_bin}" "${LOOP_DIR}/permission-check.ts" --cwd "${cwd}" --loop-root "${LOOP_DIR}" \
     --pi "${PI_BIN}" --permission "${PERMISSION_EXT}" --trust "${trust}" -- ${extra[@]+"${extra[@]}"}
-  # 启动回报身份只属于本次 pi-dev；启动后的子进程不能再改父段状态。
-  unset AUTOREVIEW_PIPELINE_LAUNCH_TOKEN
 fi
 
 args=(--offline --model "$model" --thinking "$thinking"

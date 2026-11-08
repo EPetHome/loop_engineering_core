@@ -1,10 +1,211 @@
 # Loop 内核与节点编排实施方案
 
-当前阶段：**第五步第一批第 2 次返修的两项必须修改（重命名来源、常规 npm/Node 测试入口）已修复并完成定向验证，待外层复评；真实 Pi 窗口体验及人工验收未验证，不能称第五步整体完成。第二批只读清理候选清单保留，未执行删除。** 用户于 2026-11-07 同意第五步分两批、有限并行：第一批完成流程修复，第二批同时只读准备清理清单；第一批可用后，清单重新核对并经用户确认，再执行第二批。不改变五步名称与顺序。
+当前阶段：**第五步第一批已发布；第五步第二批 C1—C8 开发及定向程序覆盖完成，原源码外层第 2 轮静态评审通过（0 条必须修改、2 条建议）；发布卡追加发现的 PA 撤权问题已在原会话修复并完成定向自检。用户随后关闭原 Loop，明确要求接管并完成部署，发布不再触发评审，运行代码只使用本次发布版本。先前“须复评”的执行安排由本次要求替代；原失败和未复评事实保留，不改成通过。提交源分支、统一合入 dev、本机入口更新与资源释放以发布证据为准。** 用户此前已明确要求“开始第二批，如果要loop的话，最后给我启动指令，我自己来”。本次执行下方八类旧路径清理，保持五步顺序；第一批真实窗口体验及业务/人工验收仍未验证，不因本次发布补记通过。
+
+第一批发布事实：第6轮外层静态评审通过，源提交 `ccb95d0` 已推送 `origin/refactor/loop-kernel-step5-flow`；统一发布提交 `e170e31787e4d96aedf1f9adbcdafa9ef16794c3` 已合入并推送 dev，本地入口更新、原有修改保留、发布临时资源释放有记录。发布卡自身评审缺项保留，不与源代码外层评审混称。证据：`/Users/Admin/.pi-autoreview/deployments/loop-kernel-step5-flow-y04HhxGB/final-verification.json`。下文第一批“待复评/尚未启动”等描述保留当时历史，不代表当前发布状态。
 
 第四步发布已完成：源提交 `0f98dfc` 经统一 `bin/loop 合入` 压缩为 `623bd10435904e908a30b9c7896e422d82494ac5`，已合入本地 dev 并推送 origin/dev，发布卡登记工作区已释放。用户明确接受“发布卡缺少本卡有效开发评审记录”；旧外层第 3 轮静态评审通过和既有 59+4 条兼容检查不伪造为本卡检查通过，也不代表真实部署或业务验收通过。13 个重叠文件按已核对合并结果恢复，其他既有文件逐字保护核对无差异。证据目录：`/Users/Admin/.pi-autoreview/deployments/loop-kernel-step4-20261107-pbln8hew/`，见 `publication-verification.json`、`publication-output.log`、`plan.json`。
 
-本批唯一任务文件：[第 5 步第一批提示词](prompt/提示词-Loop内核与节点编排-5第一批流程修复.md)。权威需求仍为 [Loop内核与节点编排](../issues/【req】Loop内核与节点编排.md)。本页下文「第 5 步已确认补充」的六项必须修改、两项建议及完成条件原文保留，全部纳入第一批。
+本批唯一任务文件：[第 5 步第二批提示词](prompt/提示词-Loop内核与节点编排-5第二批旧路径清理.md)。[第一批提示词](prompt/提示词-Loop内核与节点编排-5第一批流程修复.md)作为历史保留。权威需求仍为 [Loop内核与节点编排](../issues/【req】Loop内核与节点编排.md)；第一批六项必须修改、两项建议及未验条件原文保留，不由清理批追认通过。
+
+## 第 5 步第二批：旧路径清理实施安排
+
+### 基线与本机既有修改
+
+工作目录 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step5-cleanup`，分支 `refactor/loop-kernel-step5-cleanup`，提交基线 `e170e31`。为避免第一批发布时才合并本机修改，本次准备已把主目录当前相关的19份源码/测试/现用说明复制到独立工作区；每份与主目录逐字核对，清单及字节备份在 `/Users/Admin/.pi-autoreview/preparations/loop-kernel-step5-cleanup-20261107/inherited.json` 和 `local-baseline/`。这些是继承内容，不算本批新增成果；不要还原成 dev 旧版或覆盖主目录。
+
+继承功能包括仅本地发布、经用户确认追加一个任务文件范围、原活 Pi 私有收件箱恢复、任务卡元数据同步、无关任务并行及现有 Git/候选保护；旧队列指定 release 的实现也留有来源。C6旧发布执行被移除时，旧 `--release` 路径只给明确迁移诊断，不另造新目标分支发布能力，不碰 main。其余相关保留功能不能随清理退化。
+
+只复制本机原 `.autoreview.json`，保持既有 auto、deny、模型配置。主目录 `.gitignore`、历史文档删除/归档、旧批次、eval、本机辅助目录和旧 worktree 全部保留，不随本批复制、恢复或清理。主目录只允许协调方更新本方案与第二批提示词；产品修改只发生在第二批工作区。外层 Loop 始终加载主目录当前 `autoreview.ts`，不让开发中的清理代码评审自己。
+
+### 本次清理清单与替代位置
+
+本节把前期候选按已合入第一批及本机当前调用链复核，作为用户“开始第二批”的执行范围。按函数/字段/入口分支清理，不能按文件名整删。列出的旧执行能力必须真正移除，不能只藏在 `legacyCompatibility:true`、环境变量或默认关闭的分支后面；历史读取和准确迁移诊断允许保留。
+
+| 项 | 删除或改变的旧逻辑 | 必须保留/承接的位置 |
+|---|---|---|
+| C1 旧 workflow、每段验收 | `config.ts` 的 StageWorkflow/parseStageWorkflow/workflowSteps/batchStageConfiguration；`review.ts/acceptanceStep` 与评审后验收分支；pipeline 的段级 workflow 解释 | 新卡固定 flow、kernel-session 节点推进、acceptance-node 批次统一验收。保留 parseAcceptanceConfig、标准、人工/授权和验收执行器。旧字段不能继续控制流程；不改写项目配置。 |
+| C2 定向复验后追加 full | `acceptance.ts/runAcceptanceStage` 中定向成功后再调用 full 的包装，以及 review/pipeline 调用者 | runAcceptanceOnce/runAcceptanceAttempt、证据、来源、授权及资源收尾；首次和移出任务等需求明确要求的全量条目范围仍保留，不能误删成“永不完整验收”。 |
+| C3 评审/验收共用次数与时限 | checkRoundBudget、评审 deadline 与验收 deadline 取最小值、验收失败使用 ReviewState.repairs 的路径 | 新卡各节点独立 limits/counters/deadline；单会话评审自身 maxRepairs/reviewTimeoutMin、preparation 独立恢复预算保留。 |
+| C4 workspaces 与旧开工两步 | ProjectLayout.workspaces、旧目录名推导、loop.ts/cmdOpen 及仅为旧开工服务的 loadBatch/resolveStageMap 装配 | 新卡一次启动 createKernelRun/createWorkspace/launchKernel，localFiles、准备/方法/权限/来源检查照常。旧开工只给明确新入口说明，不建目录/分支；已有目录不迁移、不删除。 |
+| C5 同仓库串行旧流水线和旧卡执行 | pipeline.ts 的旧 parsePlan 开发卡解析、dispatchBatches/runPipeline，loop.ts 的 legacyCompatibility 执行分流，旧后台重新派发路径 | 新卡任务并行、测试/验收本机槽、目标分支发布锁与批次贡献。旧 stages/workflow/steps 卡在创建资源前拒绝并提示迁移；pipeline-core 的通用原子读写/事件类型按真实调用者保留。 |
+| C6 旧队列再次检查、免审及批次分支推送 | review.ts/queueReviewedResult、merge-queue.ts/runMergeQueue 的旧检查/返修/免审、commit-batch.ts 的旧提交推送路径 | node-ledger/validResult、统一合入资格和 submission-node；只推 dev 的新发布规则、真实例外决定、用户未提交内容及释放保护保留。第四步部署/回退/项目互斥不删除；旧记录只读展示，不伪造新账本。 |
+| C7 独立 accept-cmd | autoreview.ts 的旧参数解析、acceptCommand/acceptMode、独立命令执行及完成门槛、`/accept`，core.ts 对应旧状态/总结分支 | 新卡 tasks[].test/test-node；旧参数/命令给明确迁移说明、不执行。`bin/loop 开发 pi|claude|codex` 继续只有开发评审，原会话返修/停止/恢复可用，不暗加测试或提交。 |
+| C8 现用说明与模板 | CLI 帮助、README、工具清单、运行维护及项目模板中仍指导使用旧 workflow/workspaces/开工/accept-cmd 的内容 | 统一指向真实新入口、固定节点及字段。历史文档原样保留；稳定规则 AGENTS.md/CLAUDE.md 不改，不向接入项目复制新规则。 |
+
+共享依赖不能误删：`workspace.ts` 的 gitResult/gitText/worktrees/worktreeForBranch 被新内核和部署直接使用；`pipeline-core.ts` 的原子 JSON/事件工具被 resources/materials/methods/project-context 等使用；`review.ts/autoreview.ts/hosts/review-hook.ts` 仍承载正常单会话。可以移除无调用的旧专有函数/类型，但不为删文件搬出一套通用框架。
+
+`review-only.ts` 的独立 `loop 评审` 入口必须仍能评审已有提交并只出报告；拆除其 ReviewPlan/旧 parseRecipe 依赖时，复用现有只评审解析和执行接缝。PA 已有查询、消息、授权来源、请求去重与原会话身份语义保留；`pa-resume.ts` 中重开旧 pipeline 的部分改为旧卡迁移拒绝/适用新入口衔接，不能再偷偷启动已作废旧批次，也不顺带扩建 PA 协议。历史任务资源按既有归属提供安全停止/诊断，不能因读旧记录触发恢复或发布。
+
+### 对应测试调整清单
+
+不整文件删除现有测试，不修改或运行 `test/e2e.mjs`。以下过时行为断言按本次已授权行为替换；同一测试内的独有保护必须迁到新入口继续验证，不能只删到绿。需要删除表外测试文件或改变表外能力时，先保留并单列，不扩大本批。
+
+| 现有测试位置 | 本批替换的旧期待 | 必须保留的反例/新覆盖 |
+|---|---|---|
+| test/workflow.test.ts；test/pipeline.test.ts 的 P1/P3/P5/P8 与旧启动/派发用例 | 接受旧卡、workflow 控制验收、同仓库强制串行、开工成功 | 旧卡无副作用拒绝、正确迁移提示；新卡原有并行/归属/原会话回流覆盖；非法路径/配置和启动失败保护。 |
+| test/acceptance-recheck.test.ts 的“完成前完整验收/定向后full”场景；pipeline 同类场景 | 定向通过后再追加完整重验 | 精确复验、首次/移出任务合法完整范围；标准/授权变化、沿用证据来源、未验证/人工项不伪通过。 |
+| test/config.test.ts 共用预算及 workflow/workspaces 场景 | 验收时限必须小于评审时限、依旧 workspaces 创建目录 | 节点独立限额、非法输入在资源前拒绝、旧字段不执行且不改用户配置；新卡 localFiles 与配置优先级。 |
+| test/autoreview-delivery.test.ts 的必需/附加验收命令及 PA A3；相关 autoreview/hook/fixture 场景 | 独立 accept-cmd 运行及控制完成 | 旧参数迁移且不执行、新测试节点承接；释放证明、失败分类、单会话评审/返修/通知/真实用户输入。 |
+| test/loop-documents.test.ts、test/preflight.test.ts 及 workflow 中混合的开工保护 | 旧开工执行/文档搬运流程 | 源文件、用户暂存/忽略文件、链接、localFiles、方法与准备的保护在新入口继续成立；不删除独有反例。 |
+| test/*queue*.test.ts、test/recipes.test.ts、test/merge-queue-target.test.ts 的旧执行行为 | 旧队列再次检查/免审、批次分支推送、旧指定 release 发布 | 新提交节点只发布已检查候选，目标/用户内容/进程/停止/回退保护；只评审入口及纯报告不开发语义。旧目标参数只留迁移诊断测试。 |
+
+`test/kernel*.test.ts`、第四步部署/只评审、第一批产物证明/窗口适配、单会话及继承的 scope/native-Pi 测试作为受影响保护基线。开发时在本节记录最终“原断言 → 新入口/新断言”，交付列明全部实际改动及原因，不再新增平行测试台账。
+
+### 实施顺序与完成条件
+
+先核对本次继承差异与调用者，移走保留入口对旧编排的依赖，再按 C1—C7 删除旧执行分支；按依赖分组执行最小充分验证，最后同步 C8。每组自检通过继续，不等用户逐步验收。旧实现无生产调用后才处理专有死代码；少量迁移诊断或历史读取不等于保留旧执行引擎。
+
+完成须同时满足：新卡六节点/单多任务/原会话恢复不退化；旧卡、开工、旧独立验收命令不能再执行资源动作；没有提交节点暗查、定向后追加 full、共用产品次数/时限或新旧双调度；保留能力均有实际入口及受影响测试证据。仅把旧代码改名/藏入兼容开关，或只删README，不算完成。
+
+测试使用已有 node:test/fixture、本地临时 Git/bare origin 及模型替身，按调用影响选文件/名字，不跑全仓、真实模型业务、浏览器/后端联调、真实部署/远端或额外自动验收；类型检查复用已安装工具。测试临时文件按实际归属释放，失败证据保留；不清理旧运行目录或按名字/PID猜测释放。现有真实用户入口和资源不受本批检查影响。
+
+交付前分别列明继承内容、本批删除/迁移内容、定向程序结果、外层静态评审、实际装配及仍未验证的窗口/业务项。未经用户当次明确发布指令，不 add/commit/合入/push；不把“开始第二批”当发布授权。发布时由实现者对照本次 inherited.json 与主目录最新变化做有界差异保护，不能直接整目录覆盖；新增本机变化需明确列出，避免把准备基线之外的内容悄悄带入。
+
+### 第二批准备与启动记录（2026-11-07）
+
+准备目录：`/Users/Admin/.pi-autoreview/preparations/loop-kernel-step5-cleanup-20261107/`。已建立独立工作区、保存主目录改动及19份继承文件指纹，更新同一方案并生成本批唯一提示词。未修改主目录产品代码、未删除旧实现/测试/文档/工作目录、未提交或推送本批。
+
+本次重新核对真实 Pi 包为 `@earendil-works/pi-coding-agent` 1.3.0，实际入口 `/Users/Admin/.local/bin/pi`。选择 read/edit/write/bash，加载当前权限扩展、主目录 autoreview 和 Ponytail full；保留原全局 yoloMode=true 和明确 deny，无新项目覆盖。`--offline` 仅关闭启动联网检查，仍正常连接开发及评审模型，不安装或恢复其他插件。
+
+已完成的准备检查：当前 Pi 参数解析器接受本次启动参数；现有标准解析器完整提取9条标准；正式 `bin/loop 开发 pi` dry-run 指向正确工作区、三项扩展与新会话；启动脚本语法、文档/继承差异空白检查通过。真实权限扩展处理器模拟 read/edit/write/bash 均放行、0次询问，未执行探针工具或调用模型。证据为 `prompt-check.json`、`launch-dry-run.log`、`permission-handler-check.json`。未执行产品测试/构建、真实窗口、业务或外层评审。
+
+**本批未启动，用户自行执行启动命令。** 会话 ID `2092b4cd-c3af-4f23-9d9c-41a711a71737`；脚本 `start-step5-cleanup.sh` 内已固定工作目录、清除其他批次身份、原生前台 Pi、唯一提示词及本次信任参数。实际启动后才能核对加载、模型执行和外层评审情况，准备检查不冒充开发完成或业务通过。
+
+## 第二批实施与验证记录（2026-11-08 UTC）
+
+本节是本工作区实际实施记录，不改写上方准备时“尚未启动”的历史。工作区 `/Users/Admin/.pi-autoreview/worktrees/loop-kernel-step5-cleanup`，分支 `refactor/loop-kernel-step5-cleanup`，HEAD 仍为 `e170e31787e4d96aedf1f9adbcdafa9ef16794c3`。仅修改本工作区授权文件；没有 add/commit/stash/reset/合入/push，没有覆盖主目录产品、其他仓库或旧 worktree。当前目录没有方案引用的 `issues/【req】Loop内核与节点编排.md`，未补建/关闭原单；按本方案及本批提示词 A1—A9 实施，不降低原标准。
+
+### 继承差异与本批差异分列
+
+启动时核对 inherited.json 的19份 SHA-256，全部匹配，未整仓重读 local-baseline。继承的仅本地合入、scope 单文件增补、原活 Pi 私有收件箱、未知/过期返修拒绝、卡元数据同步、无关任务并行和 Git/候选保护不是本批新成果。起点已有的未提交差异不还原、不丢弃、不擅自提交。最终逐文件指纹见 `/tmp/loop-step5-cleanup-checks-bunzxv/inheritance-final.json`。
+
+| 继承文件 | 本批在继承基线上的处理 |
+|---|---|
+| acceptance-node.ts、batch-integration.ts、kernel-controls.ts、kernel-session.ts、kernel-workspace.ts、kernel.ts、submission-node.ts | 与继承清单仍逐字一致；保留统一验收、贡献/元数据、仅本地、范围及释放保护 |
+| test/kernel-batch.test.ts、test/kernel-scope-control.test.ts、test/native-pi-owner.test.ts | 与继承清单仍逐字一致；作为正常/反例基线执行，没有把其原有功能计为本批成果 |
+| kernel-cli.ts | 仅将文件头“旧引擎内部保留”改为已删除的准确说明；继承的本地模式/任务控制保留 |
+| kernel-runtime.ts | 在原活 Pi/窗口/恢复实现之外接回方法自测；不改其既有模式、归属或收件箱语义 |
+| node-ledger.ts | 增加已有 PA RelaySource 形状的任务来源记录，不改变原有发布/控制决定或次数 |
+| loop.ts | 保留新卡、单会话外围、只评审、PA、问题单/经验/维护入口；删除旧开工/启动/合入装配及内部兼容分流；仍传递 --仅本地 |
+| merge-queue.ts、test/merge-queue-target.test.ts | 按已授权 C6 停用继承的旧 --release 执行并改迁移拒绝；不迁成任意目标发布、不碰 main |
+| test/kernel.test.ts | 只补可选断言说明的空字符串类型兜底，不改继承的业务断言 |
+| README.md、工具清单.md | 同步 C8，但继续说明继承的本地发布、单文件增补、原活 Pi 和无关任务并行 |
+
+### C1—C8 实际删除与承接
+
+| 清单 | 实际删除/改变的符号和分支 | 仍在使用的承接调用链 |
+|---|---|---|
+| C1 | config 的 StageWorkflow/parseStageWorkflow/workflowSteps/stageAcceptance/batchStageConfiguration，review.acceptanceStep 及评审后 workflow/验收分支，旧段解释器 | development-card 固定 flow → kernel-session/acceptance-node；parseAcceptanceConfig、标准/授权和验收执行器保留。旧字段不解析流程或段预算、不改用户配置 |
+| C2 | runAcceptanceStage 的“定向后 full”包装及调用者；无调用的旧验收目录/开工 reset 空跑助手 | acceptance-node → runAcceptanceOnce → 内部单轮 attempt；首次及移出任务后的完整范围由原内核计划决定。定向成功不多跑第二轮 |
+| C3 | checkRoundBudget、static-review.reservedMs、评审/验收 deadline 取最小值、验收失败扣 ReviewState.repairs | 单会话只保留自己的评审预算/次数；新卡各节点 limits/counters/deadline 和 preparation 有限恢复独立，排队不计执行时限 |
+| C4 | ProjectLayout.workspaces/workspacePath；loop.cmdOpen/loadBatch/旧 repo 装配、文档搬运/恢复/提交、仅旧开工的前检/空跑；preflight.ts；旧问题单开工预写/队列状态冲突消解/合入回写 | createKernelRun/createWorkspace/launchKernel；localFiles、来源/权限/准备保留。methods.selfCheck 脱离旧开工接回新卡启动前，按指纹缓存，受管执行/释放并守候选输入 |
+| C5 | pipeline.parsePlan/dispatchBatches/runPipeline、旧 Pi/Stage/Plan 专有类型、串行/Terminal/后台派发；loop legacyCompatibility 分流；launch 的旧段锁/派发/覆盖分支和 terminalStageCommand | 新卡六节点/并行任务/本机槽/发布锁。pipeline.ts、launch.ts 直接旧脚本只短拒绝；launch 共用启动组只供 review-only，内部旧段参数也在锁/目录/模型前拒绝 |
+| C6 | queueReviewedResult/queueCommittedResult、旧队列完成入队/再次检查/免审/返修/自动恢复/重定目标；runMergeQueue、mergeQueuedBatch、retargetQueueBatch、commitBatch/pushBatch、workspace.commitAll 等专有写操作 | submission-node 只发布当前 validResult/候选/输入/贡献及真实决定，不暗查；只 dev/仅本地/失败不重推。merge-queue 仅旧 JSON/归属及显式安全停止，直接 worker 脚本拒绝；不将历史 blocked/testing/e2e 改成可执行 pending/新通过 |
+| C7 | acceptCommand/acceptMode/acceptTimeoutMs、run/start/finish/interruptAcceptRun、独立命令执行/恢复/完成门槛；core.AcceptRunRecord/旧命令总结；Pi/Hook 的旧机器收件箱派发和队列免审 | bin/loop 开发三宿主仍仅静态评审；/accept 与旧参数仅诊断，含新卡直接扩展入口；bin 参数空格/等号两形式在权限检查/模型前拒绝。真实用户输入/撤权、单会话返修/通知/来源/停止/续接保留 |
+| C8 | 现用帮助、README、工具清单、运行维护、项目模板 JSON/配置/说明不再指导旧执行 | 新卡、单会话及纯报告入口一致；模板既有“批次.json”文件名保留但内容改 version:1。不改模板稳定规则。README-验收标准原文保留，运行时指路明确仅取写法，旧执行要求由新卡/独立 limits 替代 |
+
+没有把旧实现搬进 legacy、新模块或关闭开关。没有引入通用流程引擎/产物 DSL/PA 新协议。原 gate 不执行、类型不校验、不自动删除；配置解析静默，仅新卡实际启动提醒一次。auto 和明确 deny 保留，不把自动执行当发布授权。
+
+保留模块及真实消费者：workspace 的 Git/worktree 归属供 kernel/workspace/submission/deployment；pipeline-core 原子 JSON 供 resources/materials/methods/project-context/宿主/PA/停止；review/autoreview/hosts 保留单会话；review-only 独立解析仅报告配方，loop 直接评审与只评审卡均可用；部署/回退、测试产物/真实输入保护仍走原内核。IssueWriteback 只读历史类型及 regularFile/stateField/writeIssue 供旧记录/issue-archive；归档 CLI 和两类工具完成事件仍用同一归档器，不自动关单。
+
+**表外数据能力单列保留，不假称新的生产执行入口：** batch-refs 的纯历史路径重定位与 parseIssuePaths 仍由 batch-refs/issue-contract 测试消费；pa-records 的旧 grant 绑定/合并数据助手仍有 pa-grants 反例（可能写绑定数据，但不投递、不启动、不会成为新内核授权），生产查询只用 readPAGrants/wordRecords；ledger 的历史批次格式化/追加助手仍有 ledger 测试，不参与 validResult/发布资格。未擅删这些表外能力或测试，未把它们接回执行。StageStatus/QueueBatch/QueueEntry/BatchCommit 的旧字段仅历史展示/归属停止，消费者为 query/stop/PA/宿主观测；不据旧记录生成新账本通过项。
+
+### 拆依赖时发现并修正的保护缺口
+
+- 方法自测原先只在旧开工：接回新卡开发启动前，仍用 methods 指纹/paths/selfCheck/probe；失败不启动模型，不把它变成业务测试。改为受管消费者/资源和项目检查租约，方法改变候选/输入时停下。纯报告不执行项目方法。
+- 权限缓存反例揭示：方法未变时，旧批准缓存会跳过后来 trust/no-approve/deny 的变化。缓存现绑定实际信任决定、全局/项目权限原字节、扩展和 Pi 入口；不修改用户权限、不新增授权渠道。先前批准后明确 no-approve/deny 的反例均拒绝。
+- 直接只评审继续存在，但不能用 finally 抹去未知消费者/脏检出：单轮结构化记录 consumersReleased；报告模式缺/否定回执立即停止重试、保留阻塞租约，损坏登记/目录或 HEAD 身份变化、未保存及 ignored 输出保留 retainedWorktree。两处纯内存测试明确声明未启动消费者；真实执行器回执不补造。新增6类反例和原正常/超时/中断报告均覆盖。
+- PA 仅使用既有 id/header/原文哈希/用户来源协议：新卡续跑走已有内核 worker，JSON 收据形状稳定去重；旧卡确定性拒绝，连拒绝收据/锁目录也不建，旧成功缓存不重启。新卡原话按既有任务 UUID 存储，合法名称文件化碰撞不串消息/误去重；原会话/进程/正文核对后才消费。开发环境含新卡身份不能伪装 PA 用户送话。编号续跑仍整批，不静默忽略 --task（单任务用原统一续跑、不附 --id），不扩协议；旧 grant-file 不读取/代填新授权，历史授权只读对账。
+
+### 断言变化 → 替代覆盖及原因
+
+没有整文件删除 node:test，没有修改/删除/运行 test/e2e.mjs；旧成功期待不再代表当前产品行为，以下是实际替换范围，独有保护保留于原文件或已有内核反例，不以“只要不崩”代替断言。
+
+| 测试位置 | 原断言 → 当前断言/承接 |
+|---|---|
+| workflow；pipeline 的 P1/P2/P3/P5/P8；pipeline-startup；acceptance-rename | 旧 workflow/steps/串行/平铺或 e2e 卡可执行 → 公共 CLI、直接脚本、legacyCompatibility:true 及内部段启动均在资源前迁移拒绝；新卡非法路径/标准/限额仍资源前拒绝。新并行屏障、回流/归属/精确验收保留在 kernel-batch 原断言 |
+| acceptance-recheck | 定向后 full/为 full 预留预算 → 一次精确复验、原树/轮次/证据沿用；首次/显式完整范围、同文改版/改内容/真实授权变化、缺历史身份仍完整；无法验证暂停、人工/拒绝授权不伪通过；报告不写“尚非最终完整” |
+| acceptance-checkpoint/correction/tools/resources/system/recovery | 仅将导入接到 runAcceptanceOnce（局部别名便于原反例不动），原有证据、工具/授权、断线、进程/端口/释放断言不删；acceptance.test 只替换共用预算期待 |
+| config、review、config-launch | 验收必须小于评审/预留后预算/旧段覆盖 → 独立限额、静态首次/一次重试只用自己的剩余时限；正常 Pi flag > env > 文件和精确 session 实际贯穿权限/来源；旧段参数/窗口分流拒绝；非法有效配置仍报错、不改原文 |
+| autoreview-accept-command/acceptance；hook-acceptance/policy | 自动/手动 required/advisory 命令或每段验收控制完成 → 全部旧参数/命令仅迁移、零执行/命令资源；单会话标准仅静态核对、没验证不通过。准备/脏基线/机器来源/规则副本原文和即时静态返修交接保留，新测试节点产品/环境/恢复/释放反例由 kernel-test-node 承接 |
+| autoreview-delivery；hook-delivery | 未执行命令的 TMPDIR/必需验收完成/部分验证总表 → 无旧资源动作、只追加真实静态报告、测试/验收没验证；瘦身保留证据/脚本/小文件、不可写只提示、Ponytail、问题/通知/故障原文/PA 查询与上限继续断言；会话 done 不冒充批次提交/发布 |
+| autoreview-input/sources；hook-input/session | 旧命令输出或正在验收的授权取消 → 真实静态必修/在途静态调用的机器消息隔离和授权取消；文件内授权不算、撤权先落盘、标准改版入新静态全文；CRLF/过滤/原始字节/模式/子目录/来源缺失/恢复取证窗口与巡检等独有反例保留。旧 mode/命令结果不控制完成，真实候选/输入变化仍失效 |
+| autoreview-queue；hook-queue | done 入队/机器收件箱/队列同树免审 → 单会话仍报告状态但不提交/入队，旧消息不发返修或改标准/授权/计数；正常静态评审与新增提交记录保留，新内核信封/宿主真实原生收件由 kernel-test-node/batch 原场景承接 |
+| loop、loop-launch、loop-documents、preflight、loop-merge | 旧开工搬文档/切分支/提交、旧合入 stash → 迁移拒绝仍逐字保护用户暂存/未暂存/忽略同名/源文档/链接/父路径/已有 MERGE_HEAD/stash；新卡冻结已提交资料，不搬原区未提交内容；localFiles 越界/链接、方法指纹/失败/权限仍实际验证 |
+| batch-queue-state/completion/acceptance/repair/gate/stash/publish-locks | 旧 FIFO 重压/重验/免审/冲突退最后一段/恢复发布 → 历史原文/顺序/欠项/次数只读，旧启动/合入/恢复拒绝，锁未知/活 owner 有界拒绝。跨仓库 FIFO、责任回流、资格撤销、完整贡献与发布锁由 local-node-queue/kernel-batch/kernel 原反例承接 |
+| merge-queue、target、commit、publication、recovery、withdraw、inbox；commit-batch | 旧重检/压缩/批次推送/任意 release/撤回/恢复 → 旧 API 不存在、脚本非零迁移、原事务/stash/收件箱/控制字节只读不重启；新提交只发已检查候选、只 dev/仅本地、不暗查、不推任务分支、不重推、目标前进/脏用户区/检查后新增/链接及本机文件保护有正反断言 |
+| batch-delivery/timeout/deployment/deployment-wait；batch-queue-native-claude/codex | 旧队列推批次/部署调度/原生返修 → 新统一发布/本地事实/拒推不重试；历史待办只能取消、在途副作用未知保留；实际项目检查/部署双向互斥、cmd/check/回退、停止/配置/目标保护及原生草稿/精确会话由第四步和 kernel-test-node 原场景保留 |
+| recipes、stop-safety、pa-pipeline/relay | 原 parsePlan/后台旧 pipeline/旧整批 grant 复活 → 独立只评审解析及正常/失败/中断/纯报告保留；旧 PA 明确零资源拒绝，重复编号不读/重发、直接写历史授权仍可查；新内核 PA worker、正确任务/原会话、错误归属/伪头/开发环境、任务名碰撞不串账有反例。跨项目同名/复制品、共享组/错误启动时间/无身份、旧发布未知事务不假称停止 |
+| loop-issues、issue-contract | 旧开工/队列问题单状态自动回写 → 不走旧执行；原规范正文/CRLF/单头与正文区分、并发原文 CAS、只读/缺失/链接/硬链接/父路径保护及同一归档器保留；issue-archive 的真实工具适配反例未删 |
+| core、events、tool-manifest、template、production-loop、cli-worker | 旧命令总结/旧段原因数量阈值/parsePlan 文档抽取/开工模板 → 不渲染旧命令资格；每个实际保留来源提取非空、共享停点与所有原因分类仍逐项检查，不用删除旧引擎后的条数制造失败；新卡/任务白名单及配置 helper 双向字段对照并保留“增/删源码字段必须失败”反例；真实模板占位符在模型前失败；官方 Hook 的只读/范围/重定向/heredoc/路径/去重保护保留 |
+| fixture、继承测试类型补强 | 旧模拟调度器改为临时 Git/bare origin 的前后字节/索引/ref/资源快照，不搬死引擎；kernel fixture 可保存本次 owner/启动时间及证据。可选错误说明补空串、空参数补 {}、env 明确 ProcessEnv 仅类型/诊断文本，不改比较条件。3份起点未跟踪测试不作为新增成果 |
+
+### 实际命令、失败与闭环
+
+证据根 **`/tmp/loop-step5-cleanup-checks-bunzxv/`**。`check-commands.json` 从本原会话实际工具调用逐字提取原始命令及 timeout；`test-log-results.json` 只汇总真实 TAP，不把内部循环膨胀成 node:test 数量。以下 `node --test` 均使用 `env -u AUTOREVIEW_SINGLE_NODE -u AUTOREVIEW_KERNEL_LEDGER -u AUTOREVIEW_KERNEL_RUN -u AUTOREVIEW_KERNEL_TASK NODE_NO_WARNINGS=1`；需要的资源/通知/HOME/队列/模型/宿主和 Git origin 全在各自临时夹具。额外证据变量/完整参数以原始命令为准。不是固定全仓测试集合，没有依赖安装、真实业务模型/浏览器/后端数据库/远端或额外验收；本机短服务/工具仅为已有 fixture。
+
+| 实际检查主体/范围 | 日志与结果（原失败不删除） |
+|---|---|
+| config/review/autoreview 第一组 | config-review-single-1：88/89；唯一失败仍期待清除旧启动令牌，改为旧令牌无执行/回报能力；round-isolation-2 该项已过 |
+| acceptance-recheck/config/autoreview | round-isolation-2：69/71；授权反例未设置授权项，变化无实际授权效果。修为真实授权变化后，final-precise-increments 中该父/3子均过；不是降低验收断言 |
+| kernel-batch/kernel/kernel-controls/step4 定向基线 | kernel-boundary-1：4/4 |
+| pipeline/workflow/preflight/documents/launch/queue/commit/publication/PA 初组 | entry-publication-1：23/24；测试误把提交节点的失败 NodeOutput 当 throw，改断言状态/原因及目标不动；methods-pa-issues-1 两项 publication 反例通过 |
+| 单会话/Hook/交付/历史停止/只评审 | retained-adapters-1：52/52 |
+| 方法自测、PA relay/grants、问题单实际归档及发布保护 | methods-pa-issues-1：33/33 |
+| 现用清单/模板/标准写法保护 | docs-template-1：12/15，清单表提取误限反引号、模板缺停用词；修为完整双向表提取及准确说明。manifest-config-launch-2：8/8；模板/保护原通过项不重复扩大 |
+| 生产 Hook 指路/解析/缺文件/heredoc/项目状态及 README/帮助 | production-guidance-1：8/9；ENOENT 只带缺失父目录，补明原引用完整路径；production-missing-path-2：1/1；末次 cli-and-guidance-final 相关指路再过 |
+| 23份旧队列/开工/交付/历史及新对应保护文件 | migration-history-groups-1：30/31，权限缓存确实复用了过期批准；实际修复后 permission-cache-fixed：1/1，含批准后 no-approve/deny 反例 |
+| core/acceptance 及 checkpoint/correction/tools/resources/system/recovery | acceptance-executor-core-1：91/91，单轮导入后的原反例保留 |
+| 用户输入/来源/普通会话/两宿主/通知事件 | retained-inputs-sources-1：101/110；9计数为旧约定/共用预算/旧引擎原因条数期待。同步当前约定/独立预算及实际原因完整性后 retained-contract-fixed：9/9；未删独有原文/路径/故障/释放反例 |
+| kernel-batch/kernel-test-node/kernel-controls/step4/scope/native 原集成命令 | kernel-integrated-1 被工具450秒上限中断，无失败 TAP；已输出前29个批次顶层场景通过。未宣称该整命令通过，也未重跑已完成29项；kernel-batch-remainder-1 只跑剩余 CAS 恢复/双宿主 Hook：4/4（2顶层+2子例） |
+| kernel/kernel-controls/kernel-scope-control/native-pi-owner | kernel-base-controls-1：61/61，含继承本地模式/未知身份/范围控制 |
+| kernel-test-node | kernel-test-node-1：12/12 |
+| kernel-step4/kernel-step4-review2 | kernel-step4-retained-1：48/48，含纯报告、部署/回退、互斥、停止和真实/缺失回执；预期拒推日志仍保留 |
+| kernel-step5-flow 受影响适配、状态、窗口替身、构建/缓存、真实输入与释放恢复 | kernel-step5-retained-1：13/13；不是实际窗口/业务通过 |
+| local-node-queue 原跨仓库 FIFO/停止/改卡/未知登记 | local-slot-regression-1：4/4 |
+| 直接只评审资源补强 | direct-review-release-final：11/17；新增清理守卫把带换行 HEAD 与 trim 后对象比较，错误保留6个正常/超时检出。补 trim 后 direct-review-release-fixed：13/13（原失败6项+新增6子及父），正常和真实超时/信号均收尾，缺回执/脏/ignored/损坏登记/同树不同 HEAD 均保留；没有只删反例到绿 |
+| 末次精确复验/预算/纯报告渲染/旧直接脚本 | final-precise-increments：16/16 |
+| PA 迁移/新 worker/旧源环境边界 | pa-migration-final：9/11；2项是首回内存 undefined 与持久 JSON 形状不同、拒绝 helper 未取 reason.text；规范同一收据形状/结构化原因后 pa-worker-receipt-fixed：2/2 |
+| 新卡直接扩展旧参数、实际只评审启动、内部旧段拒绝、正常取消/缺回执 | last-entry-and-receipts：8/8 |
+| 旧队列 worker 脚本、内部旧段、只评审正例及迁移指路 | cli-and-guidance-final：5/5 |
+| PA 整批续跑不吞 --task、任务 UUID/名称碰撞、原会话消息、旧缓存/归属 | pa-task-identity-final：4/4；实际内核 worker 仅一次评审，未启动开发宿主/发布 |
+
+交付说明增量后，仅复核 `node --test test/tool-manifest.test.ts test/single-entry-docs.test.ts`：`document-delivery-final.log` **9/9**；末次空白/稳定原文核对通过，没有重复扩大运行验证。
+
+类型工具仅复用已安装 TypeScript/Node/Pi 类型。旧 ES2023 临时脚本不认识既有 Promise.withResolvers，换为匹配 Node22 的 ESNext 临时检查参数，不加包；后续显式检查完整依赖。集成首次22条为测试可选断言说明/空 helper 参数，及一次旧 launch 测试类型尚未同步，均做类型/说明兜底不改变比较值。**`types-final.jsonl`：114入口及其依赖，0诊断。** 原始 types-*.jsonl 均保留。
+
+pi-lens 实际 touchFile/collectDiagnostics，禁自动安装、finally shutdown：lens-final（28文件182诊断）、lens-increments-final（17文件180）、lens-last-final（19文件164）及最后 PA/身份4文件增量有真实输出，不是空缓存。推断工程仍有缺 Node/Pi 类型等基线诊断，**不把退出0当零诊断通过**；显式既有类型依赖的 strict 结果另列如上。未为清空基线增加依赖。
+
+其余集成核对：`git diff --check`；`bash -n bin/loop bin/pi-dev bin/loop-dev`；两份受改 mjs fixture 的 `node --check`；78份产品/hosts TS 的 AST 声明/调用扫描，已退役符号声明/调用为0，保留模块导入消费者见 `static-call-audit.json`。`protected-boundaries.json` 核对6份稳定/原标准/e2e原文 SHA 与 HEAD 相同、其他历史 docs/temp 无差异、暂存为空；不将静态核对当程序运行证明。
+
+### 资源、保留场景和未验证项
+
+`final-resources.json` 按本次保存的身份/账本核对：245份夹具快照根已不存在；158条测试检出及专用父目录不存在；234条运行资源目录不存在；36条登记启动组无存活/未知归属，测试标记无存活进程。负面“释放未知/失败”历史不改成通过。工具超时遗留的一个本次夹具以其他本次证据中的相同 owner PID/启动时间、run/task/attempt、Git common/本地 origin/全部 worktree 归属核对，原消费者/两资源及检出均已释放，先完整留证再收尾：`timeout-fixture-candidates.json`、`timeout-fixture-snapshot/`、`timeout-fixture-release.json/.log`；没有发送任何信号或按名字/年龄杀进程。
+
+直接只评审清理守卫调试失败留下6份检出候选，源夹具登记已随旧夹具释放，**原样保留为失败场景，不按名称/年龄认领删除**：系统临时目录 `loop-review-3ANSrV`、`loop-review-3LT1Za`、`loop-review-3rXqx2`、`loop-review-b5DWIh`、`loop-review-cjXov3`、`loop-review-pA2zAm`。完整绝对路径/Git引用在 final-resources.json；当前与其原夹具环境匹配的进程0、各目录 lsof 开放引用0。它们不作为业务通过/可接力证据，后续不凭消失的登记猜测清理。修复后的正常/中断检出及新反例的本次明确归属测试产物已确认收尾；测试的纯内存反例只在确知没有启动消费者时释放自己的副本，不给生产路径补回执。证据根与本开发工作区有意保留，旧任务/目录未清理。
+
+分层结论：**源码 C1—C8 实施及受影响程序覆盖完成；外层独立静态评审等待本次交付触发，有必须修改继续原会话返修。** 本工作区清理代码不负责外层评审自己，第一批/前四步旧通过记录不追认为本批通过。
+
+**未验证且不偷偷补跑：** 真实 Terminal/Pi/Claude/Codex 窗口及人工体验，正式插件安装/信任和外部 worker 的真实装配，真实模型业务、浏览器/后端数据库联调、真实远端/部署与业务/人工验收。程序替身不代表这些已通过；第一批真实体验仍按原未验事项保留。没有发布可接力卡、没有把环境恢复当业务返修、没有自动关需求/问题单。后续若用户明确授权发布，仍须统一 `bin/loop 合入`，先对照 inherited.json 核对主目录后来新增修改，不能覆盖。
+
+### 第二批外层评审与本次发布授权（2026-11-08）
+
+外层第 1 次调用耗尽预算，保留原失败；第 2 轮于 `2026-11-08 05:13:19` 开始，71 秒返回“通过”，0 条必须修改、0 次返修。证据：`/Users/Admin/.pi-autoreview/loop-kernel-step5-cleanup/2092b4cd-c3af-4f23-9d9c-41a711a71737.md` 及第 2 轮完整源码快照。此结论是外层静态评审，不是业务验收或发布卡的新账本通过。
+
+两条建议单列延期，不改产品源码、不阻断本次发布：一是 PA 续跑包装的“请求受理”和底层 `ok:false` 启动结果分开显示；二是新卡查询任务视图补充已有 paRelays 的只读来源导航。底层失败和来源证据均保留，运行行为按原报告记未验证。
+
+用户本次真实原话“部署，合入，提交分支到仓库”，消息 `89982ac6`（`2026-11-08T10:25:17.226Z`），明确授权本批源分支提交/推送、统一合入 dev 与本机入口更新；不解释为修改 main、强推、覆盖无关改动或接受缺失检查。
+
+发布证据根：`/Users/Admin/.pi-autoreview/deployments/loop-kernel-step5-cleanup-20261108-Sq92vsz6/`。已核对主目录19份继承文件与 inherited.json 逐字相同，无后来新增的继承源码变化；主方案与本批准备版本相同，本批提示词与源文件相同。主目录21个重叠文件均为已继承/本任务准备内容，将在完整字节/模式备份及输入核对后受控消纳到新版本；其余主目录既有改动、历史删除/归档、配置、辅助目录不纳入提交，逐字保护，不 stash/reset 或整目录覆盖。
+
+源分支提交包含本批清理和必须保留的继承源码/测试，继承功能仍不计作新增成果；先保全并推送 `refactor/loop-kernel-step5-cleanup`。以下复评安排属于接管前历史，现按本节开头的最新要求处理：不再调用发布静态评审，不把既有外层报告或开发自检写成 validResult；记录当前用户的部署决定及本卡未复评事实，沿 `bin/loop 合入` 的既有受控入口合入 dev/推 origin/dev。Loop 本机部署更新主目录 CLI/Pi/Hook 产品文件并核对与发布树一致；已备份的旧源码补丁不再恢复到运行目录。配置、数据和无关历史资料继续保留，不补跑业务/窗口/e2e。
+
+发布卡第 1 轮于 `2026-11-08T15:27:10Z` 返回 1 条必须修改，因果链已静态确认：新卡 Pi/Claude/Codex 接收核验后的 PA 正文时丢失 verifiedRelay，正文若以合法引用头开头，会再次被 typedByUser 当作未核验机器信封丢弃，从而不能撤回旧 A1 授权。此次检查确实阻止了合入，dev/主目录未变；不是业务返修或用户接管，原失败及返修计数 1 保留。
+
+第 1 条：已修。`recordManagedUserInput` 新增可选来源参数，默认仍不信任；两处适配层只在 consumeRelay 成功后传递现有 verifiedRelay 事实。未新增授权方式，不采信文件内容，不把机器返修信封当用户授权。Pi/Claude/Codex 三个真实处理器替身新增引用头撤权、伪造/重放拒绝、文件块/文件引用/机器消息不能改授权断言；先红 0/3（原授权未撤回），再绿 3/3。完整 PA 定向回归 19/19，内核输入/授权/文件相关回归 10/10；前后有覆盖，不相加虚报总数。4 入口及依赖 strict 类型检查 0 诊断；pi-lens 实际检查4文件仍有基线依赖类型诊断35条（4/23/2/6），退出0不算零诊断。仅改必要的3个产品文件、1个现有测试文件与本方案，未改 e2e 或原验收标准。证据在同一发布根 `pa-revoke-red.log` / `pa-revoke-green.log` / `pa-repair-regression.log` / `kernel-input-regression.log` / `repair-types.jsonl` / `repair-lens.jsonl`。当时计划使用同一发布卡复评；后续用户明确要求发布不触发评审并接管部署，该安排已取消，原失败、修复证据与未复评事实仍保留。
+
+实际源提交、发布提交、远端确认、主目录保护、入口核验和消费者释放，均以该证据根 `plan.json` / `final-verification.json` 及发布卡查询为准；结果尚未生成或未确认时不称已发布，不发布可接力状态。上方“本批未提交/待外层评审”的段落保留开发交付当时事实；真实窗口/业务/人工验收仍未验证，不以本次发布追认通过。
 
 ## 第 5 步第一批：流程修复实施安排
 
@@ -267,7 +468,7 @@ pi-lens：对同样 7/9 个入口实际 touchFile/collectDiagnostics，记录 `l
 - `node /tmp/loop-step5-review3-W8emtx/verify-release.mjs` → `release-verification.log/.json`：34 份账本副本、36 条检查空间/父目录和 36 条资源目录均已收尾；本轮登记 runtime 活动 0，未猜杀/猜删。没有真实部署/模型会话。源开发 worktree、历史/本轮证据和先前仅准备的人工窗口示例保留。
 - `git diff --check` 通过，受保护文件零差异，HEAD/分支不变，未提交/发布或执行第二批清理。两项必须修改已修，待外层复评；真实 Pi/Terminal 窗口、业务体验，以及未完整观测的其他构建器继续未验证，不称第五步整体完成。
 
-## 第 5 步第二批：只读清理候选清单（未授权删除）
+## 第 5 步第二批前期只读候选清单（历史）
 
 本清单已并行静态梳理，仅作为第一批完成后复核的候选范围。位置以准备时主目录和第四步源码为依据；最终必须按第一批合入后的实际调用关系更新。不能按文件名整删共享模块，也不能以删测试消除失败。
 

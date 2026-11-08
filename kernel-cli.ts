@@ -1,4 +1,4 @@
-/** 新卡统一 CLI。旧引擎继续内部保留，但启动旧卡必须给迁移提示。 */
+/** 新卡统一 CLI。旧引擎已删除；旧卡不回退，历史查询/安全停止由只读接缝处理。 */
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -11,7 +11,7 @@ import { controlSource, requestCardChange } from "./kernel-controls.ts";
 import { prepareExceptionCandidate } from "./batch-integration.ts";
 import { readMarker, warnDisabledGate } from "./config.ts";
 
-interface Args { task?: string; removeTask?: string; node?: string; from?: string; removeNode?: string; reviewTimeoutMin?: string; recheck?: boolean; command?: string; batch?: string; dryRun: boolean; json: boolean; acceptUnverified?: boolean; launcher?: string; rest: string[]; stage?: string; id?: string; all?: boolean }
+interface Args { localOnly?: boolean; task?: string; removeTask?: string; node?: string; from?: string; removeNode?: string; reviewTimeoutMin?: string; recheck?: boolean; command?: string; batch?: string; dryRun: boolean; json: boolean; acceptUnverified?: boolean; launcher?: string; rest: string[]; stage?: string; id?: string; all?: boolean }
 export function findKernelLedger(file: string, cwd = process.cwd()): string | undefined {
   const probe = gitResult(dirname(resolve(file)), ["rev-parse", "--show-toplevel"]);
   try {
@@ -63,6 +63,7 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
   const file = resolve(args.batch), path = findKernelLedger(file, cwd);
   // 启动始终先校验新版，不允许旧批次偷偷回退；其余旧历史命令暂保留。
   if (command !== "启动" && !path) {
+    if (args.localOnly) throw new Error("--仅本地 只接受已登记的新开发卡，不回退旧合入入口");
     if (args.task) throw new Error("--task 只用于已登记的新开发卡；未回退旧引擎或停止旧批次");
     if (["重跑", "改卡", "放弃"].includes(command)) throw new Error("开发卡尚未登记，未调用旧引擎");
     if (existsSync(file)) {
@@ -115,7 +116,7 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
   const q = qualification(run);
   const currentDecision = contributionProblems(run, false).length ? undefined : findUserDecision(run, q.candidate, q.inputs, q.missing);
   const decision = args.acceptUnverified && !args.dryRun && !run.publication ? currentDecision ?? ttyDecision(path) : undefined;
-  const output = await mergeManaged(path, { accept: args.acceptUnverified, decision, dryRun: args.dryRun });
+  const output = await mergeManaged(path, { accept: args.acceptUnverified, decision, dryRun: args.dryRun, localOnly: args.localOnly });
   if (!args.dryRun && readRun(path).publication?.local === "merged") await releaseKernelWorkspace(path);
   return { ...queryKernel(path), ok: output.status === "通过", command, outcome: output, dryRun: args.dryRun };
 }

@@ -1,8 +1,5 @@
 {
-  "release": "main",
-  "workspaces": {
-    "dev分支": "../<仓库目录名>-dev分支"
-  },
+  "release": "dev",
   "localFiles": [
     "deploy/acceptance/start.sh",
     "deploy/acceptance/reset-data.sh",

@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
-import { CONVENTION, conventionText } from "../core.ts";
+import { conventionText } from "../core.ts";
+const CONVENTION = conventionText({ singleNode: true });
 import { findProjectRoot, lastAssistantFromTranscript, loadConfig } from "../hosts/review-hook.ts";
 import { detectHost } from "../hosts/hook.ts";
 import { projectRootOf } from "../ledger.ts";
@@ -49,7 +50,7 @@ test("A5 Claude/Codex 普通与开发会话的 SessionStart 都不提醒回写�
         const res = h.run(h.event("SessionStart"), { devRoot: dev ? h.repo : null, env: { AUTOREVIEW_HOST: host } });
         assert.equal(res.code, 0, res.stderr);
         assert.doesNotMatch(res.stdout + res.stderr, /待回写原单|收尾回写/);
-        if (dev) assert.equal(JSON.parse(res.stdout).hookSpecificOutput.additionalContext, conventionText());
+        if (dev) assert.equal(JSON.parse(res.stdout).hookSpecificOutput.additionalContext, conventionText({ singleNode: true }));
         else assert.equal(res.stdout, "", "普通会话不注入任何内容");
         assert.deepEqual(readFileSync(h.ledger), old);
       }
@@ -235,7 +236,7 @@ test("Hook会话／findProjectRoot 与 loadConfig", () => {
     const { configurationHash, ...settings } = config;
     assert.match(configurationHash!, /^[a-f0-9]{64}$/);
     assert.deepEqual(settings, {
-      maxRepairs: 4, reviewerModel: "openai-codex/gpt-6-astra", reviewerThinking: "xhigh",
+      singleNode: true, maxRepairs: 4, reviewerModel: "openai-codex/gpt-6-astra", reviewerThinking: "xhigh",
       reviewTimeoutMin: 60, reviewerCmd: "",
     });
     writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ acceptance: { start: "npm start", timeoutMin: 15 } }));
@@ -243,7 +244,8 @@ test("Hook会话／findProjectRoot 与 loadConfig", () => {
     assert.equal(withAcceptance.acceptance?.start, "npm start");
     assert.equal(withAcceptance.acceptance?.testerCmd, "/fake-tester");
     writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ reviewTimeoutMin: 20, acceptance: { timeoutMin: 20 } }));
-    assert.throws(() => loadConfig(root, {}), /acceptance\.timeoutMin（20）必须小于/);
+    assert.equal(loadConfig(root, {}).reviewTimeoutMin, 20);
+    assert.equal(loadConfig(root, {}).acceptance?.timeoutMin, 20, "验收时限不挤占单会话评审预算");
     writeFileSync(join(root, ".autoreview.json"), JSON.stringify({ maxRepairs: 1, reviewerModel: "m", reviewerThinking: "low", reviewTimeoutMin: 5 }));
     const custom = loadConfig(root, { AUTOREVIEW_REVIEWER_CMD: "/fake" });
     assert.equal(custom.maxRepairs, 1);

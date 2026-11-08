@@ -1,16 +1,46 @@
 /** 受管任务 Git 边界：私有索引、范围/本机文件排除、CAS；不处理用户独立工作区。 */
 import { spawnSync } from "node:child_process";
-import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { digest, inside, type NodeName } from "./development-card.ts";
 import { findProjectRoot, loadProjectLayout, parseAcceptanceConfig, parseContext, parseDeploymentConfig, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
-import { outOfScope } from "./scope.ts";
+import { inScope, outOfScope } from "./scope.ts";
 import { gitResult, gitText, worktrees, worktreeForBranch } from "./workspace.ts";
 import { taskDefinition, taskView, type Candidate, type KernelRun, type DeploymentPlan } from "./node-ledger.ts";
 import { authorizationStatus, forUser, type AcceptanceItemResult } from "./acceptance-core.ts";
+import { processGroup, processStartTime } from "./procs.ts";
 
 const nul = (s: string): string[] => s.split("\0").filter(Boolean);
+/** macOS Pi 改写进程标题后 ps 可能不再展示环境；仅核对原生会话的完整启动链，不授予杀组权限。 */
+export function nativePiOwnerConfirmed(run: KernelRun, ledger: string): boolean {
+  const s = run.session, g = run.launch;
+  if (process.platform !== "darwin" || run.card.host !== "pi" || s?.host !== "pi" || !s.log || !g || !g.token || s.launchId !== g.token
+    || s.pid !== g.pid || s.started !== g.processStarted || processStartTime(s.pid) !== s.started || processGroup(s.pid) !== g.pid) return false;
+  try {
+    const file = lstatSync(s.log);
+    if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || realpathSync(s.log) !== resolve(s.log)) return false;
+    const fd = openSync(s.log, "r"), buffer = Buffer.alloc(8192); let size: number;
+    try { size = readSync(fd, buffer, 0, buffer.length, 0); } finally { closeSync(fd); }
+    const end = buffer.subarray(0, size).indexOf(10); if (end < 0) return false;
+    const header = JSON.parse(buffer.subarray(0, end).toString("utf8")), cwd = realpathSync(run.worktree);
+    if (header.type !== "session" || header.id !== s.id || realpathSync(header.cwd) !== cwd) return false;
+    const current = spawnSync("/usr/sbin/lsof", ["-a", "-p", String(s.pid), "-d", "cwd", "-F0n"], { encoding: "utf8", timeout: 5000, maxBuffer: 64 * 1024 });
+    if (current.status !== 0 || !current.stdout.split("\0").includes(`n${cwd}`)) return false;
+    const parent = spawnSync("ps", ["-o", "ppid=", "-p", String(s.pid)], { encoding: "utf8", timeout: 5000 });
+    const ppid = Number(parent.stdout?.trim()); if (parent.status !== 0 || !Number.isSafeInteger(ppid) || ppid < 2) return false;
+    const names = [run.taskId, taskDefinition(run).name, ...(!run.taskRecords ? ["batch"] : [])].filter((n): n is string => !!n && !/[\\/]/.test(n));
+    return names.some((name) => {
+      try {
+        const path = `${ledger}.${name}.launch.lock`, info = lstatSync(path);
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) return false;
+        const owner = JSON.parse(readFileSync(path, "utf8"));
+        return owner.pid === ppid && typeof owner.token === "string" && /^[a-f0-9-]{36}$/.test(owner.token) && owner.started === processStartTime(ppid)
+          && processStartTime(s.pid) === s.started && processGroup(s.pid) === g.pid;
+      } catch { return false; }
+    });
+  } catch { return false; }
+}
 /** 路径按原始 NUL 字节拆分，不 trim 文件名中的首尾空白。 */
 export function gitRaw(repo: string, args: string[]): string {
   const r = gitResult(repo, args);
@@ -330,11 +360,17 @@ export function workspaceGuard(run: KernelRun, headIdentity?: string, includeIgn
 }
 const ancestor = (repo: string, a: string, b: string): boolean => gitResult(repo, ["merge-base", "--is-ancestor", a, b]).status === 0;
 const treeEntry = (repo: string, commit: string, path: string): string => gitRaw(repo, ["--literal-pathspecs", "ls-tree", "-z", commit, "--", path]);
+/** 受控增补的是文件，不因把它换成目录就获得该目录下的新路径。 */
+function outsideTaskScope(run: KernelRun, files: string[]): string[] {
+  const task = taskDefinition(run), additions = (run.changes ?? []).filter((c) => c.state === "applied" && c.scopeAddition?.task === task.name).map((c) => c.scopeAddition!.file);
+  const original = { ...task.scope, allow: task.scope.allow?.filter((p) => !additions.includes(p)) };
+  return [...new Set([...outOfScope(files, task.scope), ...files.filter((p) => additions.some((file) => p.startsWith(`${file}/`)) && !inScope(p, original))])];
+}
 /** 范围不扩张：已登记候选的原样文件可沿用；新增范围外内容必须能证明来自 dev 的合并父提交。 */
 export function taskScopeBaseline(run: KernelRun, head: string): { target: string; base: string; imported: string[] } {
   const target = gitText(run.repo, ["rev-parse", "refs/heads/dev"]);
   const files = nul(gitRaw(run.worktree, ["diff", "--name-only", "--no-renames", "-z", run.base, head, "--"]));
-  const outside = outOfScope(files, taskDefinition(run).scope);
+  const outside = outsideTaskScope(run, files);
   const fresh = outside.filter((p) => !run.candidate || treeEntry(run.repo, head, p) !== treeEntry(run.repo, run.candidate.commit, p));
   if (!fresh.length) return { target, base: run.base, imported: outside };
   const reject = (paths: string[]): never => { throw new Error(`任务范围外变更，未自动提交（不是已核对 dev 来源）：${paths.join("、")}`); };
@@ -372,7 +408,7 @@ function deliverWithIndex(run: KernelRun, fd: number, lock: string, target: stri
   const branchFiles = nul(gitRaw(run.worktree, ["diff", "--name-only", "--no-renames", "-z", run.base, head, "--"]));
   const imported = new Set(taskScopeBaseline(run, head).imported);
   const changed = dirtyPaths(run);
-  const outside = outOfScope([...new Set([...branchFiles.filter((p) => !imported.has(p)), ...changed])], taskDefinition(run).scope);
+  const outside = outsideTaskScope(run, [...new Set([...branchFiles.filter((p) => !imported.has(p)), ...changed])]);
   if (outside.length) throw new Error(`任务范围外变更，未自动提交：${outside.join("、")}`);
   if (branchFiles.some((p) => local(run, p))) throw new Error("任务历史夹带本机文件，未交付");
   if (gitText(run.worktree, ["diff", "--cached", "--name-only", "-z"])) throw new Error("索引有未经登记的用户暂存改动，未自动提交；请保留成果并取消暂存后在原会话重新交付");

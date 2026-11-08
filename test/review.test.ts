@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { checkRoundBudget, parseAcceptanceConfig, parseProjectLayout, resolveProjectConfig } from "../config.ts";
+import { parseAcceptanceConfig, parseProjectLayout, resolveProjectConfig } from "../config.ts";
 import type { Exec, ExecResult } from "../git.ts";
 import { loadContext, refreshContext } from "../project-context.ts";
 import { newReviewState, runReviewRound, type ReviewConfig, type ReviewDeps } from "../review.ts";
@@ -58,14 +58,14 @@ function harness() {
   } };
 }
 
-test("评审／首次与重试预算：预处理、后置预留和重试共用总时限", async (t) => {
+test("静态评审自身预算：预处理和重试共用；验收配置不预留或扣减", async (t) => {
   const cases: { name: string; total: number; preprocess?: number; spent: number; killed?: boolean; pass?: boolean; acceptance?: boolean; calls: number[]; done: boolean; noRetryNote?: boolean }[] = [
     { name: "首次耗掉59.5分钟不重试", total: 60, spent: 59.5 * 60_000, killed: true, calls: [60 * 60_000], done: false },
     { name: "失败重试只取剩余30分钟", total: 60, spent: 30 * 60_000, calls: [60 * 60_000, 30 * 60_000], done: true },
     { name: "首次超时但尚余55分钟仍可重试", total: 60, spent: 5 * 60_000, killed: true, calls: [60 * 60_000, 55 * 60_000], done: true },
     { name: "首次不足一分钟仍启动／不带验收", total: 1, preprocess: 1000, spent: 59_000, pass: true, calls: [59_000], done: true },
-    { name: "首次不足一分钟仍启动／带验收", total: 21, preprocess: 1000, spent: 59_000, pass: true, acceptance: true, calls: [59_000], done: true },
-    { name: "预处理耗尽验收预留外的预算则评审不调用", total: 21, preprocess: 60_001, spent: 0, acceptance: true, calls: [], done: false },
+    { name: "验收配置不预留二十分钟", total: 21, preprocess: 1000, spent: 59_000, pass: true, acceptance: true, calls: [21 * 60_000 - 1000], done: true },
+    { name: "预处理只消耗评审本身预算", total: 21, preprocess: 60_001, spent: 0, pass: true, acceptance: true, calls: [20 * 60_000 - 1], done: true },
     { name: "首次短预算失败后不再重试", total: 1, preprocess: 1000, spent: 1000, calls: [59_000], done: false, noRetryNote: true },
   ];
   // 只共享不可变 Git 基线；每行重新创建状态、时钟、调用记录和资源身份。
@@ -76,7 +76,6 @@ test("评审／首次与重试预算：预处理、后置预留和重试共用�
       const started = now, calls: number[] = [], gateTimeouts: number[] = [];
       const config: ReviewConfig = { ...h.config, reviewTimeoutMin: item.total,
         ...(item.acceptance ? { acceptance: parseAcceptanceConfig({}, h.repo, {}) } : {}) };
-      checkRoundBudget(config.reviewTimeoutMin, config.acceptance);
       const state = newReviewState();
       if (item.acceptance) state.criteria = { source: "用户", version: 1, updatedAt: "now", items: [{ id: "A1", text: "[人工] 操作：查看布局\n预期：符合用户偏好" }] };
       const outcome = await runReviewRound({
@@ -86,7 +85,7 @@ test("评审／首次与重试预算：预处理、后置预留和重试共用�
           return h.exec(command, args, options);
         },
         writeInput: (name, text) => { now += item.preprocess ?? 0; const path = join(h.root, name); writeFileSync(path, text); return path; },
-        acceptanceDir: join(h.root, `acceptance-${cases.indexOf(item)}`), saveState: () => {},
+        saveState: () => {},
         callReviewer: async (_session, _round, timeout) => {
           calls.push(timeout);
           if (calls.length === 1) {
@@ -106,7 +105,7 @@ test("评审／首次与重试预算：预处理、后置预留和重试共用�
   } finally { h.close(); }
 });
 
-test("旧 gate 任意内容静默忽略；重复解析不提醒，预算只校验验收", () => {
+test("旧 gate 任意内容静默忽略；验收预算完全独立", () => {
   const warnings: string[] = [], original = console.error;
   console.error = (...args) => { warnings.push(args.join(" ")); };
   try {
@@ -116,10 +115,7 @@ test("旧 gate 任意内容静默忽略；重复解析不提醒，预算只校�
       assert.equal(parseProjectLayout({ gate }, "/p").release, "main");
     }
     assert.equal(warnings.length, 0);
-    const acceptance = parseAcceptanceConfig({}, "/p", {})!;
-    assert.throws(() => checkRoundBudget(20, acceptance), /acceptance.timeoutMin/);
-    checkRoundBudget(21, acceptance);
-    checkRoundBudget(1, undefined);
+    assert.equal(resolveProjectConfig(undefined, { marker: { reviewTimeoutMin: 1, acceptance: { timeoutMin: 999 } }, env: {} }).acceptance?.timeoutMin, 999);
   } finally { console.error = original; }
 });
 
@@ -221,7 +217,7 @@ test("子目录会话：仓库内来源变化不阻断，非来源改动仍暂�
       writeInput, saveState: () => {},
       callReviewer: async () => { writeFileSync(join(workDir, "need.md"), "v2"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
     });
-    assert.equal(done.kind, "done", done.kind === "paused" ? done.reason : "");
+    assert.equal(done.kind, "done", done.kind === "paused" ? done.reason ?? "" : "");
     assert.deepEqual(sourceState.sourceChanges?.map((item) => item.path), ["sub/need.md"]);
     const codeState = newReviewState();
     const blocked = await runReviewRound({
@@ -305,7 +301,7 @@ test("子目录会话：评审期间仓库内来源变化不阻断", async () =>
       writeInput: (name: string, text: string) => { const file = join(h.root, name); writeFileSync(file, text); return file; }, saveState: () => {},
       callReviewer: async () => { writeFileSync(join(h.repo, "sub/need.md"), "v2"); return { stdout: PASS, stderr: "", code: 0, killed: false }; },
     });
-    assert.equal(outcome.kind, "done", outcome.kind === "paused" ? outcome.reason : "");
+    assert.equal(outcome.kind, "done", outcome.kind === "paused" ? outcome.reason ?? "" : "");
     assert.deepEqual(state.sourceChanges?.map((item) => item.path), ["sub/need.md"]);
   } finally {
     if (previous === undefined) delete process.env.AUTOREVIEW_PROJECTS_ROOT; else process.env.AUTOREVIEW_PROJECTS_ROOT = previous;
@@ -362,7 +358,7 @@ test("评审必修：直接返修，测试门禁和验收均没跑", async () =>
       cwd: h.repo, devSessionId: "order", round: 1, deliveryNote: "完成", state,
       config: { ...h.config, acceptance: parseAcceptanceConfig({}, h.repo, {}) }, exec: h.exec,
       writeInput: (name, text) => { const p = join(h.root, name); writeFileSync(p, text); return p; },
-      acceptanceDir: join(h.root, "acceptance"), saveState: () => {},
+      saveState: () => {},
       callReviewer: async () => ({ stdout: PASS.replace("## 必修\n无", "## 必修\n1. 位置：file.txt:1 问题：不正确").replace("结论：通过", "结论：需返修"), stderr: "", code: 0, killed: false }),
     });
     assert.equal(run.kind, "repair");

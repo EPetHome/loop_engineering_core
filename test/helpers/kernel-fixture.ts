@@ -3,14 +3,15 @@ import "../test-env.ts";
 import "./git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createKernelRun } from "../../kernel.ts";
 import { readRun, updateRun } from "../../node-ledger.ts";
 import { deliverCandidate } from "../../kernel-workspace.ts";
 import type { Exec } from "../../git.ts";
+import { processStartTime } from "../../procs.ts";
 export const PASS = "## 结论：通过\n## 必修\n无\n";
 export const reviewer = async () => ({ stdout: PASS, stderr: "", code: 0, killed: false, processesReleased: true });
 export function fakeKernelLauncher(f: ReturnType<typeof kernelFixture>): void {
@@ -26,8 +27,9 @@ export function fakeKernelLauncher(f: ReturnType<typeof kernelFixture>): void {
 }
 export function kernelFixture(flow = ["开发评审", "测试"], command = "printf 'ok\\n'") {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "loop-node-"))), repo = join(root, "项目 有空格'甲"), origin = join(root, "origin.git"), saved = { ...process.env };
-  mkdirSync(repo); writeFileSync(join(root, "pa.json"), JSON.stringify({ pa: { localNotify: false } }));
-  Object.assign(process.env, { LOOP_PA_CONFIG: join(root, "pa.json"), AUTOREVIEW_KERNEL_ROOT: join(root, "kernel"), AUTOREVIEW_LOCAL_QUEUE_ROOT: join(root, "local-queue"),
+  writeFileSync(join(root, "fixture-owner.json"), JSON.stringify({ pid: process.pid, started: processStartTime(process.pid), evidence: process.env.LOOP_STEP5_CLEANUP_EVIDENCE, test: process.argv[1], created: new Date().toISOString() }));
+  mkdirSync(repo); mkdirSync(join(root, "home")); writeFileSync(join(root, "pa.json"), JSON.stringify({ pa: { localNotify: false } }));
+  Object.assign(process.env, { HOME: join(root, "home"), AUTOREVIEW_MERGE_QUEUE_ROOT: join(root, "old-queues"), LOOP_PA_CONFIG: join(root, "pa.json"), AUTOREVIEW_KERNEL_ROOT: join(root, "kernel"), AUTOREVIEW_LOCAL_QUEUE_ROOT: join(root, "local-queue"),
     AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"), AUTOREVIEW_PROJECTS_ROOT: join(root, "projects"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
   // 不把外层开发会话的受管身份带到临时模型/CLI。
   for (const key of ["AUTOREVIEW_KERNEL_LEDGER", "AUTOREVIEW_KERNEL_RUN", "AUTOREVIEW_KERNEL_REPAIR", "AUTOREVIEW_KERNEL_TASK", "AUTOREVIEW_KERNEL_LAUNCH", "AUTOREVIEW_KERNEL_NATIVE_BINDING", "AUTOREVIEW_DEV_ROOT", "AUTOREVIEW_SCOPE", "AUTOREVIEW_SCOPE_FILE"]) delete process.env[key];
@@ -49,6 +51,15 @@ export function kernelFixture(flow = ["开发评审", "测试"], command = "prin
   const start = () => createKernelRun(file, repo).path;
   const candidate = (path: string) => { const run = readRun(path); writeFileSync(join(run.worktree, "file.txt"), "delivered\n"); updateRun(path, (r) => { r.candidate = deliverCandidate(r); }); };
   const replacement = (mutate: (card: any) => void) => { const data = JSON.parse(readFileSync(file, "utf8")); mutate(data); const target = join(root, "替换卡.json"); writeFileSync(target, JSON.stringify(data)); return target; };
-  const cleanup = () => { for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); rmSync(root, { recursive: true, force: true }); };
+  const cleanup = () => {
+    const evidence = process.env.LOOP_STEP5_CLEANUP_EVIDENCE;
+    if (evidence) {
+      const target = join(evidence, basename(root)); mkdirSync(target, { recursive: true });
+      for (const name of ["kernel/runs", "resources", "local-queue"]) if (existsSync(join(root, name))) cpSync(join(root, name), join(target, name), { recursive: true });
+      cpSync(join(root, "fixture-owner.json"), join(target, "fixture-owner.json"));
+      writeFileSync(join(target, "fixture.json"), JSON.stringify({ root, repo, common: join(repo, ".git"), ended: new Date().toISOString() }));
+    }
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); rmSync(root, { recursive: true, force: true });
+  };
   return { root, repo, origin, file, card, git, exec, start, candidate, replacement, cleanup };
 }

@@ -32,7 +32,10 @@ const text = (v: unknown, label: string): string => {
 function relativeText(value: unknown, file: string, repo: string, label: string): string {
   const raw = text(value, label);
   if (isAbsolute(raw)) throw new Error(`${label} 必须相对卡文件目录`);
-  const path = realpathSync(resolve(dirname(file), raw)), info = statSync(path);
+  let path: string;
+  try { path = realpathSync(resolve(dirname(file), raw)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") (error as Error).message = `${label} 引用 ${resolve(dirname(file), raw)}：${(error as Error).message}`; throw error; }
+  const info = statSync(path);
   if (!inside(realpathSync(repo), path) || !info.isFile() || info.size > 200 * 1024 || readFileSync(path).includes(0)) throw new Error(`${label} 越出仓库或不是 <=200KB 文本：${path}`);
   return path;
 }

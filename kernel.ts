@@ -7,7 +7,7 @@ import { inside, ownedCriteria, readDevelopmentCard, type NodeName } from "./dev
 import { parseAcceptanceConfig, readMarker } from "./config.ts";
 import { eventLock } from "./events.ts";
 import { gitResult, gitText } from "./workspace.ts";
-import { activityAlive, atomicRun, finishAttempt, kernelRoot, ledgerPath, readRun, readTaskRun, repositoryIdentity, taskDefinition, taskIdentity, taskIds, taskView, updateRun, updateTaskRun, validResult, type Candidate, type KernelRun, type NodeResult } from "./node-ledger.ts";
+import { activityAlive, atomicRun, finishAttempt, kernelRoot, ledgerPath, pendingCardBlocks, readRun, readTaskRun, repositoryIdentity, taskDefinition, taskIdentity, taskIds, taskView, updateRun, updateTaskRun, validResult, type Candidate, type KernelRun, type NodeResult } from "./node-ledger.ts";
 import { assertWorkspace, checkInputs, createWorkspace, dirtyPaths, frozenCardProblem, localCopyPlan, managedConfig, workspaceGuard, fileDigest, freezeDeploymentPlan } from "./kernel-workspace.ts";
 import { acquireProjectExecution } from "./project-execution.ts";
 import { processStartTime } from "./procs.ts";
@@ -228,7 +228,7 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
   const task = options.task, read = () => readTaskRun(path, task), change = <T>(cb: (r: KernelRun) => T) => updateTaskRun(path, task, cb);
   const initial = read(), problem = frozenCardProblem(initial);
   if (problem) { change((r) => { r.stopped = true; r.stopReason = problem; }); throw new Error(problem); }
-  if (initial.stopped || initial.abandoned || initial.pendingCard) throw new Error("任务已停止、放弃或有待应用改卡，不能自动推进");
+  if (initial.stopped || initial.abandoned || pendingCardBlocks(initial)) throw new Error("任务已停止、放弃或有待应用改卡，不能自动推进");
   if (initial.card.nature === "评审" && node !== "评审") throw new Error("只评审卡只能执行评审节点，不授予开发/提交/部署资格");
   if (["开发评审", "测试"].includes(node)) taskDefinition(initial);
   if (node !== "提交" && !initial.card.flow.includes(node)) throw new Error(`卡上未安排 ${node}`);
@@ -250,7 +250,7 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
   const id = randomUUID(), token = randomUUID(), started = stamp(), guard = node === "部署" ? "发布后部署" : workspaceGuard(initial), epoch = initial.epoch ?? 0;
   const evidenceDir = join(initial.dir, "attempts", id), procsFile = node === "开发评审" || node === "评审" ? join(initial.dir, "review.procs.json") : join(evidenceDir, "test.procs.json");
   const run = change((r) => {
-    if (r.stopped || r.abandoned || r.pendingCard || (r.epoch ?? 0) !== epoch) throw new Error("执行控制版本变化");
+    if (r.stopped || r.abandoned || pendingCardBlocks(r) || (r.epoch ?? 0) !== epoch) throw new Error("执行控制版本变化");
     if (r.userVersion !== initial.userVersion || checkInputs(r, node).hash !== inputs || node !== "部署" && workspaceGuard(r) !== guard) throw new Error("节点启动边界候选或输入变化，未调用执行器");
     if (r.activity && r.activity.kind !== "developing" && activityAlive(r.activity) !== false) throw new Error("节点已有活动尝试或归属未确认，未并发执行");
     if (node !== "部署") r.candidate = candidate; r.blockedNode = node;
@@ -292,7 +292,7 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
       await acquireLocalSlot({ id, token, ledger: path, run: run.id, common: run.common, task: identity, node: node === "验收" ? "验收" : "测试", tree: candidate.tree, inputs, epoch,
         pid: process.pid, started: processStartTime(process.pid), procs: procsFile }, controller.signal, live); acquired = true;
       change((r) => {
-        live(); if (r.pendingCard || frozenCardProblem(r) || checkInputs(r, node).hash !== inputs || workspaceGuard(r) !== guard) throw new Error("排队期间卡或候选变化，未执行节点");
+        live(); if (pendingCardBlocks(r) || frozenCardProblem(r) || checkInputs(r, node).hash !== inputs || workspaceGuard(r) !== guard) throw new Error("排队期间卡或候选变化，未执行节点");
         if (node === "测试" && !validResult(r, "开发评审", candidate, checkInputs(r, "开发评审").hash)) throw new Error("缺当前开发评审结论，未执行测试");
         r.activity!.kind = node === "验收" ? "accepting" : "testing";
       });
@@ -301,7 +301,7 @@ export async function executeNode(path: string, node: NodeName, executor: NodeEx
       const kind = read().activity!.kind;
       projectRelease = await acquireProjectExecution(run.worktree, "check", procsFile, controller.signal, live, () => change((r) => { live(); r.activity!.kind = "waiting"; }));
       change((r) => {
-        live(); if (r.pendingCard) throw new Error("下一安全边界有待应用改卡，未启动旧命令"); r.activity!.kind = kind;
+        live(); if (pendingCardBlocks(r)) throw new Error("下一安全边界有待应用改卡，未启动旧命令"); r.activity!.kind = kind;
         if (options.localSlot) { if (node === "验收") r.acceptanceState!.round++; r.activity!.deadline = Date.now() + (node === "验收" ? r.card.limits.验收 : r.card.limits.测试).timeoutMin * 60_000; }
       });
     }

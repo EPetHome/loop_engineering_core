@@ -1,278 +1,57 @@
-/**
- * 工具清单一致性：子命令和字段从代码的解析定义里取，与 工具清单.md 对照。
- * 任一边新增或删除而另一边没跟上，测试失败并列出缺项/多项。
- */
-import "./helpers/git-runtime.ts";
+/** 现用入口/新卡字段/配置双向一致；源码增删字段而未改文档必须失败。 */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
-const KEY = "[A-Za-z_$][\\w$]*";
-
-/** 取函数体（从声明后的第一个 { 到匹配的 }）；忽略字符串内的花括号。 */
-function functionBody(source: string, signature: string): string {
-  const start = source.indexOf(signature);
-  assert.ok(start >= 0, `源码里找不到 ${signature}`);
-  const paren = source.indexOf("(", start);
-  assert.ok(paren >= 0, `${signature} 没有参数列表`);
-  let parenDepth = 0;
-  let quote = "";
-  let escaped = false;
-  let bodyStart = -1;
-  for (let index = paren; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === "\"" || char === "'" || char === "`") { quote = char; continue; }
-    if (char === "(") parenDepth += 1;
-    else if (char === ")") {
-      parenDepth -= 1;
-      if (parenDepth === 0) { bodyStart = index + 1; break; }
-    }
+const ROOT = fileURLToPath(new URL("..", import.meta.url)), read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+const quoted = (s: string): string[] => [...s.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+function section(md: string, heading: string): string {
+  const start = md.indexOf(heading + "\n"); assert.ok(start >= 0, `缺标题 ${heading}`); const rest = md.slice(start + heading.length + 1), level = /^#+/.exec(heading)![0].length; const lines = rest.split("\n"), end = lines.findIndex((l) => { const m = /^(#+) /.exec(l); return m && m[1].length <= level; }); return lines.slice(0, end < 0 ? undefined : end).join("\n");
+}
+function table(md: string): Set<string> {
+  return new Set(md.split("\n").filter((l) => /^\|/.test(l)).map((l) => l.split("|")[1].replace(/`/g, "").trim()).filter((k) => k && !["字段", "配置"].includes(k) && !/^:?-+:?$/.test(k)));
+}
+function compare(code: Set<string>, doc: Set<string>): void { assert.deepEqual([...code].filter((k) => !doc.has(k)).sort(), [], "文档缺少源码字段"); assert.deepEqual([...doc].filter((k) => !code.has(k)).sort(), [], "文档多出已不解析字段"); }
+function body(source: string, signature: string): string {
+  const start = source.indexOf(signature); assert.ok(start >= 0, `缺函数 ${signature}`); let at = source.indexOf("(", start), depth = 0, quote = "", escaped = false;
+  for (; at < source.length; at++) { const c = source[at]; if (quote) { if (escaped) escaped = false; else if (c === "\\") escaped = true; else if (c === quote) quote = ""; continue; } if ('"\'`'.includes(c)) quote = c; else if (c === "(") depth++; else if (c === ")" && --depth === 0) break; }
+  const open = source.indexOf("{", at); depth = 0; quote = ""; escaped = false;
+  for (at = open; at < source.length; at++) { const c = source[at]; if (quote) { if (escaped) escaped = false; else if (c === "\\") escaped = true; else if (c === quote) quote = ""; continue; } if ('"\'`'.includes(c)) quote = c; else if (c === "{") depth++; else if (c === "}" && --depth === 0) return source.slice(open, at + 1); }
+  throw new Error("函数体未闭合");
+}
+function keys(text: string, variable: string): Set<string> {
+  const result = new Set([...text.matchAll(new RegExp(`\\b${variable}\\.([A-Za-z_$][\\w$]*)`, "g"))].map((m) => m[1]));
+  for (const m of text.matchAll(new RegExp(`\\b(?:nonNegativeInt|nonEmptyString|optionalString|stringList|positiveInt|number|string|object|text)\\(\\s*${variable}\\s*,\\s*"([^"]+)"`, "g"))) result.add(m[1]);
+  return result;
+}
+function configFields(source = read("config.ts")): Set<string> {
+  const fields = keys(body(source, "export function parseProjectLayout"), "raw"), review = keys(body(source, "export function resolveProjectConfig"), "data"); for (const k of review) fields.add(k); fields.add("gate");
+  for (const [name, signature] of [["methods", "export function parseMethodsConfig"], ["acceptance", "export function parseAcceptanceConfig"], ["deployment", "export function parseDeploymentConfig"], ["preparation", "export function parsePreparation"], ["context", "export function parseContext"]]) {
+    const b = body(source, signature); for (const k of keys(b, "data")) fields.add(`${name}.${k}`);
+    if (name === "methods") for (const m of b.matchAll(/command\("([^"]+)"\)/g)) fields.add(`methods.${m[1]}`);
+    if (name === "deployment") for (const k of quoted(/for \(const key of \[([^\]]+)\] as const\)/.exec(b)?.[1] ?? "")) fields.add(`deployment.${k}`);
+    if (name === "preparation") for (const k of keys(b, "r")) fields.add(`preparation.repair.${k}`);
+    if (name === "context") { fields.add("context.sources[]"); for (const k of keys(b, "source")) fields.add(`context.sources[].${k}`); }
   }
-  assert.ok(bodyStart >= 0, `${signature} 的参数列表没有闭合`);
-  const open = source.indexOf("{", bodyStart);
-  assert.ok(open >= 0, `${signature} 后面没有函数体`);
-  let depth = 0;
-  quote = "";
-  escaped = false;
-  for (let index = open; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === "\"" || char === "'" || char === "`") { quote = char; continue; }
-    if (char === "{") depth += 1;
-    else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(open, index + 1);
-    }
-  }
-  throw new Error(`${signature} 的函数体没有闭合`);
-}
-
-function directKeys(body: string, variables: string[]): Set<string> {
-  const keys = new Set<string>();
-  for (const variable of variables) {
-    for (const match of body.matchAll(new RegExp(`\\b${variable}\\.(${KEY})`, "g"))) keys.add(match[1]);
-  }
-  return keys;
-}
-
-function helperKeys(body: string, variables: string[]): Set<string> {
-  const keys = new Set<string>();
-  const helpers = "nonNegativeInt|nonEmptyString|optionalString|stringList|positiveInt|number|string|object|text";
-  for (const variable of variables) {
-    for (const match of body.matchAll(new RegExp(`\\b(?:${helpers})\\(\\s*${variable}\\s*,\\s*"([^"]+)"`, "g"))) keys.add(match[1]);
-  }
-  return keys;
-}
-
-function headingLevel(line: string): number {
-  const match = /^(#{1,6})\s/.exec(line);
-  return match ? match[1].length : 0;
-}
-
-/** 取某个标题下、下一个同级或更高级标题之前的内容。 */
-function section(markdown: string, heading: string): string {
-  const lines = markdown.split(/\r?\n/);
-  const level = headingLevel(heading);
-  const start = lines.findIndex((line) => line.trim() === heading);
-  assert.ok(start >= 0, `工具清单里缺少标题：${heading}`);
-  let end = start + 1;
-  while (end < lines.length) {
-    const next = headingLevel(lines[end]);
-    if (next > 0 && next <= level) break;
-    end += 1;
-  }
-  return lines.slice(start + 1, end).join("\n");
-}
-
-/** 取 markdown 表格的第一列；只用于清单里的字段/子命令表。 */
-function tableFirstColumn(text: string): Set<string> {
-  const keys = new Set<string>();
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("|")) continue;
-    const cells = trimmed.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
-    const key = (cells[0] ?? "").replace(/`/g, "").trim();
-    if (!key || ["字段", "子命令", "选项", "变量", "退出码", "标记/退出码"].includes(key)) continue;
-    if (/^:?-+:?$/.test(key)) continue;
-    keys.add(key);
-  }
-  return keys;
-}
-
-function differences(code: Set<string>, doc: Set<string>): { missing: string[]; extra: string[] } {
-  return {
-    missing: [...code].filter((item) => !doc.has(item)).sort(),
-    extra: [...doc].filter((item) => !code.has(item)).sort(),
-  };
-}
-
-function compare(label: string, code: Set<string>, doc: Set<string>): void {
-  const { missing, extra } = differences(code, doc);
-  assert.deepEqual(missing, [], `${label}：工具清单缺少 ${missing.join("、")}`);
-  assert.deepEqual(extra, [], `${label}：工具清单多出 ${extra.join("、")}（代码里没有解析定义）`);
-}
-
-type Sources = Record<string, string>;
-
-function realSources(): Sources {
-  return {
-    "pipeline.ts": read("pipeline.ts"),
-    "scope.ts": read("scope.ts"),
-    "config.ts": read("config.ts"),
-    "preparation.ts": read("preparation.ts"),
-    "project-context.ts": read("project-context.ts"),
-    "hosts/review-hook.ts": read("hosts/review-hook.ts"),
-  };
-}
-
-function batchFields(sources: Sources = realSources()): Set<string> {
-  const pipeline = sources["pipeline.ts"];
-  const parsePlan = functionBody(pipeline, "export function parsePlan");
-  const piOptions = functionBody(pipeline, "function piOptions");
-  const scope = functionBody(sources["scope.ts"], "export function parseStageScope");
-
-  const fields = new Set<string>();
-  for (const key of directKeys(parsePlan, ["raw"])) fields.add(key);
-  for (const key of directKeys(parsePlan, ["raw.review"])) fields.add(`review.${key}`);
-  const reviewFiles = /for \(const key of \[([^\]]+)\] as const\) if \(raw\.review/.exec(parsePlan)?.[1] ?? "";
-  for (const match of reviewFiles.matchAll(/"([^"]+)"/g)) fields.add(`review.${match[1]}`);
-  // 新批次平铺验收配置；input.acceptance 仅用于兼容旧嵌套配置，不是新字段。
-  for (const key of directKeys(parsePlan, ["input"])) if (key !== "acceptance") fields.add(`acceptance.${key}`);
-  const acceptance = functionBody(sources["config.ts"], "export function parseAcceptanceConfig");
-  for (const key of new Set([...directKeys(acceptance, ["data"]), ...helperKeys(acceptance, ["data"])])) fields.add(`acceptance.${key}`);
-
-  const stage = directKeys(parsePlan, ["value"]);
-  const pi = directKeys(piOptions, ["value"]);
-  for (const key of helperKeys(piOptions, ["value"])) pi.add(key);
-  for (const match of piOptions.matchAll(/\bpick\("([^"]+)"\)/g)) pi.add(match[1]);
-  for (const key of pi) {
-    fields.add(`pi.${key}`);
-    fields.add(`stages.<段>.${key}`);
-  }
-  for (const match of piOptions.matchAll(new RegExp(`\\bvalue\\.ponytail\\.(${KEY})`, "g"))) {
-    fields.add(`pi.ponytail.${match[1]}`);
-    fields.add(`stages.<段>.ponytail.${match[1]}`);
-  }
-  fields.add("stages.<段>");
-  for (const key of stage) fields.add(`stages.<段>.${key}`);
-  for (const key of directKeys(scope, ["raw"])) fields.add(`stages.<段>.scope.${key}`);
   return fields;
 }
-
-function autoreviewFields(sources: Sources = realSources()): Set<string> {
-  const config = sources["config.ts"];
-  const layout = functionBody(config, "export function parseProjectLayout");
-  const methods = functionBody(config, "export function parseMethodsConfig");
-  const acceptance = functionBody(config, "export function parseAcceptanceConfig");
-  const merge = functionBody(config, "export function parseMergeConfig");
-  const deployment = functionBody(config, "export function parseDeploymentConfig");
-  const preparation = functionBody(config, "export function parsePreparation");
-  const repair = functionBody(preparation, "if (data.repair !== undefined)");
-  const context = functionBody(config, "export function parseContext");
-  const review = functionBody(config, "export function resolveProjectConfig");
-
-  const fields = new Set<string>();
-  for (const key of new Set([...directKeys(layout, ["raw"]), ...helperKeys(layout, ["raw"])])) fields.add(key);
-  for (const key of helperKeys(review, ["data"])) fields.add(key);
-  for (const key of directKeys(review, ["data"])) fields.add(key);
-  fields.add("context");
-
-  for (const key of new Set([...directKeys(methods, ["data"]), ...helperKeys(methods, ["data"]), ...[...methods.matchAll(/command\("([^"]+)"\)/g)].map((match) => match[1])])) {
-    fields.add(`methods.${key}`);
-  }
-  for (const key of new Set([...directKeys(acceptance, ["data"]), ...helperKeys(acceptance, ["data"])])) {
-    fields.add(`acceptance.${key}`);
-  }
-  // 只识别为停用兼容字段，不再解析 gate 子字段。
-  fields.add("gate");
-  for (const key of directKeys(merge, ["data"])) fields.add(`merge.${key}`);
-  const deploymentCommands = /for \(const key of \[([^\]]+)\] as const\)/.exec(deployment)?.[1] ?? "";
-  for (const key of new Set([...directKeys(deployment, ["data"]), ...helperKeys(deployment, ["data"]), ...[...deploymentCommands.matchAll(/"([^"]+)"/g)].map((match) => match[1])])) fields.add(`deployment.${key}`);
-  for (const key of new Set([...directKeys(preparation, ["data"]), ...helperKeys(preparation, ["data"])])) {
-    fields.add(`preparation.${key}`);
-  }
-  for (const key of new Set([...directKeys(repair, ["r"]), ...helperKeys(repair, ["r"])])) {
-    fields.add(`preparation.repair.${key}`);
-  }
-  for (const key of directKeys(context, ["data"])) fields.add(`context.${key}`);
-  fields.add("context.sources[]");
-  for (const key of directKeys(context, ["source"])) fields.add(`context.sources[].${key}`);
-  return fields;
-}
-
-test("工具清单覆盖所有工具入口", () => {
-  const doc = read("工具清单.md");
-  for (const heading of [
-    "## bin/loop",
-    "## loop 开发",
-    "### loop 接入",
-    "## 内部实现：兼容入口",
-    "### pipeline.ts（流水线）",
-    "## project-context.ts（来源索引）",
-    "## 项目方法的环境变量",
-    "## 批次.json 字段",
-    "## .autoreview.json 字段",
-    "## 失败分类与退出码",
-  ]) {
-    assert.ok(doc.includes(heading), `工具清单缺少一节：${heading}`);
-  }
+test("当前工具入口与真实 CLI 双向一致；旧入口仅诊断，不列成执行命令", () => {
+  const source = read("loop.ts"), code = new Set([...source.matchAll(/args\.command === "([^"]+)"/g)].map((m) => m[1]));
+  for (const m of read("bin/loop").matchAll(/\$\{1:-\}" == "([^"]+)"/g)) code.add(m[1]);
+  for (const k of quoted(/!\[([^\]]+)\]\.includes\(command\)/.exec(read("kernel-cli.ts"))![1])) code.add(k);
+  const rows = section(read("工具清单.md"), "### 子命令").split("\n").filter((l) => /^\| [\u4e00-\u9fff]/.test(l)).map((l) => l.split("|")[1].trim()).filter((k) => k !== "子命令"); compare(code, new Set(rows));
 });
-
-test("工具清单与代码一致：bin/loop 子命令", () => {
-  const source = read("loop.ts");
-  const code = new Set([...source.matchAll(/args\.command === "([^"]+)"/g)].map((match) => match[1]));
-  for (const match of read("bin/loop").matchAll(/\$\{1:-\}" == "([^"]+)"/g)) code.add(match[1]);
-  const kernel = /!\[([^\]]+)\]\.includes\(command\)/.exec(read("kernel-cli.ts"));
-  assert.ok(kernel, "新卡命令白名单形状变化，需同步提取规则");
-  for (const match of kernel[1].matchAll(/"([^"]+)"/g)) code.add(match[1]);
-  const doc = tableFirstColumn(section(read("工具清单.md"), "### 子命令"));
-  compare("bin/loop 子命令", code, doc);
+test("开发卡与任务字段来自真正解析白名单，不再抽取已删除 parsePlan", () => {
+  const source = read("development-card.ts"), doc = read("工具清单.md");
+  for (const [variable, heading] of [["raw", "## 开发卡字段（第4步）"], ["task", "### tasks[]"]]) { const match = new RegExp(`Object\\.keys\\(${variable}\\)\\) if \\(!\\[([^\\]]+)\\]\\.includes\\(key\\)`).exec(source); assert.ok(match); compare(new Set(quoted(match[1])), table(section(doc, heading).split("###")[0])); }
+  for (const name of ["开发评审", "评审", "测试", "验收", "提交", "部署"]) assert.ok(doc.includes(name));
 });
-
-test("工具清单与代码一致：批次.json 字段", () => {
-  const code = batchFields();
-  const doc = tableFirstColumn(section(read("工具清单.md"), "## 批次.json 字段"));
-  compare("批次.json 字段", code, doc);
+test("配置字段（含 helper/嵌套模型和来源）与现用表双向一致，废弃字段另作迁移说明", () => {
+  const doc = table(section(read("工具清单.md"), "## .autoreview.json 字段")); compare(configFields(), doc);
+  const added = configFields(read("config.ts").replace('reviewTimeoutMin = nonNegativeInt(data, "reviewTimeoutMin", DEFAULT_TIMEOUT_MIN);', 'reviewTimeoutMin = nonNegativeInt(data, "newBudget", DEFAULT_TIMEOUT_MIN);')); assert.throws(() => compare(added, doc), /文档缺少|文档多出/);
+  const deleted = new Set(configFields()); deleted.delete("acceptance.timeoutMin"); assert.throws(() => compare(deleted, doc), /文档多出/);
 });
-
-test("工具清单与代码一致：.autoreview.json 字段", () => {
-  const code = autoreviewFields();
-  const doc = tableFirstColumn(section(read("工具清单.md"), "## .autoreview.json 字段"));
-  compare(".autoreview.json 字段", code, doc);
-});
-
-test("一致性检查覆盖 helper 字段读取方式：新增报缺项，删除报多项", () => {
-  const doc = tableFirstColumn(section(read("工具清单.md"), "## .autoreview.json 字段"));
-  const sources = realSources();
-  const needle = 'const release = raw.release === undefined ? "main" : nonEmptyString(raw, "release", "main");';
-  assert.ok(sources["config.ts"].includes(needle), "项目布局的 release 解析写法变了，更新负向测试");
-
-  const addedSource = sources["config.ts"].replace(needle,
-    `${needle}\n  const toolManifestProbe = nonEmptyString(raw, "toolManifestProbe", "默认值");`);
-  const added = autoreviewFields({ ...sources, "config.ts": addedSource });
-  assert.ok(added.has("toolManifestProbe"), "helper 形式的新字段应进入比较集合");
-  assert.ok(differences(added, doc).missing.includes("toolManifestProbe"), "新增字段应报为清单缺项");
-
-  const removed = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace(`${needle}\n`, "") });
-  assert.ok(!removed.has("release"), "helper 和属性访问都删除后，字段应离开比较集合");
-  assert.ok(differences(removed, doc).extra.includes("release"), "删除字段应报为清单多项");
-  const mergeAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace('if (["auto", "push"].some((key) => key in data))', 'if (data.probe || ["auto", "push"].some((key) => key in data))') });
-  assert.ok(differences(mergeAdded, doc).missing.includes("merge.probe"), "merge 子字段新增同样应报清单缺项");
-  const deploymentAdded = autoreviewFields({ ...sources, "config.ts": sources["config.ts"].replace('["cmd", "check"] as const', '["cmd", "check", "probe"] as const') });
-  assert.ok(differences(deploymentAdded, doc).missing.includes("deployment.probe"), "部署命令字段也由解析定义提取，新增字段不能漏报");
+test("帮助与现用说明指向新卡/单会话；不得推荐旧 workflow 或 accept-cmd 执行", () => {
+  for (const p of ["README.md", "工具清单.md", "项目文档/运行与维护.md", "项目模板/README.md"]) { const text = read(p); assert.match(text, /bin\/loop 开发/); assert.match(text, /bin\/loop 接入/); assert.match(text, /已停用|已删除/); assert.doesNotMatch(text, /验收预算必须小于|定向复验通过后立即补做|旧批次引擎内部保留|accept-cmd 默认 required/); }
 });

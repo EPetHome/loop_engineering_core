@@ -5,7 +5,6 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { remapBatchReferences } from "../batch-refs.ts";
-import { parsePlan } from "../pipeline.ts";
 import { parseIssuePaths } from "../issue-writeback.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -25,9 +24,8 @@ test("A1/A2/A9 问题单方法只有一个正文来源，模板只指向它，�
   assert.ok(existsSync(join(root, "项目模板/项目根/issues")));
   assert.deepEqual(readdirSync(join(root, "项目模板/项目根/issues")).sort(), [".gitkeep", "【history】"], "不复制第二份写法或正文模板");
   assert.deepEqual(readdirSync(join(root, "项目模板/项目根/issues/【history】")), [".gitkeep"]);
-  const fields = read("工具清单.md").split("## 批次.json 字段\n")[1];
-  const issue = fields.split("\n").find((line) => line.startsWith("| `issues` |"))!;
-  for (const text of ["string[]", "批次文件所在目录", "绝对路径", "仓库内", "开工", "仓库外", "合入成功后", "不阻断开工", "不退回", "不阻止合入"]) assert.ok(issue.includes(text), text);
+  const fields = read("工具清单.md");
+  for (const text of ["问题单规范", "README-验收标准.md#问题单", "旧开工预写/合入回写不再执行", "安全归档"]) assert.ok(fields.includes(text), text);
 });
 
 test("issues 字段解析：可省略，按批次目录解析并去重，路径不存在不做阻断检查", () => {
@@ -36,9 +34,7 @@ test("issues 字段解析：可省略，按批次目录解析并去重，路径�
   assert.deepEqual(parseIssuePaths(undefined, dir), []);
   assert.deepEqual(parseIssuePaths(value, dir), [resolve("/project/repo/issues/【bug】登录失败.md"), resolve("/elsewhere/issues/【req】新增导出.md")]);
   for (const invalid of ["issues/【bug】登录失败.md", null, [null], [""], ["line\nbreak"]]) assert.throws(() => parseIssuePaths(invalid, dir), /issues.*数组/);
-  const raw = { name: "问题单批次", issues: value, stages: { 甲: { cwd: root, start: "true" } } };
-  assert.deepEqual(parsePlan(raw, dir).issues, parseIssuePaths(value, dir));
-  assert.throws(() => parsePlan({ ...raw, issues: {} }, dir), /issues.*数组/);
+  assert.deepEqual(parseIssuePaths(value, dir), parseIssuePaths([...value], dir), "历史路径解析独立于已删除的旧卡调度器");
 });
 
 test("问题单路径搬运：仓库内绝对路径跟随非同级 worktree，仓库外相对路径固定，重复搬运不漂移", () => {

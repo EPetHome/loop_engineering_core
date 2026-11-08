@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { grantsFromUser, renderAcceptanceLines, type AcceptanceRecord, type Criteria } from "../acceptance-core.ts";
-import { runAcceptanceStage } from "../acceptance.ts";
+import { runAcceptanceOnce as runAcceptanceStage } from "../acceptance.ts";
 import { parseAcceptanceConfig } from "../config.ts";
 import { blockerHint } from "../onboarding.ts";
 import { readProcs } from "../procs.ts";

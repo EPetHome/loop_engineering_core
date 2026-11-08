@@ -7,7 +7,7 @@ import { eventLock } from "./events.ts";
 import { digest, inside, type NodeName } from "./development-card.ts";
 import { batchAssemblyProblem, contributionProblems, currentCandidate, kernelCommand } from "./kernel.ts";
 import { checkInputs, dirtyPaths, fileDigest, frozenCardProblem, gitRaw, taskScopeBaseline, workspaceGuard } from "./kernel-workspace.ts";
-import { activityAlive, atomicRun, readRun, taskDefinition, taskIds, taskView, updateRun, validResult, type Candidate, type Contribution, type KernelRun } from "./node-ledger.ts";
+import { activityAlive, atomicRun, pendingCardBlocks, readRun, taskDefinition, taskIds, taskView, updateRun, validResult, type Candidate, type Contribution, type KernelRun } from "./node-ledger.ts";
 import { outOfScope } from "./scope.ts";
 import { gitResult, gitText } from "./workspace.ts";
 import { consumerProblem, readLocalQueue } from "./local-node-queue.ts";
@@ -116,7 +116,8 @@ function install(path: string, run: KernelRun, mapping: Contribution[], task: st
   const entry = { id, task, at: new Date().toISOString(), before, after, mapping, history, evidence, order: run.batch!.integrations.length + 1, control: cardChange, targetSource: run.batch?.targetSource };
   writeFileSync(evidence, JSON.stringify(entry, null, 2), { mode: 0o600 });
   updateRun(path, (r) => {
-    if (r.stopped && !acceptUnverified || r.abandoned || r.pendingCard && r.pendingCard !== cardChange || r.batch!.version !== version || r.epoch !== run.epoch || r.cardHash !== run.cardHash || frozenCardProblem(r) || workspaceGuard(r) !== guard) throw new Error("集成边界输入、控制或批次头变化，未覆盖");
+    const blockedChange = r.pendingCard && r.pendingCard !== cardChange && (!r.taskRecords?.some((t) => t.id === task) || pendingCardBlocks(taskView(r, task)));
+    if (r.stopped && !acceptUnverified || r.abandoned || blockedChange || r.batch!.version !== version || r.epoch !== run.epoch || r.cardHash !== run.cardHash || frozenCardProblem(r) || workspaceGuard(r) !== guard) throw new Error("集成边界输入、控制或批次头变化，未覆盖");
     for (const c of mapping) verifyContribution(r, c, acceptUnverified ? "exception" : !cardChange && c.task === task ? "ready" : "registered");
     if (acceptUnverified) assertExceptionIdle(r, path);
     gitText(r.repo, ["update-ref", history, before.commit, "0".repeat(40)]);
@@ -185,7 +186,7 @@ export function integrateTask(path: string, task: string): { ok: boolean; reason
     return { ok: true, evidence: [readRun(path).batch!.integrations.at(-1)!.evidence] };
   } catch (error) {
     const reason = String(error), run = readRun(path), view = taskView(run, task), id = randomUUID(), token = randomUUID();
-    if (run.stopped || run.pendingCard || view.stopped || view.candidate?.commit !== expected.candidate?.commit || view.userVersion !== expected.userVersion || view.epoch !== expected.epoch || run.batch?.pending || activityAlive(run.activity) !== false) return {
+    if (run.stopped || pendingCardBlocks(view) || view.stopped || view.candidate?.commit !== expected.candidate?.commit || view.userVersion !== expected.userVersion || view.epoch !== expected.epoch || run.batch?.pending || activityAlive(run.activity) !== false) return {
       ok: false, failure: "environment", reason: `集成已取消/等待边界或意图未确认，未向任务发送旧返修。${reason}；补救：${kernelCommand("续跑", run.file, "--task", taskDefinition(view).name)}`, evidence: [] };
     const evidence = join(view.dir, `integration-conflict-${id}.md`);
     const message = `【Loop 集成返修】[${id}:${token}]\n仅任务 ${taskDefinition(view).name} 返回原开发评审会话；不扣验收次数。\n${reason}\n已集成来源：${JSON.stringify(run.batch?.contributions)}\n请在原 scope 内交付可证明的独立贡献；不能夹带其他任务来源或编辑批次目录。最后写【交付完成】。`;

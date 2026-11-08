@@ -12,15 +12,15 @@ import { readRun, readTaskRun, taskDefinition, taskIds, taskView, updateRun, upd
 import { checkInputs, deliverCandidate, workspaceGuard } from "../kernel-workspace.ts";
 import { advanceBatch, advanceManaged, attachSession, completeManagedDelivery, consumeManagedRepair, continueAcceptanceTask, prepareManagedContinuation, mergeManaged, recordManagedUserInput } from "../kernel-session.ts";
 import { integrateTask, recoverBatchIntegration } from "../batch-integration.ts";
-import { applyPendingCardChange, recordCardControl, requestCardChange } from "../kernel-controls.ts";
-import { abandonKernel, integrateKernel, launchKernel, managedLaunchArgs, releaseKernelWorkspace, resumeManaged, settleTaskRemoval, stopKernel } from "../kernel-runtime.ts";
+import { applyPendingCardChange, reconcileRemovedGate, recordCardControl, requestCardChange } from "../kernel-controls.ts";
+import { abandonKernel, integrateKernel, launchKernel, managedLaunchArgs, releaseKernelWorkspace, resumeManaged, resumeTerminalTasks, settleTaskRemoval, stopKernel } from "../kernel-runtime.ts";
 import { readLocalQueue } from "../local-node-queue.ts";
 import { createChildExec, handleReviewEvent } from "../hosts/review-hook.ts";
 import { developerActive } from "../kernel-session.ts";
 import { runTestNode } from "../test-node.ts";
 import { parseArgs } from "../loop.ts";
 import { kernelCLI } from "../kernel-cli.ts";
-import { ownedProcessGroupAlive } from "../procs.ts";
+import { ownedProcessGroupAlive, processStartTime } from "../procs.ts";
 const TESTER = fileURLToPath(new URL("./fake-tester.mjs", import.meta.url));
 function fixture(names = ["甲", "乙"], results: { fail?: string[]; unknown?: string[] }[] = []) {
   const f = kernelFixture(["开发评审", "测试", "验收"], "printf 'ok\\n'");
@@ -45,6 +45,23 @@ async function until(predicate: () => boolean, label: string, timeout = 20000) {
   const deadline = Date.now() + timeout;
   while (!predicate()) { if (Date.now() >= deadline) throw new Error(`等待超时：${label}`); await sleep(20); }
 }
+test("统一验收向独立验收方明确只读候选及临时副本运行边界", async () => {
+  const f = fixture();
+  try {
+    const path = f.start(); await f.deliver(path, "甲");
+    const b = readTaskRun(path, "乙"); writeFileSync(join(b.worktree, "乙.txt"), "B changed\n");
+    let calls = 0;
+    await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer, task: b.taskId, acceptanceExec: async (cmd, args, opts) => {
+      calls++; assert.equal(opts.env?.GIT_OPTIONAL_LOCKS, "0", "验收方及其 Git 只读命令不能触发 index 刷新"); return f.exec(cmd, args, opts);
+    } });
+    assert.ok(calls > 0);
+    const run = readRun(path), text = readFileSync(join(f.calls()[0].runDir, "input.md"), "utf8");
+    assert.ok(text.includes(run.candidate!.commit));
+    assert.match(text, /受检工作区是只读候选/); assert.match(text, /包括被 Git 忽略的 node_modules、dist/);
+    assert.match(text, /系统临时目录/); assert.match(text, /不得把另一版本的结果当成当前通过/);
+    assert.equal(run.results.filter((r) => r.node === "验收").at(-1)!.status, "通过");
+  } finally { f.cleanup(); }
+});
 test("A4：缺验收/归属、多义/未知/非法路径/空标准/重复任务/逆序/缺命令均在资源前拒绝", () => {
   const f = fixture();
   try {
@@ -88,6 +105,92 @@ test("头less续跑精确原会话及任务，机器继续信封不更新授权/
     assert.equal(launch.env.AUTOREVIEW_KERNEL_TASK, a.taskId); assert.ok(launch.args.includes(run.session!.log!)); assert.ok(launch.args.includes(`@${run.repair!.file}`)); assert.deepEqual(launch.args.slice(-2), ["--", "-p"]);
     assert.equal(consumeManagedRepair(path, `@"${run.repair!.file}"`, { files: [{ path: run.repair!.file, text: run.repair!.message }] }, a.taskId), true);
     assert.equal(readTaskRun(path, "甲").repairs, 2); assert.equal(readTaskRun(path, "甲").counters!.验收!.repairs, 2); assert.equal(readTaskRun(path, "甲").userVersion, 0);
+  } finally { f.cleanup(); }
+});
+test("原生交互续跑去掉 print，保留原任务/会话；无终端拒绝，整批拆成独立窗口", async () => {
+  const f = fixture();
+  try {
+    const path = f.start(), a = readTaskRun(path, "甲"); attachSession(path, "pi", "original-a", join(a.dir, "session.jsonl"), a.taskId);
+    updateTaskRun(path, a.taskId, (r) => { r.repairs = 2; });
+    const original = readFileSync(path, "utf8"), normal = managedLaunchArgs(path, a.taskId), native = managedLaunchArgs(path, a.taskId, true);
+    assert.deepEqual(normal.args.slice(-2), ["--", "-p"]); assert.equal(native.args.includes("-p"), false);
+    assert.equal(native.cwd, a.worktree); assert.equal(native.env.AUTOREVIEW_KERNEL_TASK, a.taskId); assert.ok(native.args.includes(join(a.dir, "session.jsonl")));
+    const args = { command: "续跑", batch: f.file, task: "甲", launcher: "terminal", dryRun: true, json: false, rest: [] };
+    assert.match((await kernelCLI(args, f.repo))!.lines.join("\n"), /原生 Pi 界面/);
+    await assert.rejects(() => kernelCLI({ ...args, json: true }, f.repo), /不带 --json/);
+    const batch = (await kernelCLI({ ...args, task: undefined }, f.repo))!;
+    assert.equal(batch.commands.length, 2); assert.match(batch.lines[0], /独立原生 Pi 窗口/);
+    assert.match((await kernelCLI({ ...args, command: "启动", task: undefined }, f.repo))!.lines.join("\n"), /原生 Pi 界面/);
+    if (!process.stdin.isTTY || !process.stdout.isTTY) await assert.rejects(() => kernelCLI({ ...args, dryRun: false }, f.repo), /需要交互终端/);
+    assert.equal(readFileSync(path, "utf8"), original, "只读预检和被拒的入口不改变会话、次数或账本");
+  } finally { f.cleanup(); }
+});
+test("关闭窗口后只刷新过期的开发续跑信封，原会话/次数/历史保留", () => {
+  const f = fixture();
+  try {
+    const path = f.start(), a = readTaskRun(path, "甲"); attachSession(path, "pi", "original-a", join(a.dir, "session.jsonl"), a.taskId);
+    updateTaskRun(path, a.taskId, (r) => { r.repairs = 2; }); prepareManagedContinuation(path, a.taskId!);
+    const old = readTaskRun(path, "甲").repair!;
+    updateTaskRun(path, a.taskId, (r) => { r.epoch = (r.epoch ?? 0) + 1; }); prepareManagedContinuation(path, a.taskId!);
+    const current = readTaskRun(path, "甲"); assert.notEqual(current.repair!.id, old.id); assert.equal(current.repair!.epoch, current.epoch);
+    assert.equal(current.repairs, 2); assert.equal(current.session!.id, "original-a"); assert.equal(existsSync(old.file), true);
+    prepareManagedContinuation(path, a.taskId!); assert.equal(readTaskRun(path, "甲").repair!.id, current.repair!.id);
+  } finally { f.cleanup(); }
+});
+test("原生窗口流水线逐任务开独立窗口，参数安全传递；部分失败不重派，活动任务拒绝重复开窗", () => {
+  const f = fixture(["甲'一", "乙"]);
+  try {
+    const path = f.start(), original = readFileSync(path, "utf8"), calls: any[] = [];
+    const execute = ((command: string, args: string[]) => { calls.push({ command, args }); return { status: calls.length === 1 ? 0 : 1, stderr: "fixture refusal" }; }) as typeof spawnSync;
+    const result = resumeTerminalTasks(path, false, execute);
+    assert.equal(result.ok, false); assert.deepEqual(result.opened, ["甲'一"]); assert.equal(calls.length, 2);
+    assert.equal(calls[0].command, "osascript"); assert.match(calls[0].args[1], /item 1 of argv/);
+    assert.ok(calls[0].args[2].includes("'甲'\\''一'")); assert.match(calls[0].args[2], /'--launcher' 'terminal'/);
+    assert.equal(readFileSync(path, "utf8"), original, "开窗只是启动请求，不冒充已接续或改任务身份");
+    updateTaskRun(path, "乙", (r) => { r.activity = { id: "active", node: "开发评审", kind: "developing", pid: process.pid, started: processStartTime(process.pid) }; });
+    assert.throws(() => resumeTerminalTasks(path, false, execute), /仍活动/); assert.equal(calls.length, 2);
+  } finally { f.cleanup(); }
+});
+test("只修乙测试命令可在甲开发时生效，甲活动/评审输入不变，全局改变仍等待边界", () => {
+  const f = fixture();
+  try {
+    const path = f.start(); updateTaskRun(path, "甲", (r) => { r.activity = { id: "dev-a", node: "开发评审", kind: "developing", pid: process.pid, started: processStartTime(process.pid) }; });
+    const before = readTaskRun(path, "甲"), reviewed = checkInputs(before, "开发评审").hash;
+    const bReview = checkInputs(readTaskRun(path, "乙"), "开发评审").hash, bTest = checkInputs(readTaskRun(path, "乙"), "测试").hash;
+    const change = requestCardChange(path, { from: f.replacement((c) => { c.tasks[1].test = "printf changed"; }), source: "cli:automation" });
+    assert.equal(change.state, "applied"); assert.deepEqual(readTaskRun(path, "甲").activity, before.activity); assert.equal(readTaskRun(path, "甲").epoch, before.epoch);
+    assert.equal(checkInputs(readTaskRun(path, "甲"), "开发评审").hash, reviewed); assert.equal(checkInputs(readTaskRun(path, "乙"), "开发评审").hash, bReview);
+    assert.notEqual(checkInputs(readTaskRun(path, "乙"), "测试").hash, bTest);
+    const global = requestCardChange(path, { from: f.replacement((c) => { c.limits = { 测试: { timeoutMin: 25 } }; }), source: "cli:automation" });
+    assert.equal(global.state, "pending"); assert.deepEqual(readTaskRun(path, "甲").activity, before.activity);
+  } finally { f.cleanup(); }
+});
+test("废弃 gate 删除须有匹配原配置，不接纳其他变更，保留旧哈希且不改变检查输入", async () => {
+  const f = fixture();
+  try {
+    const cfg = join(f.repo, ".autoreview.json"), raw = JSON.parse(readFileSync(cfg, "utf8")); raw.gate = { cmd: "obsolete" };
+    writeFileSync(cfg, JSON.stringify(raw)); const original = join(f.root, "original.json"); writeFileSync(original, readFileSync(cfg));
+    const path = f.start(), run = readRun(path), before = run.localHashes[".autoreview.json"];
+    delete raw.gate; const bytes = JSON.stringify(raw), roots = [run.repo, run.worktree, ...run.taskRecords!.map((t) => t.worktree)];
+    for (const root of roots) writeFileSync(join(root, ".autoreview.json"), bytes);
+    const input = checkInputs(readTaskRun(path, "甲"), "开发评审").hash;
+    writeFileSync(cfg, JSON.stringify({ ...raw, reviewerThinking: "low" })); assert.throws(() => reconcileRemovedGate(path, original), /不只是删除/);
+    assert.equal(readRun(path).localHashes[".autoreview.json"], before); writeFileSync(cfg, bytes);
+    const evidence = reconcileRemovedGate(path, original), after = readRun(path);
+    assert.equal(after.localHashHistory![0].before, before); assert.notEqual(after.localHashes[".autoreview.json"], before); assert.equal(existsSync(evidence), true);
+    assert.equal(checkInputs(readTaskRun(path, "甲"), "开发评审").hash, input); assert.equal(reconcileRemovedGate(path, original), evidence);
+    await f.deliver(path, "甲"); assert.equal(readRun(path).batch!.contributions.length, 1, "严格集成校验使用已证明的配置迁移，而非跳过校验");
+  } finally { f.cleanup(); }
+});
+test("受控改测试后汇总只同步登记的新卡，业务贡献与检查仍按原任务核对", async () => {
+  const f = fixture();
+  try {
+    const path = f.start(), change = requestCardChange(path, { from: f.replacement((c) => { c.tasks[0].test = "printf changed"; }), source: "cli:automation" });
+    assert.equal(change.state, "applied");
+    await f.deliver(path, "甲"); await f.deliver(path, "乙");
+    const run = readRun(path); assert.equal(queryKernel(path).status, "可合入");
+    assert.equal(f.git(run.worktree, "show", "HEAD:开发卡.json"), readFileSync(f.file, "utf8").trim());
+    assert.equal(run.batch!.contributions.length, 2); assert.equal(f.calls().length, 1);
   } finally { f.cleanup(); }
 });
 test("A6：只退甲，甲原通过项也重验，乙分支/检查不变，精确两次调用无末尾 full，合法映射推 bare origin/dev", async () => {

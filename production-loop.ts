@@ -13,7 +13,7 @@ const LOOP_ROOT = dirname(fileURLToPath(import.meta.url));
 /** 标题用真实完整标题，测试逐一核对；指路卡正文只维护这一份。 */
 export const PRODUCTION_RULES = [
   { file: "README-验收标准.md", sections: ["起草需求时写验收标准（自动验收 v7）", "起草任务提示词（自动评审 v2）"], description: "任务提示词与验收标准" },
-  { file: "README.md", sections: ["单任务开发卡（第2步）"], description: "新卡、测试、重跑/改卡/放弃与统一合入（旧批次仅内部保留）" },
+  { file: "README.md", sections: ["开发卡（第4步）"], description: "新卡、测试、重跑/改卡/放弃与统一合入（旧引擎已删除）" },
   { file: "项目文档/运行与维护.md", sections: ["项目配置示例", "迁移与检查"], description: "项目配置、方法与迁移" },
 ] as const;
 const ruleLine = (index: number): string => {
@@ -184,14 +184,14 @@ function hasBatch(root: string): boolean {
 
 export function productionCard(roots: string[]): string {
   const lines = ["Loop 规则按需读：", ...PRODUCTION_RULES.map((rule, index) => `- ${rule.description} → ${ruleLine(index)}`),
-    "新卡由程序提交并记账；前置结论有效后合入 dev 并推送 origin/dev；接受未验证须真实用户决定，也走 bin/loop 合入。不要手动 git 合并。"];
+    "新卡由程序提交并记账；前置结论有效后合入 dev 并推送 origin/dev；接受未验证须真实用户决定，也走 bin/loop 合入。不要手动 git 合并。旧开工、共用预算和 accept-cmd 已停用；原标准文只取写法，执行以新卡 flow/独立 limits 为准。"];
   const unmigrated = roots.filter((root) => {
     try {
       const raw = JSON.parse(readFileSync(join(root, ".autoreview.json"), "utf8"));
-      return raw && typeof raw === "object" && !["release", "workspaces", "methods"].some((key) => Object.hasOwn(raw, key)) && !hasBatch(root);
+      return raw && typeof raw === "object" && !["release", "methods"].some((key) => Object.hasOwn(raw, key)) && !hasBatch(root);
     } catch { return false; } // 配置错误由程序校验报告，不猜项目状态。
   });
-  if (unmigrated.length) lines.push(`本项目未接入批次流程，迁移见「迁移与检查」（${unmigrated.join("、")}）。`);
+  if (unmigrated.length) lines.push(`本项目尚无新卡/方法接入记录，迁移见「迁移与检查」（${unmigrated.join("、")}）。`);
   return lines.join("\n");
 }
 

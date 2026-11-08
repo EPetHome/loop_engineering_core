@@ -34,6 +34,7 @@ export interface DeploymentAttempt {
 }
 export interface CardChange {
   id: string; source: string; authorization?: string; userVersion: number; at: string; expectedHash: string; content: string; card: DevelopmentCard;
+  scopeAddition?: { task: string; file: string; scope: string };
   before: string; deploymentPlan?: DeploymentPlan; reviewInputs?: { hash: string; files: Record<string, string> }; removeTasks?: string[]; acceptanceVersion?: { path: string; hash: string }; installed?: boolean; state: "pending" | "prepared" | "applied" | "rejected"; appliedAt?: string; reason?: string;
 }
 export interface RepairEnvelope {
@@ -53,13 +54,15 @@ export interface KernelRun {
   deploymentPlan?: DeploymentPlan; deploymentAttempts?: DeploymentAttempt[];
   testWorkspaces?: TestWorkspace[];
   consumerReleases?: ConsumerRelease[];
+  localHashHistory?: { path: string; before: string; after: string; evidence: string; at: string; reason: string }[];
   candidate?: Candidate; results: NodeResult[]; repairs: number; userVersion: number; userInputs: string[]; userFiles?: string[];
   /** 最近一次真实用户引用时确认的原始文本内容哈希；不凭磁盘的新内容自动更新。 */
   userFileVersions?: Record<string, string>;
+  paRelays?: import("./pa-records.ts").RelaySource[];
   inputVersion?: 2; cardRevision?: number; epoch?: number;
   counters?: Partial<Record<NodeName, { repairs: number; recoveries: number }>>;
   blockedNode?: NodeName; changes?: CardChange[]; pendingCard?: string;
-  controlDecisions?: { id: string; source: string; text: string; at: string; cardHash: string; userVersion: number; action: "remove-test" | "remove-acceptance" | "remove-task" | "raise-acceptance" | "change-acceptance"; acceptance?: { path: string; hash: string }; task?: string; used?: string }[];
+  controlDecisions?: { id: string; source: string; text: string; at: string; cardHash: string; userVersion: number; action: "remove-test" | "remove-acceptance" | "remove-task" | "raise-acceptance" | "change-acceptance" | "extend-scope"; acceptance?: { path: string; hash: string }; scope?: string; task?: string; used?: string }[];
   /** 只在内存上下文出现，不写第二份账本。新多任务的任务运行字段唯一存于 taskRecords。 */
   taskId?: string; taskRecords?: TaskRecord[];
   batch?: { version: number; targetSource?: Candidate; contributions: Contribution[]; integrations: BatchIntegration[]; pending?: { id: string; before: string; after: string; version: number; entry?: BatchIntegration; guard?: string; epoch?: number }; removed: { id: string; name: string; at: string; source: string; history?: string }[] };
@@ -85,11 +88,11 @@ export interface KernelRun {
     /** 发布边界绑定的实际通过记录；没有 result 表示该节点作为用户例外欠项保留。 */
     nodeChecks?: Partial<Record<NodeName, { inputs: string; result?: string }>>;
     taskChecks?: { task: string; candidate: Candidate; checks: { node: NodeName; inputs: string; result?: string }[] }[]; mapping?: Contribution[];
-    at: string; local: "intent" | "merged"; push: "未开始" | "进行中" | "成功" | "失败"; reason?: string; decision?: string; origin: string };
+    at: string; local: "intent" | "merged"; push: "未开始" | "进行中" | "成功" | "失败" | "未请求"; reason?: string; decision?: string; origin: string };
   release: { status: "未释放" | "已释放" | "未确认"; details: string[] };
 }
 /** 显式上下文投影：不是另一份 run；写回仍持同一个账本短锁。 */
-export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "userFiles", "userFileVersions", "epoch", "counters", "consumerReleases", "blockedNode", "worker", "workerRequest", "repair", "delivery", "launchMode", "terminal", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
+export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "paRelays", "userFiles", "userFileVersions", "epoch", "counters", "consumerReleases", "blockedNode", "worker", "workerRequest", "repair", "delivery", "launchMode", "terminal", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
 export type TaskRecord = Pick<KernelRun, typeof TASK_FIELDS[number]> & { id: string; name: string; definition?: DevelopmentTask; removed?: boolean };
 export interface Contribution { task: string; candidate: Candidate; base: string; patchBase: string; contribution: string; inputs: Record<string, string>; checks: string[]; epoch: number; userVersion: number }
 export interface BatchIntegration { id: string; task: string; at: string; before: Candidate; after: Candidate; mapping: Contribution[]; history: string; evidence: string; order: number; control?: string; targetSource?: Candidate }
@@ -100,6 +103,12 @@ export function taskDefinition(run: KernelRun): DevelopmentTask {
   return task;
 }
 export function taskIdentity(run: KernelRun): string { return run.taskId ?? taskDefinition(run).name; }
+/** 单任务文件增补只阻塞责任任务；批次验收/发布仍等待改卡完成。 */
+export function pendingCardBlocks(run: KernelRun): boolean {
+  if (!run.pendingCard) return false;
+  const change = run.changes?.find((c) => c.id === run.pendingCard);
+  return !run.taskId || !change?.scopeAddition || change.scopeAddition.task === taskDefinition(run).name;
+}
 export function taskIds(run: KernelRun): string[] { return run.taskRecords ? run.taskRecords.filter((t) => !t.removed).map((t) => t.id) : [taskDefinition(run).name]; }
 export function taskView(run: KernelRun, id?: string): KernelRun {
   if (!run.taskRecords) { if (id && id !== taskDefinition(run).name) throw new Error(`未知任务：${id}`); return run; }

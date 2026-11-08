@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { judgeAcceptance, mergeAcceptanceReports } from "../acceptance-core.ts";
-import { runAcceptanceStage } from "../acceptance.ts";
+import { runAcceptanceOnce as runAcceptanceStage } from "../acceptance.ts";
 import { block, harness } from "./helpers/acceptance-fixture.ts";
 
 test("A32 中断保留逐条显式结果，未完成条目不冒充通过；新重验不读旧检查点", async () => {

@@ -5,11 +5,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { ACCEPTANCE_CONVENTION } from "../acceptance-core.ts";
 import {
   CONVENTION,
   MAX_DIFF_BYTES,
-  acceptRunLabel,
   buildRepairMessage,
   buildReviewInput,
   classifyMarker,
@@ -289,48 +287,23 @@ test("T14 总结的来源变化一节：列出文件和发现时间或版本兜�
   assert.match(fallback, /## 开发期间来源变化\n来源有变化（第 3 版）/);
 });
 
-test("T12 总结渲染验收命令：状态行下多一行，详情一节带命令、触发、输出尾部", () => {
-  const plain = renderSummary(summaryInput({ status: "完成" }));
-  assert.ok(!plain.includes("验收命令"), "没有验收命令记录时总结不变");
-
-  const failed = renderSummary(summaryInput({
-    status: "完成",
-    acceptRun: {
-      command: "node test/e2e.mjs", trigger: "auto", round: 2, startedAt: "2026-10-10 10:00:00",
-      result: "不通过", exitCode: 1, durationMs: 61_400, logPath: "/tmp/accept.log", outputTail: "验收结论：🔴 不通过",
-    },
-  }));
-  assert.match(failed, /^- 状态：完成$/m);
-  assert.match(failed, /^- 验收命令：不通过（退出码 1）$/m);
-  assert.ok(failed.includes("## 验收命令"));
-  assert.ok(failed.includes("- 命令：node test/e2e.mjs"));
-  assert.ok(failed.includes("- 触发：第 2 轮评审完成后自动执行"));
-  assert.ok(failed.includes("耗时 61 秒"));
-  assert.ok(failed.includes("- 完整输出：/tmp/accept.log"));
-  assert.ok(failed.includes("验收结论：🔴 不通过"));
-
-  const running = renderSummary(summaryInput({
-    status: "进行中",
-    acceptRun: { command: "x", trigger: "command", round: 0, startedAt: "t", result: "进行中" },
-  }));
-  assert.match(running, /^- 验收命令：进行中$/m);
-  assert.ok(running.includes("- 触发：手动 /accept"));
-  assert.match(running, /^- 开始：t$/m, "未结束时不写耗时");
-
-  assert.equal(acceptRunLabel({ command: "x", trigger: "auto", round: 1, startedAt: "t", result: "通过", exitCode: 0 }), "通过");
-  assert.equal(acceptRunLabel({ command: "x", trigger: "auto", round: 1, startedAt: "t", result: "中断" }), "中断");
+test("T12 旧独立命令记录不再成为当前总结状态或完成门槛", () => {
+  for (const result of ["进行中", "通过", "不通过", "中断"]) {
+    const legacy = { ...summaryInput({ status: "完成" }), acceptRun: { command: "do-not-run", result, trigger: "auto", round: 2 } };
+    const text = renderSummary(legacy); assert.match(text, /^- 状态：完成$/m); assert.doesNotMatch(text, /验收命令|do-not-run|手动 \/accept/);
+  }
 });
 
 test("T14 Loop 不运行测试：开发约定、评审输入和各种状态的总结如实记录", () => {
   assert.equal(conventionText(), CONVENTION);
-  assert.equal(conventionText({ acceptance: true }), `${CONVENTION}\n${ACCEPTANCE_CONVENTION}`);
+  assert.match(conventionText({ singleNode: true }), /本次只有开发评审节点/);
   assert.match(CONVENTION, /开发方自行做改动相关的定向自检/);
   assert.doesNotMatch(CONVENTION, /程序统一执行完整门禁/);
   const input = buildReviewInput({ round: 1, requirement: "需求", deliveryNote: "说明", diff: "d", diffStat: "", untracked: [] });
   assert.match(input, /Loop 未运行测试/);
   assert.doesNotMatch(input, /## 门禁/);
   for (const status of ["完成", "暂停", "进行中"] as const) {
-    const summary = renderSummary(summaryInput({ status, rounds: [roundRecord()] }));
+    const summary = renderSummary(summaryInput({ status, rounds: [roundRecord({})] }));
     assert.match(summary, /测试：Loop 未运行测试/);
     assert.doesNotMatch(summary, /门禁：通过|测试通过/);
   }

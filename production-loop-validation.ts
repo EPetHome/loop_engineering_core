@@ -1,41 +1,20 @@
-/** 仅在配置写入命中后加载。复用 Loop 的只读解析，不执行准备/开工。 */
-import { existsSync } from "node:fs";
+/** 配置写入后只读校验；旧批次只诊断，不空跑旧流程。 */
 import { loadProjectLayout } from "./config.ts";
 import { loadConfig } from "./hosts/review-hook.ts";
-import { loadBatch } from "./loop.ts";
 import { gitText } from "./workspace.ts";
-import { checkBatchConfiguration } from "./preflight.ts";
 import { readDevelopmentCard } from "./development-card.ts";
 import { managedConfig } from "./kernel-workspace.ts";
-
+import { PIPELINE_MIGRATION } from "./pipeline.ts";
 export async function validateProductionFile(file: { path: string; kind: string; root: string }): Promise<string[]> {
-  const warnings: string[] = []; // Hook 提醒走结构化上下文，不把迁移提示写到 stderr。
   try {
     if (file.kind === "card") {
       const root = gitText(file.root, ["rev-parse", "--show-toplevel"]);
       readDevelopmentCard(file.path, root); managedConfig(root); return [];
     }
-    if (file.kind === "config") {
-      loadProjectLayout(file.root); // release、workspaces、localFiles、methods。
-      loadConfig(file.root, {}); // 原有配置解析（含 acceptance、preparation 和预算，旧 gate 只提醒）。
-      return [];
-    }
-    const { layout } = loadProjectLayout(file.root);
-    const root = gitText(file.root, ["rev-parse", "--show-toplevel"]);
-    const batch = loadBatch({ root, projectRoot: file.root, layout }, file.path, { warn: (message) => warnings.push(message) });
-    const missing = new Set<string>();
-    for (const stage of batch.plan.stages.values()) {
-      if (stage.prompt && !existsSync(stage.prompt)) missing.add(stage.prompt);
-      if (stage.ponytail && !existsSync(stage.ponytail.extension)) missing.add(stage.ponytail.extension);
-    }
-    const mismatches = checkBatchConfiguration(batch.plan, file.root, { localFileCopies: batch.localFileCopies }).filter((check) => !check.ok)
-      .map((check) => check.name.endsWith("的验收说明引用") && /ENOENT/.test(check.detail) ? `尚未找到：${check.detail}` : `${check.name}：${check.detail}`);
-    return [...warnings, ...[...missing].map((path) => `尚未找到：${path}`), ...mismatches];
+    if (file.kind === "config") { loadProjectLayout(file.root); loadConfig(file.root, {}); return []; }
+    return [PIPELINE_MIGRATION];
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
-    if (file.kind === "card" && (error as NodeJS.ErrnoException).code === "ENOENT") return [`尚未找到：${text}`];
-    // parsePlan 自身会读取验收标准；生产中的文件可以稍后再写，不伪造文件通过校验。
-    const missing = /^(?:acceptance|e2e)\.criteria 指的文件不存在：(.*)$/.exec(text); // 兼容旧字段的报错。
-    return [...warnings, missing ? `尚未找到：${missing[1]}` : text];
+    return [(error as NodeJS.ErrnoException).code === "ENOENT" ? `尚未找到：${text}` : text];
   }
 }

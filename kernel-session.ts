@@ -2,10 +2,10 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { authorizationHint, authorizationStatus, forUser, grantsFromUser, typedByUser } from "./acceptance-core.ts";
+import { authorizationHint, authorizationStatus, forUser, grantsFromUser, typedByUser, type UserPromptProvenance } from "./acceptance-core.ts";
 import { classifyMarker } from "./core.ts";
 import { digest } from "./development-card.ts";
-import { acceptanceBasis, acceptanceSignature, checkInputs, deliverCandidate, dirtyPaths, frozenCardProblem, reusedAcceptanceItems, taskAcceptanceInputs } from "./kernel-workspace.ts";
+import { acceptanceBasis, acceptanceSignature, checkInputs, deliverCandidate, dirtyPaths, frozenCardProblem, nativePiOwnerConfirmed, reusedAcceptanceItems, taskAcceptanceInputs } from "./kernel-workspace.ts";
 import { contributionProblems, currentCandidate, executeNode, kernelCommand, nodeCheckLines, qualification, queryKernel, writeKernelSummary, type NodeOutput } from "./kernel.ts";
 import { activityAlive, confirmedConsumerRelease, findUserDecision, kernelRoot, readRun, readTaskRun, taskDefinition, taskIdentity, taskIds, taskView, updateRun, updateTaskRun, type KernelRun, type UserDecision } from "./node-ledger.ts";
 import { reviewDevelopment } from "./development-node.ts";
@@ -107,13 +107,13 @@ export function managedMergeRequest(run: KernelRun, raw: string): boolean {
   return new RegExp(`^合入(?:本批|这批|[「"']?${run.card.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[」"']?)(?:\\s*(?:--接受未验证|接受未验证|按现状))?[。！!\\s]*$`).test(typedByUser(raw).trim());
 }
 /** 仅适配层已核对来源为 interactive/rpc 或宿主 UserPromptSubmit 时调用；机器消息/文件块不授权。 */
-export function recordManagedUserInput(path: string, raw: string, source: string, materials?: { text: string; files: { path: string; text: string }[] }, shown?: Pick<UserDecision, "candidate" | "inputs" | "userVersion" | "missing">, task?: string): UserDecision | undefined {
+export function recordManagedUserInput(path: string, raw: string, source: string, materials?: { text: string; files: { path: string; text: string }[] }, shown?: Pick<UserDecision, "candidate" | "inputs" | "userVersion" | "missing">, task?: string, provenance: UserPromptProvenance = {}): UserDecision | undefined {
   if (consumeManagedRepair(path, raw, materials, task)) return undefined;
   const known = [readRun(path).repair, ...(readRun(path).taskRecords ?? []).map((t) => t.repair)].filter(Boolean);
   const envelope = known.find((e) => raw.startsWith(`${e!.message}\n`) || raw.startsWith(`<cross-session-message>\n${e!.message}\n</cross-session-message>\n`));
   const genuine = envelope ? raw.slice(raw.startsWith("<cross-session-message>") ? `<cross-session-message>\n${envelope.message}\n</cross-session-message>\n`.length : envelope.message.length + 1) : raw;
   const invalidEnvelope = !envelope && /^(?:<cross-session-message>\n)?【Loop (?:(?:测试|验收|集成)返修|开发续跑)】/.test(raw); // 不伪报已读；真实入口原文仍记新输入，但伪信封正文不授予权限。
-  const text = typedByUser(genuine).trim();
+  const text = typedByUser(genuine, provenance).trim();
   if (!text || !["pi:interactive", "pi:rpc", "claude:UserPromptSubmit", "codex:UserPromptSubmit", "terminal:tty"].includes(source)) return undefined;
   if (recordCardControl(path, text, source)) return undefined;
   let run = readRun(path);
@@ -155,7 +155,7 @@ export function recordManagedUserInput(path: string, raw: string, source: string
   });
   return undefined;
 }
-export async function mergeManaged(path: string, options: { accept?: boolean; decision?: UserDecision; automatic?: boolean; dryRun?: boolean } = {}): Promise<NodeOutput> {
+export async function mergeManaged(path: string, options: { accept?: boolean; decision?: UserDecision; automatic?: boolean; dryRun?: boolean; localOnly?: boolean } = {}): Promise<NodeOutput> {
   const run = readRun(path);
   if (run.card.nature === "评审") throw new Error("只评审卡仅出报告，不能合入（接受未验证也不允许）");
   if (run.publication) return options.dryRun ? { status: "没验证", reason: "已有发布；只读查询部署，未执行", evidence: [], operations: [], released: true } : deployManaged(path);
@@ -165,7 +165,10 @@ export async function mergeManaged(path: string, options: { accept?: boolean; de
   currentCandidate(run);
   const cardProblem = frozenCardProblem(run); if (cardProblem) throw new Error(cardProblem);
   if (run.pendingCard || run.release.status === "未确认" || run.taskRecords?.some((t) => t.release.status === "未确认") || readLocalQueue().items.some((t) => t.ledger === path) || run.abandoned || [run.activity, ...(run.taskRecords ?? []).map((t) => t.activity)].some((a) => activityAlive(a) !== false)) throw new Error("还有节点活动、归属未确认或任务已放弃，未合入；先停止并确认资源");
-  for (const view of [run, ...(run.taskRecords ?? [])]) if ([view.launch, view.supervisor, view.worker].some((group) => group && ownedProcessGroupAlive(group) === undefined)) throw new Error("登记消费者进程身份未确认，普通/例外均不能发布");
+  for (const view of [run, ...(run.taskRecords ?? []).map((t) => taskView(run, t.id))]) {
+    for (const group of [view.launch, view.supervisor, view.worker]) if (group && ownedProcessGroupAlive(group) === undefined
+      && !(group === view.launch && nativePiOwnerConfirmed(view, path))) throw new Error("登记消费者进程身份未确认，普通/例外均不能发布");
+  }
   for (const dir of [run.dir, ...(run.taskRecords ?? []).map((t) => t.dir)]) {
     const procs = join(dir, "review.procs.json");
     if (existsSync(procs)) {
@@ -182,13 +185,13 @@ export async function mergeManaged(path: string, options: { accept?: boolean; de
   const sources = contributionProblems(run, false);
   if (sources.length) throw new Error(`批次来源不完整或已过期，例外不能豁免；请真实用户重新确认「合入本批」以冻结全部当前任务贡献：\n${sources.join("\n")}`);
   const decision = findUserDecision(run, q.candidate, q.inputs, q.missing, options.decision?.id);
-  if (options.dryRun) return { status: q.missing.length ? "没验证" : "通过", reason: "只读核对，未发布；例外执行仍须真实用户决定", evidence: [], operations: q.missing, released: true };
+  if (options.dryRun) return { status: q.missing.length ? "没验证" : "通过", reason: `只读核对，未发布；${options.localOnly ? "本次仅本地合入 dev，不请求远端推送；" : ""}例外执行仍须真实用户决定`, evidence: [], operations: q.missing, released: true };
   if (options.accept && !decision) throw new Error("没有绑定本候选与逐项欠项的真实用户决定；请在原会话亲手输入「合入本批」，或在交互终端确认统一命令；卡/提示词/机器消息不算授权");
   updateRun(path, (r) => {
     if (r.userVersion !== run.userVersion || checkInputs(r).hash !== q.inputs) throw new Error("合入交接前检查输入或用户决定已变化");
     r.stopped = false; r.stopReason = undefined; if (r.activity && activityAlive(r.activity) === false) r.activity = undefined;
   }); // 停止不是放弃，允许显式发布已登记候选。
-  const result = await executeNode(path, "提交", (input) => submitCandidate(input, options.accept ? decision : undefined));
+  const result = await executeNode(path, "提交", (input) => submitCandidate(input, options.accept ? decision : undefined, options.localOnly));
   const published = readRun(path).publication;
   if (published?.local === "merged") {
     try { appendMergeRecord({ project: run.repo, batch: run.card.name, entry: `${run.id}:${published.commit}`, commit: published.commit, file: run.file, manual: [],
@@ -203,7 +206,7 @@ export async function mergeManaged(path: string, options: { accept?: boolean; de
 /** 发布后的唯一接续入口；不会再次评审/提交/推送。 */
 export async function deployManaged(path: string, signal?: AbortSignal, exec?: Exec, retryAttempt?: string): Promise<NodeOutput> {
   const run = readRun(path), p = run.publication;
-  if (!run.card.flow.includes("部署")) return { status: p?.push === "成功" ? "通过" : "没验证", reason: `本地发布记录已存在；推送 ${queryKernel(path).publication?.push ?? "未开始"}，不自动重试推送。${p?.reason ?? ""}；部署：没验证（本次未安排）`, evidence: [], operations: [], released: true };
+  if (!run.card.flow.includes("部署")) return { status: p && ["成功", "未请求"].includes(p.push) ? "通过" : "没验证", reason: `本地发布记录已存在；推送 ${queryKernel(path).publication?.push ?? "未开始"}，不自动重试推送。${p?.reason ?? ""}；部署：没验证（本次未安排）`, evidence: [], operations: [], released: true };
   if (p?.local !== "merged" || p.push !== "成功") return { status: "没验证", reason: `部署未执行：发布/推送未成功（${p?.push ?? "无发布身份"}）；不自动重推`, evidence: [], operations: [], released: true };
   const prior = run.deploymentAttempts?.at(-1), uncertain = deploymentUncertainty(prior);
   if (uncertain) throw new Error(uncertain);

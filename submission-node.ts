@@ -19,7 +19,7 @@ function protectedTarget(cwd: string, touched: string[]): string {
   return digest(JSON.stringify([entries, paths.map((p) => [p, existsSync(join(cwd, p)) ? fileDigest(join(cwd, p)) : "缺失"])]));
 }
 
-export async function submitCandidate(input: NodeInput, decision?: UserDecision): Promise<NodeOutput> {
+export async function submitCandidate(input: NodeInput, decision?: UserDecision, localOnly = false): Promise<NodeOutput> {
   if (input.run.card.nature === "评审") throw new Error("只评审卡不允许提交或合入");
   const projectRelease = await acquireProjectExecution(input.run.repo, "deploy", input.procsFile!, input.signal, () => input.signal?.throwIfAborted(), () => updateRun(input.ledger, (r) => {
     if (r.activity?.id === input.attempt) r.activity.kind = "waiting";
@@ -84,7 +84,7 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
       if (r.status !== 0 && !(args[0] === "update-index" && r.status === 1 && !r.stderr.trim())) throw new Error(`目标工作区更新失败：${r.stderr || r.stdout || r.error}`);
     };
     if (holder && existsSync(gitText(holder.path, ["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"]))) throw new Error("目标有未完成合并，未触碰");
-    const origin = gitText(run.repo, ["remote", "get-url", "--push", "origin"]);
+    const origin = localOnly ? "" : gitText(run.repo, ["remote", "get-url", "--push", "origin"]);
     const prefix = `refs/loop/kernel/${run.id}/pre-squash/`;
     const refs = gitText(run.repo, ["for-each-ref", "--format=%(refname)", prefix]).split("\n").filter(Boolean);
     const sequence = Math.max(0, ...refs.map((r) => Number(r.slice(prefix.length)) || 0)) + 1;
@@ -152,7 +152,13 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     log(`发布输入核对：${transition}；仅归一化已发布候选造成的更新：${pushInputs.publicationChanges.join("、") || "无"}`);
     if (pushing.stopped || pushing.userVersion !== input.run.userVersion || pushInputs.hash !== input.inputs
       || currentCandidate(pushing).tree !== candidate.tree) throw new Error("本地已合入，但推送前停止/候选/检查输入变化，未推送");
-    if (gitText(run.repo, ["remote", "get-url", "--push", "origin"]) !== origin || gitText(run.repo, ["rev-parse", "refs/heads/dev"]) !== commit) throw new Error("推送前目标或 origin 身份变化，未推送");
+    if (gitText(run.repo, ["rev-parse", "refs/heads/dev"]) !== commit) throw new Error("发布收尾前目标 dev 身份变化，未推送");
+    if (localOnly) {
+      updateRun(input.ledger, (r) => { r.publication!.push = "未请求"; r.publication!.reason = "按本人要求仅本地合入 dev，未请求远端推送"; });
+      log("仅本地合入完成；未请求或执行 git push");
+      return { status: "通过", reason: "已本地合入 dev，未推送", evidence: [evidence], operations, released: true };
+    }
+    if (gitText(run.repo, ["remote", "get-url", "--push", "origin"]) !== origin) throw new Error("推送前 origin 身份变化，未推送");
     updateRun(input.ledger, (r) => { r.publication!.push = "进行中"; });
     const args = ["-c", "core.hooksPath=/dev/null", "push", "--no-follow-tags", "--recurse-submodules=no", "--", "origin", `${commit}:refs/heads/dev`];
     log(`$ git ${args.join(" ")}`);

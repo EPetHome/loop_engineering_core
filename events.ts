@@ -8,7 +8,7 @@ import { processStartTime } from "./procs.ts";
 import { queueAcceptance, readJson, writeJsonAtomic } from "./pipeline-core.ts";
 import type { FailureKind } from "./failure.ts";
 import type { AcceptanceRecord } from "./acceptance-core.ts";
-import type { RoundRecord, AcceptRunRecord } from "./core.ts";
+import type { RoundRecord } from "./core.ts";
 import type { QueueAcceptance } from "./pipeline-core.ts";
 
 export const REASON_CATEGORIES = ["需要你决定", "返修到上限", "环境", "方法", "超时", "返修后没改动", "输入变化", "授权待答复", "内部错误", "已停止", "其他"] as const;
@@ -210,21 +210,10 @@ export function writePhase(info: BatchInfo, stage: string | null, phase: PhaseRe
   } catch (error) { eventError(info.batch.file, null, error); return; }
 }
 
-/** 验收调用结束不等于批次已提交；欠项与证据在真实提交完成前继续受保护。 */
-export function reportUncommittedBatch(info: BatchInfo, record?: AcceptanceRecord, paGrantsUsed?: string[]): void {
-  const reason = eventReason(record?.verdict === "部分验证" ? "整批验收部分验证，尚未完成提交" : "整批尚未完成提交，成果与证据保留");
-  const evidence = { summary: join(info.dir, "report.md"), ...(record?.runDir ? { acceptance: record.runDir } : {}) };
-  const next: NextAction = record?.verdict === "部分验证" ? "resume" : "manual";
-  const detail = { next, test: "Loop 未运行测试", acceptance: { verdict: record?.verdict ?? "未验证", ...queueAcceptance(record) },
-    paGrantsUsed: paGrantsUsed ?? readJson<PhaseRecord>(phasePath(info.dir, null))?.detail.paGrantsUsed ?? [] };
-  writePhase(info, null, "paused", { status: "paused", ...reason, next, evidence, detail });
-  if (info.batch.file) pushEvent(info, null, "paused", reason, evidence, detail);
-}
-
-/** 两个宿主的开始/评审/暂停/恢复/完成共用。段 done 只记 phase，由提交成功的程序发事件。 */
+/** 单会话的开始/评审/暂停/恢复/完成观测；完成事件只是报告，不表示提交或发布。 */
 export function observeStage(options: {
   cwd: string; summary: string; session: NonNullable<PhaseRecord["session"]>;
-  phase: PhaseRecord["phase"]; state: { rounds: RoundRecord[]; repairs: number; pauseReason?: string; unresolvedMustFix?: string; unresolvedAcceptance?: string; acceptRun?: AcceptRunRecord; queueReviewedAcceptance?: QueueAcceptance | null; pauseDetail?: import("./blockers.ts").PauseDetail };
+  phase: PhaseRecord["phase"]; state: { rounds: RoundRecord[]; repairs: number; pauseReason?: string; unresolvedMustFix?: string; unresolvedAcceptance?: string; pauseDetail?: import("./blockers.ts").PauseDetail };
   reason?: string; failureKind?: FailureKind; question?: string; via?: "user" | "auto"; replay?: boolean; env?: NodeJS.ProcessEnv;
 }): void {
   try {
@@ -236,8 +225,8 @@ export function observeStage(options: {
   const reason = eventReason(options.reason ?? "", options.failureKind);
   const status = options.phase === "paused" ? pauseStatus(reason) : options.phase === "done" ? "done" : options.phase === "failed" ? "failed" : options.via ? "resumed" : "started";
   const evidence: Evidence = { summary: options.summary, ...(round?.scope?.logPath ? { log: round.scope.logPath } : {}), ...(round?.acceptance?.runDir ? { acceptance: round.acceptance.runDir } : {}),
-    ...(state.acceptRun?.logPath ? { log: state.acceptRun.logPath } : {}), ...(round?.snapshot ? { review: round.snapshot } : {}), ...(options.session.log ? { session: options.session.log } : {}) };
-  const detail: Record<string, unknown> = options.phase === "done" ? completionDetail(round, state.queueReviewedAcceptance) : { round: state.rounds.length, repairs: state.repairs };
+    ...(round?.snapshot ? { review: round.snapshot } : {}), ...(options.session.log ? { session: options.session.log } : {}) };
+  const detail: Record<string, unknown> = options.phase === "done" ? { ...completionDetail(round), scope: "会话", published: false, test: "没验证（本次未安排）", acceptance: { verdict: "没验证（本次未安排）", ...queueAcceptance() } } : { round: state.rounds.length, repairs: state.repairs };
   if (options.failureKind) detail.failureKind = options.failureKind;
   if (options.phase === "paused") {
     detail.next = "send";
@@ -259,7 +248,7 @@ export function observeStage(options: {
   if (!options.replay && options.phase !== "done" && options.phase !== "paused" && (!batchPhase || ["done", "failed"].includes(batchPhase.phase))) writePhase(info, null, "running");
   writePhase(info, stage, options.phase, { status, ...reason, round: state.rounds.length, repairs: state.repairs, session: { ...options.session, runId: options.session.runId ?? env.AUTOREVIEW_LAUNCH_ID }, evidence, detail,
     ...(options.phase === "paused" ? { next: "send" } : {}) });
-  if (!file || options.replay || options.phase === "reviewing" || options.phase === "done") return;
+  if (!file || options.replay || options.phase === "reviewing") return;
   if (status === "started" && previous?.session?.id === options.session.id) return;
   const prompt = info.stages.find((item) => item.stage === stage)?.prompt;
   pushEvent(info, stage, status, reason, evidence, status === "started" ? { recipe: info.batch.recipe, ...(prompt ? { prompt } : {}) } : detail);

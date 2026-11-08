@@ -70,7 +70,7 @@ test("PA A2/A3/A4/A7：幂等、关闭、超时不重试、运行拒绝不占编
     assert.equal((await h.send("timeout", "继续", { deliver: async () => { attempts++; } })).state, "unknown"); assert.equal(attempts, 1);
     writePhase(h.info, "甲", "paused", { session: { ...h.session, processStarted: "different-start-time" } });
     const closed: any = await h.send("closed"); assert.equal(closed.state, "failed"); assert.equal(closed.reason.text, "会话已关闭");
-    for (const key of ["AUTOREVIEW_STAGE", "AUTOREVIEW_PIPELINE_DIR"]) {
+    for (const key of ["AUTOREVIEW_STAGE", "AUTOREVIEW_PIPELINE_DIR", "AUTOREVIEW_KERNEL_LEDGER"]) {
       const result = spawnSync(process.execPath, [LOOP, "送话", h.file, "--stage", "甲", "--id", key, "--text-file", "-", "--json"], { env: { ...process.env, [key]: "" }, input: "同意授权：A3", encoding: "utf8" });
       assert.equal(result.status, 1); assert.match(JSON.parse(result.stdout).error, /开发会话环境禁止/);
     }
@@ -93,10 +93,11 @@ test("PA CLI 送话：stdin 原样留底、同编号忽略新文件、dry-run �
     assert.equal(repeated.status, 0); assert.deepEqual(JSON.parse(repeated.stdout), JSON.parse(sent.stdout));
     writePhase(h.info, null, "paused", { next: "resume" });
     const dryResume = await resumeBatch({ info: h.info, id: "dry-r", dryRun: true });
-    assert.equal(dryResume.mode, "pipeline"); assert.equal(existsSync(join(h.dir, "pa-resumes")), false);
+    assert.equal(dryResume.state, "rejected"); assert.match((dryResume.reason as any).text, /已停用/); assert.equal(existsSync(join(h.dir, "pa-resumes")), false);
     let argv: string[] = [];
-    const resumed = await resumeBatch({ info: h.info, id: "multi-r", launch: async (command) => { argv = command; return { pid: process.pid, processStarted: h.session.processStarted }; } });
-    assert.equal(resumed.mode, "pipeline"); assert.equal(argv.includes("--from"), false, "未完成段走和 loop 启动相同的多段编排路径");
+    const retiredOptions = { info: h.info, id: "multi-r", launch: async (command: string[]) => { argv = command; return { pid: process.pid, processStarted: h.session.processStarted }; } };
+    const resumed = await resumeBatch(retiredOptions);
+    assert.equal(resumed.state, "rejected"); assert.deepEqual(argv, [], "旧卡 PA 不再启动编排");
   } finally { h.close(); }
 });
 
@@ -190,64 +191,26 @@ test("PA 核对：哈希不符不读取；已完成段可读；事件失败留�
   } finally { h.close(); }
 });
 
-test("PA续跑／标准变化后实际 pipeline 在授权前暂停，新编号答复后才调用替身验收", async (t) => {
+test("PA续跑／旧卡标准或授权变化均只迁移，不读授权、不启动验收、不改标准原文", async (t) => {
   for (const [name, changed] of [["新增授权条目", REQUIREMENT + "A4. [授权] 操作：真实扣费\n"], ["同编号内容变化", REQUIREMENT.replace("真实命令", "删除真实数据")]]) await t.test(name, async () => {
-    const h = fixture();
-    try {
-      writeStageStatus({ dir: h.dir, stage: "甲" }, { event: "done", readyEpoch: "fixture-ready", sessionId: "s1", summary: "", inbox: 0 });
-      const launch = async () => ({ pid: process.pid, processStarted: h.session.processStarted });
-      writePhase(h.info, null, "paused", { next: "grant" });
-      const first: any = await resumeBatch({ info: h.info, id: "old-all", readGrant: () => "同意授权：全部", launch });
-      assert.equal(first.state, "started"); assert.ok(readPAGrants(h.dir)[0].criteriaHash);
-      writeFileSync(h.raw.acceptance.criteria, changed); writePhase(h.info, null, "paused", { next: "resume" });
-      const env = { ...process.env, FAKE_STATE_DIR: join(h.root, "tester") };
-      const paused = spawnSync(process.execPath, first.argv.slice(1), { cwd: h.repo, env, encoding: "utf8", timeout: 30_000 });
-      assert.equal(paused.status, 2, paused.stdout + paused.stderr); assert.equal(readJson<any>(phasePath(h.dir, null))!.next, "grant");
-      assert.equal(existsSync(join(env.FAKE_STATE_DIR, "acc-calls.log")), false, "旧授权不得先执行再补问");
-      assert.deepEqual((queryBatches(h.file).batches[0] as any).batch.paGrants.map((item: any) => item.id), ["old-all"]);
-      const fresh: any = await resumeBatch({ info: h.info, id: "new-all", readGrant: () => "同意授权：全部", launch });
-      const completed = spawnSync(process.execPath, fresh.argv.slice(1), { cwd: h.repo, env, encoding: "utf8", timeout: 30_000 });
-      assert.equal(completed.status, 0, completed.stdout + completed.stderr); assert.ok(existsSync(join(env.FAKE_STATE_DIR, "acc-calls.log")));
-      assert.ok(h.rows().some((item) => item.detail.paGrantsUsed?.includes("new-all")));
-      assert.equal(h.rows().some((item) => item.detail.paGrantsUsed?.includes("old-all")), false);
-      assert.equal(readFileSync(h.raw.acceptance.criteria, "utf8"), changed, "续跑不能改写标准文件");
+    const h = fixture(); try {
+      writeFileSync(h.raw.acceptance.criteria, changed);
+      const request = { info: h.info, id: "old-all", readGrant: () => assert.fail("旧卡不能再读取授权"), launch: async () => assert.fail("不能启动旧 pipeline") };
+      const result = await resumeBatch(request); assert.equal(result.state, "rejected"); assert.deepEqual(await resumeBatch(request), result);
+      assert.equal(existsSync(grantsPath(h.dir)), false); assert.equal(readFileSync(h.raw.acceptance.criteria, "utf8"), changed);
     } finally { h.close(); }
   });
 });
 
-test("PA A8/A9/A10：后台续跑替身验收、标准不变、直接写入授权对账、拒绝与幂等", async () => {
-  const h = fixture();
-  let launched: { pid?: number; processStarted?: string } | undefined;
-  try {
-    const original = readFileSync(h.raw.acceptance.criteria, "utf8");
-    writeStageStatus({ dir: h.dir, stage: "甲" }, { event: "done", readyEpoch: "fixture-ready", sessionId: "s1", summary: "", inbox: 0 });
-    writePhase(h.info, null, "paused", { next: "manual", text: "需改标准" });
-    let attempts = 0;
-    assert.equal((await resumeBatch({ info: h.info, id: "manual", launch: async () => { attempts++; return { pid: process.pid, processStarted: h.session.processStarted }; } })).state, "rejected");
-    writePhase(h.info, null, "running", { session: h.session });
-    const busy: any = await resumeBatch({ info: h.info, id: "busy" }); assert.equal(busy.state, "rejected"); assert.equal(busy.reason.text, "流水线正在运行"); assert.equal(attempts, 0);
-    writePhase(h.info, null, "paused", { next: "grant" });
-    const bad: any = await resumeBatch({ info: h.info, id: "invalid", readGrant: () => "同意授权：A999" }); assert.equal(bad.state, "rejected"); assert.deepEqual(bad.parsed.approved, []); assert.equal(existsSync(grantsPath(h.dir)), false);
-    // 真实 CLI、stdin 和后台 pipeline；唯有验收方被假命令替代，绝不启动模型。
+test("PA A8/A9/A10：旧后台/授权续跑迁移拒绝；直接写入授权仍只读对账，不触发验收", async () => {
+  const h = fixture(); try {
+    const original = readFileSync(h.raw.acceptance.criteria), grant = { id: "direct-grant", text: "不授权：A3", at: new Date().toISOString(), via: "pa" };
+    writeFileSync(grantsPath(h.dir), JSON.stringify(grant) + "\n");
     const result = spawnSync(process.execPath, [LOOP, "续跑", h.file, "--id", "batch-grant", "--grant-file", "-", "--json"], { cwd: h.repo, env: process.env, input: "同意授权：A3\r\n", encoding: "utf8" });
-    assert.equal(result.status, 0, result.stdout + result.stderr); const receipt = JSON.parse(result.stdout); launched = receipt;
-    assert.equal(receipt.state, "started"); assert.equal(receipt.mode, "acceptance"); assert.ok(receipt.argv.includes("验收"));
-    await until(() => existsSync(join(h.dir, "pipeline.finished")) && !sessionAlive(launched), "后台验收与资源全部结束", 30_000);
-    assert.equal(readFileSync(join(h.dir, "pipeline.finished"), "utf8").trim(), "0"); assert.equal(readFileSync(h.raw.acceptance.criteria, "utf8"), original);
-    assert.equal(readPAGrants(h.dir)[0].text, "同意授权：A3\r\n");
-    assert.ok(h.rows().some((row) => row.stage === null && row.status === "resumed" && row.detail.id === "batch-grant" && row.detail.via === "pa"));
-    assert.ok(h.rows().some((row) => row.detail.paGrantsUsed?.includes("batch-grant")));
-    assert.deepEqual(await resumeBatch({ info: h.info, id: "batch-grant", launch: async () => assert.fail("续跑幂等不再启动") }), receipt);
-    // 不经过续跑直接写文件，下一次普通 pipeline 仍在使用事件与查询里列出它。
-    const grant = { id: "direct-grant", text: "不授权：A3", at: new Date().toISOString(), via: "pa" };
-    writeFileSync(grantsPath(h.dir), readFileSync(grantsPath(h.dir), "utf8") + JSON.stringify(grant) + "\n");
-    writePhase(h.info, null, "paused", { next: "resume" });
-    const argv = receipt.argv.slice(1), rerun = spawnSync(process.execPath, argv, { cwd: h.repo, env: process.env, encoding: "utf8", timeout: 30_000 });
-    assert.equal(rerun.status, 0, rerun.stdout + rerun.stderr);
-    const query: any = queryBatches(h.file).batches[0]; assert.deepEqual(query.batch.paGrants.map((row: any) => row.id), ["batch-grant", "direct-grant"]);
-    assert.ok(h.rows().some((row) => row.detail.paGrantsUsed?.includes("direct-grant"))); assert.equal(readFileSync(h.raw.acceptance.criteria, "utf8"), original);
-  } finally {
-    if (launched) await until(() => !sessionAlive(launched), "只释放本测试登记的后台编排后删除目录", 30_000);
-    h.close();
-  }
+    assert.equal(result.status, 1); const receipt = JSON.parse(result.stdout); assert.equal(receipt.state, "rejected"); assert.match(receipt.reason.text, /已停用/);
+    const retiredOptions = { info: h.info, id: "batch-grant", launch: async () => assert.fail("不能重发") };
+    assert.deepEqual(await resumeBatch(retiredOptions), receipt);
+    assert.equal(readPAGrants(h.dir)[0].text, "不授权：A3"); assert.deepEqual((queryBatches(h.file).batches[0] as any).batch.paGrants.map((r: any) => r.id), ["direct-grant"]);
+    assert.deepEqual(readFileSync(h.raw.acceptance.criteria), original); assert.equal(existsSync(join(h.dir, "pipeline.finished")), false);
+  } finally { h.close(); }
 });
