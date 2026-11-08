@@ -38,7 +38,7 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
       const materials = expandFileRefsWithSources(raw, event.cwd ?? root);
       if (consumeManagedRepair(path, raw, materials, task)) { developerActive(path, task); return context(`${MANAGED_CONVENTION}\n机器返修信封已核对；用户标准、授权与次数保持原值`); }
       if (readRun(path).publication && managedMergeRequest(readRun(path), raw)) { await mergeManaged(path); return JSON.stringify({ decision: "block", reason: queryKernel(path).lines.join("\n") }); }
-      const decision = recordManagedUserInput(path, raw, `${host}:UserPromptSubmit`, materials, undefined, task);
+      const decision = recordManagedUserInput(path, raw, `${host}:UserPromptSubmit`, materials, undefined, task, { verifiedRelay: Boolean(relay) });
       if (relay) recordManagedRelay(path, task, relay);
       if (decision) {
         await mergeManaged(path, { accept: true, decision });

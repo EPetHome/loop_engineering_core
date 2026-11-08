@@ -101,7 +101,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     const raw = relay ? relay.text : event.text, materials = expandFileRefsWithSources(raw, ctx.cwd);
     if (consumeManagedRepair(path, raw, materials, task)) return { action: "continue" };
     if (run.publication && managedMergeRequest(run, raw)) { await mergeManaged(path); show(ctx); return { action: "handled" }; }
-    const decision = recordManagedUserInput(path, raw, relay ? "pi:interactive" : `pi:${event.source}`, materials, undefined, task);
+    const decision = recordManagedUserInput(path, raw, relay ? "pi:interactive" : `pi:${event.source}`, materials, undefined, task, { verifiedRelay: Boolean(relay) });
     if (relay) recordManagedRelay(path, task, relay);
     if (decision) { await mergeManaged(path, { accept: true, decision }); show(ctx); return { action: "handled" }; }
     controller?.abort(); await pending;

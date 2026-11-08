@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { authorizationHint, authorizationStatus, forUser, grantsFromUser, typedByUser } from "./acceptance-core.ts";
+import { authorizationHint, authorizationStatus, forUser, grantsFromUser, typedByUser, type UserPromptProvenance } from "./acceptance-core.ts";
 import { classifyMarker } from "./core.ts";
 import { digest } from "./development-card.ts";
 import { acceptanceBasis, acceptanceSignature, checkInputs, deliverCandidate, dirtyPaths, frozenCardProblem, nativePiOwnerConfirmed, reusedAcceptanceItems, taskAcceptanceInputs } from "./kernel-workspace.ts";
@@ -107,13 +107,13 @@ export function managedMergeRequest(run: KernelRun, raw: string): boolean {
   return new RegExp(`^合入(?:本批|这批|[「"']?${run.card.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[」"']?)(?:\\s*(?:--接受未验证|接受未验证|按现状))?[。！!\\s]*$`).test(typedByUser(raw).trim());
 }
 /** 仅适配层已核对来源为 interactive/rpc 或宿主 UserPromptSubmit 时调用；机器消息/文件块不授权。 */
-export function recordManagedUserInput(path: string, raw: string, source: string, materials?: { text: string; files: { path: string; text: string }[] }, shown?: Pick<UserDecision, "candidate" | "inputs" | "userVersion" | "missing">, task?: string): UserDecision | undefined {
+export function recordManagedUserInput(path: string, raw: string, source: string, materials?: { text: string; files: { path: string; text: string }[] }, shown?: Pick<UserDecision, "candidate" | "inputs" | "userVersion" | "missing">, task?: string, provenance: UserPromptProvenance = {}): UserDecision | undefined {
   if (consumeManagedRepair(path, raw, materials, task)) return undefined;
   const known = [readRun(path).repair, ...(readRun(path).taskRecords ?? []).map((t) => t.repair)].filter(Boolean);
   const envelope = known.find((e) => raw.startsWith(`${e!.message}\n`) || raw.startsWith(`<cross-session-message>\n${e!.message}\n</cross-session-message>\n`));
   const genuine = envelope ? raw.slice(raw.startsWith("<cross-session-message>") ? `<cross-session-message>\n${envelope.message}\n</cross-session-message>\n`.length : envelope.message.length + 1) : raw;
   const invalidEnvelope = !envelope && /^(?:<cross-session-message>\n)?【Loop (?:(?:测试|验收|集成)返修|开发续跑)】/.test(raw); // 不伪报已读；真实入口原文仍记新输入，但伪信封正文不授予权限。
-  const text = typedByUser(genuine).trim();
+  const text = typedByUser(genuine, provenance).trim();
   if (!text || !["pi:interactive", "pi:rpc", "claude:UserPromptSubmit", "codex:UserPromptSubmit", "terminal:tty"].includes(source)) return undefined;
   if (recordCardControl(path, text, source)) return undefined;
   let run = readRun(path);
