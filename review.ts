@@ -2,8 +2,7 @@
  * review.ts — 自动评审一轮的共用流程，pi 扩展与宿主 Hook 共用。
  *
  * 负责：取快照 → 拼输入 → 静态评审（失败重试 1 次）
- * → 无必修后按流程自动验收
- * → 解析 → 比较指纹 → 决定完成/返修/暂停。验收与评审共用一轮总预算。
+ * → 解析 → 比较指纹 → 决定完成/返修/暂停。只负责静态评审，绝不编排验收或发布。
  * exec、状态读写、总结、进度等副作用全部通过参数注入；调用方负责把 outcome 变成
  * pi 的返修消息或宿主的 block JSON。
  */
@@ -11,23 +10,20 @@ import { dirname, join, relative, resolve } from "node:path";
 import { executeStaticReview, staticReviewer, REVIEW_PROMPT_PATH } from "./static-review.ts";
 import { auditLoopConfig, type ConfigAudit } from "./config-audit.ts";
 import type { PauseDetail } from "./blockers.ts";
-import { acceptanceRunDir, runAcceptanceStage, type AcceptanceState } from "./acceptance.ts";
+import type { AcceptanceState } from "./acceptance.ts";
 import {
-  authorizationLine, buildAcceptanceRepairMessage, formatCriteria, formatFailedItems, renderAcceptanceForReview, type AcceptanceRecord,
+  authorizationLine, formatCriteria, type AcceptanceRecord,
 } from "./acceptance-core.ts";
 import {
   buildRepairMessage, buildReviewInput, decideNext, deriveReviewerSessionId,
   type ParsedReview, type RoundRecord,
 } from "./core.ts";
-import { findProjectRoot, PERMISSION_EXT, PI_BIN, type AcceptanceConfig, type StageWorkflow } from "./config.ts";
+import { findProjectRoot, PERMISSION_EXT, PI_BIN, type AcceptanceConfig } from "./config.ts";
 import { createGitEvidence, type Exec, type ExecResult, type Snapshot } from "./git.ts";
 import { methodEnv as buildMethodEnv } from "./method-env.ts";
 import { saveReviewSnapshot } from "./snapshots.ts";
-import { queueReviewedResult } from "./merge-queue.ts";
-import type { QueueAcceptance } from "./pipeline-core.ts";
 import { experienceInjection, markExperienceRecurrence } from "./experience.ts";
 import { changedSince, outOfScope, stageScopeFromEnv, type StageScope } from "./scope.ts";
-import { blockerHint, manualHint } from "./onboarding.ts";
 import type { FailureKind } from "./failure.ts";
 import { runPreparation, type PreparationConfig, type PreparationState } from "./preparation.ts";
 import { isRegisteredSource, loadContext, recordSourceChange, refreshContext, type SourceChangeMark } from "./project-context.ts";
@@ -42,8 +38,6 @@ export interface ReviewState extends AcceptanceState, PreparationState, ConfigAu
   /** 独立经验起草的输入指纹与软失败；不参与完成资格。 */
   experienceDraft?: { signature: string; error?: string };
   inputsFingerprint?: string;
-  /** undefined：正常检查；null：兜底命中但历史结论未知；对象：沿用已测资格（空数组才是明确无欠项）。 */
-  queueReviewedAcceptance?: QueueAcceptance | null;
   enabled: boolean;
   userInputVia?: "user" | "pa";
   userInputCount?: number;
@@ -90,7 +84,6 @@ export interface ReviewState extends AcceptanceState, PreparationState, ConfigAu
 
 export interface ReviewConfig {
   singleNode?: boolean;
-  workflow?: StageWorkflow;
   configurationHash?: string;
   maxRepairs: number;
   reviewerModel: string;
@@ -98,7 +91,7 @@ export interface ReviewConfig {
   reviewTimeoutMin: number;
   /** 仅测试：外部评审命令；语义同 pi 扩展的 autoreview-reviewer-cmd。 */
   reviewerCmd: string;
-  /** .autoreview.json 的 acceptance 一节；没有就不验收。 */
+  /** 只读配置兼容/审计；静态评审绝不执行它。验收由内核独立节点调用。 */
   acceptance?: AcceptanceConfig;
   preparation?: PreparationConfig;
 }
@@ -124,8 +117,6 @@ export interface ReviewOutcome {
 export interface ReviewDeps {
   sink?: "repair" | "report";
   getConfig?: () => ReviewConfig;
-  cleanupExec?: Exec;
-  onCleanup?: (work: Promise<void>, recordPath: string) => void;
   projectContext?: string;
   checkInputs?: () => ReviewOutcome | undefined;
   /** 只有已登记来源文件能命中的路径判定：命中的工作区变化不算候选改动。 */
@@ -154,8 +145,6 @@ export interface ReviewDeps {
   /** 时间源（测试可注入）；缺省 Date.now。 */
   now?: () => number;
   signal?: AbortSignal;
-  /** 验收材料目录（每轮一个 r<轮次> 子目录）；配了 acceptance 时必须给。 */
-  acceptanceDir?: string;
   /** 进程登记文件：被测系统登记进去。 */
   procsFile?: string;
   /** 启动入口交给会话的环境变量；缺省读 process.env。 */
@@ -199,7 +188,6 @@ export function defaultCallReviewer(deps: ReviewDeps) { return staticReviewer(de
 interface RoundClock {
   startedAt: string;
   startedTs: number;
-  deadline: number;
   now: () => number;
 }
 
@@ -272,86 +260,6 @@ async function scopeStep(
 }
 
 /**
- * 静态评审后的验收：不通过就打回，无法验收、被暂停或改了工作区就暂停；
- * 通过返回记录，检查本段完成条件。没通过的轮次也记进 rounds，便于总结。
- * 验收的时限从验收开始算，仍不超过一轮总预算。
- */
-async function acceptanceStep(
-  deps: ReviewDeps, before: Snapshot, git: ReturnType<typeof createGitEvidence>, clock: RoundClock, reviewed: RoundRecord,
-): Promise<{ outcome: ReviewOutcome } | { record: AcceptanceRecord }> {
-  const { state, config } = deps;
-  const acceptance = config.acceptance!;
-  if (!deps.acceptanceDir) throw new Error("配置了 acceptance 但没有给验收材料目录");
-  const live = (): void => { deps.checkLive?.(); };
-  const previous = lastAcceptance(state);
-  const stage = await runAcceptanceStage({
-    workDir: deps.cwd, devSessionId: deps.devSessionId, round: deps.round, deliveryNote: deps.deliveryNote,
-    state, config: acceptance, reviewerModel: config.reviewerModel, reviewerThinking: config.reviewerThinking,
-    cleanupExec: deps.cleanupExec, onCleanup: deps.onCleanup,
-    exec: deps.exec, runDir: acceptanceRunDir(deps.acceptanceDir, deps.round), procsFile: deps.procsFile,
-    env: buildMethodEnv(state.baseline, {}, deps.env ?? process.env),
-    deadline: Math.min(clock.now() + acceptance.timeoutMin * 60_000, clock.deadline), now: clock.now,
-    previous, previousFailed: previous ? previous.items.filter((item) => item.verdict !== "通过" && item.verdict !== "需人工").map((item) => item.id) : [],
-    signal: deps.signal, checkLive: deps.checkLive, onProgress: deps.onProgress, saveState: deps.saveState,
-  });
-  live();
-  if (stage.attempts) {
-    reviewed.acceptanceAttempts = stage.attempts;
-    reviewed.acceptance = stage.attempts.at(-1);
-  }
-  if (stage.kind === "paused") return { outcome: { kind: "paused", reason: stage.reason, notes: stage.notes, hint: stage.hint, failureKind: stage.failureKind } };
-  const record = stage.record;
-  const pushRound = (conclusion: string): void => {
-    reviewed.reviewConclusion = reviewed.conclusion;
-    reviewed.conclusion = conclusion.replace("未评审", "评审通过");
-    reviewed.acceptance = record;
-    reviewed.durationMs = clock.now() - clock.startedTs;
-  };
-  const middle = await git.snapshot();
-  live();
-  // 已登记来源文件的内容变化不作废验收结果；其他工作区改动照旧暂停。
-  if (middle.fingerprint !== before.fingerprint && !await sourcesOnlyWorkspaceChange(git, before, middle, deps.sourceCover)) {
-    // 本次候选失效，不能在下一轮沿用这些结论。
-    record.scope = undefined;
-    pushRound("未评审（验收期间工作区变了）");
-    const changed = await git.changedFiles(before, middle);
-    live();
-    return {
-      outcome: {
-        kind: "paused", reason: "验收期间工作区变了", changedFiles: changed,
-        notes: "被测系统或验收方改了项目里的文件：把运行时产物加进 .gitignore，或用 acceptance.env 让系统写到 $AUTOREVIEW_RUN_DIR",
-      },
-    };
-  }
-  if (record.verdict === "通过" || record.verdict === "部分验证") {
-    state.unresolvedAcceptance = undefined;
-    return { record };
-  }
-  if (record.verdict === "无法验收") {
-    pushRound("未评审（无法验收）");
-    const unknown = record.items.filter((item) => item.verdict === "无法验证").map((item) => `${item.id}：${item.detail}`);
-    return {
-      outcome: {
-        kind: "paused", reason: `无法验收：${record.reason ?? "有标准无法验证"}`, notes: unknown.join("；"),
-        failureKind: record.failureKind,
-        hint: blockerHint(record, deps.cwd, acceptance),
-      },
-    };
-  }
-  pushRound("未评审（验收不通过）");
-  state.lastCheckedFingerprint = before.fingerprint;
-  state.unresolvedAcceptance = formatFailedItems(record);
-  if (decideNext(1, state.repairs, config.maxRepairs) === "pause") {
-    return { outcome: { kind: "paused", reason: "达到返修上限" } };
-  }
-  state.repairs += 1;
-  state.awaitingRepair = true;
-  await deps.writeSummary?.("进行中");
-  live();
-  return { outcome: { kind: "repair", message: buildAcceptanceRepairMessage(state.repairs, record) } };
-}
-
-/**
  * 跑一轮评审。返回结果前不改 phase、不发通知不写暂停总结，由调用方决定副作用；
  * 「完成/进行中」总结由 deps.writeSummary 在返回前写完，保证与旧 pi 扩展顺序一致。
  */
@@ -365,7 +273,7 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   const startedAt = nowStamp();
   const now = deps.now ?? Date.now;
   const startedTs = now();
-  // 一轮总预算：验收（如果有）、评审首次调用和 1 次重试共用；后面的只能用剩余时间。
+  // 静态评审首次调用与一次重试共用自己的预算，不预留/扣减验收时限。
   const deadline = startedTs + timeoutMs;
 
   const before = await git.snapshot();
@@ -377,12 +285,11 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     state.baselineFingerprint = before.fingerprint;
     await deps.saveState();
   }
-  const clock: RoundClock = { startedAt, startedTs, deadline, now };
+  const clock: RoundClock = { startedAt, startedTs, now };
   const scope = deps.sink === "report" ? undefined : await scopeStep(deps, before, clock);
   if (scope) return scope.outcome;
   const changedBeforeReview = deps.checkInputs?.();
   if (changedBeforeReview) return changedBeforeReview;
-  const previousAcceptance = lastAcceptance(state);
   const firstReview = state.lastSnapshot === undefined;
   const baseRef = firstReview ? state.baseline! : state.lastSnapshot!;
   const baseUntracked = (firstReview ? state.baselineUntracked : state.lastUntracked) ?? [];
@@ -395,7 +302,6 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
     round: deps.round, firstReview, requirement: state.requirement,
     deliveryNote: deps.deliveryNote, previousMustFix: state.unresolvedMustFix,
     diff, diffStat: stat, untracked: git.newUntrackedFiles(before, baseUntracked),
-    acceptance: previousAcceptance ? `以下为上一轮记录，不能当作当前候选已验收：\n${renderAcceptanceForReview(previousAcceptance)}` : undefined,
   });
   const inputPath = deps.writeInput(`review-input-${deps.devSessionId}-r${deps.round}.md`, inputText);
   const snapshot = await saveReviewSnapshot({ exec: deps.exec, cwd, session: deps.devSessionId, round: deps.round,
@@ -406,19 +312,18 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   const reviewerSessionId = state.reviewerSessionId ?? deriveReviewerSessionId(deps.devSessionId);
   state.reviewerSessionId = reviewerSessionId;
   await deps.saveState();
-  // 静态评审先执行，自动验收尚未开始；Loop 不运行项目测试。
-  if (config.acceptance) deps.onProgress?.(`自动评审中（第 ${deps.round} 轮）`);
+  deps.onProgress?.(`自动评审中（第 ${deps.round} 轮）`);
 
-  const { parsed, error: lastError, timedOut, logs: reviewLogs } = await executeStaticReview({
+  const { parsed, error: lastError, timedOut, logs: reviewLogs, released: consumersReleased } = await executeStaticReview({
     session: reviewerSessionId, developer: deps.devSessionId, round: deps.round, input: inputPath,
-    deadline, timeoutMs, reservedMs: (config.acceptance?.timeoutMin ?? 0) * 60_000,
+    deadline, timeoutMs, requireRelease: deps.sink === "report",
     now, live, progress: deps.onProgress, call: callReviewer, write: deps.writeInput,
   });
   const record: RoundRecord = {
     round: deps.round, startedAt, durationMs: now() - startedTs,
     conclusion: parsed?.conclusion ?? "", reviewConclusion: parsed?.conclusion, mustFixRaw: parsed?.mustFixRaw ?? "",
     mustFix: parsed?.mustFix ?? [], minor: parsed?.minor ?? [], questions: parsed?.questions ?? [],
-    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, snapshot, ...(reviewLogs.length ? { reviewLogs } : {}),
+    recheck: parsed?.recheck ?? [], note: parsed?.note, failed: parsed ? undefined : lastError, snapshot, consumersReleased, ...(reviewLogs.length ? { reviewLogs } : {}),
   };
   state.rounds.push(record);
   const after = await git.snapshot();
@@ -451,23 +356,11 @@ async function runOneReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   state.unresolvedMustFix = parsed.mustFix.length > 0 ? parsed.mustFixRaw : undefined;
   const action = decideNext(parsed.mustFix.length, state.repairs, config.maxRepairs);
   if (action === "done") {
-    if (config.workflow) {
-      const missing = config.workflow === "with-acceptance" && !config.acceptance ? "验收 acceptance" : undefined;
-      if (missing) return { kind: "paused", reason: `项目配置不可用：批次流程缺少${missing}配置`, hint: "请补齐项目 .autoreview.json，再重新开工；不能跳过流程必需检查。" };
-    }
-    const changedBeforeAcceptance = deps.checkInputs?.();
-    if (changedBeforeAcceptance) return changedBeforeAcceptance;
-    if (config.acceptance) {
-      const step = await acceptanceStep(deps, before, git, clock, record);
-      record.durationMs = now() - startedTs;
-      if ("outcome" in step) return step.outcome;
-      record.acceptance = step.record;
-    }
     const changedInputs = deps.checkInputs?.();
     if (changedInputs) return changedInputs;
     await deps.writeSummary?.("完成");
     live();
-    return { kind: "done", hint: manualHint(record.acceptance) };
+    return { kind: "done" };
   }
   if (action === "pause") return { kind: "paused", reason: "达到返修上限" };
   state.repairs += 1;
@@ -482,14 +375,16 @@ export async function runReviewRound(deps: ReviewDeps): Promise<ReviewOutcome> {
   const { acquireProjectExecution } = await import("./project-execution.ts");
   const { consumerProblem } = await import("./local-node-queue.ts");
   const release = await acquireProjectExecution(deps.cwd, "check", deps.procsFile ?? "", deps.signal, deps.checkLive);
-  try { return await runReviewRoundOwned(deps); }
-  finally { release(!consumerProblem(deps.procsFile ?? "") && !consumerProblem(`${deps.procsFile}.cleanup`)); }
+  const before = deps.state.rounds.length;
+  let released = true;
+  try { const result = await runReviewRoundOwned(deps); released = deps.state.rounds.slice(before).every((r) => r.consumersReleased !== false); return result; }
+  finally { release(released && !consumerProblem(deps.procsFile ?? "") && !consumerProblem(`${deps.procsFile}.cleanup`)); }
 }
 async function runReviewRoundOwned(deps: ReviewDeps): Promise<ReviewOutcome> {
   auditLoopConfig(deps.state, deps.cwd);
   if (deps.sink === "report") {
     // 复用同一评审调用/解析/预算；不运行项目方法、不采用开发队列资格。
-    return runOneReviewRound({ ...deps, config: { ...deps.config, maxRepairs: 0, acceptance: undefined, preparation: undefined } });
+    return runOneReviewRound({ ...deps, config: { ...deps.config, maxRepairs: 0, preparation: undefined } });
   }
   // 绑定实际使用的输入；父目录配置不一定在当前 Git 工作区里。
   const configVersion = JSON.stringify(deps.config);
@@ -531,35 +426,14 @@ async function runReviewRoundOwned(deps: ReviewDeps): Promise<ReviewOutcome> {
     deps = { ...deps, projectContext: context.text, checkInputs, sourceCover };
     await deps.saveState();
   }
-  deps.state.queueReviewedAcceptance = undefined;
-  const queueEnv = deps.env ?? process.env;
-  if (queueEnv.AUTOREVIEW_BATCH_FILE && queueEnv.AUTOREVIEW_STAGE) {
-    const reviewed = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
-    deps.checkLive?.();
-    const queued = queueReviewedResult(deps.cwd, reviewed, queueEnv);
-    if (queued) {
-      const changed = deps.checkInputs?.(); if (changed) return changed;
-      const reason = `不再评审：工作区提交和树与本批合入队列核对的合并结果完全相同（${queued.entry.result}），没有新的候选改动`;
-      Object.assign(deps.state, { lastSnapshot: reviewed.ref, lastSnapshotDetails: reviewed, lastUntracked: [],
-        lastFingerprint: reviewed.fingerprint, lastCheckedFingerprint: reviewed.fingerprint, unresolvedMustFix: undefined,
-        unresolvedAcceptance: undefined, queueReviewedAcceptance: queued.acceptance });
-      deps.state.rounds.push({ round: deps.round, startedAt: nowStamp(), durationMs: 0, conclusion: reason,
-        mustFixRaw: "", mustFix: [], minor: [], questions: [], recheck: [], note: queued.acceptance === null ? `${reason}；历史队列缺少验收结论，免重复评审未补做验收` : reason });
-      await deps.saveState();
-      await deps.writeSummary?.("完成");
-      return { kind: "done", notes: reason, hint: queued.acceptance === null ? "历史队列缺少验收结论；免重复评审未补做验收，不能据此自动合入，请重新检查必需验收。"
-        : queued.acceptance.manual.length ? `待人工验收：${queued.acceptance.manual.map((item) => `${item.id}：${item.text}`).join("；")}` : undefined };
-    }
-  }
   const preparation = deps.config.preparation;
   // 开工依据必须早于准备：准备和验收都读同一个 state.baseline，不能让准备改写它。
   // 没有会话启动时记录的快照（手动 /review）时，以 HEAD 为基线，让启动前的未提交改动进入评审。
   if (deps.state.baseline === undefined) {
     const snap = await createGitEvidence(deps.exec, deps.cwd, deps.signal).snapshot();
-    const inherited = process.env.AUTOREVIEW_PIPELINE_LAUNCH === "1" ? process.env.AUTOREVIEW_BASE_REV?.trim() : undefined;
-    deps.state.baseline = inherited || snap.head;
-    deps.state.baselineUntracked = inherited ? snap.untracked.map(({ path }) => path) : [];
-    deps.state.baselineUntrackedDetails = inherited ? snap.untracked.map((item) => ({ ...item })) : [];
+    deps.state.baseline = snap.head;
+    deps.state.baselineUntracked = [];
+    deps.state.baselineUntrackedDetails = [];
     deps.state.baselineFingerprint = snap.fingerprint;
     await deps.saveState();
   }

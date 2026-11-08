@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { runAcceptanceStage } from "../acceptance.ts";
+import { runAcceptanceOnce as runAcceptanceStage } from "../acceptance.ts";
 import { createChildExec } from "../hosts/review-hook.ts";
 import { readProcs, reapProcs } from "../procs.ts";
 import { STALLED_TESTER, criteriaItems, block, harness } from "./helpers/acceptance-fixture.ts";

@@ -1,9 +1,6 @@
 /**
- * pipeline-core.ts — 流水线的共用约定：pi 扩展（每一段的会话）和 pipeline.ts（编排）都用。
- *
- * 每一段会话由流水线启动时带两个环境变量：AUTOREVIEW_PIPELINE_DIR（流水线目录）、AUTOREVIEW_STAGE（段名）。
- * 扩展把这一段的状态写到 <目录>/<段>.status.json；编排程序把整批验收返修写到 <目录>/<段>.inbox.json，
- * 扩展读到后发给开发方。没有这两个环境变量的会话完全不受影响。
+ * 通用原子 JSON 与只读历史/单会话 PA 状态结构。
+ * resources/materials/methods/project-context、宿主观测与安全停止仍使用；不再承载旧调度。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -40,10 +37,6 @@ export function completionChecks(round?: { conclusion?: string; reviewConclusion
 
 export const PIPELINE_DIR_ENV = "AUTOREVIEW_PIPELINE_DIR";
 export const STAGE_ENV = "AUTOREVIEW_STAGE";
-/** 只有 pipeline.ts 真正启动段时才设置：段会话据此采用准备前确定的开工依据。 */
-export const PIPELINE_LAUNCH_ENV = "AUTOREVIEW_PIPELINE_LAUNCH";
-/** 一次性启动回报身份：只有真正启动段的 bin/pi-dev 持有，成功后不再传给子进程。 */
-export const PIPELINE_LAUNCH_TOKEN_ENV = "AUTOREVIEW_PIPELINE_LAUNCH_TOKEN";
 /** 仅测试：扩展轮询收件箱、编排程序轮询状态的间隔（毫秒）。 */
 export const POLL_ENV = "AUTOREVIEW_PIPELINE_POLL_MS";
 
@@ -84,14 +77,6 @@ export interface StageStatus {
   updatedAt: string;
 }
 
-export interface InboxMessage {
-  seq: number;
-  /** 发给开发方的返修消息。 */
-  message: string;
-  /** 交给评审当作「上一轮必修」复查的条目原文。 */
-  mustFix: string;
-}
-
 export interface StageLink { dir: string; stage: string }
 
 /** 会话由流水线启动时返回它属于哪个目录、哪一段；否则 undefined。 */
@@ -109,7 +94,6 @@ export function pollMs(env: NodeJS.ProcessEnv = process.env, fallback = 2000): n
 /** 段名做文件名：去掉路径分隔符等不能进文件名的字符。 */
 const fileSafe = (stage: string): string => stage.replace(/[/\\:*?"<>|\s]+/g, "_");
 export const statusPath = (dir: string, stage: string): string => join(dir, `${fileSafe(stage)}.status.json`);
-export const inboxPath = (dir: string, stage: string): string => join(dir, `${fileSafe(stage)}.inbox.json`);
 
 export function readJson<T>(path: string): T | undefined {
   if (!existsSync(path)) return undefined;

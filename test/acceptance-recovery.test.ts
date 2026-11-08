@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node
 import { join } from "node:path";
 import test from "node:test";
 import { parseAcceptanceReport } from "../acceptance-core.ts";
-import { ACCEPTANCE_EVENTS_PATH, RECOVERY_PROMPT_PATH, runAcceptanceStage } from "../acceptance.ts";
+import { ACCEPTANCE_EVENTS_PATH, RECOVERY_PROMPT_PATH, runAcceptanceOnce as runAcceptanceStage } from "../acceptance.ts";
 import { blockerHint } from "../onboarding.ts";
 import { processStartTime, readProcs } from "../procs.ts";
 import { recordToolActivity } from "../acceptance-events.ts";

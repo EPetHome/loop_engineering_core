@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { runAcceptanceStage } from "../acceptance.ts";
+import { runAcceptanceOnce as runAcceptanceStage } from "../acceptance.ts";
 import { readProcs } from "../procs.ts";
 import { STALLED_TESTER, PARALLEL_TESTER, criteriaItems, block, harness } from "./helpers/acceptance-fixture.ts";
 

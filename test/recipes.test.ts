@@ -3,20 +3,19 @@ import "./test-env.ts";
 import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
 import { createChildExec } from "../hosts/review-hook.ts";
-import { parsePlan } from "../pipeline.ts";
-import { queueDir, queueStageEvent, readMergeQueue, registerQueueBatch } from "../merge-queue.ts";
+import { queueDir, readMergeQueue, type MergeQueue, type QueueBatch } from "../merge-queue.ts";
 import { writePhase, type BatchInfo } from "../events.ts";
 import { writeStageStatus } from "../pipeline-core.ts";
 import { processStartTime, registerProc, releaseProcessTree, stopSessionGroup } from "../procs.ts";
 import { createRunResource } from "../resources.ts";
-import { runReviewOnly } from "../review-only.ts";
+import { parseReviewOnlyPlan, runReviewOnly } from "../review-only.ts";
 import { newReviewState, runReviewRound } from "../review.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,11 +34,18 @@ function fixture() {
   git(repo, "add", "."); git(repo, "commit", "-qm", "base"); const base = git(repo, "rev-parse", "HEAD");
   writeFileSync(join(repo, "file.txt"), "candidate\n"); git(repo, "commit", "-am", "candidate"); const head = git(repo, "rev-parse", "HEAD");
   const cli = (...args: string[]) => {
-    const entry = args[0] === "启动" ? ["--input-type=module", "-e", `import { main } from ${JSON.stringify(join(ROOT, "loop.ts"))}; process.exitCode = await main(process.argv.slice(1), { legacyCompatibility: true });`] : [join(ROOT, "loop.ts")];
+    const entry = [join(ROOT, "loop.ts")];
     const result = spawnSync(process.execPath, [...entry, ...args, "--json"], { cwd: repo, env, encoding: "utf8", timeout: 90_000 });
     assert.ok(result.stdout.trim(), result.stderr); return { code: result.status, data: JSON.parse(result.stdout), stderr: result.stderr };
   };
-  const close = () => rmSync(root, { recursive: true, force: true });
+  const close = () => {
+    if (process.env.LOOP_STEP5_CLEANUP_EVIDENCE) {
+      const target = join(process.env.LOOP_STEP5_CLEANUP_EVIDENCE, root.split("/").at(-1)!); mkdirSync(target, { recursive: true });
+      if (existsSync(join(home, ".pi-autoreview/reports"))) cpSync(join(home, ".pi-autoreview/reports"), join(target, "reports"), { recursive: true });
+      writeFileSync(join(target, "fixture.json"), JSON.stringify({ root, repo, owner: { pid: process.pid, started: processStartTime(process.pid) }, worktrees: git(repo, "worktree", "list", "--porcelain"), ended: new Date().toISOString() }));
+    }
+    rmSync(root, { recursive: true, force: true });
+  };
   return { root, repo, home, env, base, head, git, cli, close };
 }
 async function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T> | T): Promise<T> {
@@ -107,7 +113,7 @@ test("单一入口 A3：只评审从候选配置读取 90 分钟，仍不运行�
       const run = await runReviewOnly({ repo: f.repo, base: f.base, head }, { now: () => 0,
         callReviewer: async (_session, _round, timeout) => {
           called = true; assert.equal(timeout, 90 * 60_000);
-          return { code: 0, killed: false, stderr: "", stdout: "## 结论：通过\n## 必修\n无\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n" };
+          return { code: 0, killed: false, processesReleased: true, stderr: "", stdout: "## 结论：通过\n## 必修\n无\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n" };
         },
       });
       assert.ok(called); assert.equal(run.exitCode, 0); assert.equal(run.model, "file/model");
@@ -170,13 +176,12 @@ test("组长已退出但孤儿组仍在：不假称停止，也不凭旧 PID 杀
   } finally { assert.equal(releaseProcessTree({ pgid: child.pid!, started, token }), true); f.close(); }
 });
 
-test("A4 未知 recipe 退出 3 并列合法值；A7 缺省仍是 develop", () => {
+test("A4 旧开发配方不再执行；独立只评审仍可成功/失败并释放检出", () => {
   const f = fixture();
   try {
     const batch = join(f.root, "batch.json"); writeFileSync(batch, '{"recipe":"foo"}');
-    const run = f.cli("启动", batch); assert.equal(run.code, 3); assert.match(run.data.error, /develop.*review-only/);
-    const plan = parsePlan({ name: "dev", stages: { 甲: { start: "true" } } }, f.repo);
-    assert.equal(plan.recipe, "develop"); assert.equal(plan.stages.size, 1); assert.deepEqual(plan.steps, [["甲"]]);
+    const run = f.cli("启动", batch); assert.notEqual(run.code, 0); assert.match(run.data.error, /旧批次|version|性质/);
+    assert.throws(() => parseReviewOnlyPlan({ name: "dev", stages: { 甲: { start: "true" } } }, f.repo), /旧批次/);
     f.env.FAKE_MODE = "pass";
     assert.equal(f.cli("评审", "--base", f.base, "--head", f.head).code, 0);
     f.env.FAKE_MODE = "fail";
@@ -193,7 +198,7 @@ test("sink report 有/无必修均返回报告，不写总结、不返修、不�
       const outcome = await runReviewRound({ sink: "report", cwd: f.repo, devSessionId: "report-sink", round: 1, state, deliveryNote: "",
         config: { maxRepairs: 0, reviewerModel: "m", reviewerThinking: "xhigh", reviewTimeoutMin: 60, reviewerCmd: "" },
         exec: createChildExec(), env: {}, writeInput: (name, text) => { const path = join(f.root, name); writeFileSync(path, text); return path; }, saveState: () => {},
-        writeSummary: async () => { assert.fail("report 不走开发总结"); }, callReviewer: async () => ({ code: 0, killed: false, stderr: "", stdout: `## 结论：通过\n## 必修\n${fixes ? "1. 触发：空输入；后果：数据丢失" : "无"}\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n` }),
+        writeSummary: async () => { assert.fail("report 不走开发总结"); }, callReviewer: async () => ({ code: 0, killed: false, processesReleased: true, stderr: "", stdout: `## 结论：通过\n## 必修\n${fixes ? "1. 触发：空输入；后果：数据丢失" : "无"}\n## 小问题\n- 无\n## 需求疑问\n- 无\n## 上轮必修复查\n- 无\n` }),
       });
       assert.equal(outcome.kind, "report"); assert.equal(outcome.review?.mustFix.length, fixes ? 1 : 0); assert.ok(outcome.record);
       assert.equal(state.repairs, 0); assert.equal(state.awaitingRepair, undefined); assert.equal(existsSync(join(f.root, "projects")), false);
@@ -208,7 +213,10 @@ test("A5 停止核对身份的会话及登记消费者；同名身份不符不�
       const dev = join(f.root, "dev"); f.git(f.repo, "worktree", "add", "-b", "feat/stop", dev);
       const file = join(f.repo, "batch.json"), dir = join(f.root, "pipeline");
       writeFileSync(file, JSON.stringify({ name: "stop", branch: "feat/stop", dir, stages: { 甲: { cwd: dev, start: "fake" }, 乙: { cwd: dev, start: "fake" } } }));
-      registerQueueBatch(f.repo, { name: "stop", file, dir, project: f.repo, release: "main", stages: [{ name: "甲", cwd: dev, branch: "feat/stop", start: "fake" }, { name: "乙", cwd: dev, branch: "feat/stop", start: "fake" }], steps: [["甲", "乙"]] });
+      const directory = queueDir(f.repo); mkdirSync(directory, { recursive: true });
+      const historical: QueueBatch = { id: "history", name: "stop", file, dir, project: f.repo, release: "main", stages: [{ name: "甲", cwd: dev, branch: "feat/stop", start: "fake" }, { name: "乙", cwd: dev, branch: "feat/stop", start: "fake" }], steps: [["甲", "乙"]] };
+      const history: MergeQueue = { version: 1, repo: f.repo, common: f.git(f.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"), dir: directory, workspace: join(directory, "worktree"), nextOrder: 1, batches: [historical], entries: [] };
+      writeFileSync(join(directory, "queue.json"), JSON.stringify(history));
       const state = readMergeQueue(f.repo)!;
       state.entries.push({ id: "stop-entry", batch: state.batches[0].id, name: "stop", order: 1, status: "pending", qualification: [], sources: [], attempt: 0, createdAt: "now", updatedAt: "now" });
       writeFileSync(join(queueDir(f.repo), "queue.json"), JSON.stringify(state));
@@ -245,7 +253,7 @@ test("A5 停止核对身份的会话及登记消费者；同名身份不符不�
       assert.equal(readFileSync(join(f.root, "甲.md"), "utf8"), "保留总结和证据\n");
       assert.ok(events(f.root).some((event) => event.status === "failed" && event.reason.category === "已停止"));
       // 迟到完成不能把用户停止改成可合入。
-      queueStageEvent({ cwd: dev, file, stage: "甲", status: { sessionId: "甲", event: "done", readyEpoch: "late", summary: join(f.root, "甲.md"), inbox: 0 } });
+      writeStageStatus({ dir, stage: "甲" }, { sessionId: "甲", event: "done", readyEpoch: "late", summary: join(f.root, "甲.md"), inbox: 0 });
       assert.equal(readMergeQueue(f.repo)!.entries[0].status, "stopped");
       const oneStage = f.cli("停止", alias, "--stage", "甲"); assert.equal(oneStage.code, 0); assert.equal(oneStage.data.ok, true);
       assert.equal(processStartTime(children[1].child.pid!), children[1].started, "指定段不碰其他段");
@@ -254,6 +262,39 @@ test("A5 停止核对身份的会话及登记消费者；同名身份不符不�
     for (const { child, started } of children) { releaseProcessTree({ pgid: child.pid!, started }); await sleep(20); }
     f.close();
   }
+});
+
+test("直接只评审的缺失/否定释放回执、脏检出不能被 finally 删除或空登记洗白", async (t) => {
+  for (const mode of ["missing", "false", "dirty", "corrupt", "ignored", "rebind"] as const) await t.test(mode, async () => {
+    const f = fixture(); let retained: string | undefined, calls = 0;
+    try {
+      await withEnv(f.env, async () => {
+        const result = await runReviewOnly({ repo: f.repo, base: f.base, head: f.head }, { callReviewer: async (_session, _round, _timeout, input) => {
+          calls++; // 纯内存替身，没有启动任何模型/宿主/工具消费者。
+          if (mode === "dirty") { retained = f.git(f.repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).at(-1)!.slice(9); writeFileSync(join(retained, "diagnostic.txt"), "untrusted model output"); }
+          if (mode === "corrupt") writeFileSync(join(dirname(input), "review.procs.json"), "{broken-registry");
+          if (mode === "ignored" || mode === "rebind") {
+            retained = f.git(f.repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).at(-1)!.slice(9);
+            if (mode === "ignored") { f.git(retained, "config", "core.excludesFile", join(f.root, "ignore")); writeFileSync(join(f.root, "ignore"), "ignored.txt\n"); writeFileSync(join(retained, "ignored.txt"), "unknown ignored output"); }
+            else { const tree = f.git(retained, "rev-parse", "HEAD^{tree}"), commit = f.git(retained, "commit-tree", tree, "-p", f.head, "-m", "untrusted same tree"); f.git(retained, "update-ref", "HEAD", commit, f.head); }
+          }
+          return { code: 0, killed: false, stderr: "", stdout: "## 结论：通过\n## 必修\n无\n", ...(mode === "missing" ? {} : { processesReleased: ["dirty", "corrupt", "ignored", "rebind"].includes(mode) }) };
+        } });
+        assert.equal(result.exitCode, 2); assert.equal(calls, 1); retained = String(result.retainedWorktree); assert.ok(existsSync(retained));
+        assert.ok(f.git(f.repo, "worktree", "list", "--porcelain").includes(`worktree ${retained}`));
+        assert.match(readFileSync(String(result.report), "utf8"), /保留.*评审检出|保留现场/);
+        if (["missing", "false", "corrupt"].includes(mode)) { if (mode !== "corrupt") assert.equal((result.record as any).consumersReleased, false); const leases = JSON.parse(readFileSync(join(f.repo, ".git/loop-project-execution.json"), "utf8")); assert.ok(leases.some((r: any) => r.blocked)); }
+        if (mode === "dirty") assert.equal(readFileSync(join(retained, "diagnostic.txt"), "utf8"), "untrusted model output");
+        if (mode === "ignored") assert.equal(readFileSync(join(retained, "ignored.txt"), "utf8"), "unknown ignored output");
+        if (mode === "rebind") assert.notEqual(f.git(retained, "rev-parse", "HEAD"), f.head);
+        t.diagnostic(JSON.stringify({ mode, calls, retained, exitCode: result.exitCode }));
+      });
+    } finally {
+      // 仅此测试明确未启动消费者的私有检出；生产的未知释放/失败记录不追改为通过。
+      if (retained && existsSync(retained)) { f.git(f.repo, "worktree", "remove", "--force", retained); rmSync(dirname(retained), { recursive: true }); }
+      f.close();
+    }
+  });
 });
 
 test("A6 JSON 外壳：合入/推送参数与执行失败也有固定字段和原因", () => {

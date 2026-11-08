@@ -8,6 +8,9 @@ import { attachSession, completeManagedDelivery, consumeManagedRepair, developer
 import { createChildExec, expandFileRefsWithSources } from "./hosts/review-hook.ts";
 import type { Exec } from "./git.ts";
 import { experienceInjection } from "./experience.ts";
+import { ACCEPT_COMMAND_MIGRATION } from "./config.ts";
+import { consumeRelay, paInfo, recordManagedRelay } from "./pa.ts";
+import { hasRelayHeader, relayMessage, wordRecords } from "./pa-records.ts";
 
 function assistantText(ctx: ExtensionContext): string {
   for (const entry of [...ctx.sessionManager.getEntries()].reverse()) {
@@ -22,6 +25,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
   const readRun = (path: string) => readTaskRun(path, task), updateRun = <T>(path: string, fn: (r: KernelRun) => T) => updateTaskRun(path, task, fn);
   let path: string | undefined, controller: AbortController | undefined, pending: Promise<unknown> | undefined, inbox: ReturnType<typeof setInterval> | undefined;
   let uiContext: ExtensionContext | undefined, lastLedger = "", lastStatus = "", lastNotice = "";
+  const paDispatched = new Set<string>();
   const refresh = (ctx: ExtensionContext, force = false): void => {
     if (!path) return;
     try {
@@ -63,6 +67,7 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     if (path) updateRun(path, (r) => { if (r.publication || r.abandoned) throw new Error("任务已发布或放弃"); const releaseProblem = managedReleaseProblem(path!, r); if (releaseProblem) throw new Error(releaseProblem); r.stopped = false; r.stopReason = undefined; }); show(ctx);
   } });
   pi.on("session_start", async (_event, ctx) => {
+    if (typeof pi.getFlag === "function" && ["autoreview-accept-cmd", "autoreview-accept-mode", "autoreview-accept-timeout-min"].some((name) => pi.getFlag(name))) ctx.ui.notify(ACCEPT_COMMAND_MIGRATION, "warning");
     path = managedLedger(ctx.cwd);
     if (!path) throw new Error("缺少受管任务登记");
     const file = ctx.sessionManager.getSessionFile?.() ?? process.env.PI_SESSION_FILE;
@@ -76,6 +81,11 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
       refresh(ctx);
       if (!path || pending || !ctx.isIdle()) return;
       const run = readRun(path), repair = run.repair;
+      if (!run.activity) {
+        const info = paInfo(run.file), name = info.stages.find((s) => s.cwd === run.worktree)?.stage;
+        const word = name && wordRecords(info.dir, run.taskId ?? name).find((w) => w.state === "delivered" && w.session?.host === "pi" && w.session.id === ctx.sessionManager.getSessionId() && !paDispatched.has(w.id));
+        if (word) { paDispatched.add(word.id); pi.sendUserMessage(relayMessage(word.id, word.text)); return; }
+      }
       if (!repair || !["pending", "sent"].includes(repair.state) || run.stopped || run.activity || !pi.sendMessage) return;
       try {
         if (consumeManagedRepair(path, repair.message, undefined, task)) pi.sendMessage({ customType: "loop-repair", content: repair.message, display: true }, { triggerTurn: true });
@@ -83,16 +93,21 @@ export default function kernelPi(pi: ExtensionAPI, execOverride?: Exec): void {
     }, 250); inbox.unref?.();
   });
   pi.on("input", async (event, ctx) => {
-    if (!path || !["interactive", "rpc"].includes(event.source)) return { action: "continue" };
-    const materials = expandFileRefsWithSources(event.text, ctx.cwd);
-    if (consumeManagedRepair(path, event.text, materials, task)) return { action: "continue" };
-    if (readRun(path).publication && managedMergeRequest(readRun(path), event.text)) { await mergeManaged(path); show(ctx); return { action: "handled" }; }
-    const decision = recordManagedUserInput(path, event.text, `pi:${event.source}`, materials, undefined, task);
+    if (!path) return { action: "continue" };
+    const run = readRun(path), info = paInfo(run.file), name = info.stages.find((s) => s.cwd === run.worktree)?.stage;
+    const relay = name && hasRelayHeader(event.text) ? await consumeRelay({ message: event.text, info, stage: name, session: { host: "pi", id: ctx.sessionManager.getSessionId() }, summary: join(run.dir, "summary.md") }) : undefined;
+    if (hasRelayHeader(event.text) && !relay) return { action: "handled" };
+    if (!relay && !["interactive", "rpc"].includes(event.source)) return { action: "continue" };
+    const raw = relay ? relay.text : event.text, materials = expandFileRefsWithSources(raw, ctx.cwd);
+    if (consumeManagedRepair(path, raw, materials, task)) return { action: "continue" };
+    if (run.publication && managedMergeRequest(run, raw)) { await mergeManaged(path); show(ctx); return { action: "handled" }; }
+    const decision = recordManagedUserInput(path, raw, relay ? "pi:interactive" : `pi:${event.source}`, materials, undefined, task);
+    if (relay) recordManagedRelay(path, task, relay);
     if (decision) { await mergeManaged(path, { accept: true, decision }); show(ctx); return { action: "handled" }; }
     controller?.abort(); await pending;
     const until = Date.now() + 5000;
     while (readRun(path).activity && ["waiting", "testing"].includes(readRun(path).activity!.kind) && Date.now() < until) await new Promise((ok) => setTimeout(ok, 50));
-    return { action: "continue" };
+    return relay ? { action: "transform", text: raw } : { action: "continue" };
   });
   pi.on("before_agent_start", async (event, ctx) => {
     if (!path) return;

@@ -470,13 +470,15 @@ test("G10 暂停后你再让开发方干活：自动评审恢复，返修计数�
   });
 });
 
-test("扩展加载时撤掉一次性启动回报身份，自定义 start 的子进程不能再回报失败", async () => {
+test("废弃启动回报令牌不再被读取或授予流水线执行能力", async () => {
   const key = "AUTOREVIEW_PIPELINE_LAUNCH_TOKEN";
   const old = process.env[key];
   process.env[key] = "one-shot";
   const h = harness();
   try {
-    assert.equal(process.env[key], undefined);
+    assert.equal(process.env[key], "one-shot", "不改写外层环境；权限检查已无旧状态回报分支");
+    await h.event("session_start");
+    assert.equal(h.calls.some((c) => c.command.includes("pipeline")), false);
   } finally {
     if (old === undefined) delete process.env[key]; else process.env[key] = old;
     await h.close();

@@ -1,150 +1,31 @@
-/** 旧内部路径配置装配回归：真实 pi-dev / 权限检查 / 流水线；公开新卡 CLI 在 kernel.test.ts 覆盖。 */
-import "./test-env.ts";
-import "./helpers/git-runtime.ts";
+/** 配置装配保留于单会话/只评审；旧段 Pi 参数不再启用旧编排。 */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { EXT_DIR, PROJECT_CONFIG_ENV } from "../config.ts";
+import { EXT_DIR } from "../config.ts";
 import { readMethodsRecord } from "../methods.ts";
 import { sourceInputsProblem } from "../project-context.ts";
-
+import { kernelFixture } from "./helpers/kernel-fixture.ts";
+import { legacyFixture } from "./helpers/pipeline-fixture.ts";
 function fixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loop-config-launch-")));
-  const home = join(root, "home"), bin = join(root, "bin"), launches = join(root, "launches");
-  mkdirSync(home); mkdirSync(bin);
-  const agent = join(home, ".pi", "agent");
-  mkdirSync(join(agent, "extensions", "pi-permission-system"), { recursive: true });
-  writeFileSync(join(agent, "extensions", "pi-permission-system", "config.json"), '{"yoloMode":true}');
-  writeFileSync(join(agent, "settings.json"), '{"defaultProjectTrust":"always"}');
-  const permission = join(root, "permission.ts"); writeFileSync(permission, "// 替身通过现有配置检查，不加载真实权限扩展。\n");
-  const pa = join(root, "pa.json"); writeFileSync(pa, JSON.stringify({ pa: { localNotify: false, eventsDir: join(root, "events") } }));
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agent,
-    PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, LOOP_DIR: EXT_DIR,
-    PI_BIN: join(EXT_DIR, "test/fake-config-pi.mjs"), PI_NODE_BIN: dirname(process.execPath), PERMISSION_EXTENSION: permission,
-    AUTOREVIEW_PROJECTS_ROOT: join(root, "projects"), AUTOREVIEW_RESOURCE_ROOT: join(root, "resources"),
-    AUTOREVIEW_MERGE_QUEUE_ROOT: join(root, "queues"), AUTOREVIEW_PIPELINE_POLL_MS: "10", LOOP_PA_CONFIG: pa,
-    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", FAKE_CONFIG_LOG: launches, UNRELATED_SECRET: "do-not-copy",
-  };
-  for (const key of PROJECT_CONFIG_ENV) delete env[key];
-  const windows = join(root, "windows.jsonl");
-  // 真实 launchTerminal 生成 AppleScript；替身解码窗口命令后在独立、缺失配置覆盖的环境中实际执行。
-  writeFileSync(join(bin, "osascript"), `#!${process.execPath}
-const { spawnSync } = require('node:child_process');
-const fs = require('node:fs');
-const input = process.argv.slice(2).join('\\n');
-const match = /tell application "Terminal" to do script "((?:\\\\.|[^"\\\\])*)"/.exec(input);
-if (!match) process.exit(0);
-const command = JSON.parse('"' + match[1] + '"');
-const env = { ...process.env };
-delete env.AUTOREVIEW_REVIEW_TIMEOUT_MIN;
-delete env.AUTOREVIEW_REVIEWER_CMD;
-const wrapper = /^\\/bin\\/sh '([^']+)'$/.exec(command);
-const body = wrapper ? fs.readFileSync(wrapper[1], 'utf8') : '';
-const request = /'--payload' '([^']+)'/.exec(body);
-const script = request ? JSON.parse(fs.readFileSync(request[1], 'utf8')).script : command;
-fs.appendFileSync(${JSON.stringify(windows)}, JSON.stringify({ command, script, inheritedTimeout: env.AUTOREVIEW_REVIEW_TIMEOUT_MIN ?? null }) + '\\n');
-const run = spawnSync('/bin/sh', ['-c', command], { env, encoding:'utf8', timeout:30000 });
-process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
-process.exit(run.status ?? 1);
-`);
-  chmodSync(join(bin, "osascript"), 0o755);
-  const repo = (name: string, timeout?: number) => {
-    const cwd = join(root, name); mkdirSync(cwd);
-    writeFileSync(join(cwd, "need.md"), "配置覆盖装配\n");
-    writeFileSync(join(cwd, "prompt.md"), "替身不调用模型\n");
-    writeFileSync(join(cwd, ".autoreview.json"), JSON.stringify({
-      ...(timeout === undefined ? {} : { reviewTimeoutMin: timeout }),
-      gate: { cmd: "true", timeoutMin: 20 }, acceptance: { timeoutMin: 60 },
-      preparation: { check: 'printf prepared > "$AUTOREVIEW_RUN_DIR/config-probe.txt"' },
-      context: { sources: [{ id: "need", path: "need.md", role: "requirement" }] },
-    }));
-    for (const args of [["init", "-q", "-b", "main"], ["-c", "user.name=test", "-c", "user.email=test@example.com", "add", "."],
-      ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"]]) {
-      const run = spawnSync("git", args, { cwd, env, encoding: "utf8" }); assert.equal(run.status, 0, run.stderr);
-    }
-    return cwd;
-  };
-  const run = (cwd: string, entry: string, args: string[]) => entry === "bin/loop" && args[0] === "启动"
-    ? spawnSync(process.execPath, ["--input-type=module", "-e", `import { main } from ${JSON.stringify(join(EXT_DIR, "loop.ts"))}; process.exitCode = await main(process.argv.slice(1), { legacyCompatibility: true });`, ...args], { cwd, env, encoding: "utf8", timeout: 60_000 })
-    : spawnSync(join(EXT_DIR, entry), args, { cwd, env, encoding: "utf8", timeout: 60_000 });
-  return { root, env, launches, windows, repo, run, close: () => rmSync(root, { recursive: true, force: true }) };
+  const f = kernelFixture(["开发评审"]), agent = join(f.root, "agent"), permission = join(f.root, "permission.ts"), launches = join(f.root, "launches");
+  mkdirSync(join(agent, "extensions/pi-permission-system"), { recursive: true }); writeFileSync(join(agent, "extensions/pi-permission-system/config.json"), '{"yoloMode":true}'); writeFileSync(join(agent, "settings.json"), '{"defaultProjectTrust":"always"}'); writeFileSync(permission, "// fixture\n");
+  const marker = JSON.parse(readFileSync(join(f.repo, ".autoreview.json"), "utf8")); marker.reviewTimeoutMin = 90; marker.acceptance.timeoutMin = 999; marker.context = { sources: [{ id: "need", path: "prompt.md", role: "requirement" }] }; writeFileSync(join(f.repo, ".autoreview.json"), JSON.stringify(marker));
+  Object.assign(process.env, { PI_BIN: join(EXT_DIR, "test/fake-config-pi.mjs"), PI_CODING_AGENT_DIR: agent, PERMISSION_EXTENSION: permission, PI_NODE_BIN: dirname(process.execPath), FAKE_CONFIG_LOG: launches, UNRELATED_SECRET: "do-not-copy" });
+  const run = (...args: string[]) => spawnSync(join(EXT_DIR, "bin/loop"), args, { cwd: f.repo, env: { ...process.env, NODE_NO_WARNINGS: "1" }, encoding: "utf8", timeout: 30_000 });
+  return { ...f, launches, run, record: () => JSON.parse(readFileSync(join(launches, "standalone.json"), "utf8")) };
 }
-
-const json = (path: string): any => JSON.parse(readFileSync(path, "utf8"));
-
-test("启动配置／非预览的 pi-dev 追加 flag 贯穿权限检查；不足预算仍阻止启动", () => {
-  const f = fixture();
-  try {
-    const cwd = f.repo("standalone");
-    const args = ["--cwd", cwd, "--no-ponytail", join(cwd, "prompt.md")];
-    const invalid = f.run(cwd, "bin/pi-dev", args);
-    assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /必须小于一轮总预算/);
-    assert.ok(!existsSync(f.launches), "预算不足没有启动替身 Pi");
-    const valid = f.run(cwd, "bin/pi-dev", [...args, "--", "--autoreview-review-timeout-min", "120"]);
-    assert.equal(valid.status, 0, valid.stdout + valid.stderr);
-    assert.deepEqual(json(join(f.launches, "standalone.json")).effectiveConfig.reviewTimeoutMin, { value: 120, source: "flag" });
-    assert.ok(readMethodsRecord(cwd, f.env)?.permissionFingerprint, "实际经过权限检查并留下记录");
-  } finally { f.close(); }
+test("非预览单会话实际经过权限检查：验收时限大于评审仍启动，flag > env > 文件", () => {
+  const f = fixture(); try { const args = ["开发", "pi", "--cwd", f.repo, "--no-ponytail", join(f.repo, "prompt.md")]; assert.equal(f.run(...args).status, 0); assert.deepEqual(f.record().effectiveConfig.reviewTimeoutMin, { value: 90, source: "file" }); process.env.AUTOREVIEW_REVIEW_TIMEOUT_MIN = "110"; assert.equal(f.run(...args, "--", "--autoreview-review-timeout-min", "120").status, 0); assert.deepEqual(f.record().effectiveConfig.reviewTimeoutMin, { value: 120, source: "flag" }); assert.ok(readMethodsRecord(f.repo)?.permissionFingerprint); assert.doesNotMatch(JSON.stringify(f.record().overrides), /UNRELATED_SECRET|do-not-copy|HOME/); assert.equal(sourceInputsProblem(f.repo, f.record().sourceInputs, f.record().overrides), undefined); } finally { f.cleanup(); }
 });
-
-test("启动配置／非预览单段启动以 pi.args 补足预算并携带完成资格覆盖", () => {
-  const f = fixture();
-  try {
-    const cwd = f.repo("single"), file = join(f.root, "single.json"), dir = join(f.root, "pipeline");
-    writeFileSync(file, JSON.stringify({ name: "single", dir, pi: { ponytail: false, args: ["--autoreview-review-timeout-min", "120"] },
-      stages: { 甲: { cwd, prompt: join(cwd, "prompt.md") } } }));
-    const result = f.run(cwd, "bin/loop", ["启动", file, "--json"]);
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.ok(readMethodsRecord(cwd, f.env)?.permissionFingerprint);
-    assert.equal(json(join(f.launches, "甲.json")).effectiveConfig.reviewTimeoutMin.value, 120);
-    const status = json(join(dir, "甲.status.json"));
-    assert.equal(status.configOverrides.reviewTimeoutMin, "120");
-    assert.doesNotMatch(JSON.stringify(status.configOverrides), /UNRELATED_SECRET|do-not-copy|HOME/);
-    assert.equal(sourceInputsProblem(cwd, status.sourceInputs, status.configOverrides), undefined);
-  } finally { f.close(); }
+test("精确单会话恢复沿用 argv/真实覆盖，不选择最近会话；非法 flag 仍拒绝", () => {
+  const f = fixture(); try { const r = f.run("开发", "pi", "--cwd", f.repo, "--no-ponytail", "--session", "original-session", "--", "--autoreview-review-timeout-min", "150"); assert.equal(r.status, 0, r.stderr); assert.equal(f.record().sessionId, "original-session"); assert.equal(f.record().resumed, true); assert.equal(f.record().effectiveConfig.reviewTimeoutMin.value, 150); const bad = f.run("开发", "pi", "--cwd", f.repo, "--no-ponytail", "--session", "original-session", "--", "--autoreview-review-timeout-min", "invalid"); assert.notEqual(bad.status, 0); } finally { f.cleanup(); }
 });
-
-test("启动配置／非预览多段的准备、Terminal 窗口、最终资格沿用覆盖且段 flag 优先", () => {
-  const f = fixture();
-  try {
-    const a = f.repo("first"), b = f.repo("second");
-    const file = join(f.root, "multi.json"), dir = join(f.root, "pipeline");
-    writeFileSync(file, JSON.stringify({ name: "multi", dir, pi: { ponytail: false, args: ["--autoreview-review-timeout-min", "120"] },
-      stages: { 甲: { cwd: a, prompt: join(a, "prompt.md") }, 乙: { cwd: b, prompt: join(b, "prompt.md"), args: ["--autoreview-review-timeout-min", "150"] } } }));
-    const result = f.run(a, "bin/loop", ["启动", file, "--launcher", "terminal", "--json"]);
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(readFileSync(join(dir, "pipeline.finished"), "utf8").trim(), "0", "真实流水线完成资格复核通过");
-    for (const [name, cwd, value] of [["甲", a, 120], ["乙", b, 150]] as const) {
-      assert.ok(readMethodsRecord(cwd, f.env)?.permissionFingerprint);
-      assert.equal(json(join(f.launches, `${name}.json`)).effectiveConfig.reviewTimeoutMin.value, value);
-      assert.equal(readFileSync(join(dir, "preparation", name, "config-probe.txt"), "utf8"), "prepared", "真实准备方法在启动前执行");
-    }
-    assert.equal(readFileSync(f.windows, "utf8").trim().split("\n").length, 2);
-  } finally { f.close(); }
+test("旧 pi.args、段覆盖、Terminal/后台环境均无副作用拒绝，不创建窗口命令或完成资格", () => {
+  const f = legacyFixture(); try { f.raw.pi = { args: ["--autoreview-review-timeout-min", "120"] }; f.raw.stages.甲.args = ["--autoreview-review-timeout-min", "150"]; f.save(); for (const launcher of ["terminal", "background"]) f.refuse("启动", ["--launcher", launcher], true); } finally { f.cleanup(); }
 });
-
-test("启动配置／入口预算跨 Terminal 环境断点传递，文件 90 和缺省 60 均实际取 120", () => {
-  for (const fileTimeout of [90, undefined]) {
-    const f = fixture();
-    try {
-      const a = f.repo("first", fileTimeout), b = f.repo("second", fileTimeout);
-      const file = join(f.root, "multi.json"), dir = join(f.root, "pipeline");
-      writeFileSync(file, JSON.stringify({ name: "terminal", dir, pi: { ponytail: false },
-        stages: { 甲: { cwd: a, prompt: join(a, "prompt.md") }, 乙: { cwd: b, prompt: join(b, "prompt.md"), args: ["--autoreview-review-timeout-min", "150"] } } }));
-      const result = f.run(a, "bin/loop", ["启动", file, "--launcher", "terminal", "--autoreview-review-timeout-min", "120", "--json"]);
-      assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.equal(json(join(f.launches, "甲.json")).effectiveConfig.reviewTimeoutMin.value, 120);
-      assert.deepEqual(json(join(f.launches, "乙.json")).effectiveConfig.reviewTimeoutMin, { value: 150, source: "flag" });
-      const windows = readFileSync(f.windows, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-      assert.equal(windows.length, 2);
-      for (const window of windows) {
-        assert.equal(window.inheritedTimeout, null, "替身 Terminal 没有继承入口的预算变量");
-        assert.ok(Buffer.byteLength(window.command) < 1024, "Terminal 只输入短文件路径");
-        assert.ok(window.script.includes("AUTOREVIEW_REVIEW_TIMEOUT_MIN='120'"), "完整启动文件显式携带预算");
-      }
-    } finally { f.close(); }
-  }
+test("独立只评审启动保留显式时限及来源，实际子执行器不回退旧 parsePlan", () => {
+  const f = fixture(); try { const file = join(f.root, "report.json"), head = f.git(f.repo, "rev-parse", "HEAD"); writeFileSync(file, JSON.stringify({ recipe: "review-only", review: { repo: f.repo, base: head, head } })); process.env.AUTOREVIEW_REVIEWER_CMD = join(EXT_DIR, "test/fake-reviewer.mjs"); process.env.FAKE_MODE = "pass"; process.env.FAKE_STATE_DIR = join(f.root, "reviewer"); const r = f.run("启动", file, "--autoreview-review-timeout-min", "150", "--json"); assert.equal(r.status, 0, r.stderr + r.stdout); assert.deepEqual(JSON.parse(r.stdout).effectiveConfig.reviewTimeoutMin, { value: 150, source: "flag" }); assert.equal(existsSync(join(f.root, "pipeline")), false); } finally { f.cleanup(); }
 });

@@ -7,6 +7,8 @@ import { attachSession, completeManagedDelivery, consumeManagedRepair, developer
 import { createChildExec, expandFileRefsWithSources, lastAssistantMessage, sessionIdOf } from "./review-hook.ts";
 import { detectHost, type HookEvent } from "./hook.ts";
 import { experienceInjection } from "../experience.ts";
+import { consumeRelay, paInfo, recordManagedRelay } from "../pa.ts";
+import { hasRelayHeader } from "../pa-records.ts";
 
 export async function handleKernelHook(event: HookEvent): Promise<string | undefined> {
   const task = process.env.AUTOREVIEW_KERNEL_TASK || undefined;
@@ -28,12 +30,16 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
       return context(`${MANAGED_CONVENTION}\n${experienceInjection(readRun(path).repo)}\n${queryKernel(path).lines.join("\n")}`);
     }
     if (event.hook_event_name === "UserPromptSubmit") {
-      const raw = event.prompt ?? "";
+      const incoming = event.prompt ?? "", run = readRun(path), info = paInfo(run.file), name = info.stages.find((s) => s.cwd === run.worktree)?.stage;
+      const relay = name && hasRelayHeader(incoming) ? await consumeRelay({ message: incoming, info, stage: name, session: { host, id }, summary: join(run.dir, "summary.md") }) : undefined;
+      if (hasRelayHeader(incoming) && !relay) return context("PA 用户原话核对失败，未采用输入或授权");
+      const raw = relay ? relay.text : incoming;
       // 不根据引用前缀猜测启动消息；每条真实输入（包括再次引用原提示词）都登记完整材料。
       const materials = expandFileRefsWithSources(raw, event.cwd ?? root);
       if (consumeManagedRepair(path, raw, materials, task)) { developerActive(path, task); return context(`${MANAGED_CONVENTION}\n机器返修信封已核对；用户标准、授权与次数保持原值`); }
       if (readRun(path).publication && managedMergeRequest(readRun(path), raw)) { await mergeManaged(path); return JSON.stringify({ decision: "block", reason: queryKernel(path).lines.join("\n") }); }
       const decision = recordManagedUserInput(path, raw, `${host}:UserPromptSubmit`, materials, undefined, task);
+      if (relay) recordManagedRelay(path, task, relay);
       if (decision) {
         await mergeManaged(path, { accept: true, decision });
         return JSON.stringify({ decision: "block", reason: queryKernel(path).lines.join("\n") });
@@ -41,7 +47,7 @@ export async function handleKernelHook(event: HookEvent): Promise<string | undef
       const until = Date.now() + 5000;
       while (readRun(path).activity && ["waiting", "testing"].includes(readRun(path).activity!.kind) && Date.now() < until) await new Promise((ok) => setTimeout(ok, 50));
       developerActive(path, task);
-      return context(`${MANAGED_CONVENTION}\n${experienceInjection(readRun(path).repo)}`);
+      return context(`${MANAGED_CONVENTION}\n${experienceInjection(readRun(path).repo)}${relay ? `\n【PA 转达已核对】\n${raw}` : ""}`);
     }
     if (event.hook_event_name !== "Stop") return undefined;
     const run = readRun(path), text = lastAssistantMessage(event);

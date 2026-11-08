@@ -130,7 +130,7 @@ test("H14 Hook 的总结也记录开发方在基线之后新增的提交", () =>
 test("H18 交付总表：Hook 完成只追加结果与欠项，SessionStart 不再注入回写提醒", async (t) => {
   const marker = JSON.stringify({ acceptance: {} });
   const requirement = "自动评审总表\n## 验收标准\n不授权：A1\n1. [授权] 操作：todo add 买菜\n   预期：已添加\n2. 操作：todo list\n   预期：有买菜\n3. [人工] 操作：看新首页\n   预期：布局和文案是你想要的";
-  await t.test("A4 完成写入总表，总结开头带路径，无回写勾，人工项保留勾选", () => {
+  await t.test("A4 静态完成写入总表，保留标准/拒绝授权，但未执行验收不冒充部分验证", () => {
     const h = fixture({ marker });
     try {
       h.run(h.event("SessionStart"), { env: ACC_ENV });
@@ -138,23 +138,24 @@ test("H18 交付总表：Hook 完成只追加结果与欠项，SessionStart 不�
       // A2：完成时写入。
       h.run(h.event("UserPromptSubmit", { prompt: requirement }), { env: ACC_ENV });
       h.write("file.txt", "base\nTODO\n");
-      const done = JSON.parse(h.run(h.delivered(), { env: ACC_ENV }).stdout);
+      const done = h.run(h.delivered(), { env: ACC_ENV });
       assert.equal(h.readState().phase, "done", `pauseReason=${h.readState().pauseReason}`);
       const text = readFileSync(h.ledger, "utf8");
       assert.match(text, new RegExp(`^## .+ · ${projectRootOf(h.repo)} · 会话 claude-s1$`, "m"));
       assert.match(text, /^- 任务：自动评审总表$/m);
-      assert.match(text, /^- 结果：完成（部分验证）；评审 1 次，返修 0 次$/m);
+      assert.match(text, /^- 结果：完成；评审 1 次，返修 0 次$/m);
+      assert.match(text, /验收：没验证（本次未安排）/);
       assert.match(text, /^- 总结：.*\/claude-s1\.md$/m);
       assert.doesNotMatch(text, /已回写原单/);
-      assert.match(text, /^- \[ \] A1 人工$/m);
-      assert.match(text, /^- \[ \] A3 人工$/m);
+      assert.doesNotMatch(text, /验收：通过|验收：部分验证/);
       const summary = h.summary();
-      assert.match(summary, /^# 自动评审总结\n- 已登记到交付总表：.*（A1 人工、A3 人工）$/m);
+      assert.match(summary, /^# 自动评审总结\n- 已登记到交付总表：/m);
+      assert.match(summary, /\[人工\].*看新首页/);
       assert.doesNotMatch(summary, /待回写原单/);
-      assert.ok(done.systemMessage.includes("A1 你没授权"), "不授权的条目照常提示人工验收");
+      assert.equal(done.code, 0); assert.deepEqual(h.readState().grants.denied, ["A1"]); assert.match(summary, /本次未安排/);
 
       const first = JSON.parse(h.run(h.event("SessionStart"), { env: ACC_ENV }).stdout);
-      assert.equal(first.hookSpecificOutput.additionalContext, conventionText({ acceptance: true }));
+      assert.equal(first.hookSpecificOutput.additionalContext, conventionText({ singleNode: true }));
       assert.equal(first.systemMessage, undefined);
       assert.equal(readFileSync(h.ledger, "utf8"), text, "开会话不改变总表");
       const passive = h.run(h.event("SessionStart", {}, "s2"), { env: ACC_ENV, devRoot: null });

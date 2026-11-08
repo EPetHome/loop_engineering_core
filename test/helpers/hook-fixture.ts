@@ -65,7 +65,7 @@ export function fixture(options: { marker?: string | null; maxRepairs?: number; 
   const fakeGit = join(bin, "git");
   writeFileSync(fakeGit, `#!/bin/sh\nif [ -n "$FAKE_GIT_FAIL" ]; then\n  case " $* " in\n    *" $FAKE_GIT_FAIL "*) echo "fake git failure" >&2; exit 1;;\n  esac\nfi\nexec "${realGit}" "$@"\n`);
   chmodSync(fakeGit, 0o755);
-  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const git = (...args: string[]): string => {
     const res = spawnSync("git", args, { cwd: repo, env, encoding: "utf8" });
     assert.equal(res.status, 0, res.stderr || res.stdout);

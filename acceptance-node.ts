@@ -22,7 +22,7 @@ export async function runAcceptanceNode(input: NodeInput, exec: Exec): Promise<N
   const retained = reusedAcceptanceItems(run);
   const evidence: string[] = [], operations: string[] = [], guard = workspaceGuard(run), deadline = input.deadline!;
   let released = true, resource: RunResource | undefined, record: AcceptanceRecord | undefined;
-  const execute: Exec = async (cmd, args, opts) => { const result = await exec(cmd, args, opts); released &&= result.processesReleased === true; return result; };
+  const execute: Exec = async (cmd, args, opts) => { const result = await exec(cmd, args, { ...opts, env: { ...opts.env, GIT_OPTIONAL_LOCKS: "0" } }); released &&= result.processesReleased === true; return result; };
   const live = (): void => {
     input.signal?.throwIfAborted(); const r = readRun(input.ledger);
     if (r.stopped || r.activity?.id !== input.attempt || r.userVersion !== run.userVersion || checkInputs(r, "验收").hash !== input.inputs || workspaceGuard(r) !== guard) throw new Error("验收候选/输入/工作区或控制代次变化");
@@ -33,7 +33,9 @@ export async function runAcceptanceNode(input: NodeInput, exec: Exec): Promise<N
     const index = evidence.length, runDir = join(input.evidenceDir, `acceptance-${index}`);
     operations.push(`统一验收第 ${state.round} 轮；实测 ${plan.ids.join("、")}；沿用 ${retained.map((i) => i.id).join("、") || "无"}；树 ${input.candidate.tree}；deadline ${deadline}`);
     try {
-      const result = await runAcceptanceOnce({ workDir: run.worktree, devSessionId: `${run.id}:batch`, round: state.round, deliveryNote: "", state: { requirement: checkInputs(run).requirement, criteria, grants: state.grants },
+      const result = await runAcceptanceOnce({ workDir: run.worktree, devSessionId: `${run.id}:batch`, round: state.round,
+        deliveryNote: `受检工作区是只读候选 ${input.candidate.commit}（tree ${input.candidate.tree}）。不得在受检目录安装依赖、构建、生成或修改任何文件，包括被 Git 忽略的 node_modules、dist、日志与临时脚本；这些写入会中止验收。需要运行时，先将该精确候选归档/检出到系统临时目录，在副本安装原 lockfile 依赖、构建和验证；模型、渠道、账号及数据仍遵守本批隔离边界。测试脚本和证据写验收 runDir 或临时目录，核对副本与本候选的源码一致；不得把另一版本的结果当成当前通过。不要在受检目录后台启动 npm ci。当前候选自身的构建/类型错误属于产品缺陷，应按文件职责及受影响标准归因，不伪称模型或环境故障。`,
+        state: { requirement: checkInputs(run).requirement, criteria, grants: state.grants },
         config, reviewerModel: managedConfig(run.worktree, true).reviewerModel, reviewerThinking: managedConfig(run.worktree, true).reviewerThinking,
         exec: execute, cleanupExec: execute, runDir, procsFile: input.procsFile, deadline, now: Date.now, previousFailed: state.previous?.items.filter((i) => i.verdict !== "通过" && i.verdict !== "需人工").map((i) => i.id) ?? [],
         explicitScope: { ids: plan.ids, retained }, boundedDeadline: true, signal: input.signal, checkLive: live, saveState: () => {},

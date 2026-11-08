@@ -1,4 +1,5 @@
-# 本机验收环境：复制到项目的 .git/info/exclude（或项目自己的 .gitignore）。
+# 本机配置与验收环境：写入项目 .git/info/exclude（或项目自己的 .gitignore）。
+.autoreview.json
 # 这些文件只在本机存在，不进仓库；.autoreview.json 的 localFiles 要列出同样的路径。
 deploy/acceptance/start.sh
 deploy/acceptance/reset-data.sh

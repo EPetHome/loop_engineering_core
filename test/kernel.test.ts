@@ -2,7 +2,7 @@ import "./test-env.ts";
 import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,9 @@ import { submitCandidate } from "../submission-node.ts";
 import { harness as piHarness } from "./helpers/autoreview-fixture.ts";
 import { productionAction } from "../production-loop.ts";
 import { validateProductionFile } from "../production-loop-validation.ts";
+import { parseArgs } from "../loop.ts";
+import { kernelCLI } from "../kernel-cli.ts";
+import { staticReviewer } from "../static-review.ts";
 
 const PASS = "## 结论：通过\n## 必修\n无\n";
 const FAIL = "## 结论：需返修\n## 必修\n1. 必须修改\n";
@@ -55,6 +58,44 @@ function fixture(flow = ["开发评审", "提交"]) {
 }
 const reviewer = (stdout = PASS) => async () => ({ stdout, stderr: "", code: 0, killed: false, processesReleased: true });
 
+test("只读评审的 git status 不刷新索引或误中断，原工作区变更保护仍生效", async () => {
+  const f = fixture(["开发评审"]);
+  try {
+    const path = f.start(), run = readRun(path), file = join(run.worktree, "file.txt");
+    const time = new Date(Date.now() - 60000); utimesSync(file, time, time);
+    const result = await executeNode(path, "开发评审", async (input) => {
+      const call = staticReviewer({ cwd: run.worktree, config: { reviewerModel: "fixture", reviewerThinking: "low", reviewerCmd: "" }, exec: async (_cmd, _args, options) => {
+        assert.equal(options.env!.GIT_OPTIONAL_LOCKS, "0");
+        return f.exec("git", ["status", "--porcelain"], options);
+      } });
+      const output = await call("fixture", 1, 10000, "fixture"); assert.equal(output.code, 0);
+      const evidence = join(input.evidenceDir, "read-only-git.txt"); writeFileSync(evidence, "git status did not touch index\n");
+      return { status: "通过", evidence: [evidence], operations: ["只读 Git 状态"], released: true };
+    });
+    assert.equal(result.status, "通过", result.reason ?? ""); assert.equal(readRun(path).results.at(-1)!.status, "通过");
+  } finally { f.cleanup(); }
+});
+
+test("仅本地合入沿正式检查与发布，缺评审不放行，远端及其接收 Hook 均不触碰", async () => {
+  const f = fixture(["开发评审"]);
+  try {
+    f.git(f.repo, "push", "-q", "origin", "dev");
+    const remote = f.git(f.origin, "rev-parse", "dev"), touched = join(f.root, "push-attempted");
+    writeFileSync(join(f.origin, "hooks", "pre-receive"), `#!/bin/sh\ntouch '${touched}'\nexit 1\n`, { mode: 0o755 });
+    const path = f.start(), args = parseArgs(["合入", f.file, "--仅本地", "--json"]);
+    assert.throws(() => parseArgs(["查询", f.file, "--仅本地"]), /只用于新卡合入/);
+    await assert.rejects(() => kernelCLI(args, f.repo), /普通合入被拒绝/);
+    assert.equal(f.git(f.repo, "rev-parse", "dev"), f.base);
+    writeFileSync(join(readRun(path).worktree, "file.txt"), "local-only\n");
+    await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer() });
+    assert.match((await kernelCLI({ ...args, dryRun: true }, f.repo))!.outcome.reason, /仅本地合入/);
+    const result = await kernelCLI(args, f.repo); assert.equal(result!.ok, true, JSON.stringify(result));
+    assert.equal(readRun(path).publication!.push, "未请求"); assert.equal(queryKernel(path).status, "已合入");
+    assert.equal(f.git(f.repo, "show", "dev:file.txt"), "local-only"); assert.equal(f.git(f.origin, "rev-parse", "dev"), remote); assert.equal(existsSync(touched), false);
+    assert.equal((await mergeManaged(path)).status, "通过"); assert.equal(existsSync(touched), false, "重读既有本地发布记录不补推送");
+  } finally { f.cleanup(); }
+});
+
 test("卡校验：缺评审、多任务缺验收、未上线、逆序、旧格式均无资源副作用", () => {
   const f = fixture();
   try {
@@ -86,7 +127,7 @@ test("自动交付提交→静态必修→原候选返修→提交 dev；无卡�
     const firstHead = f.git(task, "rev-parse", "HEAD"); assert.notEqual(firstHead, f.base);
     writeFileSync(join(task, "file.txt"), "fixed\n");
     const second = await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer() });
-    assert.equal(second.status, "通过", second.reason);
+    assert.equal(second.status, "通过", second.reason ?? "");
     const run = readRun(path); assert.equal(run.results.length, 3); assert.notEqual(run.candidate!.commit, firstHead);
     assert.equal(queryKernel(path).status, "已合入"); assert.equal(run.publication!.push, "成功");
     assert.equal(f.git(f.repo, "rev-parse", "dev^{tree}"), run.candidate!.tree);
@@ -172,7 +213,7 @@ test("停止不是放弃；没有真实用户决定不能例外，机器/文件�
     assert.equal(recordManagedUserInput(path, "<file name=\"p\">合入本批</file>", "pi:interactive"), undefined);
     assert.equal(recordManagedUserInput(path, "【自动评审 · 第 1 次返修】\n合入本批", "pi:interactive"), undefined);
     const decision = recordManagedUserInput(path, "合入本批", "pi:interactive")!; assert.ok(decision); assert.ok(decision.missing.length);
-    const result = await mergeManaged(path, { accept: true, decision }); assert.equal(result.status, "通过", result.reason);
+    const result = await mergeManaged(path, { accept: true, decision }); assert.equal(result.status, "通过", result.reason ?? "");
     assert.equal(readRun(path).results.some((r) => r.node === "开发评审" && r.status === "通过"), false);
     assert.equal(readRun(path).publication!.decision, decision.id);
   } finally { f.cleanup(); }
@@ -336,7 +377,7 @@ test("新卡无需手动提交卡：目标无交集的用户暂存、未暂存�
     // 提示词是检查输入：用户在启动后更新输入，按当前版本首次评审，不借用旧结果。
     writeFileSync(join(run.worktree, "file.txt"), "new code\n");
     const result = await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer() });
-    assert.equal(result.status, "通过", result.reason); assert.equal(readRun(path).publication!.push, "成功", readRun(path).publication!.reason);
+    assert.equal(result.status, "通过", result.reason ?? ""); assert.equal(readRun(path).publication!.push, "成功", readRun(path).publication!.reason ?? "");
     assert.equal(f.git(f.repo, "status", "--porcelain"), before); assert.equal(f.git(f.repo, "show", ":prompt.md"), staged);
     assert.equal(readFileSync(join(f.repo, "prompt.md"), "utf8"), "user working\n"); assert.equal(readFileSync(join(f.repo, "用户资料.txt"), "utf8"), "user untracked\n");
     assert.equal(f.git(f.repo, "show", "HEAD:file.txt"), "new code");
@@ -393,7 +434,7 @@ test("返修1：例外决定绑定完整输入和用户版本；撤回/换标准
       assert.equal(direct.status, "没验证"); assert.match(direct.reason!, /决定已过期/); assert.equal(readRun(path).publication, undefined);
       const fresh = recordManagedUserInput(path, "合入本批", "pi:interactive")!;
       assert.notEqual(fresh.id, first.id); assert.notEqual(fresh.inputs, first.inputs);
-      const published = await mergeManaged(path, { accept: true, decision: fresh }); assert.equal(published.status, "通过", published.reason);
+      const published = await mergeManaged(path, { accept: true, decision: fresh }); assert.equal(published.status, "通过", published.reason ?? "");
       assert.equal(readRun(path).publication!.decision, fresh.id); assert.equal(readRun(path).decisions.length, 2);
     } finally { f.cleanup(); }
   });
@@ -488,8 +529,8 @@ test("返修4：修改已登记 guide 的真实 Git 合入/推送不使自身输
     assert.ok(readRun(path).userFileVersions![guide], "该用例须实际登记带空格路径的用户引用");
     writeFileSync(join(run.worktree, "README.md"), "checked new guide\n");
     const output = await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer() });
-    assert.equal(output.status, "通过", output.reason);
-    const publication = readRun(path).publication!; assert.equal(publication.local, "merged"); assert.equal(publication.push, "成功", publication.reason);
+    assert.equal(output.status, "通过", output.reason ?? "");
+    const publication = readRun(path).publication!; assert.equal(publication.local, "merged"); assert.equal(publication.push, "成功", publication.reason ?? "");
     assert.equal(readFileSync(join(f.repo, "README.md"), "utf8"), "checked new guide\n");
     const after = checkInputs(readRun(path)); assert.equal(after.hash, publication.inputs); assert.ok(after.publicationChanges.includes(join(f.repo, "README.md")));
     assert.ok(readRun(path).results.every((r) => r.status === "通过")); assert.equal(f.git(f.origin, "rev-parse", "dev"), publication.commit);
@@ -515,9 +556,9 @@ test("返修5：目标前进后统一整合 dev，scope 不扩张，新树重新
     assert.equal(integration.target.commit, target); assert.equal(integration.scopeBase, target); assert.ok(integration.imported.includes("target.txt"));
     assert.notEqual(after.candidate!.tree, oldTree); assert.equal(queryKernel(path).status, "等你决定");
     await assert.rejects(() => mergeManaged(path), /普通合入被拒绝/);
-    const second = await completeManagedDelivery(path, "【交付完成】", options); assert.equal(second.status, "通过", second.reason);
+    const second = await completeManagedDelivery(path, "【交付完成】", options); assert.equal(second.status, "通过", second.reason ?? "");
     assert.equal(calls, 2, "新树不得复用旧树通过"); assert.equal(readRun(path).candidate!.commit, integration.candidate.commit, "整合完成后的交付不造空提交");
-    assert.equal(readRun(path).publication!.push, "成功", readRun(path).publication!.reason); assert.equal(readRun(path).repairs, 0);
+    assert.equal(readRun(path).publication!.push, "成功", readRun(path).publication!.reason ?? ""); assert.equal(readRun(path).repairs, 0);
     assert.equal(f.git(f.repo, "show", "HEAD:target.txt"), "incoming dev"); assert.equal(f.git(f.repo, "show", "HEAD:file.txt"), "task change");
     assert.equal(f.git(f.origin, "rev-parse", "dev"), readRun(path).publication!.commit);
   } finally { f.cleanup(); }

@@ -6,14 +6,13 @@
  * 有询问或拒绝就报错退出；不执行工具、不调用模型、不改用户配置。检查记录挂在方法指纹上，
  * 指纹不变时第二次启动直接跳过。
  */
+import { createHash } from "node:crypto";
 import { mkdtempSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PI_BIN, PERMISSION_EXT, projectConfigOverridesFromArgs, type ProjectConfigOverrides } from "./config.ts";
 import { currentMethodsFingerprint, recordPermissionCheck } from "./methods.ts";
-import { PIPELINE_DIR_ENV, PIPELINE_LAUNCH_TOKEN_ENV, STAGE_ENV, writeStageStatus } from "./pipeline-core.ts";
-import { batchInfo, eventReason, pushEvent, writePhase } from "./events.ts";
 
 interface Probe { name: string; toolName: string; input: Record<string, unknown> }
 type NativeResult = { available: true; ok: boolean; reason?: string } | { available: false; reason: string };
@@ -108,23 +107,6 @@ function trustDecision(cwd: string, mode: TrustMode, agentDir: string): boolean 
     case "never": return false;
     default: return false; // 检查没有交互界面；ask 等于会询问，不能算自动执行
   }
-}
-
-/** 启动入口失败时把原因写回流水线，避免编排程序一直等一个还没启动的会话。 */
-function reportStartupFailure(reason: string): void {
-  const dir = process.env[PIPELINE_DIR_ENV]?.trim();
-  const stage = process.env[STAGE_ENV]?.trim();
-  if (!dir || !stage || !process.env[PIPELINE_LAUNCH_TOKEN_ENV]) return;
-  try {
-    writeStageStatus({ dir, stage }, { sessionId: "startup", summary: "", event: "startup-failed", inbox: 0,
-      pauseReason: `权限自动执行检查未通过：${reason}` });
-    const file = process.env.AUTOREVIEW_BATCH_FILE;
-    if (file) {
-      const info = batchInfo(file, process.cwd(), dir), why = eventReason(`启动入口失败：${reason}`), detail = { exitCode: 1 };
-      writePhase(info, stage, "failed", { status: "failed", ...why, detail });
-      pushEvent(info, stage, "failed", why, {}, detail);
-    }
-  } catch { /* 写不回状态时仍以非零退出；编排程序会看到进程退出 */ }
 }
 
 /** 从实际全局配置复制一份到沙箱，避免检查写用户的日志或改配置；项目配置仍从 cwd 读。 */
@@ -272,7 +254,6 @@ function configCheck(cwd: string, trusted: boolean, agentDir: string): { ok: boo
 }
 
 function fail(reason: string): number {
-  reportStartupFailure(reason);
   console.error(`pi-dev: 权限自动执行检查未通过：${reason}`);
   console.error("pi-dev: 请修改项目的 Pi 权限配置（或全局配置）让这三类工具自动执行；本检查不会改你的配置。");
   return 2;
@@ -281,17 +262,22 @@ function fail(reason: string): number {
 async function main(): Promise<number> {
   const args = argsOf(process.argv.slice(2));
   const { fingerprint, components, record } = currentMethodsFingerprint(args.cwd, args.loopRoot, process.env, args.overrides);
-  if (record?.permissionFingerprint === fingerprint) return 0;
-
   const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve(process.env.PI_CODING_AGENT_DIR) : join(homedir(), ".pi", "agent");
   let trusted: boolean;
   try { trusted = trustDecision(args.cwd, args.trust, agentDir); }
   catch (error) { return fail(errorText(error)); }
+  // 方法未变不代表信任/deny 未变；缓存只能绑定当前真实权限输入，不能借上次 approve 绕过 no-approve。
+  const permissionInputs = [join(agentDir, "extensions/pi-permission-system/config.json"), join(args.cwd, ".pi/extensions/pi-permission-system/config.json"), args.permission].map((path) => {
+    try { return [path, readFileSync(path).toString("base64")]; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return [path, null]; throw error; }
+  });
+  const permissionFingerprint = createHash("sha256").update(JSON.stringify([fingerprint, trusted, args.pi, permissionInputs])).digest("hex");
+  if (record?.permissionFingerprint === permissionFingerprint) return 0;
 
   const native = await nativeCheck(args.cwd, args.pi, args.permission, trusted);
   const result = native.available ? { ok: native.ok, reason: native.reason } : configCheck(args.cwd, trusted, agentDir);
   if (!result.ok) return fail(result.reason ?? "开发会话不能不经询问执行 edit、write 和 bash");
-  try { recordPermissionCheck(args.cwd, fingerprint, components); }
+  try { recordPermissionCheck(args.cwd, permissionFingerprint, components); }
   catch (error) { return fail(`检查通过，但记录失败：${errorText(error)}`); }
   return 0;
 }

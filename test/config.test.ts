@@ -100,19 +100,18 @@ test("覆盖快照只保留配置环境；下游方法和来源读取继续校�
     const copied = JSON.parse(JSON.stringify(overrides));
     assert.deepEqual(resolveProjectConfig(f.root, copied).effectiveConfig.reviewTimeoutMin, { value: 120, source: "flag" });
     assert.equal(methodsComponents(f.root, f.root, { dryRun: true, overrides: copied }).files.length, 0);
-    assert.throws(() => methodsComponents(f.root, f.root, { dryRun: true, env: {} }), /必须小于一轮总预算/);
+    assert.equal(methodsComponents(f.root, f.root, { dryRun: true, env: {} }).files.length, 0, "验收不占评审/方法预算");
     assert.equal(loadContext(f.root, copied), undefined);
     assert.equal(Object.hasOwn(resolveProjectConfig(f.root, copied), "gate"), false);
   } finally { f.close(); }
 });
 
-test("统一校验：预算文案不变，所有配置节提前报错，显式覆盖可补足预算", () => {
+test("独立预算：验收不受评审时限约束；非法配置仍在执行前报错", () => {
   const f = fixture();
   try {
     f.write({ gate: fullConfig.gate, acceptance: fullConfig.acceptance });
-    const message = ".autoreview.json 的 acceptance.timeoutMin（60）必须小于一轮总预算 reviewTimeoutMin（60）";
-    assert.throws(() => resolveProjectConfig(f.root, { env: {} }), { message });
-    assert.throws(() => loadConfig(f.root, {}), { message });
+    assert.equal(resolveProjectConfig(f.root, { env: {} }).acceptance?.timeoutMin, 60);
+    assert.equal(loadConfig(f.root, {}).reviewTimeoutMin, 60);
     assert.equal(resolveProjectConfig(f.root, { env: {}, reviewTimeoutMin: "120" }).reviewTimeoutMin, 120);
     assert.equal(loadContext(f.root, { reviewTimeoutMin: "120" }), undefined);
     for (const section of ["methods", "context", "preparation", "acceptance"]) {
@@ -126,14 +125,14 @@ test("统一校验：预算文案不变，所有配置节提前报错，显式�
   } finally { f.close(); }
 });
 
-test("接入：已有和待写配置都复用预算校验，保留其他字段且只做预览", async () => {
+test("接入保留独立时限、其他字段及配置原文；只做预览", async () => {
   const f = fixture();
   try {
     f.write(fullConfig);
     const plan = await planSetup(f.root);
     assert.equal(plan.config, undefined);
     f.write({ reviewTimeoutMin: 10, acceptance: { timeoutMin: 20 } });
-    await assert.rejects(planSetup(f.root), /acceptance.timeoutMin（20）必须小于/);
+    assert.equal((await planSetup(f.root)).config, undefined, "独立验收时限可以大于评审时限");
     f.write({ gate: { cmd: "true", timeoutMin: 45 }, custom: "keep" });
     assert.equal(JSON.parse((await planSetup(f.root)).config!).custom, "keep", "停用 gate 不占预算");
     f.write({ reviewTimeoutMin: 90, custom: "keep" });

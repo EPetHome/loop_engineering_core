@@ -7,10 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EXT_DIR, findProjectRoot, PERMISSION_EXT, PI_BIN } from "../config.ts";
-import { endHostExperienceSessions, hookPaths, loadConfig } from "./review-hook.ts";
-import { launchHookHost } from "./inbox-bridge.ts";
-import { registeredQueueBatch } from "../merge-queue.ts";
-import { readJson } from "../pipeline-core.ts";
+import { endHostExperienceSessions, loadConfig } from "./review-hook.ts";
 import { processStartTime } from "../procs.ts";
 import { nativeLaunch } from "./native-inbox.ts";
 import { readTaskRun, updateTaskRun } from "../node-ledger.ts";
@@ -136,7 +133,7 @@ export function main(argv = process.argv.slice(2)): void {
     return;
   }
   if (!root) writeFileSync(join(cwd, ".autoreview.json"), "{}\n", { flag: "wx" });
-  console.error(`[Loop] ${host} 开发宿主；评审与验收沿用 Pi 引擎。${host === "codex" ? "若提示 Hook 未信任，先在 /hooks 审阅并信任。" : ""}`);
+  console.error(`[Loop] ${host} 开发宿主；仅静态评审沿用共享引擎，不自动验收或提交。${host === "codex" ? "若提示 Hook 未信任，先在 /hooks 审阅并信任。" : ""}`);
   const runId = randomUUID();
   const env = { ...hostEnv(cwd, root), AUTOREVIEW_DEV_RUN_ID: runId, AUTOREVIEW_DEV_PID: String(process.pid), AUTOREVIEW_DEV_STARTED: processStartTime(process.pid) };
   const finished = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -144,9 +141,6 @@ export function main(argv = process.argv.slice(2)): void {
     catch (error) { console.error(`[Loop] 宿主退出后的经验活动登记未确认，批准保持阻挡：${(error as Error).message}`); }
     process.exitCode = code ?? (signal === "SIGINT" ? 130 : 1);
   };
-  const batch = process.env.AUTOREVIEW_BATCH_FILE && process.env.AUTOREVIEW_STAGE
-    ? registeredQueueBatch(cwd, process.env.AUTOREVIEW_BATCH_FILE) : undefined;
-  const stage = batch?.stages.find((item) => item.name === process.env.AUTOREVIEW_STAGE && realpathSync(item.cwd) === cwd);
   if (process.env.AUTOREVIEW_KERNEL_LEDGER) {
     const path = process.env.AUTOREVIEW_KERNEL_LEDGER, task = process.env.AUTOREVIEW_KERNEL_TASK, run = readTaskRun(path, task), launch = process.env.AUTOREVIEW_KERNEL_LAUNCH;
     if (run.id !== process.env.AUTOREVIEW_KERNEL_RUN || cwd !== run.worktree || !launch) throw new Error("新卡原生宿主启动身份不符");
@@ -156,13 +150,6 @@ export function main(argv = process.argv.slice(2)): void {
     if (child.pid) updateTaskRun(path, task, (r) => { r.native = { launch, command, childPid: child.pid!, childStarted: processStartTime(child.pid!), binding }; });
     child.on("error", (error) => { native.cleanup(); console.error(error.message); process.exitCode = 1; });
     child.on("exit", (code, signal) => { native.cleanup(); finished(code, signal); });
-  } else if (batch && stage) {
-    launchHookHost({ command, args, cwd, env, dir: batch.dir, stage: stage.name, host, token: runId, onExit: finished,
-      isIdle: (status) => {
-        const paths = hookPaths(root ?? cwd, host, status.sessionId);
-        const state = readJson<{ phase: string; awaitingRepair?: boolean; resumeAfterInputChange?: boolean }>(paths.state);
-        return state?.phase === "done" && !state.awaitingRepair && !state.resumeAfterInputChange && !existsSync(paths.lock);
-      } });
   } else {
     const child = spawn(command, args, { cwd, stdio: "inherit", env });
     child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });

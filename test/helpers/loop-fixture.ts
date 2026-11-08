@@ -13,8 +13,6 @@ export const LOOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..
 
 export const LOOP_BIN = join(LOOP_ROOT, "bin", "loop");
 
-export const FAKE_STAGE = fileURLToPath(new URL(".././fake-stage.mjs", import.meta.url));
-
 export const saved: Record<string, string | undefined> = {};
 
 export const roots: string[] = [];
@@ -89,12 +87,7 @@ export function fixture(options: { gate?: boolean } = {}): Fixture {
 }
 
 export function loop(cwd: string, args: string[]): { status: number; stdout: string; stderr: string } {
-  // 旧批次启动场景保留在明确的库内兼容入口；新卡公开 CLI 由 kernel.test.ts 实际执行。
-  const legacy = ["启动", "状态"].includes(args[0]);
-  const res = legacy ? spawnSync(process.execPath, ["--input-type=module", "-e",
-    `import { main } from ${JSON.stringify(fileURLToPath(new URL("../../loop.ts", import.meta.url)))}; process.exitCode = await main(process.argv.slice(1), { legacyCompatibility: true });`, ...args],
-    { cwd, encoding: "utf8", env: process.env, timeout: 120_000 })
-    : spawnSync(LOOP_BIN, args, { cwd, encoding: "utf8", env: process.env, timeout: 120_000 });
+  const res = spawnSync(LOOP_BIN, args, { cwd, encoding: "utf8", env: process.env, timeout: 120_000 });
   return { status: res.status ?? 1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
@@ -104,7 +97,3 @@ export function jsonOf(run: { stdout: string; stderr: string }): Record<string, 
 }
 
 export const count = (path: string): number => existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").length : 0;
-
-export function writeStage(base: string, stage: string): string {
-  return `printf '${stage}\\n' > stage-${stage}.txt && '${process.execPath}' '${FAKE_STAGE}' fix`;
-}

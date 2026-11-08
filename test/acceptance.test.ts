@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ACCEPTANCE_CONVENTION, buildAcceptanceInput, buildAcceptanceRepairMessage, buildCorrectionInput, classifySystemExit, authorizationHint, authorizationStatus, criteriaFromUser, extractCriteria, findObjections, grantsFromUser, isAuthorizationCriterion, isLoopMessage, isManualCriterion, judgeAcceptance, lastEvidenceAt, parseAcceptanceReport, typedByUser, evidenceExecution, parseCriteriaDraft, renderAcceptanceForReview, scanLogs, MAX_CRITERIA, NO_PLAYWRIGHT, type AcceptanceRecord, type Criteria } from "../acceptance-core.ts";
 import { ACCEPTANCE_PROMPT_PATH, parseElapsed } from "../acceptance.ts";
-import { checkRoundBudget, DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
+import { DEFAULT_ACCEPTANCE_MODEL, DEFAULT_RESET_TIMEOUT_SEC, parseAcceptanceConfig } from "../config.ts";
 import { criteriaItems, evidenceOf, block, stamped } from "./helpers/acceptance-fixture.ts";
 
 test("A1 取「## 验收标准」：编号、项目符号、续行，遇到下一个二级标题停止", () => {
@@ -160,8 +160,7 @@ test("A6 acceptance 配置：默认值、路径解析、非法字段、预算", 
   assert.throws(() => parseAcceptanceConfig({ timeoutMin: 0 }, "/p"), /timeoutMin/);
   assert.throws(() => parseAcceptanceConfig({ env: { A: 1 } }, "/p"), /env/);
   assert.throws(() => parseAcceptanceConfig([], "/p"), /acceptance/);
-  assert.throws(() => checkRoundBudget(20, config), /必须小于/);
-  checkRoundBudget(60, config);
+  assert.equal(parseAcceptanceConfig({ timeoutMin: 90 }, "/p", {})!.timeoutMin, 90, "验收有独立预算，不与静态评审比较");
 });
 
 test("A13 验收方输入：环境、工具用法、标准版本、开发方说明的定位", () => {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { runAcceptanceStage } from "../acceptance.ts";
+import { runAcceptanceOnce as runAcceptanceStage } from "../acceptance.ts";
 import { harness } from "./helpers/acceptance-fixture.ts";
 
 test("验收／格式更正与强模型重验：同会话更正、换模型、标准冻结及重置复用", async (t) => {

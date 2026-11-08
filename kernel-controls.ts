@@ -1,16 +1,77 @@
 /** 同卡受控变更：先校验再记请求，边界应用；来源和授权与机器返修分开。 */
-import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { digest, ownedCriteria, parseDevelopmentCard } from "./development-card.ts";
-import { activityAlive, atomicRun, readRun, taskIds, taskView, updateRun, validResult, type CardChange } from "./node-ledger.ts";
-import { acceptanceBasis, acceptanceSignature, checkInputs, frozenCardProblem, freezeDeploymentPlan } from "./kernel-workspace.ts";
+import { digest, ownedCriteria, parseDevelopmentCard, type DevelopmentCard } from "./development-card.ts";
+import { activityAlive, atomicRun, readRun, taskIds, taskView, updateRun, validResult, type CardChange, type KernelRun } from "./node-ledger.ts";
+import { acceptanceBasis, acceptanceSignature, checkInputs, fileDigest, frozenCardProblem, freezeDeploymentPlan } from "./kernel-workspace.ts";
 import { writeKernelSummary } from "./kernel.ts";
 import { consumerProblem, readLocalQueue, releaseLocalSlot } from "./local-node-queue.ts";
 import { rebuildBatch } from "./batch-integration.ts";
 import { ownedProcessGroupAlive } from "./procs.ts";
+import { inScope, parseStageScope } from "./scope.ts";
+import { gitResult } from "./workspace.ts";
 
 const now = (): string => new Date().toISOString();
+const controlSources = ["pi:interactive", "pi:rpc", "claude:UserPromptSubmit", "codex:UserPromptSubmit", "terminal:tty"];
+/** 只追加一个已有跟踪的普通文件；不缩/换旧 allow、不移除 deny、不夹带其他改卡。 */
+function scopeAddition(run: KernelRun, card: DevelopmentCard): CardChange["scopeAddition"] {
+  const changed = card.tasks.filter((t) => JSON.stringify(t.scope) !== JSON.stringify(run.card.tasks.find((o) => o.name === t.name)?.scope));
+  if (!changed.length) return;
+  const withoutScope = (c: DevelopmentCard) => ({ ...c, tasks: c.tasks.map(({ scope: _scope, ...t }) => t) });
+  if (run.card.nature !== "开发" || changed.length !== 1 || JSON.stringify(withoutScope(card)) !== JSON.stringify(withoutScope(run.card))) throw new Error("scope 增补只能单独追加一个任务的一个文件，不能夹带其他改卡");
+  const task = changed[0], old = run.card.tasks.find((t) => t.name === task.name)!.scope;
+  const allow = task.scope.allow!, prior = old.allow!, file = allow.at(-1)!;
+  if (JSON.stringify(task.scope.deny) !== JSON.stringify(old.deny) || allow.length !== prior.length + 1 || JSON.stringify(allow.slice(0, -1)) !== JSON.stringify(prior)
+    || prior.includes(file) || parseStageScope({ allow: [file] }, "scope 增补")!.allow![0] !== file || !file || !inScope(file, task.scope)) throw new Error("scope 只能追加一个新文件，保留原 allow 顺序和全部 deny");
+  const view = taskView(run, task.name), path = resolve(view.worktree, file), info = lstatSync(path);
+  const tracked = gitResult(view.worktree, ["ls-tree", "--name-only", "-z", "HEAD", "--", file]);
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || realpathSync(path) !== join(realpathSync(view.worktree), file)
+    || tracked.status !== 0 || tracked.stdout !== `${file}\0`) throw new Error("scope 增补仅接受当前任务已有跟踪的普通文件，不接受目录、链接或未跟踪文件");
+  return { task: task.name, file, scope: digest(JSON.stringify(task.scope)) };
+}
+/** 仅真实交互适配层在收到明确的结构化用户确认后调用；保留原话，不接受机器来源。 */
+export function recordScopeControl(path: string, task: string, file: string, text: string, source: string): boolean {
+  if (!controlSources.includes(source) || !text.trim()) return false;
+  updateRun(path, (r) => {
+    if (r.abandoned || r.publication || r.pendingCard || frozenCardProblem(r)) throw new Error("任务状态/卡版本变化，未登记范围决定");
+    const card = structuredClone(r.card), target = card.tasks.find((t) => t.name === task);
+    if (!target) throw new Error(`未知任务：${task}`);
+    target.scope.allow = [...target.scope.allow!, file];
+    const addition = scopeAddition(r, card)!;
+    (r.controlDecisions ??= []).push({ id: randomUUID(), source, text, at: now(), cardHash: r.cardHash, userVersion: r.userVersion, action: "extend-scope", task, scope: addition.scope });
+  });
+  return true;
+}
+/** 只核销已废弃 gate 的删除；原字节须匹配开工指纹，其他配置差异一律拒绝。 */
+export function reconcileRemovedGate(path: string, originalFile: string): string {
+  const oldInfo = lstatSync(originalFile);
+  if (!oldInfo.isFile() || oldInfo.isSymbolicLink() || oldInfo.nlink !== 1) throw new Error("原配置备份身份不安全");
+  const bytes = readFileSync(originalFile), original = JSON.parse(bytes.toString("utf8")), before = fileDigest(originalFile);
+  if (!Object.hasOwn(original, "gate")) throw new Error("备份没有待核对的废弃 gate");
+  delete original.gate;
+  return updateRun(path, (r) => {
+    if (r.publication || r.pendingCard || r.batch?.pending || [r.activity, ...(r.taskRecords ?? []).map((t) => t.activity)].some((a) => activityAlive(a) !== false)) throw new Error("节点仍活动或有未完成事务，未核销配置变更");
+    const prior = r.localHashHistory?.find((h) => h.path === ".autoreview.json" && h.before === before && h.after === r.localHashes[h.path]);
+    if (r.localHashes[".autoreview.json"] !== before && !prior) throw new Error("备份不匹配开工配置指纹，未采用当前文件");
+    const roots = [...new Set([r.repo, r.worktree, ...(r.taskRecords ?? []).filter((t) => !t.removed).map((t) => t.worktree)])];
+    const copies = roots.map((root) => {
+      const file = join(root, ".autoreview.json"), info = lstatSync(file), current = readFileSync(file);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o111) !== (oldInfo.mode & 0o111)
+        || JSON.stringify(JSON.parse(current.toString("utf8"))) !== JSON.stringify(original)) throw new Error("配置变化不只是删除废弃 gate，未放行");
+      return { bytes: current, hash: fileDigest(file) };
+    });
+    if (new Set(copies.map((c) => c.hash)).size !== 1) throw new Error("各工作区本机配置字节不一致，未核销");
+    const after = copies[0].hash;
+    if (prior) { if (prior.after !== after) throw new Error("核销后配置再次变化"); return prior.evidence; }
+    const dir = join(r.dir, "local-file-changes", randomUUID()); mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "before.json"), bytes, { flag: "wx", mode: 0o600 }); writeFileSync(join(dir, "after.json"), copies[0].bytes, { flag: "wx", mode: 0o600 });
+    const evidence = join(dir, "change.json"), change = { path: ".autoreview.json", before, after, evidence, at: now(), reason: "仅删除已停用 gate；原始开工字节已核对保留，其他配置及检查结论不变" };
+    writeFileSync(evidence, JSON.stringify(change, null, 2), { flag: "wx", mode: 0o600 });
+    (r.localHashHistory ??= []).push(change); r.localHashes[change.path] = after;
+    return evidence;
+  });
+}
 function install(file: string, content: string, mode = 0o600): void {
   const temp = join(dirname(file), `.loop-card-${randomUUID()}.tmp`);
   try { writeFileSync(temp, content, { mode, flag: "wx" }); renameSync(temp, file); }
@@ -18,7 +79,9 @@ function install(file: string, content: string, mode = 0o600): void {
 }
 /** 真实交互适配层调用；原话确认仅绑定当前卡，不能由命令行开关/机器文字伪造。 */
 export function recordCardControl(path: string, text: string, source: string): boolean {
-  if (!["pi:interactive", "pi:rpc", "claude:UserPromptSubmit", "codex:UserPromptSubmit", "terminal:tty"].includes(source)) return false;
+  if (!controlSources.includes(source)) return false;
+  const scope = /^补充任务[「"'](.+?)[」"']范围[:：]\s*(.+?)\s*$/.exec(text.trim());
+  if (scope) return recordScopeControl(path, scope[1], scope[2], text, source);
   const node = /^(?:去掉|移除|取消)本批(?:必需)?(测试|验收)(?:节点)?[。！!\s]*$/.exec(text.trim());
   const task = /^(移出任务|继续修任务)\s*[「"']?(.+?)[」"']?[。！!]*$/.exec(text.trim());
   const standard = /^确认本批验收标准[。！!\s]*$/.test(text.trim());
@@ -53,22 +116,24 @@ export function requestCardChange(path: string, options: { removeNode?: string; 
   const removed = run.card.tasks.filter((t) => !card.tasks.some((n) => n.name === t.name));
   const retained = run.card.tasks.filter((t) => !removed.includes(t));
   if (["base", "target", "nature", "host"].some((k) => (card as any)[k] !== (run.card as any)[k])
-    || JSON.stringify(card.tasks.map(({ test: _test, limits: _limits, ...task }) => task)) !== JSON.stringify(retained.map(({ test: _test, limits: _limits, ...task }) => task))) throw new Error("改卡不能替换启动时任务身份、prompt/scope、顺序、分支或宿主；请另建卡");
+    || JSON.stringify(card.tasks.map(({ test: _test, limits: _limits, scope: _scope, ...task }) => task)) !== JSON.stringify(retained.map(({ test: _test, limits: _limits, scope: _scope, ...task }) => task))) throw new Error("改卡不能替换启动时任务身份、prompt、顺序、分支或宿主；请另建卡");
+  const addedScope = scopeAddition(run, card);
   if (JSON.stringify(card.review && [card.review.base, card.review.head]) !== JSON.stringify(run.card.review && [run.card.review.base, run.card.review.head])) throw new Error("改卡不能更换受评 base/head；对象已固定，请另建只评审卡");
   const deploymentPlan = card.flow.includes("部署") ? freezeDeploymentPlan(run.repo) : undefined;
   const reviewInputs = card.nature === "评审" ? checkInputs({ ...run, card, reviewInputs: undefined }, "评审") : undefined;
   if (run.card.flow.includes("验收") && card.limits.验收.maxRepairs > (run.card.limits.验收?.maxRepairs ?? 3)) throw new Error("继续修只能提高指定 tasks[].limits.验收.maxRepairs，不自动扩大其他任务额度");
-  const actions: { action: "remove-test" | "remove-acceptance" | "remove-task" | "raise-acceptance" | "change-acceptance"; task?: string; acceptance?: { path: string; hash: string } }[] = [];
+  const actions: { action: "remove-test" | "remove-acceptance" | "remove-task" | "raise-acceptance" | "change-acceptance" | "extend-scope"; task?: string; acceptance?: { path: string; hash: string }; scope?: string }[] = [];
+  if (addedScope) actions.push({ action: "extend-scope", task: addedScope.task, scope: addedScope.scope });
   const acceptanceVersion = card.flow.includes("验收") && card.acceptance ? { path: card.acceptance, hash: digest(readFileSync(card.acceptance)) } : undefined;
   if (acceptanceVersion && (acceptanceVersion.path !== run.card.acceptance || acceptanceVersion.hash !== run.acceptanceState?.hash)) actions.push({ action: "change-acceptance", acceptance: acceptanceVersion });
   if (run.card.flow.includes("测试") && (!card.flow.includes("测试") || card.tasks.some((t) => /^无[:：]/.test(t.test ?? "") && !/^无[:：]/.test(run.card.tasks.find((o) => o.name === t.name)?.test ?? "")))) actions.push({ action: "remove-test" });
   if (run.card.flow.includes("验收") && !card.flow.includes("验收")) actions.push({ action: "remove-acceptance" });
   for (const t of removed) actions.push({ action: "remove-task", task: t.name });
   for (const t of card.tasks) if ((t.limits?.验收.maxRepairs ?? card.limits.验收.maxRepairs) > (run.card.tasks.find((o) => o.name === t.name)?.limits?.验收.maxRepairs ?? run.card.limits.验收.maxRepairs)) actions.push({ action: "raise-acceptance", task: t.name });
-  const authorizations = actions.map((action) => [...(run.controlDecisions ?? [])].reverse().find((d) => !d.used && d.cardHash === run.cardHash && d.userVersion === run.userVersion && d.action === action.action && d.task === action.task && (!action.acceptance || JSON.stringify(d.acceptance) === JSON.stringify(action.acceptance))));
-  if (actions.length && options.source !== "terminal:tty" && authorizations.some((d) => !d)) throw new Error("移除必需测试/验收、移出任务或提高验收额度须真实用户决定：交互终端执行，或原会话亲手输入「移除本批测试节点」「移出任务甲」「继续修任务甲」「确认本批验收标准」；机器返修不能代选或降低标准");
+  const authorizations = actions.map((action) => [...(run.controlDecisions ?? [])].reverse().find((d) => !d.used && d.cardHash === run.cardHash && d.userVersion === run.userVersion && d.action === action.action && d.task === action.task && (!action.acceptance || JSON.stringify(d.acceptance) === JSON.stringify(action.acceptance)) && (!action.scope || d.scope === action.scope)));
+  if (actions.length && options.source !== "terminal:tty" && authorizations.some((d) => !d)) throw new Error("移除必需测试/验收、移出任务、提高验收额度或增补 scope 须真实用户决定：交互终端执行，或原会话亲手输入「移除本批测试节点」「移出任务甲」「继续修任务甲」「确认本批验收标准」「补充任务「甲」范围：文件路径」；机器返修不能代选、扩权或降低标准");
   const authorization = authorizations.find(Boolean);
-  const change: CardChange = { id: randomUUID(), source: options.source, authorization: authorization?.id, userVersion: run.userVersion, at: now(), before, expectedHash: run.cardHash, card, content, acceptanceVersion, deploymentPlan, ...(reviewInputs ? { reviewInputs: { hash: reviewInputs.hash, files: reviewInputs.files } } : {}), removeTasks: removed.map((t) => run.taskRecords!.find((r) => r.name === t.name)!.id), state: "pending" };
+  const change: CardChange = { id: randomUUID(), source: options.source, authorization: authorization?.id, userVersion: run.userVersion, at: now(), before, expectedHash: run.cardHash, card, content, acceptanceVersion, deploymentPlan, ...(addedScope ? { scopeAddition: addedScope } : {}), ...(reviewInputs ? { reviewInputs: { hash: reviewInputs.hash, files: reviewInputs.files } } : {}), removeTasks: removed.map((t) => run.taskRecords!.find((r) => r.name === t.name)!.id), state: "pending" };
   if (options.dryRun) return change;
   updateRun(path, (r) => {
     if (r.cardHash !== change.expectedHash || r.pendingCard || frozenCardProblem(r) || r.abandoned || r.publication) throw new Error("请求边界卡版本或任务状态变化");
@@ -90,15 +155,24 @@ export function applyPendingCardChange(path: string): boolean {
   const applied = updateRun(path, (r) => {
     const c = r.changes?.find((c) => c.id === r.pendingCard);
     if (!c) return false;
+    if (r.batch?.pending) return false;
     if (r.publication || r.abandoned) throw new Error("已发布/放弃，保留待处理改卡记录");
     if (c.userVersion !== r.userVersion) {
       c.state = "rejected"; c.reason = "请求后真实用户输入/撤权版本变化，请按当前决定重新提出改卡"; r.pendingCard = undefined; r.stopped = true; r.stopReason = c.reason; return false;
     }
+    // 单任务测试命令修复不打断另一项仍在开发的任务；检查中的任务仍守原边界。
     const withoutTests = (card: typeof r.card) => ({ ...card, tasks: card.tasks.map(({ test: _test, ...task }) => task) });
     const testOnly = JSON.stringify(withoutTests(c.card)) === JSON.stringify(withoutTests(r.card));
     const affected = c.card.tasks.filter((t) => t.test !== r.card.tasks.find((o) => o.name === t.name)?.test).map((t) => t.name);
-    const activities = [r.activity, ...(r.taskRecords ?? []).filter((t) => !(testOnly && !affected.includes(t.name) && t.activity?.kind === "developing")).map((t) => t.activity)];
+    const addedScope = scopeAddition(r, c.card);
+    if (JSON.stringify(addedScope) !== JSON.stringify(c.scopeAddition)) throw new Error("scope 请求与冻结范围不一致，未应用");
+    const activities = [r.activity, ...(r.taskRecords ?? []).filter((t) => addedScope ? t.name === addedScope.task : !(testOnly && !affected.includes(t.name) && t.activity?.kind === "developing")).map((t) => t.activity)];
     if (activities.some((a) => a && a.kind !== "waiting" && activityAlive(a) !== false)) return false;
+    if (addedScope) {
+      const target = taskView(r, addedScope.task);
+      if (target.release.status === "未确认" || target.workerRequest || target.worker && ownedProcessGroupAlive(target.worker) !== false
+        || consumerProblem(join(target.dir, "review.procs.json")) || readLocalQueue().items.some((t) => t.ledger === path && t.task === target.taskId)) return false;
+    }
     for (const id of c.removeTasks ?? []) {
       const t = taskView(r, id);
       if (!t.abandonment?.history || [t.launch, t.supervisor, t.worker].some((g) => g && ownedProcessGroupAlive(g) !== false) || consumerProblem(join(t.dir, "review.procs.json")) || readLocalQueue().items.some((ticket) => ticket.ledger === path && ticket.task === id)) return false;
@@ -133,10 +207,14 @@ export function applyPendingCardChange(path: string): boolean {
     if (digest(readFileSync(r.file)) !== actual) throw new Error("安装前卡又被直接修改，未替换");
     install(r.file, c.content, info.mode & 0o777);
     install(join(r.dir, "frozen-card.json"), c.content);
-    for (const view of [r, ...(r.taskRecords ?? []).filter((t) => !t.removed)]) if (view.activity?.kind === "waiting") { if (view.activity.ticket) oldTickets.push(view.activity.ticket); view.activity = undefined; if (view !== r) view.epoch = (view.epoch ?? 0) + 1; }
-    const changedTasks = c.card.tasks.filter((t) => t.test !== r.card.tasks.find((o) => o.name === t.name)?.test || c.card.flow.includes("测试") !== r.card.flow.includes("测试")).map((t) => t.name);
+    for (const view of [r, ...(r.taskRecords ?? []).filter((t) => !t.removed && (!addedScope || t.name === addedScope.task))]) if (view.activity?.kind === "waiting") { if (view.activity.ticket) oldTickets.push(view.activity.ticket); view.activity = undefined; if (view !== r) view.epoch = (view.epoch ?? 0) + 1; }
+    const changedTasks = c.card.tasks.filter((t) => t.name === addedScope?.task || t.test !== r.card.tasks.find((o) => o.name === t.name)?.test || c.card.flow.includes("测试") !== r.card.flow.includes("测试")).map((t) => t.name);
     const acceptanceChanged = c.card.acceptance && (c.card.acceptance !== r.card.acceptance || digest(readFileSync(c.card.acceptance)) !== r.acceptanceState?.hash);
     r.card = c.card; r.reviewInputs = c.reviewInputs; r.deploymentPlan = c.deploymentPlan; r.cardHash = nextHash; r.cardRevision = (r.cardRevision ?? 0) + 1; r.epoch = (r.epoch ?? 0) + 1;
+    if (addedScope) {
+      const task = r.taskRecords?.find((t) => t.name === addedScope.task);
+      if (task) task.definition = structuredClone(r.card.tasks.find((t) => t.name === task.name)!);
+    }
     if (acceptanceChanged) {
       const standard = ownedCriteria(r.card.acceptance!, r.taskRecords?.map((t) => t.name) ?? r.card.tasks.map((t) => t.name));
       r.acceptanceState = { criteria: { source: "用户", items: standard.items, version: (r.acceptanceState?.criteria.version ?? 0) + 1, updatedAt: now() }, hash: standard.hash, owners: standard.owners, round: r.acceptanceState?.round ?? 0 };

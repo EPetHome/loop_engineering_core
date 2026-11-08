@@ -1,15 +1,30 @@
 /** 只评审入口：隔离检出候选，调用共享评审引擎，最终只保留报告与证据。 */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractCriteria } from "./acceptance-core.ts";
 import { LOOP_TEST_STATUS, findProjectRoot, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
-import { batchInfo, eventReason, pushEvent, writePhase, type BatchInfo } from "./events.ts";
+import { batchInfo, batchLocation, eventReason, pushEvent, writePhase, type BatchInfo } from "./events.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { beginBatchRun } from "./launch.ts";
-import type { ReviewPlan } from "./pipeline.ts";
+import { PIPELINE_MIGRATION } from "./pipeline.ts";
+
+export interface ReviewPlan { repo: string; base: string; head: string; requirement?: string; criteria?: string; note?: string }
+/** 只评审配方独立解析；不借用已删除的开发卡调度器，也不接受混入旧段。 */
+export function parseReviewOnlyPlan(raw: unknown, planDir: string): { name: string; dir: string; review: ReviewPlan } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("只评审配方必须是对象");
+  const data = raw as Record<string, unknown>;
+  if (data.recipe !== "review-only" || ["stages", "workflow", "steps", "workspaces"].some((key) => Object.hasOwn(data, key))) throw new Error(PIPELINE_MIGRATION);
+  if (!data.review || typeof data.review !== "object" || Array.isArray(data.review)) throw new Error("review-only 的 review 必须是对象");
+  const text = (value: unknown, name: string): string => { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} 必须是非空字符串`); return value.trim(); };
+  for (const key of ["name", "dir"] as const) if (data[key] !== undefined) text(data[key], key);
+  const r = data.review as Record<string, unknown>;
+  const review: ReviewPlan = { repo: resolve(planDir, text(r.repo, "review.repo")), base: text(r.base, "review.base"), head: text(r.head, "review.head") };
+  for (const key of ["requirement", "criteria", "note"] as const) if (r[key] !== undefined) review[key] = resolve(planDir, text(r[key], `review.${key}`));
+  return { ...batchLocation(data, planDir), review };
+}
 import { processStartTime, readProcs, reapProcs } from "./procs.ts";
 import { DEFAULT_MODEL, errorText, newReviewState, runReviewRound, type ReviewDeps, type ReviewOutcome } from "./review.ts";
 import { gitResult, gitText } from "./workspace.ts";
@@ -39,7 +54,8 @@ export async function runReviewOnly(review: ReviewPlan, options: {
   const interrupt = (): void => controller.abort(new Error("评审被中断"));
   const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
   for (const signal of signals) process.on(signal, interrupt);
-  let temp: string | undefined, worktree: string | undefined;
+  let temp: string | undefined, worktree: string | undefined, retainedWorktree: string | undefined;
+  let releaseUnknown = false, checkoutIdentity: { dev: number; ino: number } | undefined;
   let base: string | null = null, head: string | null = null, model = DEFAULT_MODEL, failure = "";
   let files: string[] = [], outcome: ReviewOutcome | undefined;
   const state = newReviewState();
@@ -62,6 +78,7 @@ export async function runReviewOnly(review: ReviewPlan, options: {
     const checkout = join(ownedTemp, "worktree");
     temp = ownedTemp; worktree = checkout;
     checkedGit(review.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", checkout, head]);
+    const identity = lstatSync(checkout); checkoutIdentity = { dev: identity.dev, ino: identity.ino };
     files = checkedGit(checkout, ["diff", "--name-only", "-z", base, head, "--"]).split("\0").filter(Boolean);
     const root = findProjectRoot(checkout);
     const { raw, effectiveConfig: resolvedEffectiveConfig, methods, context, ...config } = resolveProjectConfig(root, options.configOverrides);
@@ -79,12 +96,30 @@ export async function runReviewOnly(review: ReviewPlan, options: {
   } catch (error) { failure = errorText(error); }
   finally {
     try {
+      if (existsSync(procs)) {
+        const info = lstatSync(procs);
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error(`评审消费者登记不是独立普通文件，保留：${procs}`);
+        const rows: unknown = JSON.parse(readFileSync(procs, "utf8"));
+        if (!Array.isArray(rows) || rows.some((r) => !Number.isSafeInteger(r?.pgid) || r.pgid < 2 || !r.started || !r.token || !Number.isSafeInteger(r.ownerPid))) throw new Error(`评审消费者登记不可用，保留：${procs}`);
+      }
       reapProcs(procs, { ownerPid: process.pid });
       if (readProcs(procs).length) throw new Error(`评审资源释放未确认：${procs}`);
-    } catch (error) { failure = [failure, errorText(error)].filter(Boolean).join("；"); }
+    } catch (error) { releaseUnknown = true; failure = [failure, errorText(error)].filter(Boolean).join("；"); }
     try {
+      if (worktree && (releaseUnknown || state.rounds.some((r) => r.consumersReleased === false) || readProcs(procs).length)) {
+        retainedWorktree = worktree;
+        throw new Error(`消费者释放未确认，保留评审检出及证据，不删除：${worktree}`);
+      }
+      if (worktree && existsSync(worktree)) {
+        const info = lstatSync(worktree);
+        retainedWorktree = worktree; // 后续任意取证异常也保留，不强删未知目录。
+        if (info.isSymbolicLink() || !info.isDirectory() || !checkoutIdentity || info.dev !== checkoutIdentity.dev || info.ino !== checkoutIdentity.ino || realpathSync(worktree) !== worktree) throw new Error(`评审检出目录身份变化，保留现场：${worktree}`);
+        const status = gitResult(worktree, ["--no-optional-locks", "status", "--porcelain=v1", "-z"]), ignored = gitResult(worktree, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]);
+        if (status.status !== 0 || ignored.status !== 0 || status.stdout || ignored.stdout || checkedGit(worktree, ["rev-parse", "HEAD"]).trim() !== head) throw new Error(`评审检出有未保存变化或候选身份变化，保留现场：${worktree}`);
+        retainedWorktree = undefined;
+      }
       if (worktree) {
-        // 只移除本次 mkdtemp 下自己创建的分离检出，绝不 prune 其他工作区。
+        // 只移除本次 mkdtemp 下自己创建的干净分离检出，绝不 prune 其他工作区。
         const registered = gitText(review.repo, ["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${worktree}`);
         if (registered) checkedGit(review.repo, ["worktree", "remove", "--force", worktree]);
         else if (existsSync(worktree)) rmSync(worktree, { recursive: true }); // add 失败留下的本次私有目录。
@@ -100,7 +135,7 @@ export async function runReviewOnly(review: ReviewPlan, options: {
     repo: resolve(review.repo), baseline: base, candidate: head, files, mustFix: parsed?.mustFix ?? [], mustFixRaw: parsed?.mustFixRaw ?? "",
     suggestions: parsed?.minor ?? [], questions: parsed?.questions ?? [], conclusion: failure ? "评审失败" : parsed?.conclusion,
     model, durationMs: Date.now() - started, exitCode, report, reportJson: json,
-    effectiveConfig, reason: eventReason(failure), record: outcome?.record ?? state.rounds.at(-1) ?? null };
+    effectiveConfig, reason: eventReason(failure), ...(retainedWorktree ? { retainedWorktree } : {}), record: outcome?.record ?? state.rounds.at(-1) ?? null };
   writeFileSync(json, `${JSON.stringify(result, null, 2)}\n`);
   writeFileSync(report, ["# 只评审报告", `基线：${base ?? review.base}`, `候选：${head ?? review.head}`, `模型：${model}`, `耗时：${result.durationMs} ms`, `测试：${LOOP_TEST_STATUS}`,
     `结论：${result.conclusion ?? "评审失败"}`, failure ? `评审失败：${failure}` : "", "\n## 改动文件", ...files.map((file) => `- ${file}`),
@@ -127,9 +162,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   void (async () => {
     try {
       const file = resolve(process.argv[2]);
-      const { parsePlan } = await import("./pipeline.ts");
-      const plan = parsePlan(JSON.parse(readFileSync(file, "utf8")), dirname(file), process.env, { batchFile: file });
-      if (plan.recipe !== "review-only") throw new Error("只评审入口只接受 review-only 配方");
+      const plan = parseReviewOnlyPlan(JSON.parse(readFileSync(file, "utf8")), dirname(file));
       const result = await runReviewOnly(plan.review!, { file, name: plan.name, dir: plan.dir });
       console.log(JSON.stringify(result)); process.exitCode = result.exitCode as number;
     } catch (error) { console.log(JSON.stringify({ ok: false, recipe: "review-only", exitCode: 2, error: errorText(error) })); process.exitCode = 2; }

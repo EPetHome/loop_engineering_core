@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { activityAlive, atomicRun, confirmedConsumerRelease, readRun, readTaskRun, taskDefinition, taskIds, taskView, updateRun, updateTaskRun, type KernelRun } from "./node-ledger.ts";
+import { activityAlive, atomicRun, confirmedConsumerRelease, pendingCardBlocks, readRun, readTaskRun, taskDefinition, taskIds, taskView, updateRun, updateTaskRun, type KernelRun } from "./node-ledger.ts";
 import { currentCandidate, kernelCommand, queryKernel, writeKernelSummary } from "./kernel.ts";
 import { assertWorkspace, dirtyPaths, fileDigest, frozenCardProblem, gitRaw, managedConfig, taskScopeBaseline, workspaceGuard, createWorkspace } from "./kernel-workspace.ts";
 import { ownedProcessGroupAlive, processStartTime, readProcs, reapProcs, stopSessionGroup } from "./procs.ts";
@@ -14,6 +14,7 @@ import { advanceManaged, continueAcceptanceTask, deployManaged, managedReleasePr
 import { recoverBatchIntegration } from "./batch-integration.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { runPreparation, type PreparationState } from "./preparation.ts";
+import { runMethodsSelfTest } from "./methods.ts";
 import { systemNotify } from "./notify.ts";
 import { eventLock } from "./events.ts";
 import { applyPendingCardChange } from "./kernel-controls.ts";
@@ -329,7 +330,13 @@ async function superviseKernel(path: string, task?: string, interactive = false)
   for (const s of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(s, interrupt);
   try {
     updateRun(path, (r) => { r.activity = { id: randomUUID(), node: "开发评审", kind: "starting", pid: process.pid, started: processStartTime(process.pid) }; });
-    const preparation = managedConfig(initial.worktree, initial.inputVersion === 2).preparation;
+    const configuration = managedConfig(initial.worktree, initial.inputVersion === 2);
+    if (configuration.methods) {
+      const guard = workspaceGuard(readRun(path));
+      await runMethodsSelfTest(initial.worktree, { loopRoot: ROOT, procsFile: join(initial.dir, "review.procs.json"), signal: controller.signal, env: { ...process.env, AUTOREVIEW_BASE_REV: initial.base, AUTOREVIEW_BATCH_FILE: initial.file, AUTOREVIEW_STAGE: taskDefinition(initial).name } });
+      if (workspaceGuard(readRun(path)) !== guard) throw new Error("方法自测改动候选/输入，未启动开发；请修正方法并保留用户成果");
+    }
+    const preparation = configuration.preparation;
     if (preparation) {
       const statePath = join(initial.dir, "preparation-state.json");
       const state: PreparationState = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : {};
@@ -377,6 +384,15 @@ export async function deliverManagedRepair(path: string, task?: string, workerRe
   const run = readRun(path), repair = run.repair;
   if (!repair || repair.state === "read" || !run.session) return;
   if (run.stopped || run.abandoned || run.userVersion !== repair.userVersion) return;
+  const session = run.session, launch = run.launch;
+  if (session.host === "pi" && session.log && launch && session.launchId === launch.token && session.pid === launch.pid
+    && session.started === launch.processStarted && processStartTime(session.pid) === session.started) {
+    if (repair.session !== session.id || repair.epoch !== run.epoch || repair.taskId !== run.taskId || repair.candidate.tree !== run.candidate?.tree
+      || repair.inputs !== checkInputs(run, repair.node === "验收" || repair.node === "开发评审" ? "开发评审" : "测试").hash) throw new Error("原返修信封与当前任务/输入不匹配，未重新投递");
+    // 原 Pi 的私有轮询自行核对信封并留已读回执；无需为投递消息取得 OS 杀组权限。
+    if (repair.state === "unknown") updateRun(path, (r) => { if (r.repair?.id === repair.id && r.repair.state === "unknown") { r.repair.state = "pending"; r.stopReason = undefined; } });
+    return;
+  }
   const groupState = run.launch ? ownedProcessGroupAlive(run.launch) : undefined;
   if (groupState === false) {
     if (run.card.host === "pi" && (run.launchMode ?? "terminal") === "terminal") {
@@ -504,6 +520,37 @@ export async function resumeManaged(path: string, background = false, node?: str
   const releaseProblem = managedReleaseProblem(path, run); if (releaseProblem) throw new Error(releaseProblem);
   if (visible && (run.terminal?.state === "requested" || run.activity && activityAlive(run.activity) !== false)) return { ...queryKernel(path), active: [taskDefinition(run).name], opened: [], lines: ["原任务仍活动/待确认，不重复派工；请查看原窗口或查询状态", ...queryKernel(path).lines] };
   if (run.activity && activityAlive(run.activity) !== false) throw new Error("节点仍执行/排队或归属未确认，不重复派工");
+  // 显式恢复开发评审停点的原活 Pi；只投递私有收件箱，不获得杀组/新开宿主权限。
+  const scopeRecovery = !node && !postNode && run.taskRecords && run.taskId && run.stopped && (!run.blockedNode || run.blockedNode === "开发评审")
+    && (dirtyPaths(run).length > 0 || !run.candidate || !validResult(run, "开发评审", run.candidate, checkInputs(run, "开发评审").hash));
+  const session = run.session, launch = run.launch;
+  if (scopeRecovery && session?.host === "pi" && session.log && launch && session.launchId === launch.token
+    && session.pid === launch.pid && session.started === launch.processStarted && processStartTime(session.pid) === session.started) {
+    if (run.workerRequest || run.worker && ownedProcessGroupAlive(run.worker) !== false || consumerProblem(join(run.dir, "review.procs.json"))
+      || consumerProblem(join(run.dir, "review.procs.json.cleanup")) || readLocalQueue().items.some((t) => t.ledger === path && t.task === run.taskId)) throw new Error("原任务还有检查消费者或排队，不能投递开发续跑");
+    updateRun(path, (r) => {
+      if (pendingCardBlocks(r) || r.publication || r.abandoned || r.activity || r.epoch !== run.epoch || r.userVersion !== run.userVersion
+        || r.session?.id !== session.id || r.session?.launchId !== session.launchId || processStartTime(session.pid) !== session.started) throw new Error("原会话/任务状态变化，未投递续跑");
+      r.stopped = false; r.stopReason = undefined;
+    });
+    try {
+      const pending = readRun(path).repair;
+      const continuation = pending?.file === join(run.dir, `continue-${pending?.id}.md`) && pending.message.startsWith("【Loop 开发续跑】");
+      if (pending && pending.state !== "read" && !continuation && (!["pending", "sent"].includes(pending.state)
+        || pending.session !== session.id || pending.host !== session.host || pending.userVersion !== run.userVersion || pending.epoch !== run.epoch
+        || pending.candidate.tree !== run.candidate?.tree || pending.taskId !== run.taskId
+        || pending.inputs !== checkInputs(run, pending.node === "验收" || pending.node === "开发评审" ? "开发评审" : "测试").hash)) throw new Error("原未读返修信封与当前输入不匹配；保留原证据，未投递开发续跑");
+      prepareManagedContinuation(path, task);
+      const current = readRun(path), repair = current.repair;
+      if (!repair || !["pending", "sent", "read"].includes(repair.state) || repair.session !== current.session?.id || repair.host !== current.session?.host
+        || repair.userVersion !== current.userVersion || repair.epoch !== current.epoch || repair.candidate.tree !== current.candidate?.tree
+        || repair.inputs !== checkInputs(current, repair.node === "验收" || repair.node === "开发评审" ? "开发评审" : "测试").hash
+        || repair.taskId !== current.taskId) throw new Error("原未读返修信封与当前输入不匹配；保留原证据，未投递开发续跑");
+    }
+    catch (error) { pauseManaged(path, `原会话续跑准备失败：${String(error)}`); throw error; }
+    writeKernelSummary(path);
+    return { ...queryKernel(path), lines: ["续跑已放入原 Pi 私有收件箱；等待原会话核对已读，没有停止或新建宿主", ...queryKernel(path).lines] };
+  }
   if (run.card.nature === "评审") {
     const valid = run.candidate && validResult(run, "评审", run.candidate, checkInputs(run, "评审").hash);
     if (valid) return { ...queryKernel(path), lines: ["同一受评对象与输入，复用原有效报告", ...queryKernel(path).lines] };

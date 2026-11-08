@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { LOOP_TEST_STATUS } from "./config.ts";
 import { relaySourceLines } from "./pa-records.ts";
 import {
-  ACCEPTANCE_CONVENTION, authorizationLine, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria, type Grants,
+  authorizationLine, formatCriteria, renderAcceptanceLines, type AcceptanceRecord, type Criteria, type Grants,
 } from "./acceptance-core.ts";
 
 export const MARKER_DELIVERED = "【交付完成】";
@@ -23,9 +23,9 @@ export const CONVENTION = [
   "- 开发方自行做改动相关的定向自检；Loop 不运行、不判定项目测试，交付记录统一写「Loop 未运行测试」。",
 ].join("\n");
 
-/** 注入给开发方的约定全文：开发约定，配了验收再追加验收约定。 */
-export function conventionText(options: { singleNode?: boolean; acceptance?: boolean; experience?: string } = {}): string {
-  return [CONVENTION, options.singleNode ? "本次只有开发评审节点；测试、验收：没验证（本次未安排）。不运行旧后置验收命令。" : "", options.acceptance ? ACCEPTANCE_CONVENTION : "", options.experience ?? ""]
+/** 正常单会话的开发约定；不根据旧 acceptance 配置追加隐含流程。 */
+export function conventionText(options: { singleNode?: boolean; experience?: string } = {}): string {
+  return [CONVENTION, options.singleNode ? "本次只有开发评审节点；测试、验收：没验证（本次未安排）。不运行旧后置验收命令。" : "", options.experience ?? ""]
     .filter(Boolean).join("\n");
 }
 /** 超过这个字节数的 diff 不再原文附给评审。 */
@@ -56,13 +56,15 @@ export type RoundRecord = ParsedReview & {
   durationMs: number;
   /** 本轮实际输入与完整工作区字节的本机保留类快照。 */
   snapshot?: string;
+  /** 实际静态调用的释放事实；false 不得凭空登记/空缓存核销。 */
+  consumersReleased?: boolean;
   /** 本轮评审失败时的错误摘要。 */
   failed?: string;
   /** 各次失败调用的完整原文；文件唯一，不被重试或下一轮覆盖。 */
   reviewLogs?: string[];
   /** 本轮的验收结果（配了 acceptance 时）。 */
   acceptance?: AcceptanceRecord;
-  /** 同轮定向复验及完成前完整验收，按执行顺序保留；acceptance 为最后一次结论。 */
+  /** 只读历史：旧组合轮次按当时实际执行顺序展示，不触发重放。 */
   acceptanceAttempts?: AcceptanceRecord[];
   /** 评审前的越界检查失败，不冒充测试或静态评审。 */
   scope?: { files: string[]; logPath?: string };
@@ -70,33 +72,8 @@ export type RoundRecord = ParsedReview & {
   reviewConclusion?: string;
 };
 
-/** 验收命令（--autoreview-accept-cmd）的一次执行；与自动验收无关，只有 pi 扩展配置了验收命令时才有。 */
-export interface AcceptRunRecord {
-  command: string;
-  trigger: "auto" | "command";
-  /** 触发时已完成的评审轮数。 */
-  round: number;
-  startedAt: string;
-  result: "进行中" | "通过" | "不通过" | "超时" | "中断" | "无法执行";
-  durationMs?: number;
-  exitCode?: number;
-  /** 完整输出所在的日志文件。 */
-  logPath?: string;
-  /** 输出最后几行，写进总结。 */
-  outputTail?: string;
-  detail?: string;
-  /** required 必须通过才允许段接力；advisory 只记录附加检查。 */
-  mode?: "required" | "advisory";
-  candidate?: string;
-  readyEpoch?: string;
-  inputsFingerprint?: string;
-  failureKind?: import("./failure.ts").FailureKind;
-  cleanup?: string;
-}
-
 export interface SummaryInput {
   singleNode?: boolean;
-  workflow?: import("./config.ts").StageWorkflow;
   acceptanceConfigured?: boolean;
   cwd: string;
   devSessionId: string;
@@ -119,8 +96,6 @@ export interface SummaryInput {
   unresolvedAcceptance?: string;
   /** 需要你做的事（暂停时怎么继续、人工验收的条目、接入提醒），放在总结开头。 */
   todos?: string[];
-  /** 最近一次验收命令的执行结果。 */
-  acceptRun?: AcceptRunRecord;
   /** 开发基线之后开发方新增的提交数（只记录，不评判）。 */
   newCommits?: number;
   /** 开发期间发现变化的来源文件与时间。 */
@@ -295,17 +270,11 @@ export function deriveReviewerSessionId(devSessionId: string): string {
   return deriveSessionId("rev", devSessionId);
 }
 
-/** 验收命令结果的一句话写法，总结、通知和状态命令共用。 */
-export function acceptRunLabel(record: AcceptRunRecord): string {
-  return record.result === "不通过" ? `不通过（退出码 ${record.exitCode ?? "未知"}）` : record.result;
-}
-
 /** 用户首先看到本轮证据，不能把上一轮通过结果或缺失字段当成本轮结论。 */
 export function renderDeliveryReport(input: SummaryInput): string {
   const round = input.rounds.at(-1), acceptance = round?.acceptance;
   const lines = ["# 交付报告", `- 项目：${input.cwd}`];
-  const skipped = input.singleNode ? "本次未安排" : input.workflow === "without-acceptance" ? "批次明确选择不带验收流程"
-    : round?.mustFix.length ? "评审有必修，本轮直接返修"
+  const skipped = input.singleNode ? "本次未安排" : round?.mustFix.length ? "评审有必修，本轮直接返修"
     : round?.failed ? "评审未成功，本轮暂停"
     : input.acceptanceConfigured === false ? "未配置自动验收" : "本轮没有验收记录";
   lines.push("## 逐条验收");
@@ -323,7 +292,7 @@ export function renderDeliveryReport(input: SummaryInput): string {
     lines.push(`- 结论：${!item ? `没跑（${skipped}）` : item.verdict === "需人工" ? `没跑（${item.detail}）` : !executed && item.verdict === "通过" ? "无法核实（缺少实际执行记录）" : item.verdict}`);
     if (acceptance && item) {
       const source = item.source, evidenceDir = source?.runDir ?? acceptance.runDir;
-      lines.push(`- 最终结论来源：${source ? `第 ${source.round} 轮${source.full ? "完整验收" : "定向复验（尚非最终完整验收）"}${item.verdict === "需人工" ? "（该条未实测，留给用户）" : ""}` : "没有记录完整验收轮次"}`);
+      lines.push(`- 最终结论来源：${source ? `第 ${source.round} 轮${source.full ? "完整验收" : "定向复验"}${item.verdict === "需人工" ? "（该条未实测，留给用户）" : ""}` : "没有记录实测轮次"}`);
       lines.push(`- ${executed ? `证据：${evidenceDir}/evidence/${item.id}.txt；` : ""}完整判定：${evidenceDir}/result.json`);
     }
   }
@@ -358,10 +327,6 @@ export function renderSummary(input: SummaryInput): string {
   if (input.singleNode) lines.push("- 验收：没验证（本次未安排）");
   lines.push(`- 评审 ${input.rounds.length} 次，返修 ${input.repairs} 次`);
   if (input.status === "完成" && input.materialCleanup) lines.push(`- ${input.materialCleanup}`);
-  if (input.acceptRun) {
-    lines.push(`- 验收命令：${acceptRunLabel(input.acceptRun)}`);
-    lines.push(`- 验收命令用途：${input.acceptRun.mode === "required" ? "本段必需验收" : "附加检查"}`);
-  }
   if (input.newCommits) lines.push(`- 开发方新增提交：${input.newCommits} 个（基线之后，只记录不评判）`);
   if (input.notes) lines.push(`- 说明：${input.notes}`);
   if (input.status === "暂停" && input.pauseDetail?.question) lines.push("## 开发方的问题原文", input.pauseDetail.question);
@@ -388,18 +353,6 @@ export function renderSummary(input: SummaryInput): string {
   const bullets = (items: string[], prefix = ""): void => {
     lines.push(...(items.length > 0 ? items.map((item) => `- ${prefix}${item}`) : ["- 无"]));
   };
-  const accept = input.acceptRun;
-  if (accept) {
-    lines.push("## 验收命令");
-    lines.push(`- 命令：${accept.command}`);
-    lines.push(`- 触发：${accept.trigger === "auto" ? `第 ${accept.round} 轮评审完成后自动执行` : "手动 /accept"}`);
-    lines.push(`- 开始：${accept.startedAt}${accept.durationMs === undefined ? "" : `，耗时 ${Math.round(accept.durationMs / 1000)} 秒`}`);
-    lines.push(`- 结果：${acceptRunLabel(accept)}`);
-    if (accept.detail) lines.push(`- 说明：${accept.detail}`);
-    if (accept.cleanup) lines.push(`- 资源：${accept.cleanup}`);
-    if (accept.logPath) lines.push(`- 完整输出：${accept.logPath}`);
-    if (accept.outputTail?.trim()) lines.push("输出最后几行：", "```text", accept.outputTail.trimEnd(), "```");
-  }
   lines.push("## 各轮");
   for (const round of input.rounds) {
     lines.push(`### 第 ${round.round} 轮（${round.startedAt}，耗时 ${Math.round(round.durationMs / 1000)} 秒）`);

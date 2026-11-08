@@ -34,7 +34,7 @@ export interface MethodsRecord {
   permissionCheckedAt?: string;
 }
 
-export interface MethodsOptions { recheck?: boolean; dryRun?: boolean; loopRoot: string; env?: NodeJS.ProcessEnv; overrides?: ProjectConfigOverrides }
+export interface MethodsOptions { recheck?: boolean; dryRun?: boolean; loopRoot: string; env?: NodeJS.ProcessEnv; overrides?: ProjectConfigOverrides; procsFile?: string; signal?: AbortSignal }
 
 export const methodsRecordPath = (root: string, env: NodeJS.ProcessEnv = process.env): string =>
   join(projectDataDir(root, env), "methods.json");
@@ -137,12 +137,6 @@ export function changedParts(previous: MethodsRecord | undefined, current: Metho
   return changes;
 }
 
-function runCommand(root: string, command: string, timeoutMs: number): { ok: boolean; output: string; code: number } {
-  const res = spawnSync("/bin/sh", ["-c", command], { cwd: root, encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
-  const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-  return { ok: (res.status ?? 1) === 0 && !res.error, output, code: res.status ?? 1 };
-}
-
 export interface MethodsRunResult {
   skipped: boolean;
   changed: string[];
@@ -153,7 +147,7 @@ export interface MethodsRunResult {
 }
 
 /** 指纹不变就跳过；变了（或 --recheck）执行方法自检，通过后才更新记录。 */
-export function runMethodsSelfTest(root: string, options: MethodsOptions): MethodsRunResult {
+export async function runMethodsSelfTest(root: string, options: MethodsOptions): Promise<MethodsRunResult> {
   const env = options.env ?? process.env;
   const previous = readMethodsRecord(root, env);
   const current = methodsComponents(root, options.loopRoot, { dryRun: options.dryRun, env, overrides: options.overrides });
@@ -173,10 +167,20 @@ export function runMethodsSelfTest(root: string, options: MethodsOptions): Metho
   }
   const methods = resolveProjectConfig(findProjectRoot(root), { env, ...options.overrides }).methods;
   if (methods?.selfCheck) {
-    const result = runCommand(root, methods.selfCheck, 10 * 60_000);
-    if (!result.ok) throw new Error(`方法自测未通过（${methods.selfCheck}，退出码 ${result.code}）：${tail(result.output)}`);
+    const { createChildExec } = await import("./hosts/review-hook.ts");
+    const { createRunResource, managedShell, releaseRunResource } = await import("./resources.ts");
+    const { acquireProjectExecution } = await import("./project-execution.ts");
+    const release = await acquireProjectExecution(root, "check", options.procsFile ?? "", options.signal);
+    let resource: ReturnType<typeof createRunResource> | undefined, result;
+    try {
+      resource = createRunResource(`methods:${fingerprint}`, undefined, options.procsFile);
+      result = await createChildExec(options.procsFile)("/bin/sh", ["-c", managedShell(methods.selfCheck, resource)], { cwd: root, env, timeout: 10 * 60_000, role: "方法自测", signal: options.signal });
+    } finally { if (resource) releaseRunResource(resource); release(resource ? resource.status === "released" : true); }
+    const output = `${result.stdout}${result.stderr}`;
+    if (result.processesReleased !== true || resource!.status !== "released") throw new Error("方法自测消费者/资源释放未确认，保留登记，不启动开发");
+    if (result.code !== 0 || result.killed) throw new Error(`方法自测未通过（${methods.selfCheck}，退出码 ${result.code}）：${tail(output)}`);
     record.components = current;
-    const check = { command: methods.selfCheck, passed: true, output: result.output };
+    const check = { command: methods.selfCheck, passed: true, output };
     writeJsonAtomic(methodsRecordPath(root, env), record);
     return { skipped: false, changed: changes, fingerprint, selfCheck: check, record, written: true };
   }

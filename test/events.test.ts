@@ -89,7 +89,7 @@ test("无 eventsDir 不建事件状态；通知 false 不调用系统执行器�
   writeFileSync(h.config, "{}"); await systemNotify("测试", "默认通知", { exec: async () => { called = true; return { code: 0, stdout: "", stderr: "", killed: false }; } }); assert.equal(called, true);
 });
 
-test("暂停原因映射覆盖率：收集两个宿主、共享评审、验收与流水线的原因字符串，新增原因不能落到其他", () => {
+test("暂停原因映射覆盖率：逐一核对保留宿主/评审/验收来源，新增原因不能落到其他", () => {
   const reasons = new Set<string>();
   const patterns = [
     /\bpause\(ctx,\s*(?:state,\s*)?(["'`])([\s\S]*?)\1/g,
@@ -98,13 +98,14 @@ test("暂停原因映射覆盖率：收集两个宿主、共享评审、验收�
     /\bfinish\(2,\s*(["'`])([\s\S]*?)\1/g,
     /(?:const INTERRUPTED|const USER_INPUT_CHANGED)\s*=\s*(["'`])([\s\S]*?)\1/g,
   ];
-  for (const name of ["autoreview.ts", "hosts/review-hook.ts", "review.ts", "acceptance.ts", "pipeline.ts"]) {
-    const source = readFileSync(fileURLToPath(new URL(`../${name}`, import.meta.url)), "utf8");
-    for (const pattern of patterns) for (const match of source.matchAll(pattern)) reasons.add(match[2]);
+  for (const name of ["autoreview.ts", "hosts/review-hook.ts", "review.ts", "acceptance.ts"]) {
+    const source = readFileSync(fileURLToPath(new URL(`../${name}`, import.meta.url)), "utf8"), extracted = new Set<string>();
+    for (const pattern of patterns) for (const match of source.matchAll(pattern)) { extracted.add(match[2]); reasons.add(match[2]); }
+    assert.ok(extracted.size > 0, `${name} 的实际原因提取失效，不能将空缓存当覆盖通过`);
   }
   // 条件分支中的两条，以及通过辅助函数返回到 pause 的固定原因。
-  for (const reason of ["评审改动了工作区", "工作区或提交发生了变化", "候选或输入版本变化，原评审结果不能放行当前候选", "当前必需验收尚未通过，不能接力", "上游来源配置已移除，需要重新确认输入"]) reasons.add(reason);
-  assert.ok(reasons.size >= 40, `仅收集到 ${reasons.size} 条原因，收集规则可能已失效`);
+  for (const reason of ["评审改动了工作区", "工作区或提交发生了变化", "候选或输入版本变化，原评审结果不能放行当前候选", "上游来源配置已移除，需要重新确认输入"]) reasons.add(reason);
+  for (const reason of ["开发方需要你决定", "达到返修上限", "评审改动了工作区", "工作区或提交发生了变化"]) assert.ok(reasons.has(reason), `必须覆盖实际共享停点：${reason}`);
   assert.deepEqual([...reasons].filter((reason) => eventReason(reason).category === "其他"), [], "暂停原因未登记");
 });
 
