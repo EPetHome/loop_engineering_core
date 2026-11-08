@@ -186,11 +186,11 @@ test("显式 cwd 的本仓库 worktree 同样做脏检查和方法自测", () =>
   assert.equal(count(f.selfLog), 1, "显式 cwd 也要跑方法自测");
 });
 
-test("开工不再记录门禁树；旧 gate 只提醒并忽略，仍登记队列", () => {
+test("开工不再记录门禁树；旧 gate 静默忽略，仍登记队列", () => {
   const f = fixture();
   const opened = loop(f.repo, ["开工", f.batch, "--json"]);
   assert.equal(opened.status, 0, opened.stderr);
-  assert.match(opened.stderr, /gate 已停用并忽略/);
+  assert.doesNotMatch(opened.stderr, /gate.*已停用/);
   assert.equal(count(f.gateLog), 0);
   const record = readMethodsRecord(f.worktree, process.env)!;
   assert.equal(Object.hasOwn(record, "gateTrees"), false);

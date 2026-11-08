@@ -9,6 +9,7 @@ import { mergeManaged, recordManagedUserInput } from "./kernel-session.ts";
 import { gitResult } from "./workspace.ts";
 import { controlSource, requestCardChange } from "./kernel-controls.ts";
 import { prepareExceptionCandidate } from "./batch-integration.ts";
+import { readMarker, warnDisabledGate } from "./config.ts";
 
 interface Args { task?: string; removeTask?: string; node?: string; from?: string; removeNode?: string; reviewTimeoutMin?: string; recheck?: boolean; command?: string; batch?: string; dryRun: boolean; json: boolean; acceptUnverified?: boolean; launcher?: string; rest: string[]; stage?: string; id?: string; all?: boolean }
 export function findKernelLedger(file: string, cwd = process.cwd()): string | undefined {
@@ -77,11 +78,17 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
   if (args.task && !["续跑", "重跑", "停止", "整合"].includes(command)) throw new Error("--task 仅用于续跑/重跑/停止/整合");
   if (args.reviewTimeoutMin !== undefined || args.recheck) throw new Error("新卡不采用旧批次预算/重检开关；开发评审限额须写在 limits.开发评审");
   if (args.launcher && !["启动", "续跑", "重跑"].includes(command)) throw new Error("新卡 --launcher 只用于启动/续跑/重跑");
-  if (args.launcher && args.launcher !== "background") throw new Error("新卡默认在当前终端前台启动；后台可用 --launcher background，不经过终端长文本粘贴");
+  if (args.launcher && !["background", "terminal"].includes(args.launcher)) throw new Error("新卡 --launcher 只支持 terminal|background；--json 仅改变输出，不选择后台");
+  const raw = command === "启动" ? JSON.parse(readFileSync(file, "utf8")) : path ? readRun(path).card : undefined;
+  const terminalAction = command === "启动" || command === "续跑" || command === "重跑" && args.node === "开发评审";
+  const terminal = terminalAction && raw?.nature !== "评审" && (args.launcher === "terminal" || !args.launcher && (raw?.host ?? "pi") === "pi");
+  if (args.launcher === "terminal" && (raw?.nature === "评审" || (raw?.host ?? "pi") !== "pi" || command === "重跑" && args.node !== "开发评审")) throw new Error("--launcher terminal 仅用于 Pi 开发任务启动/续跑或重跑开发评审；只评审不开开发窗口");
+  if (terminal && process.platform !== "darwin" && !args.dryRun) throw new Error("默认可见 Pi 窗口依赖 macOS Terminal；请明确选择 --launcher background，不自动转后台");
   if (command === "启动") {
     const result = createKernelRun(file, cwd, args.dryRun);
-    if (args.dryRun) return { ok: true, kernel: 1, dryRun: true, lines: result.lines };
-    return { ...await launchKernel(result.path, args.json || args.launcher === "background"), command };
+    if (args.dryRun) return { ok: true, kernel: 1, dryRun: true, lines: [...result.lines, ...(terminal ? ["Pi 开发默认各任务独立可见窗口；本次只读，未打开窗口"] : [])] };
+    warnDisabledGate(readMarker(result.run!.repo));
+    return { ...await (terminal ? resumeManaged(result.path, false, undefined, false, undefined, true) : launchKernel(result.path, args.launcher === "background" || args.json)), command };
   }
   if (!path) throw new Error("没有内核登记");
   if (["状态", "查询"].includes(command)) return { ...queryKernel(path), command };
@@ -101,7 +108,7 @@ export async function kernelCLI(args: Args, cwd = process.cwd()): Promise<Record
   }
   if (command === "续跑" || command === "重跑") {
     if (command === "重跑" && !args.node) throw new Error("重跑需要 --node 开发评审|评审|测试|验收|部署");
-    return { ...await resumeManaged(path, args.json || args.launcher === "background", args.node, args.dryRun, args.task), command };
+    return { ...await resumeManaged(path, terminal ? false : args.json || args.launcher === "background", args.node, args.dryRun, args.task, terminal, args.launcher as "terminal" | "background" | undefined), command };
   }
   const run = readRun(path);
   if (run.card.nature === "评审") throw new Error("只评审卡仅出报告，不能合入（包括接受未验证）；请查询报告或重跑 --node 评审");

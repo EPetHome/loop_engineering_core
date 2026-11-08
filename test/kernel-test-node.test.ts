@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { deliverManagedRepair, releaseKernelWorkspace, resumeManaged, stopKernel } from "../kernel-runtime.ts";
 import { processStartTime, readProcs, registerProc, releaseProc } from "../procs.ts";
 import { readLocalQueue } from "../local-node-queue.ts";
+import { releaseTestWorkspace } from "../test-workspace.ts";
 
 test("A2 产品测试失败回同一会话，修复后先评审再测试；各自计数/精确命令", async () => {
   const command = `node -e "if(require('fs').readFileSync('file.txt','utf8').trim()!=='fixed'){console.error('AssertionError: expected fixed');process.exit(1)}"`;
@@ -26,11 +27,11 @@ test("A2 产品测试失败回同一会话，修复后先评审再测试；各�
     writeFileSync(join(run.worktree, "file.txt"), "broken"); let reviews = 0;
     const options = { exec: f.exec, callReviewer: async () => { reviews++; return reviewer(); } };
     const first = await completeManagedDelivery(path, "【交付完成】", options);
-    assert.equal(first.status, "不通过", first.reason); assert.match(first.message!, /AssertionError: expected fixed/);
+    assert.equal(first.status, "不通过", first.reason ?? ""); assert.match(first.message!, /AssertionError: expected fixed/);
     assert.equal(readRun(path).session!.id, "original-session"); assert.equal(readRun(path).repairs, 0); assert.equal(readRun(path).counters!.测试!.repairs, 1);
     assert.equal(readLocalQueue().items.length, 0); assert.equal(reviews, 1);
     writeFileSync(join(run.worktree, "file.txt"), "fixed");
-    const second = await completeManagedDelivery(path, "【交付完成】", options); assert.equal(second.status, "通过", second.reason);
+    const second = await completeManagedDelivery(path, "【交付完成】", options); assert.equal(second.status, "通过", second.reason ?? "");
     assert.equal(reviews, 2); assert.deepEqual(readRun(path).results.map((r) => r.node), ["开发评审", "测试", "开发评审", "测试"]);
     assert.equal(queryKernel(path).status, "可合入");
     const results = readRun(path).results.filter((r) => r.node === "测试");
@@ -42,7 +43,7 @@ test("真实 bin/loop → Pi 生命周期替身 → 测试返修原会话 → �
   let path: string | undefined;
   try {
     fakeKernelLauncher(f);
-    const cli = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["启动", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 20_000 });
+    const cli = spawnSync(fileURLToPath(new URL("../bin/loop", import.meta.url)), ["启动", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 20_000 });
     assert.equal(cli.status, 0, cli.stdout + cli.stderr); path = JSON.parse(cli.stdout).ledger;
     const end = Date.now() + 30_000;
     while (readRun(path!).release.status !== "已释放" && Date.now() < end) await sleep(50);
@@ -60,7 +61,7 @@ test("同次尝试首次 75、自动重试 0 保留失败证据并继续提交�
     f.card.tasks[0].test = command; writeFileSync(f.file, JSON.stringify(f.card));
     const path = f.start(); writeFileSync(join(readRun(path).worktree, "file.txt"), "done");
     const output = await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer });
-    assert.equal(output.status, "通过", output.reason); const run = readRun(path);
+    assert.equal(output.status, "通过", output.reason ?? ""); const run = readRun(path);
     assert.equal(run.publication!.push, "成功"); assert.equal(run.repairs, 0); assert.deepEqual(run.counters!.测试, { repairs: 0, recoveries: 1 });
     assert.deepEqual(run.results.map((r) => [r.node, r.status]), [["开发评审", "通过"], ["测试", "通过"], ["提交", "通过"]]);
     const result = run.results.find((r) => r.node === "测试")!;
@@ -115,11 +116,11 @@ test("ENOSPC 共享归因实际接入节点：通过名不吞产品返修，真�
       const path = f.start(), run = readRun(path); attachSession(path, "pi", "original-enospc", join(run.dir, "session.jsonl"));
       writeFileSync(join(run.worktree, "file.txt"), "candidate");
       const output = await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer });
-      assert.equal(output.failure, failure, output.reason); assert.equal(output.released, true);
+      assert.equal(output.failure, failure, output.reason ?? ""); assert.equal(output.released, true);
       const current = readRun(path); assert.equal(current.repairs, 0); assert.equal(current.counters!.测试!.repairs, failure === "product" ? 1 : 0);
       assert.equal(current.counters!.测试!.recoveries, maxRecoveries, "mc 水位错误应进入有限环境恢复，而非产品返修");
       assert.equal(current.session!.id, "original-enospc"); assert.equal(current.results[0].status, "通过");
-      assert.equal(queryKernel(path).missing.some((s) => s.includes("/ 开发评审 /")), false, "当前开发评审仍有效");
+      assert.equal(queryKernel(path).missing.some((s: string) => s.includes("/ 开发评审 /")), false, "当前开发评审仍有效");
       assert.equal(Boolean(output.message), failure === "product", "只有产品失败回同一会话返修");
       if (failure === "product") assert.match(output.message!, /AssertionError: actual product regression/);
       else { assert.equal(queryKernel(path).status, "等你决定"); assert.equal(queryKernel(path).node, "测试"); }
@@ -140,12 +141,12 @@ test("A7/A9 已检查树合入不复跑，用户例外保留测试失败且只�
         assert.equal(recordManagedUserInput(path, '<file name="x">合入本批</file>', "pi:interactive"), undefined);
         const decision = recordManagedUserInput(path, "合入本批", "pi:interactive")!;
         assert.ok(decision.missing.some((s) => s.includes("测试")));
-        const output = await mergeManaged(path, { accept: true, decision }); assert.equal(output.status, "通过", output.reason);
+        const output = await mergeManaged(path, { accept: true, decision }); assert.equal(output.status, "通过", output.reason ?? "");
         assert.equal(readRun(path).results.some((r) => r.node === "测试" && r.status === "通过"), false);
         assert.equal(readRun(path).publication!.decision, decision.id);
       } else {
         const count = readRun(path).results.length; await completeManagedDelivery(path, "【交付完成】", options); assert.equal(readRun(path).results.length, count);
-        const output = await mergeManaged(path); assert.equal(output.status, "通过", output.reason);
+        const output = await mergeManaged(path); assert.equal(output.status, "通过", output.reason ?? "");
       }
       assert.equal(reviews, 1); assert.equal(f.git(f.origin, "for-each-ref", "--format=%(refname)"), "refs/heads/dev");
       const before = readRun(path), checks = queryKernel(path).checks, missing = queryKernel(path).missing;
@@ -171,7 +172,11 @@ test("真实命令超时、无释放证明、写产品源码都不算测试通�
       const output = await executeNode(path, "测试", (i) => runTestNode({ ...i, deadline: mode === "timeout" ? Date.now() + 100 : i.deadline },
         mode === "release" ? async () => ({ code: 0, stdout: "ok", stderr: "", killed: false }) : createChildExec(i.procsFile)), { localSlot: true });
       assert.notEqual(output.status, "通过"); assert.notEqual(output.failure, "product"); assert.equal(readRun(path).counters?.测试?.repairs ?? 0, 0);
-      await assert.rejects(() => mergeManaged(path), /未确认|活动|普通合入|身份核对/);
+      await assert.rejects(() => mergeManaged(path!), /未确认|活动|普通合入|身份核对/);
+      if (mode === "release") {
+        const entry = readRun(path).testWorkspaces!.at(-1)!;
+        assert.equal(releaseTestWorkspace(path, entry, true), undefined, "纯内存替身未启动消费者，仅释放本夹具检出；不改产品的未知结论");
+      }
     } finally { if (path) await stopKernel(path); f.cleanup(); }
   }
 });
@@ -206,7 +211,7 @@ test("新卡 Claude/Codex 实际启动/原生通道，独立测试返修仍回�
       Object.assign(process.env, { LOOP_FAKE_HOST_CONFIG: config, AUTOREVIEW_HOST: host, CLAUDE_BIN: hostCommand, CODEX_BIN: hostCommand, CODEX_HOME: join(f.root, "codex"),
         AUTOREVIEW_REVIEWER_CMD: join(root, "test/fake-reviewer.mjs"), FAKE_MODE: "pass", FAKE_STATE_DIR: join(f.root, "reviewer") });
       f.card.host = host; f.card.tasks[0].scope = ["src/a.txt"]; writeFileSync(f.file, JSON.stringify(f.card));
-      const cli = spawnSync(join(root, "bin/loop"), ["启动", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 20_000 });
+      const cli = spawnSync(join(root, "bin/loop"), ["启动", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 20_000 });
       assert.equal(cli.status, 0, cli.stdout + cli.stderr); path = JSON.parse(cli.stdout).ledger;
       const wait = async (check: () => boolean, label: string) => { const end = Date.now() + 20_000; while (!check() && Date.now() < end) await sleep(50); assert.ok(check(), `${host}: ${label}; ${readRun(path!).stopReason}; ${readFileSync(join(readRun(path!).dir, "launch.log"), "utf8").slice(-4000)}`); };
       await wait(() => existsSync(join(f.root, "before-stop-1")), "原宿主实际启动"); writeFileSync(join(f.root, "run-stop-1"), "go");

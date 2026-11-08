@@ -18,6 +18,8 @@ export type Exec = (
   args: string[],
   /** role：需要登记的长进程角色（评审、验收方），宿主 Hook 被杀后据此清理。 */
   options: { cwd: string; timeout: number; signal?: AbortSignal; role?: string; env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void;
+    /** 可选的本次命令证据通道（fd 3）；不混入业务 stdout/stderr。 */
+    onControl?: (chunk: string) => void;
     /** 在首次中止/退出边界、任何进程清理之前调用；用于保留终止现场，而非清理后的状态。 */
     onBeforeStop?: () => void },
 ) => Promise<ExecResult>;
@@ -70,7 +72,7 @@ export function createGitEvidence(exec: Exec, cwd: string, signal?: AbortSignal)
   const raw = async (args: string[], timeout = 30_000): Promise<ExecResult> => {
     signal?.throwIfAborted();
     try {
-      const res = await exec("git", ["-c", "core.quotePath=false", ...args], { cwd, timeout, signal });
+      const res = await exec("git", ["-c", "core.quotePath=false", ...args], { cwd, timeout, signal, env: { GIT_OPTIONAL_LOCKS: "0" } });
       signal?.throwIfAborted();
       return res;
     } catch (error) {

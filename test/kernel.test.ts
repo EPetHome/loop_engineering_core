@@ -214,7 +214,7 @@ test("真实 bin/loop→pi-dev→Pi适配替身→原会话返修→dev发布→
     mkdirSync(dirname(join(f.repo, nested)), { recursive: true }); writeFileSync(join(f.repo, nested), "# 完整长路径提示词\n");
     f.card.tasks[0].prompt = nested; writeFileSync(f.file, JSON.stringify(f.card)); f.git(f.repo, "add", "."); f.git(f.repo, "commit", "-qm", "long path fixture");
     fakeLauncher(f);
-    const cli = spawnSync(join(LOOP, "bin/loop"), ["启动", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 30_000 });
+    const cli = spawnSync(join(LOOP, "bin/loop"), ["启动", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 30_000 });
     assert.equal(cli.status, 0, `${cli.stdout}\n${cli.stderr}`);
     const result = JSON.parse(cli.stdout); path = result.ledger; assert.ok(path);
     await waitFor(() => readRun(path!).release.status === "已释放", `发布/释放完成；${readRun(path!).stopReason}`);
@@ -234,7 +234,7 @@ test("新卡会话空闲不报 running；CLI 停止与查询一致；启动失�
   const f = fixture(["开发评审"]); let path: string | undefined;
   try {
     fakeLauncher(f); process.env.KERNEL_FAKE_ACTION = "idle";
-    const cli = spawnSync(join(LOOP, "bin/loop"), ["启动", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" });
+    const cli = spawnSync(join(LOOP, "bin/loop"), ["启动", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" });
     assert.equal(cli.status, 0, cli.stderr); path = JSON.parse(cli.stdout).ledger;
     await waitFor(() => !!readRun(path!).session, "宿主已登记");
     assert.equal(queryKernel(path!).status, "等你决定", "空闲会话存活不是节点执行");
@@ -244,13 +244,13 @@ test("新卡会话空闲不报 running；CLI 停止与查询一致；启动失�
     const launch = managedLaunchArgs(path!); assert.ok(launch.args.includes(readRun(path!).session!.log!));
     updateRun(path!, (r) => { r.repairs = 3; });
     process.env.PI_BIN = join(f.root, "missing-pi");
-    const resumed = spawnSync(join(LOOP, "bin/loop"), ["续跑", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" });
+    const resumed = spawnSync(join(LOOP, "bin/loop"), ["续跑", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" });
     assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
     await waitFor(() => !!readRun(path!).stopReason?.includes("启动失败"), "启动失败已登记");
     assert.equal(queryKernel(path!).status, "等你决定"); assert.equal(readRun(path!).repairs, 3);
     assert.match(readRun(path!).stopReason!, /续跑/);
     Object.assign(process.env, { PI_BIN: join(f.root, "fake-pi"), KERNEL_FAKE_ACTION: "no-ack", AUTOREVIEW_KERNEL_STARTUP_TIMEOUT_MS: "100" });
-    const retry = spawnSync(join(LOOP, "bin/loop"), ["续跑", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" });
+    const retry = spawnSync(join(LOOP, "bin/loop"), ["续跑", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" });
     assert.equal(retry.status, 0, retry.stdout + retry.stderr);
     await waitFor(() => !!readRun(path!).stopReason?.includes("未获宿主确认"), "宿主未确认时有界失败");
     assert.equal(queryKernel(path!).status, "等你决定"); assert.equal(readRun(path!).repairs, 3);

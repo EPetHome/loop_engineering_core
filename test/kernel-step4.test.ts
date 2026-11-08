@@ -277,7 +277,7 @@ test("A17 Pi 真入口替身及 Claude/Codex 已发布 Stop 均接续部署，�
     try {
       fakeKernelLauncher(f); process.env.KERNEL_FAKE_REPEAT_SETTLE = "1";
       const bin = fileURLToPath(new URL("../bin/loop", import.meta.url));
-      const start = spawnSync(bin, ["启动", f.file, "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" }); assert.equal(start.status, 0, start.stdout + start.stderr);
+      const start = spawnSync(bin, ["启动", f.file, "--launcher", "background", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8" }); assert.equal(start.status, 0, start.stdout + start.stderr);
       path = JSON.parse(start.stdout).ledger; await until(() => readRun(path!).release.status === "已释放", "Pi 发布/部署/释放");
       const run = readRun(path!);
       if (run.supervisor) { const supervisor = run.supervisor; await until(() => ownedProcessGroupAlive(supervisor) === false, "Pi supervisor 退出"); }

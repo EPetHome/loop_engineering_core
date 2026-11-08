@@ -10,7 +10,7 @@ import { gitText } from "./workspace.ts";
 import type { RunResource } from "./resources.ts";
 import type { DeploymentConfig } from "./config.ts";
 import type { FailureKind } from "./failure.ts";
-import { processStartTime, type SessionGroup } from "./procs.ts";
+import { processStartTime, type ProcEntry, type SessionGroup } from "./procs.ts";
 
 export interface Candidate { commit: string; tree: string }
 export interface NodeResult {
@@ -18,7 +18,11 @@ export interface NodeResult {
   started: string; ended?: string; status: "通过" | "不通过" | "没验证" | "中断";
   failure?: FailureKind; reason?: string; evidence: string[]; operations: string[]; released: boolean;
   acceptance?: AcceptanceRecord;
+  interruption?: { trigger?: { kind: string; path?: string; event?: string; at: string; reason: string }; observations?: { kind: string; path?: string; event: string; at: string }[]; executorReason?: string;
+    validity: { candidate: boolean | "未知"; inputs: boolean | "未知"; control: boolean }; protectionReason?: string };
 }
+export interface TestWorkspace { attempt: string; run: string; task?: string; candidate: Candidate; inputs: string; source: string; parent: string; path: string; identity: string; state: "creating" | "active" | "released" | "retained"; reason?: string }
+export interface ConsumerRelease { attempt: string; captured: string; consumers: { file: string; entry: ProcEntry }[]; confirmed?: string; previousProblems?: string[] }
 export interface DeploymentPlan { config: DeploymentConfig; cwd: string; common: string }
 export interface DeploymentAttempt {
   id: string; inputs: string; publication: Candidate; config: DeploymentConfig; cwd: string; started: string; ended?: string;
@@ -47,6 +51,8 @@ export interface KernelRun {
   reviewInputs?: { hash: string; files: Record<string, string> };
   reviewReport?: { report: string; json: string; attempt: string };
   deploymentPlan?: DeploymentPlan; deploymentAttempts?: DeploymentAttempt[];
+  testWorkspaces?: TestWorkspace[];
+  consumerReleases?: ConsumerRelease[];
   candidate?: Candidate; results: NodeResult[]; repairs: number; userVersion: number; userInputs: string[]; userFiles?: string[];
   /** 最近一次真实用户引用时确认的原始文本内容哈希；不凭磁盘的新内容自动更新。 */
   userFileVersions?: Record<string, string>;
@@ -63,6 +69,10 @@ export interface KernelRun {
     bindings?: Record<string, { tree: string; round: number; task?: string; candidate?: string; inputs: string; reason?: string }> };
   worker?: SessionGroup; workerRequest?: string;
   repair?: RepairEnvelope;
+  delivery?: { candidate: Candidate; inputs: string; userVersion: number; at: string };
+  /** 用户的开发会话前后台选择，独立于可撤销的一次性开窗请求。 */
+  launchMode?: "terminal" | "background";
+  terminal?: { request: string; at: string; script: string; owner?: { pid: number; started: string }; state: "requested" | "claimed" | "failed"; reason?: string };
   native?: { launch: string; command: string; childPid: number; childStarted: string; binding: string };
   abandonment?: { at: string; source: string; head?: string; history?: string };
   activity?: { id: string; node: NodeName; kind: "starting" | "developing" | "reviewing" | "submitting" | "waiting" | "testing" | "accepting" | "deploying"; pid: number; started: string; session?: string; procs?: string; ticket?: string; deadline?: number };
@@ -79,7 +89,7 @@ export interface KernelRun {
   release: { status: "未释放" | "已释放" | "未确认"; details: string[] };
 }
 /** 显式上下文投影：不是另一份 run；写回仍持同一个账本短锁。 */
-export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "userFiles", "userFileVersions", "epoch", "counters", "blockedNode", "worker", "workerRequest", "repair", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
+export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "userFiles", "userFileVersions", "epoch", "counters", "consumerReleases", "blockedNode", "worker", "workerRequest", "repair", "delivery", "launchMode", "terminal", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
 export type TaskRecord = Pick<KernelRun, typeof TASK_FIELDS[number]> & { id: string; name: string; definition?: DevelopmentTask; removed?: boolean };
 export interface Contribution { task: string; candidate: Candidate; base: string; patchBase: string; contribution: string; inputs: Record<string, string>; checks: string[]; epoch: number; userVersion: number }
 export interface BatchIntegration { id: string; task: string; at: string; before: Candidate; after: Candidate; mapping: Contribution[]; history: string; evidence: string; order: number; control?: string; targetSource?: Candidate }
@@ -146,6 +156,11 @@ export function updateRun<T>(path: string, change: (run: KernelRun) => T): T {
   try { const run = readRun(path), value = change(run); run.revision += 1; atomicRun(path, run); return value; }
   finally { release(); }
 }
+/** 只接受同一尝试已登记消费者的后续实际释放回执，不改变当时的业务结论。 */
+export function confirmedConsumerRelease(run: KernelRun, attempt: string): boolean {
+  const receipts = [...(run.consumerReleases ?? []), ...(!run.taskId ? (run.taskRecords ?? []).flatMap((t) => t.consumerReleases ?? []) : [])];
+  return receipts.some((r) => r.attempt === attempt && !!r.confirmed && r.consumers.length > 0);
+}
 /** 历史决定保留，但只有本候选、本输入、本用户版本的决定仍有授权效力。 */
 export function findUserDecision(run: KernelRun, candidate: Candidate | undefined, inputs: string | undefined, missing: string[], id?: string): UserDecision | undefined {
   return [...run.decisions].reverse().find((d) => (!id || d.id === id) && d.userVersion === run.userVersion && typeof inputs === "string" && d.inputs === inputs
@@ -161,8 +176,15 @@ export function finishAttempt(path: string, expected: { id: string; candidate: C
   return updateTaskRun(path, expected.task, (run) => {
     const fresh = run.activity?.id === expected.id && !run.stopped && !run.abandoned && run.userVersion === expected.userVersion
       && (run.epoch ?? 0) === (expected.epoch ?? 0) && run.candidate?.tree === expected.candidate.tree && current.candidate.tree === expected.candidate.tree && current.inputs === expected.inputs;
-    run.results.push(fresh ? result : { ...result, status: "中断", reason: "候选、输入、停止状态或尝试代次变化；迟到结果不可放行" });
-    if (run.activity?.id === expected.id) { run.activity = undefined; if (!fresh) run.stopReason = "检查期间候选或输入变化，旧结果无效"; }
+    const protectionReason = fresh ? undefined : "候选、输入、停止状态或尝试代次变化；迟到结果不可放行";
+    if (result.interruption) { result.interruption.validity.control = !run.stopped && !run.abandoned && run.userVersion === expected.userVersion && (run.epoch ?? 0) === (expected.epoch ?? 0); result.interruption.protectionReason = protectionReason; }
+    const reason = [result.reason, protectionReason].filter(Boolean).join("；");
+    run.results.push(fresh ? result : { ...result, status: "中断", reason });
+    if (!result.released && !confirmedConsumerRelease(run, result.id)) run.release = { status: "未确认", details: [...new Set([...run.release.details, result.reason ?? "节点消费者释放未知，旧结果无效不等于资源已释放"])] };
+    if (run.activity?.id === expected.id) {
+      run.activity = undefined;
+      if (!fresh) { run.stopped = true; run.stopReason = reason; }
+    }
     return fresh;
   });
 }

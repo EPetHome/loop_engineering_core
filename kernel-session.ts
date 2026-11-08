@@ -1,13 +1,13 @@
 /** 入口装配：固定开发评审/提交执行器；Pi、宿主 Hook 与 CLI 使用同一账本和状态。 */
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { authorizationHint, authorizationStatus, forUser, grantsFromUser, typedByUser } from "./acceptance-core.ts";
 import { classifyMarker } from "./core.ts";
 import { digest } from "./development-card.ts";
-import { acceptanceBasis, acceptanceSignature, checkInputs, deliverCandidate, frozenCardProblem, reusedAcceptanceItems, taskAcceptanceInputs } from "./kernel-workspace.ts";
+import { acceptanceBasis, acceptanceSignature, checkInputs, deliverCandidate, dirtyPaths, frozenCardProblem, reusedAcceptanceItems, taskAcceptanceInputs } from "./kernel-workspace.ts";
 import { contributionProblems, currentCandidate, executeNode, kernelCommand, nodeCheckLines, qualification, queryKernel, writeKernelSummary, type NodeOutput } from "./kernel.ts";
-import { activityAlive, findUserDecision, kernelRoot, readRun, readTaskRun, taskDefinition, taskIdentity, taskIds, taskView, updateRun, updateTaskRun, type KernelRun, type UserDecision } from "./node-ledger.ts";
+import { activityAlive, confirmedConsumerRelease, findUserDecision, kernelRoot, readRun, readTaskRun, taskDefinition, taskIdentity, taskIds, taskView, updateRun, updateTaskRun, type KernelRun, type UserDecision } from "./node-ledger.ts";
 import { reviewDevelopment } from "./development-node.ts";
 import { submitCandidate } from "./submission-node.ts";
 import { appendLedgerRecord, appendMergeRecord } from "./ledger.ts";
@@ -51,19 +51,46 @@ export function attachSession(path: string, host: "pi" | "claude" | "codex", id:
     if (r.activity?.kind === "starting") r.activity = undefined; // 不覆盖正在排队/执行的其他节点。
   });
 }
-export function prepareManagedContinuation(path: string, task: string): void {
+export function prepareManagedContinuation(path: string, task?: string): void {
   updateTaskRun(path, task, (r) => {
-    if (!r.taskRecords || !r.session || r.repair && r.repair.state !== "read") return;
-    const id = randomUUID(), token = randomUUID(), message = `【Loop 开发续跑】[${id}:${token}]\n继续本原会话的冻结任务 ${taskDefinition(r).name}，保留未提交成果、标准/授权及全部历史次数。不是新用户授权；不要自行提交/合入。完成后写【交付完成】。`;
+    if (!r.session) return;
+    const previous = r.repair;
+    if (previous && previous.state !== "read" && previous.userVersion === r.userVersion && previous.epoch === (r.epoch ?? 0)
+      && previous.candidate.tree === r.candidate?.tree && previous.inputs === checkInputs(r, previous.node === "测试" ? "测试" : "开发评审").hash) return;
+    const context = previous && !previous.message.startsWith("【Loop 开发续跑】") ? `\n\n上次原会话返修上下文（历史次数保留，不重放检查动作）：\n${previous.message}` : "";
+    const id = randomUUID(), token = randomUUID(), message = `【Loop 开发续跑】[${id}:${token}]\n继续本原会话的冻结任务 ${taskDefinition(r).name}，保留未提交成果、标准/授权及全部历史次数。不是新用户授权；不要自行提交/合入。完成后写【交付完成】。${context}`;
     const file = join(r.dir, `continue-${id}.md`); writeFileSync(file, message, { mode: 0o600, flag: "wx" });
     r.repair = { id, token, taskId: r.taskId, node: "开发评审", attempt: id, candidate: r.candidate!, inputs: checkInputs(r, "开发评审").hash, userVersion: r.userVersion, epoch: r.epoch ?? 0,
       session: r.session.id, host: r.session.host, message, hash: digest(message), file, state: "pending", at: new Date().toISOString() };
   });
 }
+/** 同一账本的释放事实也约束停止后的开发/派工；枚举状态不能覆盖未结清票据或检出。 */
+export function managedReleaseProblem(path: string, run: KernelRun, reconciling = false): string | undefined {
+  if (!reconciling && (run.release.status === "未确认" || !run.taskId && run.taskRecords?.some((t) => !t.removed && t.release.status === "未确认"))) return "资源释放未确认；请核对原消费者和释放回执，停止不是释放证明";
+  const all = !!run.taskRecords && !run.taskId, identity = all ? undefined : taskIdentity(run);
+  const ticket = readLocalQueue().items.find((t) => t.ledger === path && t.run === run.id && (all || t.task === identity));
+  if (ticket) return `资源释放未确认；本机票据 ${ticket.id} 尚未结清：${ticket.reason ?? ticket.state}`;
+  const checkout = run.testWorkspaces?.find((e) => e.state !== "released" && (all || e.task === run.taskId));
+  if (checkout) return `资源释放未确认；隔离检出保留：${checkout.path}；${checkout.reason ?? checkout.state}`;
+  const missing = run.results.find((r) => (all || r.task === identity) && !r.released && !confirmedConsumerRelease(run, r.id));
+  if (missing) return `资源释放未确认；尝试 ${missing.id} 缺少执行器回执或已登记消费者的实际释放证明`;
+  for (const dir of [run.dir, ...(all ? (run.taskRecords ?? []).filter((t) => !t.removed).map((t) => t.dir) : [])]) {
+    const root = join(dir, "attempts"); if (!existsSync(root)) continue;
+    for (const entry of readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && /^[0-9a-f-]{36}$/.test(e.name))) {
+      if (run.results.some((r) => r.id === entry.name) || confirmedConsumerRelease(run, entry.name)) continue;
+      try { const request = JSON.parse(readFileSync(join(root, entry.name, "attempt.json"), "utf8")); if (request.invoked === false) continue; }
+      catch { /* 请求/调用回执缺失也是具体未结项，不凭所有者退出核销。 */ }
+      return `资源释放未确认；尝试 ${entry.name} 缺少调用结束/消费者释放回执`;
+    }
+  }
+  const pending = [...(run.consumerReleases ?? []), ...(all ? (run.taskRecords ?? []).flatMap((t) => t.consumerReleases ?? []) : [])].find((r) => !r.confirmed);
+  return pending ? `资源释放未确认；尝试 ${pending.attempt} 的原消费者仍待核对` : undefined;
+}
 export function developerActive(path: string, task?: string): void {
   updateTaskRun(path, task, (r) => {
     if (r.card.nature === "评审") throw new Error("只评审不允许开发、返修或修改候选");
     if (r.stopped || r.publication || r.abandoned) throw new Error("任务已停止或已发布，不再自动开发");
+    const releaseProblem = managedReleaseProblem(path, r); if (releaseProblem) throw new Error(releaseProblem);
     if (r.blockedNode === "验收" && r.acceptanceState?.plan?.repairTasks.includes(taskIdentity(r))) throw new Error("验收返修等待真实用户提高本任务额度并续跑、移出或放弃；不能用开启开发绕过额度记账");
     if (r.activity && !["starting", "developing"].includes(r.activity.kind) && activityAlive(r.activity) !== false) throw new Error("测试/检查仍执行或归属未确认，停止并确认释放后才能编辑源码");
     const problem = frozenCardProblem(r); if (problem) throw new Error(problem);
@@ -200,6 +227,35 @@ export async function reviewManaged(path: string, options: { signal?: AbortSigna
   await reportManaged(path); return output;
 }
 export interface DeliveryOptions { exec: Exec; signal?: AbortSignal; callReviewer?: ReviewerCall; testExec?: Exec; acceptanceExec?: Exec; task?: string }
+/** 新卡边界标记；不改变旧单会话的末行语义，也不接受正文/引用中的任意标记。 */
+export function managedMarker(text: string): ReturnType<typeof classifyMarker> {
+  const lines = text.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const edges = [lines[0], lines.at(-1)];
+  if (edges.includes("【需要你决定】")) return "decision";
+  return edges.includes("【交付完成】") ? "delivered" : "none";
+}
+/** 两宿主共用的交付判断；只有当前输入的已登记候选/交付/原会话返修才能在无标记时接续。 */
+export function managedDeliveryIntent(run: KernelRun, text: string): { advance: boolean; reason?: string } {
+  if (run.stopped || run.abandoned) return { advance: false, reason: run.stopReason ?? "任务已停止；请显式续跑原任务" };
+  if (run.publication || managedMarker(text) !== "none") return { advance: true };
+  const reason = "本回合未识别为交付，未执行检查；完成任务后请发送首行或末行独立的【交付完成】；需要用户决定请写【需要你决定】";
+  try {
+    const dirty = dirtyPaths(run).length > 0, candidate = dirty ? run.candidate : currentCandidate(run), inputs = checkInputs(run, "开发评审").hash;
+    if (!candidate) return { advance: false, reason: "没有登记候选；请在原会话明确交付【交付完成】" };
+    const repair = run.repair;
+    const context = run.delivery?.userVersion === run.userVersion && run.delivery.inputs === inputs && run.delivery.candidate.tree === candidate.tree
+      || repair?.state === "read" && repair.userVersion === run.userVersion && repair.epoch === (run.epoch ?? 0)
+      && repair.session === run.session?.id && repair.host === run.session?.host && repair.taskId === run.taskId
+      && repair.candidate.tree === candidate.tree && repair.inputs === checkInputs(run, repair.node === "测试" ? "测试" : "开发评审").hash && digest(repair.message) === repair.hash;
+    if (!context) return { advance: false, reason }; // 脏文件只说明候选变化，不证明本回合交付。
+    const pending = dirty || !validResult(run, "开发评审", candidate, inputs)
+      || run.card.flow.includes("测试") && !validResult(run, "测试", candidate, checkInputs(run, "测试").hash)
+      || run.taskRecords && !run.batch?.contributions.some((c) => c.task === run.taskId && c.candidate.commit === candidate.commit)
+      || run.card.flow.includes("验收") && !validResult(run, "验收", candidate, checkInputs(run, "验收").hash)
+      || run.card.flow.includes("提交");
+    return context && pending ? { advance: true } : { advance: false, reason: pending ? reason : "本任务已交付；有效检查保留，等待批次后续或用户补充要求" };
+  } catch (error) { return { advance: false, reason: `不能安全接续：${String(error)}；请处理后在原会话重新交付【交付完成】，或用续跑/状态入口核对` }; }
+}
 export function consumeManagedRepair(path: string, raw: string, materials?: { files: { path: string; text: string }[] }, task?: string): boolean {
   const run = readTaskRun(path, task), repair = run.repair;
   if (!repair) {
@@ -232,7 +288,7 @@ export async function reportManaged(path: string): Promise<void> {
   try { appendLedgerRecord({ project: run.repo, session: `${run.id}:${run.revision}`, task: run.card.name, result: `${q.status}；${q.reason}`, summary: join(run.dir, "summary.md"),
     checks: { test: checkLine("测试"), review: checkLine("评审"), acceptance: checkLine("验收") }, pending: [] }, process.env.AUTOREVIEW_KERNEL_ROOT ? join(kernelRoot(), "交付记录.md") : undefined); }
   catch (error) { updateRun(path, (r) => { (r.notes ??= []).push(`交付索引写入失败：${String(error)}`); }); }
-  await systemNotify("Loop 单任务", q.lines.join("\n"));
+  await systemNotify(run.taskRecords ? "Loop 批次" : "Loop 单任务", q.lines.join("\n"));
 }
 /** 上限后的显式继续只使用该任务已提高额度；不清零旧计数、不重验旧失败树。 */
 export function continueAcceptanceTask(path: string, task?: string): boolean {
@@ -403,12 +459,13 @@ export async function completeManagedDelivery(path: string, text: string, option
   if (run.card.nature === "评审") throw new Error("只评审不接受开发交付，不创建任务提交");
   if (run.stopped || run.abandoned || run.publication || run.activity && !["starting", "developing"].includes(run.activity.kind)) return { status: "中断", reason: run.stopReason ?? "已有节点执行或任务停止", evidence: [], operations: [], released: true };
   if (run.blockedNode === "验收" && run.acceptanceState?.plan?.repairTasks.includes(taskIdentity(run))) return { status: "中断", reason: "验收返修额度尚未通过受控继续登记；请提高本任务额度后续跑，不能绕过旧次数", evidence: [], operations: [], released: true };
-  if (classifyMarker(text) === "decision") { pauseManaged(path, "开发方需要你决定", task); return { status: "中断", reason: "开发方需要你决定", evidence: [], operations: [], released: true }; }
+  if (managedMarker(text) === "decision") { pauseManaged(path, "开发方需要你决定", task); return { status: "中断", reason: "开发方需要你决定", evidence: [], operations: [], released: true }; }
   try {
     change((r) => { if (r.activity?.kind === "developing") r.activity = undefined; });
     applyPendingCardChange(path); run = read();
     const candidate = deliverCandidate(run);
     change((r) => { if (r.userVersion !== run.userVersion || r.stopped) throw new Error("交付期间输入或停止状态变化"); r.candidate = candidate; r.activity = undefined; });
+    change((r) => { r.delivery = { candidate, inputs: checkInputs(r, "开发评审").hash, userVersion: r.userVersion, at: new Date().toISOString() }; });
     writeFileSync(join(run.dir, "delivery.md"), text);
     const output = await executeNode(path, "开发评审", (input) => reviewDevelopment(input, { ...options, signal: input.signal }), { signal: options.signal, task });
     if (output.stale) return output;

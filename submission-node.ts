@@ -1,5 +1,5 @@
 /** 提交节点：按仓库/目标互斥，只核对账本并发布；不评审、不测试、不验收。 */
-import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 import { eventLock } from "./events.ts";
@@ -47,7 +47,13 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     const cardPath = relative(run.repo, run.file).replace(/\\/g, "/");
     if (inside(run.repo, run.file) && touched.includes(cardPath)
       && digest(gitRaw(run.repo, ["show", `${candidate.commit}:${cardPath}`])) !== run.cardHash) throw new Error("本任务不能通过发布修改冻结开发卡；恢复原卡后重新交付");
-    let protectedBefore = "", statusBefore = "";
+    let protectedBefore = "", statusBefore = "", frozenMetadata = false, metadataDigest = "";
+    const status = (): string => {
+      const raw = gitRaw(holder!.path, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+      // 仅冻结卡的已确认工作副本由本次元数据同步变 clean；其他用户状态逐字保留。
+      if (frozenMetadata && fileDigest(join(holder!.path, cardPath)) !== metadataDigest) throw new Error("目标冻结卡发生未知内容/模式变化，未覆盖或推送");
+      return frozenMetadata ? raw.split("\0").filter((line) => line !== ` M ${cardPath}`).join("\0") : raw;
+    };
     if (holder) {
       const file = gitText(holder.path, ["rev-parse", "--path-format=absolute", "--git-path", "index"]), lock = `${file}.lock`;
       const fd = openSync(lock, "wx", 0o600), scratch = join(run.dir, `target-index-${input.attempt}`);
@@ -57,9 +63,17 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
       const changed = [...gitRaw(holder.path, ["diff", "--name-only", "--no-renames", "-z", "HEAD", "--"]).split("\0"),
         ...gitRaw(holder.path, ["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD", "--"]).split("\0"),
         ...gitRaw(holder.path, ["ls-files", "--others", "-z"]).split("\0")].filter(Boolean);
-      const overlap = changed.filter((p) => touched.some((t) => intersects(p, t)));
+      const cardFile = join(holder.path, cardPath);
+      if (inside(run.repo, run.file) && touched.includes(cardPath) && existsSync(cardFile)) {
+        const info = lstatSync(cardFile), entry = gitRaw(run.repo, ["ls-tree", "-z", candidate.commit, "--", cardPath]);
+        const staged = gitRaw(holder.path, ["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD", "--"]).split("\0").filter(Boolean);
+        frozenMetadata = info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && digest(readFileSync(cardFile)) === run.cardHash
+          && Boolean(info.mode & 0o111) === entry.startsWith("100755 ") && !staged.some((p) => intersects(p, cardPath));
+        if (frozenMetadata) metadataDigest = fileDigest(cardFile);
+      }
+      const overlap = changed.filter((p) => !(frozenMetadata && p === cardPath) && touched.some((t) => intersects(p, t)));
       if (overlap.length) throw new Error(`目标工作区有重叠未提交或未跟踪改动，未覆盖：${overlap.join("、")}`);
-      statusBefore = gitRaw(holder.path, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+      statusBefore = status();
       protectedBefore = protectedTarget(holder.path, touched);
     }
     const checkout = (args: string[]): void => {
@@ -79,6 +93,10 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
     const commit = gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "commit-tree", candidate.tree, "-p", target, "-m",
       `chore: ${run.card.name}\n\n任务：${run.card.tasks.map((t) => t.name).join("、")}\n${decision ? "用户接受未验证（不改写检查结论）" : "按开发卡前置结论合入"}\n历史：${history}`]);
     log(`候选 ${candidate.commit} / ${candidate.tree}；目标 dev ${target}；压缩历史 ${history}；发布提交 ${commit}`);
+    if (frozenMetadata) {
+      const [mode, , blob] = gitText(run.repo, ["ls-tree", candidate.commit, "--", cardPath]).split(/[ \t]/);
+      checkout(["update-index", "--cacheinfo", mode, blob, cardPath]); // 只在私有索引采用与已确认工作副本完全一致的卡；不暂存其他用户文件。
+    }
     checkout(["update-index", "-q", "--refresh"]);
     checkout(["read-tree", "-n", "-m", "-u", target, commit]);
     // 发布意图和 CAS 共用账本短锁：停止/用户输入更新与发布有明确先后，不存在放锁后盲发。
@@ -112,7 +130,7 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
       r.publication = { candidate, inputs: input.inputs, targetBefore: target, commit, tree: candidate.tree, history, origin, nodeChecks, taskChecks, mapping: r.batch ? structuredClone(r.batch.contributions) : undefined,
         inputSnapshot: { files: checked.files, paths: checked.paths, requirement: checked.requirement }, inputRoot: holder?.path,
         at: new Date().toISOString(), local: "intent", push: "未开始", ...(decision ? { decision: decision.id } : {}) };
-      if (holder && protectedTarget(holder.path, touched) !== protectedBefore) throw new Error("发布前目标用户文件/索引发生并发变化，未覆盖");
+      if (holder && (protectedTarget(holder.path, touched) !== protectedBefore || status() !== statusBefore)) throw new Error("发布前目标用户文件/索引发生并发变化，未覆盖");
       atomicRun(input.ledger, r); // SIGKILL 后仍有精确的恢复意图。
       gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/dev", commit, target]);
       r.publication.local = "merged";
@@ -124,7 +142,7 @@ export async function submitCandidate(input: NodeInput, decision?: UserDecision)
       writeFileSync(targetIndex!.fd, readFileSync(targetIndex!.scratch)); fsyncSync(targetIndex!.fd);
       renameSync(targetIndex!.lock, targetIndex!.file); targetIndex!.installed = true;
       if (gitText(holder.path, ["rev-parse", "HEAD^{tree}"]) !== candidate.tree
-        || gitRaw(holder.path, ["status", "--porcelain", "-z", "--untracked-files=all"]) !== statusBefore
+        || status() !== statusBefore
         || protectedTarget(holder.path, touched) !== protectedBefore) throw new Error("本地已合入，目标工作区/用户索引保护收尾未确认；未推送");
     }
     const pushing = readRun(input.ledger), pushInputs = checkInputs(pushing);

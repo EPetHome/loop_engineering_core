@@ -97,6 +97,15 @@ function verifyUserReferences(run: KernelRun, files: Record<string, string>, pat
     if (mismatch) throw new Error(`引用检查输入已变化或缺少确认快照：${reference}；请在原开发会话重新引用确认（发送 ${/\s/.test(reference) ? `@"${reference}"` : `@${reference}`}），再交付；仅续跑不会自动采用新标准`);
   }
 }
+/** 已登记/依赖输入的强保护来源；其他 ignored 文件也默认带入并绑定指纹，不按忽略规则省略。 */
+export function testingFileSource(run: KernelRun, rel: string, paths: Record<string, string>): string | undefined {
+  if (run.localFiles.includes(rel)) return "localFiles";
+  if (rel.split("/").some((p) => ["node_modules", ".venv", "venv"].includes(p))) return "既有依赖目录";
+  const declared = Object.entries(paths).filter(([key]) => !key.startsWith("测试依赖/")).flatMap(([, path]) =>
+    [run.worktree, run.repo].filter((root) => inside(root, path)).map((root) => relative(root, path))).filter(Boolean);
+  if (declared.some((p) => rel === p || rel.startsWith(`${p}/`))) return "登记方法/引用输入";
+  return undefined;
+}
 export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: string; files: Record<string, string>; paths: Record<string, string>; observedFiles: Record<string, string>; publicationChanges: string[]; requirement: string } {
   const files: Record<string, string> = {}, paths: Record<string, string> = {}, contents: Record<string, string> = {};
   if (node === "部署") return deploymentInputs(run);
@@ -150,6 +159,13 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
   }
   if (prompt.text === undefined && !run.publication?.inputSnapshot) throw new Error(`提示词无法形成输入快照：${definitions.map((t) => t.prompt).join("、")}`);
   const requirement = run.publication?.inputSnapshot?.requirement ?? [prompt.text!, ...run.userInputs].join("\n\n");
+  // 实际测试读取的既有 ignored 依赖也是输入，不凭忽略规则授予写入/复用权限。
+  if (run.inputVersion === 2 && ["测试", "提交"].includes(node) && run.card.flow.includes("测试") && existsSync(run.worktree)) {
+    for (const rel of nul(gitRaw(run.worktree, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])).filter((p) => !run.localFiles.includes(p)).sort()) {
+      const path = join(run.worktree, rel), key = `测试依赖/${rel}：${path}`;
+      files[key] = fileDigest(path); paths[key] = path;
+    }
+  }
   const observedFiles = { ...files }, publicationChanges = publicationInputChanges(run, files, paths);
   verifyUserReferences(run, files, paths, contents, observedFiles, publicationChanges);
   const config = managedConfig(existsSync(run.worktree) ? run.worktree : run.repo, run.inputVersion === 2);
@@ -157,7 +173,7 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
   let identity: unknown = [identityFiles, run.userVersion, run.userInputs, config.configurationHash, config.reviewerModel, config.reviewerThinking, config.reviewerCmd, run.card.limits.开发评审];
   if (run.inputVersion === 2) {
     // 原文仍留完整证据；运行卡和已知配置仅按真正消费者投影，不间接耦合测试与评审。
-    const commonFiles = identityFiles.filter(([key]) => !key.startsWith("卡：") && !key.startsWith("测试方法/") && !["原目录/.autoreview.json：", "任务目录/.autoreview.json："].some((prefix) => key.startsWith(prefix)));
+    const commonFiles = identityFiles.filter(([key]) => !key.startsWith("卡：") && !key.startsWith("测试依赖/") && !key.startsWith("测试方法/") && !["原目录/.autoreview.json：", "任务目录/.autoreview.json："].some((prefix) => key.startsWith(prefix)));
     const configs = [run.repo, run.worktree].filter(existsSync).map((root) => readMarker(root));
     const operational = configs.map((data) => {
       return Object.fromEntries(Object.entries(data).filter(([k]) => !["gate", "acceptance", "deployment", "preparation", "maxRepairs", "reviewTimeoutMin", "reviewerModel", "reviewerThinking", "reviewerCmd"].includes(k)));
@@ -170,6 +186,8 @@ export function checkInputs(run: KernelRun, node: NodeName = "提交"): { hash: 
       const p = c.preparation as any; return p ? [p.check, p.recover, p.maxRecoveries, p.timeoutMin] : null;
     }), definition?.test, run.card.limits.测试?.timeoutMin ?? 20,
       prep ? { check: prep.check, recover: prep.recover, maxRecoveries: prep.maxRecoveries, timeoutMin: prep.timeoutMin } : null];
+    const runtime = identityFiles.filter(([key]) => key.startsWith("测试依赖/"));
+    if (runtime.length) testing.push(runtime);
     const tasks = run.taskRecords && !run.taskId ? run.taskRecords.filter((t) => !t.removed).map((t) => {
       const view = taskView(run, t.id); return [t.id, t.candidate, checkInputs(view, "开发评审").hash, run.card.flow.includes("测试") ? checkInputs(view, "测试").hash : null];
     }) : [];
@@ -342,7 +360,11 @@ export function deliverCandidate(run: KernelRun): Candidate {
   assertWorkspace(run);
   const target = gitText(run.worktree, ["rev-parse", "--path-format=absolute", "--git-path", "index"]), lock = `${target}.lock`;
   const fd = openSync(lock, "wx", 0o600), state = { published: false };
-  try { return deliverWithIndex(run, fd, lock, target, state); }
+  try {
+    const candidate = deliverWithIndex(run, fd, lock, target, state);
+    run.delivery = { candidate, inputs: checkInputs(run, "开发评审").hash, userVersion: run.userVersion, at: new Date().toISOString() };
+    return candidate;
+  }
   finally { closeSync(fd); if (!state.published) rmSync(lock); }
 }
 function deliverWithIndex(run: KernelRun, fd: number, lock: string, target: string, state: { published: boolean }): Candidate {

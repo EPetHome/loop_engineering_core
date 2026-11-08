@@ -94,7 +94,11 @@ export function applyPendingCardChange(path: string): boolean {
     if (c.userVersion !== r.userVersion) {
       c.state = "rejected"; c.reason = "请求后真实用户输入/撤权版本变化，请按当前决定重新提出改卡"; r.pendingCard = undefined; r.stopped = true; r.stopReason = c.reason; return false;
     }
-    if ([r.activity, ...(r.taskRecords ?? []).map((t) => t.activity)].some((a) => a && a.kind !== "waiting" && activityAlive(a) !== false)) return false;
+    const withoutTests = (card: typeof r.card) => ({ ...card, tasks: card.tasks.map(({ test: _test, ...task }) => task) });
+    const testOnly = JSON.stringify(withoutTests(c.card)) === JSON.stringify(withoutTests(r.card));
+    const affected = c.card.tasks.filter((t) => t.test !== r.card.tasks.find((o) => o.name === t.name)?.test).map((t) => t.name);
+    const activities = [r.activity, ...(r.taskRecords ?? []).filter((t) => !(testOnly && !affected.includes(t.name) && t.activity?.kind === "developing")).map((t) => t.activity)];
+    if (activities.some((a) => a && a.kind !== "waiting" && activityAlive(a) !== false)) return false;
     for (const id of c.removeTasks ?? []) {
       const t = taskView(r, id);
       if (!t.abandonment?.history || [t.launch, t.supervisor, t.worker].some((g) => g && ownedProcessGroupAlive(g) !== false) || consumerProblem(join(t.dir, "review.procs.json")) || readLocalQueue().items.some((ticket) => ticket.ledger === path && ticket.task === id)) return false;

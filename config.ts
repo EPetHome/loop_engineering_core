@@ -286,7 +286,6 @@ export interface ProjectLayout {
 }
 
 export function parseProjectLayout(raw: Record<string, unknown>, root: string): ProjectLayout {
-  warnDisabledGate(raw);
   parseMergeConfig(raw.merge);
   parseDeploymentConfig(raw.deployment);
   const release = raw.release === undefined ? "main" : nonEmptyString(raw, "release", "main");
@@ -334,7 +333,7 @@ export function workspacePath(root: string, layout: ProjectLayout, name: string)
 
 /** 旧 gate 不解析类型或命令，也不再参与任何执行与预算。 */
 export function warnDisabledGate(raw: Record<string, unknown>): void {
-  if (Object.hasOwn(raw, "gate")) console.error("gate 已停用并忽略；Loop 不运行项目测试，开发方自行做定向自检");
+  if (Object.hasOwn(raw, "gate")) console.error("旧 gate 配置已停用；新卡仍按 flow 执行显式测试");
 }
 
 /** 验收从一轮总预算里扣，必须给评审留时间。 */
@@ -522,7 +521,6 @@ export function resolveProjectConfig(root: string | undefined, overrides: Projec
   const configuredAcceptance = env.AUTOREVIEW_SINGLE_NODE === "1" ? undefined
     : stageAcceptance(stage?.raw, parseAcceptanceConfig(data.acceptance, configRoot, env), stage?.dir ?? configRoot, env);
   const acceptance = stage?.workflow === "without-acceptance" ? undefined : configuredAcceptance;
-  warnDisabledGate(data);
   parseDeploymentConfig(data.deployment);
   const preparation = parsePreparation(data.preparation, configRoot);
   const methods = parseMethodsConfig(data.methods, configRoot);

@@ -147,7 +147,7 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
     // detached 让子进程成为进程组组长，超时或取消时可以连同后代一起杀掉。
     // 取消不交给 spawn 的 signal：它只杀组长，还会抢先结束，让下面的整组清理来不及跑。
     child = spawn(command, args, {
-      cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true,
+      cwd: options.cwd, env, stdio: options.onControl ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"], detached: true,
     });
   } catch (error) {
     const detail = `autoreview hook: 无法启动 ${command}：${errorText(error)}\n`;
@@ -173,6 +173,7 @@ export const createChildExec = (procsFile?: string): Exec => (command, args, opt
   };
   child.stdout?.on("data", collect(stdout));
   child.stderr?.on("data", collect(stderr));
+  if (options.onControl) (child.stdio[3] as NodeJS.ReadableStream | null)?.on("data", (chunk: Buffer) => options.onControl?.(chunk.toString("utf8")));
   child.on("error", (error) => {
     stderr.push(Buffer.from(`无法启动/执行 ${command}：${errorText(error)}\n`));
     const aborted = (error as NodeJS.ErrnoException).name === "AbortError";

@@ -209,7 +209,7 @@ test("Hook旧 gate 不校验类型、命令或预算，不因此暂停", () => {
   try {
     h.write("file.txt", "base\nCHANGE\n");
     const output = h.run(h.delivered());
-    assert.equal(output.stdout, ""); assert.match(output.stderr, /gate 已停用并忽略/);
+    assert.equal(output.stdout, ""); assert.doesNotMatch(output.stderr, /gate.*已停用/);
     assert.equal(h.readState().phase, "done");
     assert.match(h.summary(), /Loop 未运行测试/);
     assert.ok(existsSync(join(h.root, "fake", "calls.log")));

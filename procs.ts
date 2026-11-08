@@ -213,7 +213,7 @@ export function releaseProcessTree(entry: Pick<ProcEntry, "pgid" | "started" | "
 /** 查询和清理全部成功才注销；原组消失不再等于本次调用的消费者全部消失。 */
 export function releaseProc(file: string, pgid: number, expected?: ProcEntry): boolean {
   const saved = readProcs(file).find((item) => item.pgid === pgid);
-  const entry = expected ? { ...expected, toolGroups: saved?.token === expected.token ? saved?.toolGroups : undefined } : saved;
+  const entry = expected ? { ...expected, toolGroups: [...new Set([...(expected.toolGroups ?? []), ...(saved?.token === expected.token ? saved?.toolGroups ?? [] : [])])] } : saved;
   if (!entry) return true;
   if (!releaseProcessTree(entry)) {
     if (!saved || saved.token === entry.token) {
