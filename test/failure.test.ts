@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { classifyFailure, classifyTesterFailure, testerDiagnostics } from "../failure.ts";
+import { classifyFailure, classifyTesterFailure, recoveryDecision, testerDiagnostics } from "../failure.ts";
 import { classifySystemExit, judgeAcceptance } from "../acceptance-core.ts";
 
 const history = JSON.parse(readFileSync(new URL("./fixtures/failure-history.json", import.meta.url), "utf8"));
@@ -44,6 +44,18 @@ for (const sample of history.samples) test(`历史归因：${sample.category}`, 
     assert.equal(record.items[0].cause, "系统被关掉");
     assert.ok(record.items.every((item) => item.verdict === "无法验证"));
   }
+});
+
+test("准备/测试共用补装规则：只有明确 method 声明跳过，引用和推断不授予跳过资格", () => {
+  const config = { recover: "install", maxRecoveries: 2 };
+  for (const output of ["Error: Cannot find module 'core'", "opaque failure", "AssertionError: product failed", "AUTOREVIEW_FAILURE=product broken", "```text\nAUTOREVIEW_FAILURE=method example\n```\nopaque failure", "> AUTOREVIEW_FAILURE=method quote\nopaque failure"]) {
+    assert.equal(recoveryDecision(1, output, config, 1).allowed, true, output);
+  }
+  for (const [code, output] of [[78, "opaque failure"], [1, "AUTOREVIEW_FAILURE=method broken"], [75, "AUTOREVIEW_FAILURE=method broken\nError: ENOSPC"]] as const) {
+    assert.deepEqual(recoveryDecision(code, output, config, 1), { allowed: false, reason: "项目声明方法错误，未补装", remaining: 1 });
+  }
+  assert.equal(recoveryDecision(1, "opaque", undefined, 0).reason, "未配置 recover，未补装");
+  assert.deepEqual(recoveryDecision(1, "opaque", config, 2), { allowed: false, reason: "补装次数用完，未补装", remaining: 0 });
 });
 
 test("ENOSPC 只在通过名/标题里出现：真实产品断言与显式 product 不被吞掉", () => {

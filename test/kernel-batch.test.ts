@@ -96,6 +96,102 @@ test("显式任务上下文不串账；单账本 query 只读；同名跨仓库�
     try { const p = other.start(); assert.notEqual(readRun(p).id, run.id); assert.notEqual(p, path); } finally { other.cleanup(); }
   } finally { f.cleanup(); }
 });
+test("准备 A3：并行任务环境未就绪各自启动并收到开工原因，不串批次状态", async () => {
+  const f = fixture(); let path: string | undefined;
+  try {
+    const marker = join(f.repo, ".autoreview.json"), raw = JSON.parse(readFileSync(marker, "utf8"));
+    writeFileSync(marker, JSON.stringify({ ...raw, preparation: { check: "echo 'Cannot find module task-core' >&2; exit 1" } }));
+    fakeKernelLauncher(f); process.env.KERNEL_FAKE_ACTION = "idle";
+    path = f.start(); await launchKernel(path, true);
+    await until(() => readRun(path!).taskRecords!.every((t) => !!t.session), "两个开发宿主均已启动");
+    const run = readRun(path); assert.equal(run.preparationStatus, undefined);
+    const files = new Set<string>();
+    for (const task of run.taskRecords!) {
+      assert.equal(task.preparationStatus!.ready, false); assert.equal(task.stopped, false);
+      const file = task.preparationStatus!.startupFile!; files.add(file);
+      assert.ok(file.startsWith(task.dir)); assert.match(readFileSync(file, "utf8"), /环境未就绪.*\n.*Cannot find module task-core/);
+      assert.ok(JSON.parse(readFileSync(join(task.dir, "host-argv.json"), "utf8")).includes(`@${file}`));
+    }
+    assert.equal(files.size, 2); assert.equal(queryKernel(path).tasks.filter((t: any) => !t.preparationStatus.ready).length, 2);
+    assert.match(readFileSync(join(run.dir, "summary.md"), "utf8"), /甲 \/ 环境未就绪：[\s\S]*乙 \/ 环境未就绪：/);
+  } finally { if (path) await stopKernel(path); f.cleanup(); }
+});
+
+test("返修1：移出任务停止核销后，批次合入仍保留其 ignored 文件", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.repo, ".gitignore"), `${readFileSync(join(f.repo, ".gitignore"), "utf8")}node_modules/\n`);
+    f.git(f.repo, "add", ".gitignore"); f.git(f.repo, "commit", "-qm", "ignored removed-task data");
+    const path = f.start(), removed = readTaskRun(path, "甲");
+    mkdirSync(join(removed.worktree, "node_modules/core"), { recursive: true });
+    const retained = join(removed.worktree, "node_modules/core/index.js"); writeFileSync(retained, "unpublished dependency");
+    await f.deliver(path, "甲"); await f.deliver(path, "乙");
+    recordCardControl(path, "移出任务甲", "pi:interactive"); requestCardChange(path, { removeTask: "甲", source: "machine:managed-session" });
+    await settleTaskRemoval(path);
+    assert.equal(readRun(path).taskRecords!.find((t) => t.id === removed.taskId)!.removed, true);
+    assert.equal(readTaskRun(path, "甲").release.status, "未确认"); assert.equal(existsSync(retained), true);
+    const stopped = await stopKernel(path, false, removed.taskId); assert.equal(stopped.ok, true);
+    assert.equal(readTaskRun(path, "甲").release.status, "未释放", "正常停止只核销资源，不授予合入资格");
+    await advanceBatch(path);
+    const published = await mergeManaged(path, { localOnly: true }); assert.equal(published.status, "通过", published.reason);
+    const run = readRun(path); assert.equal(run.publication!.local, "merged");
+    assert.equal(run.publication!.mapping!.some((c) => c.task === removed.taskId), false);
+    await releaseKernelWorkspace(path);
+    assert.equal(readFileSync(retained, "utf8"), "unpublished dependency");
+    assert.equal(readTaskRun(path, "甲").release.status, "未确认");
+    assert.match(readTaskRun(path, "甲").release.details.join("；"), /未知归属文件保留.*node_modules\/core\/index\.js/);
+    assert.equal(readTaskRun(path, "乙").release.status, "已释放");
+  } finally { f.cleanup(); }
+});
+
+test("释放 A8：批次合入后任务与汇总目录的 ignored 依赖和产物全部释放", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.repo, ".gitignore"), `${readFileSync(join(f.repo, ".gitignore"), "utf8")}node_modules/\ndist/\n`);
+    f.git(f.repo, "add", ".gitignore"); f.git(f.repo, "commit", "-qm", "ignored batch dependencies");
+    const path = f.start(); await f.deliver(path, "甲"); await f.deliver(path, "乙");
+    const output = await mergeManaged(path, { localOnly: true }); assert.equal(output.status, "通过", output.reason);
+    const run = readRun(path), roots = [run.worktree, ...run.taskRecords!.map((t) => t.worktree)];
+    for (const root of roots) {
+      mkdirSync(join(root, "node_modules/core"), { recursive: true }); mkdirSync(join(root, "dist"));
+      writeFileSync(join(root, "node_modules/core/index.js"), "dependency"); writeFileSync(join(root, "dist/output.js"), "output");
+    }
+    const checks = queryKernel(path).checks; await releaseKernelWorkspace(path);
+    assert.equal(readRun(path).release.status, "已释放", JSON.stringify(queryKernel(path).release));
+    assert.ok(readRun(path).taskRecords!.every((t) => t.release.status === "已释放"));
+    assert.ok(roots.every((p) => !existsSync(p))); assert.deepEqual(queryKernel(path).checks, checks);
+  } finally { f.cleanup(); }
+});
+
+test("返修3：并行任务补装快照各自复用，并随实际已发布任务释放", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.repo, ".gitignore"), `${readFileSync(join(f.repo, ".gitignore"), "utf8")}node_modules/\n`);
+    f.git(f.repo, "add", ".gitignore"); f.git(f.repo, "commit", "-qm", "batch dependency cache");
+    const marker = join(f.repo, ".autoreview.json"), raw = JSON.parse(readFileSync(marker, "utf8"));
+    writeFileSync(marker, JSON.stringify({ ...raw, preparation: { check: `node -e "require('core')"`, maxRecoveries: 1,
+      recover: `node -e "const fs=require('fs');fs.mkdirSync('node_modules/core',{recursive:true});fs.writeFileSync('node_modules/core/index.js','module.exports='+JSON.stringify(process.env.AUTOREVIEW_TASK))"` } }));
+    for (const task of f.card.tasks) task.test = `node -e "const assert=require('assert');assert.equal(require('core'),process.env.AUTOREVIEW_TASK);assert.equal(require('fs').readFileSync('${task.name}.txt','utf8'),'fixed')"`;
+    writeFileSync(f.file, JSON.stringify(f.card));
+    const path = f.start();
+    for (const name of ["甲", "乙"]) {
+      const failed = await f.deliver(path, name, "broken"); assert.equal(failed.failure, "product", failed.reason);
+      assert.deepEqual(readTaskRun(path, name).counters!.测试, { repairs: 1, recoveries: 1 });
+    }
+    const caches = readRun(path).taskRecords!.map((t) => t.testEnvironments![0]);
+    assert.equal(new Set(caches.map((e) => e.resource.dir)).size, 2); assert.equal(readRun(path).testEnvironments, undefined);
+    for (const name of ["甲", "乙"]) {
+      const output = await f.deliver(path, name, "fixed"); assert.notEqual(output.failure, "product", output.reason);
+      assert.equal(readRun(path).results.filter((r) => r.node === "测试" && r.task === readTaskRun(path, name).taskId).at(-1)!.status, "通过");
+      assert.deepEqual(readTaskRun(path, name).counters!.测试, { repairs: 1, recoveries: 1 });
+      assert.equal(existsSync(join(readTaskRun(path, name).worktree, "node_modules")), false);
+    }
+    assert.equal(queryKernel(path).status, "可合入"); assert.equal((await mergeManaged(path, { localOnly: true })).status, "通过");
+    await releaseKernelWorkspace(path); assert.equal(readRun(path).release.status, "已释放", JSON.stringify(queryKernel(path).release));
+    assert.ok(caches.every((e) => !existsSync(e.resource.dir))); assert.ok(readRun(path).taskRecords!.every((t) => t.testEnvironments![0].state === "released"));
+  } finally { f.cleanup(); }
+});
+
 test("头less续跑精确原会话及任务，机器继续信封不更新授权/用户版本或清零次数", () => {
   const f = fixture();
   try {

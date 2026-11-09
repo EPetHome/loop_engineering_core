@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EXT_DIR, findProjectRoot, PI_BIN, resolveProjectConfig, type ProjectConfigOverrides } from "./config.ts";
 export { parsePreparation } from "./config.ts";
-import { classifyFailure, type FailureKind } from "./failure.ts";
+import { classifyFailure, failureLine, recoveryDecision, type FailureKind } from "./failure.ts";
 import { createRunResource, managedShell, releaseRunResource, resourceLine } from "./resources.ts";
 import { createGitEvidence, type Exec } from "./git.ts";
 
@@ -26,6 +26,8 @@ export interface PreparationResult {
   kind?: FailureKind;
   reason?: string;
   log: string;
+  /** 安全保护失败不能降级为环境未就绪后继续开发。 */
+  blocked?: boolean;
 }
 
 export function loadPreparation(cwd: string, overrides: ProjectConfigOverrides = {}): PreparationConfig | undefined {
@@ -76,19 +78,29 @@ async function prepare(deps: PreparationDeps): Promise<PreparationResult> {
   const shell = (cmd: string) => `export AUTOREVIEW_RUN_DIR=${quote(deps.runDir)}; ${cmd}`;
   const options = (role: string) => ({ cwd: deps.cwd, timeout: Math.max(1, deadline - Date.now()), signal, role, ...(deps.env ? { env: deps.env } : {}) });
   let failure = deps.failure;
+  let lastFailure = { code: 1, output: deps.evidence ?? "尚未执行准备检查" };
+  const failed = (kind: FailureKind, reason: string, blocked = false): PreparationResult => {
+    const recovery = recoveryDecision(lastFailure.code, lastFailure.output, config, attempts.environment);
+    const detail = `${reason}；原始错误：${failureLine(lastFailure.code, lastFailure.output)}；${recovery.allowed ? "准备已停止，未继续补装" : recovery.reason}；剩余补装次数：${recovery.remaining}；下一步命令：cd ${quote(deps.cwd)} && ${config.check}`;
+    log(detail);
+    return { ok: false, kind, reason: detail, log: logPath, ...(blocked ? { blocked: true } : {}) };
+  };
   for (;;) {
     signal?.throwIfAborted();
-    if (Date.now() >= deadline) return { ok: false, kind: "environment", reason: "准备时间预算已用完", log: logPath };
+    if (Date.now() >= deadline) return failed("environment", "准备时间预算已用完");
     if (failure) {
       const before = await git.snapshot();
-      const action = failure;
-      if (failure === "environment" && config.recover && attempts.environment < config.maxRecoveries) {
+      const recovery = recoveryDecision(lastFailure.code, lastFailure.output, config, attempts.environment);
+      let action: "environment" | "method", actionFailure: string | undefined;
+      if (recovery.allowed) {
+        action = "environment";
         attempts.environment += 1; await deps.saveState();
         deps.onProgress?.("准备：执行已有环境恢复方法（保留业务返修计数）");
-        const result = await exec("/bin/sh", ["-c", shell(config.recover)], options("环境恢复"));
+        const result = await exec("/bin/sh", ["-c", shell(config.recover!)], options("环境恢复"));
         log(`recover #${attempts.environment} exit=${result.code}\n${result.stdout}\n${result.stderr}`);
-        if (result.code !== 0 || result.killed) return { ok: false, kind: "environment", reason: "环境恢复未成功，保留现场", log: logPath };
+        if (result.code !== 0 || result.killed) actionFailure = `环境恢复未成功，保留现场：${failureLine(result.code, `${result.stdout}\n${result.stderr}`)}`;
       } else if (failure === "method" && config.repair && attempts.method < config.maxRepairs) {
+        action = "method";
         attempts.method += 1; await deps.saveState();
         deps.onProgress?.("准备：方法失效，调用受限准备模型");
         const input = join(deps.runDir, `repair-${attempts.method}.md`);
@@ -107,25 +119,26 @@ async function prepare(deps: PreparationDeps): Promise<PreparationResult> {
           "--model", config.repair.model, "--thinking", config.repair.thinking, `@${input}`,
         ], options("准备方法修复"));
         log(`repair #${attempts.method} exit=${result.code}\n${result.stdout}\n${result.stderr}`);
-        if (result.code !== 0 || result.killed) return { ok: false, kind: "method", reason: "准备方法修复未完成", log: logPath };
-      } else return { ok: false, kind: failure, reason: "缺少对应恢复方法，或该类准备重试预算已用完", log: logPath };
-      if (!unchangedRules()) return { ok: false, kind: "method", reason: "准备过程改动了稳定规则或配置，拒绝继续", log: logPath };
+        if (result.code !== 0 || result.killed) actionFailure = `准备方法修复未完成：${failureLine(result.code, `${result.stdout}\n${result.stderr}`)}`;
+      } else return failed(failure, "准备检查未通过");
+      if (!unchangedRules()) return failed("method", "准备过程改动了稳定规则或配置，拒绝继续", true);
       const after = await git.snapshot();
       const changed = await git.changedFiles(before, after);
       if (changed.some((path) => action !== "method" || !config.repair?.paths.some((allowed) => {
         const target = resolve(deps.cwd, path), entry = resolve(config.root, allowed);
         return target === entry || target.startsWith(`${entry}/`);
-      }))) return { ok: false, kind: "method", reason: `准备动作越出修改范围：${changed.join("、")}`, log: logPath };
+      }))) return failed("method", `准备动作越出修改范围：${changed.join("、")}`, true);
+      if (actionFailure) return failed(action, actionFailure);
     }
     deps.onProgress?.("准备：检查本次运行条件");
     const beforeCheck = await git.snapshot();
     const result = await exec("/bin/sh", ["-c", shell(config.check)], options("准备检查"));
     log(`check exit=${result.code}\n${result.stdout}\n${result.stderr}`);
-    if (!unchangedRules()) return { ok: false, kind: "method", reason: "准备检查改动了稳定规则或配置，拒绝继续", log: logPath };
-    if ((await git.snapshot()).fingerprint !== beforeCheck.fingerprint) return { ok: false, kind: "method", reason: "准备检查改动了产品工作区；输出应写到运行目录", log: logPath };
+    lastFailure = { code: result.code, output: `${result.stdout}\n${result.stderr}` };
+    if (!unchangedRules()) return failed("method", "准备检查改动了稳定规则或配置，拒绝继续", true);
+    if ((await git.snapshot()).fingerprint !== beforeCheck.fingerprint) return failed("method", "准备检查改动了产品工作区；输出应写到运行目录", true);
     if (result.code === 0 && !result.killed) return { ok: true, log: logPath };
-    failure = classifyFailure(result.code, `${result.stdout}\n${result.stderr}`, result.killed).kind;
-    if (failure === "product" || failure === "unknown") return { ok: false, kind: failure, reason: "准备检查未通过，需要诊断证据，不修改产品绕过准备", log: logPath };
+    failure = classifyFailure(result.code, lastFailure.output, result.killed).kind;
   }
 }
 
@@ -142,6 +155,6 @@ export async function runPreparation(deps: PreparationDeps): Promise<Preparation
   let result: PreparationResult;
   try { result = await prepare({ ...deps, exec }); }
   finally { releaseRunResource(resource); }
-  if (resource.status !== "released") return { ok: false, kind: "environment", reason: resourceLine(resource), log: result.log };
+  if (resource.status !== "released") return { ...result, ok: false, kind: "environment", reason: [result.reason, resourceLine(resource)].filter(Boolean).join("；") };
   return result;
 }

@@ -184,15 +184,22 @@ export function queryKernel(path: string): Record<string, any> {
   const tasks = taskIds(run).map((id) => {
     const t = taskView(run, id), a = t.activity, live = activityAlive(a);
     let queue; if (a?.ticket) { try { queue = localTicketView(a.ticket); } catch { /* 只读 */ } }
-    return { id, name: taskDefinition(t).name, status: !t.stopped && live === true && a?.kind !== "waiting" ? "进行中" : "等你决定", node: a?.node ?? t.blockedNode ?? (onlyReview ? "评审" : "开发评审"),
+    let repairing = false;
+    try {
+      const last = run.results.filter((r) => r.node === "测试" && r.task === id).at(-1);
+      repairing = !t.stopped && !run.publication && t.repair?.node === "测试" && t.repair.candidate.tree === t.candidate?.tree
+        && t.repair.userVersion === t.userVersion && t.repair.epoch === (t.epoch ?? 0) && t.repair.session === t.session?.id
+        && last?.id === t.repair.attempt && last.failure === "product" && t.repair.inputs === checkInputs(t, "测试").hash;
+    } catch { /* 输入变化后的旧返修信封不能展示成仍在自动返修。 */ }
+    return { id, name: taskDefinition(t).name, status: !t.stopped && live === true && a?.kind !== "waiting" ? "进行中" : repairing ? "返修中" : "等你决定", node: a?.node ?? t.blockedNode ?? (onlyReview ? "评审" : "开发评审"),
       reason: a?.kind === "waiting" && live ? a.ticket && queue?.ticket?.state === "waiting" ? `本机排队第 ${queue.position} 位（自动等待，无需操作）` : "等待同项目检查/部署/发布执行边界（自动等待，无需操作）" : !t.stopped && a && live === true ? `${a.kind === "developing" ? "原会话开发" : a.node}正在执行` : !t.stopped && !run.activity && !q.missing.length && !onlyReview ? "本任务已交付；卡上检查已完成" : t.stopReason ?? (a && live !== true ? "登记节点已不执行或身份无法确认" : run.batch?.contributions.some((c) => c.task === id && c.candidate.commit === t.candidate?.commit) ? "已汇入，等待批次统一验收/原会话返修" : "无节点执行"),
-      activity: !t.stopped && live ? a : null, processIdentity: live === undefined ? "未确认" : live ? "存活" : "无活动", queue, candidate: t.candidate, branch: t.branch, worktree: t.worktree, session: t.session, launchMode: t.launchMode ?? null, consumerReleases: t.consumerReleases ?? [],
+      activity: !t.stopped && live ? a : null, processIdentity: live === undefined ? "未确认" : live ? "存活" : "无活动", queue, candidate: t.candidate, branch: t.branch, worktree: t.worktree, session: t.session, preparationStatus: t.preparationStatus, testEnvironments: t.testEnvironments ?? [], launchMode: t.launchMode ?? null, consumerReleases: t.consumerReleases ?? [],
       integrated: !!run.batch?.contributions.some((c) => c.task === id && c.candidate.commit === t.candidate?.commit), counters: onlyReview ? {} : { ...t.counters, 开发评审: { repairs: t.repairs, recoveries: 0 } }, release: t.release, repairReceipt: t.repair };
   });
   const active = !run.stopped && ([run.activity, ...(run.taskRecords ?? []).map((t) => t.activity)].some((a) => activityAlive(a) === true && a?.kind !== "waiting"));
   const submission = [...run.results].reverse().find((r) => r.node === "提交"), blockedPublication = submission && submission.status !== "通过" && submission.reason === run.stopReason;
   const resourceUnknown = run.release.status === "未确认" || run.taskRecords?.some((t) => !t.removed && t.release.status === "未确认");
-  const status = merged || external ? "已合入" : run.abandoned ? "已放弃" : active ? "进行中" : onlyReview || blockedPublication || resourceUnknown || q.missing.length ? "等你决定" : "可合入";
+  const status = merged || external ? "已合入" : run.abandoned ? "已放弃" : active ? "进行中" : !resourceUnknown && tasks.some((t) => t.status === "返修中") ? "返修中" : onlyReview || blockedPublication || resourceUnknown || q.missing.length ? "等你决定" : "可合入";
   const first = tasks.find((t) => t.activity) ?? tasks.find((t) => t.reason !== "无节点执行") ?? tasks[0];
   const deployment = run.deploymentAttempts?.at(-1);
   const node = run.activity?.node ?? (merged ? run.card.flow.includes("部署") ? "部署" : "提交" : run.blockedNode ?? first?.node ?? (onlyReview ? "评审" : "开发评审"));
@@ -214,6 +221,7 @@ export function queryKernel(path: string): Record<string, any> {
   }
   const lines = [`${status}：${run.card.name} / ${run.taskRecords ? "批次" : first?.name} / ${node}`, reason,
     ...(run.taskRecords ? tasks.map((t) => `${t.name} / ${t.node}：${t.status}；${t.reason}；汇入 ${t.integrated ? "已汇入" : "未汇入"}；资源 ${t.release.status}`) : []), ...q.missing, ...checks, ...acceptanceItems.map((i) => `${i.id} / ${i.owner ?? "人工"}：${i.status}${i.binding ? `；原实测树 ${i.binding.tree} / 第 ${i.binding.round} 轮；${i.binding.reason ?? "实测"}` : ""}`),
+    ...tasks.filter((t) => t.preparationStatus && !t.preparationStatus.ready).map((t) => `${run.taskRecords ? `${t.name} / ` : ""}环境未就绪：${t.preparationStatus!.reasons.join("；")}（不阻断开发）`),
     ...(onlyReview ? [`报告：${run.reviewReport?.report ?? "尚无报告"}；${reviewValid ? "输入仍匹配" : "未验证/失效"}`, kernelCommand("重跑", run.file, "--node", "评审", "--json")] : []),
     ...(versions ? [`版本：本地 ${versions.local}；远端（本次推送记录）${versions.remote}；运行（最近成功部署命令）${versions.running}；回退 ${deployment?.rollback?.state ?? "未执行"}`] : []),
     ...(run.card.flow.includes("部署") && merged ? [`部署：${deployment?.status ?? (run.stopped ? "已停止（未启动）" : publication?.push !== "成功" ? "未执行（推送未成功）" : "等待")}；${deployment?.reason ?? "只按卡接续部署；不重复推送"}`, kernelCommand("重跑", run.file, "--node", "部署", "--json"), kernelCommand("停止", run.file, "--json")] : []),
@@ -222,7 +230,7 @@ export function queryKernel(path: string): Record<string, any> {
     ...(run.blockedNode === "验收" && run.stopped && !merged ? testRemedies(run) : []), `资源：${run.release.status}；${run.release.details.join("；")}`, `总结：${join(run.dir, "summary.md")}`];
   return { ok: true, kernel: 1, id: run.id, card: run.file, name: run.card.name, status, launchMode: run.launchMode ?? null, task: run.taskRecords ? "批次" : first?.name, tasks, node, reason, checks, queue, counters: onlyReview ? {} : { ...run.counters, 开发评审: { repairs: run.repairs, recoveries: 0 } }, limits: onlyReview ? { 评审: { timeoutMin: run.card.limits.开发评审.timeoutMin } } : run.card.limits,
     cardRevision: run.cardRevision ?? 0, pendingCardChange: run.pendingCard ?? null, cardChanges: run.changes ?? [], repairReceipt: run.repair, abandonment: run.abandonment, candidate: run.candidate, missing: q.missing,
-    activity: alive && !run.stopped ? run.activity : null, reviewReport: run.reviewReport, reviewComparison: run.reviewComparison, reviewValid, deployment: deployment ?? null, versions, externalMerge: external ?? null, publication, release: run.release, notes: run.notes ?? [], decisions: run.decisions, controlDecisions: run.controlDecisions ?? [], integrations: run.batch?.integrations ?? run.integrations ?? [], acceptance: run.acceptanceState, acceptanceItems, removedTasks: run.batch?.removed ?? [], attempts, testWorkspaces: run.testWorkspaces ?? [], consumerReleases: run.consumerReleases ?? [], results: run.results, summary: join(run.dir, "summary.md"), ledger: path, lines };
+    activity: alive && !run.stopped ? run.activity : null, preparationStatus: run.preparationStatus, reviewReport: run.reviewReport, reviewComparison: run.reviewComparison, reviewValid, deployment: deployment ?? null, versions, externalMerge: external ?? null, publication, release: run.release, notes: run.notes ?? [], decisions: run.decisions, controlDecisions: run.controlDecisions ?? [], integrations: run.batch?.integrations ?? run.integrations ?? [], acceptance: run.acceptanceState, acceptanceItems, removedTasks: run.batch?.removed ?? [], attempts, testWorkspaces: run.testWorkspaces ?? [], testEnvironments: run.testEnvironments ?? [], consumerReleases: run.consumerReleases ?? [], results: run.results, summary: join(run.dir, "summary.md"), ledger: path, lines };
 }
 export async function executeNode(path: string, node: NodeName, executor: NodeExecutor, options: { signal?: AbortSignal; localSlot?: boolean; task?: string } = {}): Promise<NodeOutput> {
   const task = options.task, read = () => readTaskRun(path, task), change = <T>(cb: (r: KernelRun) => T) => updateTaskRun(path, task, cb);

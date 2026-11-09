@@ -14,7 +14,6 @@ import { projectDataDir } from "./project-context.ts";
 import { gitResult } from "./workspace.ts";
 
 const hash = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
-const tail = (value: string, max = 500): string => value.trim().slice(-max);
 
 export interface MethodFile { path: string; hash: string; missing?: boolean }
 export interface ProbeResult { command: string; exitCode: number; hash: string }
@@ -141,7 +140,7 @@ export interface MethodsRunResult {
   skipped: boolean;
   changed: string[];
   fingerprint: string;
-  selfCheck?: { command: string; passed: boolean; output: string };
+  selfCheck?: { command: string; passed: boolean; output: string; exitCode: number };
   record: MethodsRecord;
   written: boolean;
 }
@@ -178,9 +177,10 @@ export async function runMethodsSelfTest(root: string, options: MethodsOptions):
     } finally { if (resource) releaseRunResource(resource); release(resource ? resource.status === "released" : true); }
     const output = `${result.stdout}${result.stderr}`;
     if (result.processesReleased !== true || resource!.status !== "released") throw new Error("方法自测消费者/资源释放未确认，保留登记，不启动开发");
-    if (result.code !== 0 || result.killed) throw new Error(`方法自测未通过（${methods.selfCheck}，退出码 ${result.code}）：${tail(output)}`);
+    const check = { command: methods.selfCheck, passed: result.code === 0 && !result.killed, output, exitCode: result.code };
+    // 失败如实返回且不写通过指纹；启动方展示环境未就绪，不把方法失败变成开发门禁。
+    if (!check.passed) return { skipped: false, changed: changes, fingerprint, selfCheck: check, record, written: false };
     record.components = current;
-    const check = { command: methods.selfCheck, passed: true, output };
     writeJsonAtomic(methodsRecordPath(root, env), record);
     return { skipped: false, changed: changes, fingerprint, selfCheck: check, record, written: true };
   }

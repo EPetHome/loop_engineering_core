@@ -4,12 +4,13 @@ import { closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSyn
 import { dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { digest, inside, type NodeName } from "./development-card.ts";
-import { findProjectRoot, loadProjectLayout, parseAcceptanceConfig, parseContext, parseDeploymentConfig, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
+import { HERMES_BIN, findProjectRoot, loadProjectLayout, parseAcceptanceConfig, parseContext, parseDeploymentConfig, parseMethodsConfig, readMarker, resolveProjectConfig } from "./config.ts";
 import { inScope, outOfScope } from "./scope.ts";
 import { gitResult, gitText, worktrees, worktreeForBranch } from "./workspace.ts";
-import { taskDefinition, taskView, type Candidate, type KernelRun, type DeploymentPlan } from "./node-ledger.ts";
+import { taskDefinition, taskView, type Candidate, type KernelRun, type DeploymentPlan, type TestEnvironment } from "./node-ledger.ts";
 import { authorizationStatus, forUser, type AcceptanceItemResult } from "./acceptance-core.ts";
 import { processGroup, processStartTime } from "./procs.ts";
+import { resourceRoot } from "./resources.ts";
 
 const nul = (s: string): string[] => s.split("\0").filter(Boolean);
 /** macOS Pi 改写进程标题后 ps 可能不再展示环境；仅核对原生会话的完整启动链，不授予杀组权限。 */
@@ -127,10 +128,112 @@ function verifyUserReferences(run: KernelRun, files: Record<string, string>, pat
     if (mismatch) throw new Error(`引用检查输入已变化或缺少确认快照：${reference}；请在原开发会话重新引用确认（发送 ${/\s/.test(reference) ? `@"${reference}"` : `@${reference}`}），再交付；仅续跑不会自动采用新标准`);
   }
 }
+/** 只有依赖目录可跨候选复用；dist 等产品编译产物不会进入补装缓存。 */
+export function testDependencyRoot(path: string): string | undefined {
+  const parts = path.split("/"), at = parts.findIndex((p) => ["node_modules", ".venv", "venv"].includes(p));
+  return at < 0 ? undefined : parts.slice(0, at + 1).join("/");
+}
+/** 范围不能代替安装输入：scope 内源码的实际读取另由补装观测绑定。 */
+export function testEnvironmentSources(run: KernelRun): { files: string[]; bound: string[] } {
+  const descriptor = /^(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|pnpm-workspace\.yaml|bun\.lockb?|\.npmrc|\.yarnrc(?:\.yml)?|pyproject\.toml|requirements[^/]*\.txt|Pipfile(?:\.lock)?|poetry\.lock|uv\.lock|setup\.py|setup\.cfg|\.gitignore|\.gitattributes)$/;
+  const files = nul(gitRaw(run.worktree, ["ls-files", "--cached", "-z"])).sort();
+  return { files, bound: files.filter((p) => !inScope(p, taskDefinition(run).scope) || descriptor.test(p.split("/").at(-1)!)) };
+}
+/** 覆盖全部候选链接的结构，防止模块解析先 realpath 后丢失读取别名或新增父目录链接。 */
+export function testEnvironmentLinks(run: KernelRun): Record<string, string> {
+  const paths = [...new Set(nul(gitRaw(run.worktree, ["ls-files", "--cached", "--others", "-z"])))].sort();
+  return Object.fromEntries(paths.filter((p) => lstatSync(join(run.worktree, p)).isSymbolicLink()).map((p) => [p, fileDigest(join(run.worktree, p))]));
+}
+/** 仅承认不读取源码字节的直线字面量写入；任何展开、分支或未知工具都回退为候选绑定。 */
+export function independentRecoveryCommand(command: string): boolean {
+  if (process.env.ENV || process.env.BASH_ENV || process.env.LD_PRELOAD || process.env.DYLD_INSERT_LIBRARIES
+    || Object.keys(process.env).some((k) => k.startsWith("BASH_FUNC_"))) return false;
+  const commands: string[][] = [], current: string[] = [];
+  let word = "", quote = "", started = false;
+  const flush = (): void => { if (started) current.push(word); word = ""; started = false; };
+  for (const c of command) {
+    if (quote) {
+      if (c === quote) quote = "";
+      else { if (quote === '"' && /[$`\\\\]/.test(c)) return false; word += c; }
+    } else if (c === "'" || c === '"') { quote = c; started = true; }
+    else if (c === ";" || c === "\n") { flush(); if (current.length) commands.push(current.splice(0)); }
+    else if (/\s/.test(c)) flush();
+    else if (c === ">") { flush(); current.push(c); }
+    else { if (/[&|<(){}$`\\\\*?~#]/.test(c) || c === "[" || c === "]") return false; word += c; started = true; }
+  }
+  if (quote) return false;
+  flush(); if (current.length) commands.push(current);
+  const trusted = (name: string): boolean => {
+    if (name === "printf") return true; // /bin/sh 的纯字面量 printf；不允许 -v、%n 等赋值形式。
+    try {
+      const found = [HERMES_BIN, ...(process.env.PATH ?? "").split(":")].map((p) => join(p, name)).find((p) => existsSync(p) && (lstatSync(p).mode & 0o111));
+      return !!found && ["/bin", "/usr/bin"].some((root) => existsSync(join(root, name)) && realpathSync(found) === realpathSync(join(root, name)));
+    } catch { return false; }
+  };
+  const literalPath = (p: string): boolean => !!p && p !== ">" && !p.startsWith("-");
+  return commands.length > 0 && commands.every(([name, ...args]) => {
+    if (!["mkdir", "printf", "ln", "rm"].includes(name) || !trusted(name)) return false;
+    if (name === "printf") {
+      const redirection = args.indexOf(">"), values = redirection < 0 ? args : args.slice(0, redirection);
+      return !!values.length && !values[0].startsWith("-") && !values[0].replace(/%%|%s/g, "").includes("%")
+        && (redirection < 0 || redirection === args.length - 2 && literalPath(args.at(-1)!));
+    }
+    if (name === "ln") return args.length === 3 && args[0] === "-s" && args.slice(1).every(literalPath);
+    const paths = args.filter((p) => !(name === "mkdir" ? p === "-p" : ["-r", "-f", "-rf", "-fr"].includes(p)));
+    return paths.length > 0 && paths.every(literalPath);
+  });
+}
+/** 公共依据只准省略已另行证明未消费的产品输入，绝不独自授予跨候选复用资格。 */
+export function testEnvironmentBasis(run: KernelRun): string {
+  const files = testEnvironmentSources(run).bound;
+  const checked = checkInputs(run, "测试");
+  // 普通 ignored 产品产物会随返修重建，不应使依赖安装失效；显式登记输入及原依赖仍完整绑定。
+  const inputs = Object.entries(checked.files).filter(([key]) => !key.startsWith("测试依赖/")).sort(([a], [b]) => a.localeCompare(b));
+  const dependencies = nul(gitRaw(run.worktree, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])).filter((p) => testDependencyRoot(p)).sort();
+  const preparation = managedConfig(run.worktree, run.inputVersion === 2).preparation;
+  return digest(JSON.stringify([inputs, run.userVersion, run.userInputs, taskDefinition(run).test, preparation?.check, preparation?.recover,
+    dependencies.map((p) => [p, fileDigest(join(run.worktree, p))]), files.map((p) => [p, fileDigest(join(run.worktree, p))])]));
+}
+/** 快照自身也绑定字节与元数据，不跟随链接或接纳硬链接/特殊文件。 */
+export function testEnvironmentFiles(root: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const walk = (path: string): void => {
+    for (const name of readdirSync(path).sort()) {
+      const p = join(path, name), info = lstatSync(p, { bigint: true });
+      if (info.isDirectory()) walk(p);
+      else {
+        if ((!info.isFile() && !info.isSymbolicLink()) || info.nlink !== 1n) throw new Error(`补装依赖快照不是独立文件：${p}`);
+        files[relative(root, p).replace(/\\/g, "/")] = `${fileDigest(p)}:${info.dev}:${info.ino}:${info.mode}:${info.mtimeNs}:${info.ctimeNs}`;
+      }
+    }
+  };
+  walk(root); return files;
+}
+export function assertTestEnvironment(environment: TestEnvironment, run: KernelRun): Record<string, string> {
+  const { resource } = environment;
+  if (environment.run !== run.id || environment.task !== run.taskId || environment.id !== resource.id || resolve(resource.root) !== resolve(resourceRoot())
+    || resolve(resource.dir) !== resolve(resource.root, resource.id) || realpathSync(resource.dir) !== join(realpathSync(resource.root), resource.id)
+    || environment.evidence !== join(resource.evidenceDir, "environment.json")) throw new Error("补装依赖快照归属或路径变化");
+  const info = lstatSync(resource.dir);
+  if (!info.isDirectory() || info.isSymbolicLink() || `${info.dev}:${info.ino}` !== environment.identity) throw new Error("补装依赖快照目录身份变化");
+  const saved = JSON.parse(readFileSync(join(resource.root, `${resource.id}.json`), "utf8"));
+  if (saved.id !== resource.id || saved.dir !== resource.dir || saved.ownerPid !== resource.ownerPid || saved.ownerStarted !== resource.ownerStarted || saved.label !== resource.label) throw new Error("补装依赖快照资源登记变化");
+  if (!environment.manifestHash) return {}; // 尚未完成的自有复制也须按登记释放，但绝不能复用。
+  const bytes = readFileSync(environment.evidence);
+  if (digest(bytes) !== environment.manifestHash) throw new Error("补装依赖快照清单变化");
+  const manifest = JSON.parse(bytes.toString("utf8"));
+  if (JSON.stringify(manifest.installation) !== JSON.stringify(environment.installation)) throw new Error("补装依赖快照安装输入绑定变化");
+  const files: Record<string, string> = manifest.files;
+  const roots = [...new Set(Object.keys(files).map(testDependencyRoot))].sort();
+  if (roots.includes(undefined) || JSON.stringify(roots) !== JSON.stringify(environment.roots)
+    || JSON.stringify(testEnvironmentFiles(resource.dir)) !== JSON.stringify(files)) throw new Error("补装依赖快照内容变化，不复用或删除未知内容");
+  return files;
+}
+
 /** 已登记/依赖输入的强保护来源；其他 ignored 文件也默认带入并绑定指纹，不按忽略规则省略。 */
 export function testingFileSource(run: KernelRun, rel: string, paths: Record<string, string>): string | undefined {
   if (run.localFiles.includes(rel)) return "localFiles";
-  if (rel.split("/").some((p) => ["node_modules", ".venv", "venv"].includes(p))) return "既有依赖目录";
+  if (testDependencyRoot(rel)) return "既有依赖目录";
   const declared = Object.entries(paths).filter(([key]) => !key.startsWith("测试依赖/")).flatMap(([, path]) =>
     [run.worktree, run.repo].filter((root) => inside(root, path)).map((root) => relative(root, path))).filter(Boolean);
   if (declared.some((p) => rel === p || rel.startsWith(`${p}/`))) return "登记方法/引用输入";

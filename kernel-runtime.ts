@@ -7,14 +7,15 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { activityAlive, atomicRun, confirmedConsumerRelease, pendingCardBlocks, readRun, readTaskRun, taskDefinition, taskIds, taskView, updateRun, updateTaskRun, type KernelRun } from "./node-ledger.ts";
 import { currentCandidate, kernelCommand, queryKernel, writeKernelSummary } from "./kernel.ts";
-import { assertWorkspace, dirtyPaths, fileDigest, frozenCardProblem, gitRaw, managedConfig, taskScopeBaseline, workspaceGuard, createWorkspace } from "./kernel-workspace.ts";
+import { assertTestEnvironment, assertWorkspace, dirtyPaths, fileDigest, frozenCardProblem, gitRaw, managedConfig, taskScopeBaseline, workspaceGuard, createWorkspace } from "./kernel-workspace.ts";
 import { ownedProcessGroupAlive, processStartTime, readProcs, reapProcs, stopSessionGroup } from "./procs.ts";
-import { gitResult, gitText } from "./workspace.ts";
+import { gitResult, gitText, shellQuote } from "./workspace.ts";
 import { advanceManaged, continueAcceptanceTask, deployManaged, managedReleaseProblem, pauseManaged, prepareManagedContinuation, reportManaged } from "./kernel-session.ts";
 import { recoverBatchIntegration } from "./batch-integration.ts";
 import { createChildExec } from "./hosts/review-hook.ts";
 import { runPreparation, type PreparationState } from "./preparation.ts";
 import { runMethodsSelfTest } from "./methods.ts";
+import { failureLine, recoveryDecision } from "./failure.ts";
 import { systemNotify } from "./notify.ts";
 import { eventLock } from "./events.ts";
 import { applyPendingCardChange } from "./kernel-controls.ts";
@@ -26,6 +27,7 @@ import { settleProjectExecution } from "./project-execution.ts";
 import { deploymentUncertainty } from "./deployment-node.ts";
 import { sendNativeRepair } from "./hosts/native-inbox.ts";
 import { releaseTestWorkspace } from "./test-workspace.ts";
+import { releaseRunResource, resourceLine } from "./resources.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 function context(task?: string) {
@@ -52,7 +54,7 @@ export function managedLaunchArgs(path: string, task?: string, interactive = fal
     if (session.host !== run.card.host || (session.host === "pi" && !session.log)) throw new Error("无法精确恢复原会话，保留候选；原 Pi 会话日志未登记");
     args.push("--session", session.host === "pi" ? session.log! : session.id);
     if (run.repair && run.repair.state !== "read") args.push(`@${run.repair.file}`);
-  } else args.push(`@${taskDefinition(run).prompt}`);
+  } else args.push(`@${run.preparationStatus?.startupFile ?? taskDefinition(run).prompt}`);
   if (!interactive && run.card.host !== "codex") args.push("--", "-p");
   return { command: join(ROOT, "bin/loop"), args, cwd: run.worktree, env: { ...process.env,
     LOOP_DIR: ROOT, AUTOREVIEW_KERNEL_TASK: run.taskId ?? "", AUTOREVIEW_KERNEL_REPAIR: run.repair?.id ?? "", AUTOREVIEW_KERNEL_LEDGER: path, AUTOREVIEW_KERNEL_RUN: run.id, AUTOREVIEW_SINGLE_NODE: "1",
@@ -127,8 +129,12 @@ export async function releaseKernelWorkspace(path: string, task?: string): Promi
     for (const t of run.taskRecords) await releaseKernelWorkspace(path, t.id);
     for (const t of readRun(path).taskRecords!) if (t.release.status !== "已释放") reasons.push(`${t.name}：${t.release.details.join("；") || t.release.status}`);
   }
+  const record = run.taskRecords?.find((t) => t.id === run.taskId);
+  // taskView 继承批次 publication，不代表已移出/放弃的任务也发布了；只认冻结发布映射中的本任务候选。
+  const merged = run.publication?.local === "merged" && (!run.taskId || !!record && !record.removed && !record.abandoned
+    && run.publication.mapping?.some((c) => c.task === run.taskId && c.candidate.commit === run.candidate?.commit && c.candidate.tree === run.candidate?.tree));
   const reviewEnded = run.card.nature === "评审" && run.results.some((r) => r.node === "评审" && r.ended);
-  if (run.publication?.local !== "merged" && !run.abandoned && !reviewEnded) return;
+  if (!merged && !run.abandoned && !reviewEnded) return;
   if (!run.stopped && run.publication?.push === "成功" && run.card.flow.includes("部署") && !run.deploymentAttempts?.at(-1)?.ended) reasons.push("卡上部署尚未收尾，不提前移除其所需空间");
   if (deploymentUncertainty(run.deploymentAttempts?.at(-1))) reasons.push("部署副作用未确认；保留现场与资源登记，须人工核对");
   if (reviewEnded && run.results.filter((r) => r.node === "评审").at(-1)?.released === false && run.release.status === "未确认") reasons.push("只评审消费者缺少释放证明；不能因登记为空就删除现场");
@@ -151,13 +157,24 @@ export async function releaseKernelWorkspace(path: string, task?: string): Promi
         const head = gitText(run.worktree, ["rev-parse", "HEAD"]);
         if (!run.abandonment?.history || gitText(run.repo, ["rev-parse", run.abandonment.history]) !== head) reasons.push("放弃保留 ref 未覆盖当前 HEAD");
       } else currentCandidate(run);
-      const unknown = gitRaw(run.worktree, ["ls-files", "--others", "-z"]).split("\0").filter(Boolean).filter((p) => !run.localFiles.includes(p));
+      const unknown = gitRaw(run.worktree, ["ls-files", "--others", ...(merged ? ["--exclude-standard"] : []), "-z"]).split("\0").filter(Boolean).filter((p) => !run.localFiles.includes(p));
       if (unknown.length) reasons.push(`未知归属文件保留：${unknown.join("、")}`);
       for (const p of run.localFiles) if (!existsSync(join(run.worktree, p)) || fileDigest(join(run.worktree, p)) !== run.localHashes[p]) reasons.push(`本机文件变更保留：${p}`);
-      if (!reasons.length) {
-        // 当前候选已留任务分支和 pre-squash ref；只强制移除核对为原样的登记本机文件。
-        gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", run.worktree]);
-      }
+    }
+    if (!reasons.length) for (const environment of run.testEnvironments ?? []) {
+      if (environment.state === "released") continue;
+      let reason: string | undefined;
+      try {
+        assertTestEnvironment(environment, run);
+        const released = releaseRunResource(environment.resource);
+        if (released.status !== "released") reason = resourceLine(released);
+      } catch (error) { reason = String(error); }
+      updateRun(path, (r) => { Object.assign(r.testEnvironments!.find((e) => e.id === environment.id)!, environment, { state: reason ? "retained" : "released", reason }); });
+      if (reason) reasons.push(`补装依赖缓存保留：${environment.id}；${reason}`);
+    }
+    if (!reasons.length && existsSync(run.worktree)) {
+      // 当前候选已留任务分支和 pre-squash ref；已合入时 ignored 文件可重建，本机文件仍须核对原样。
+      gitText(run.repo, ["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", run.worktree]);
     }
     if (existsSync(run.worktree)) reasons.push(`工作目录未释放：${run.worktree}`);
     else if (run.workspaceParentCreated) {
@@ -246,8 +263,8 @@ export async function stopKernel(path: string, dryRun = false, task?: string): P
   }
   recoverLocalQueue(); confirmStopConsumers(path, task);
   for (const entry of readRun(path).testWorkspaces?.filter((e) => e.state !== "released" && (!task || e.task === initial.taskId)) ?? []) {
-    const result = readRun(path).results.find((r) => r.id === entry.attempt);
-    if (!result?.released && !confirmedConsumerRelease(readRun(path), entry.attempt)) { details.push(`隔离测试原消费者缺少释放证明，保留：${entry.path}`); continue; }
+    const attempt = entry.consumerAttempt ?? entry.attempt, result = readRun(path).results.find((r) => r.id === attempt);
+    if (!result?.released && !confirmedConsumerRelease(readRun(path), attempt)) { details.push(`隔离测试原消费者缺少释放证明，保留：${entry.path}`); continue; }
     const problem = releaseTestWorkspace(path, entry, true); if (problem) details.push(problem);
   }
   const unresolved = managedReleaseProblem(path, readRun(path), true);
@@ -331,21 +348,48 @@ async function superviseKernel(path: string, task?: string, interactive = false)
   try {
     updateRun(path, (r) => { r.activity = { id: randomUUID(), node: "开发评审", kind: "starting", pid: process.pid, started: processStartTime(process.pid) }; });
     const configuration = managedConfig(initial.worktree, initial.inputVersion === 2);
-    if (configuration.methods) {
-      const guard = workspaceGuard(readRun(path));
-      await runMethodsSelfTest(initial.worktree, { loopRoot: ROOT, procsFile: join(initial.dir, "review.procs.json"), signal: controller.signal, env: { ...process.env, AUTOREVIEW_BASE_REV: initial.base, AUTOREVIEW_BATCH_FILE: initial.file, AUTOREVIEW_STAGE: taskDefinition(initial).name } });
-      if (workspaceGuard(readRun(path)) !== guard) throw new Error("方法自测改动候选/输入，未启动开发；请修正方法并保留用户成果");
-    }
+    const reasons: string[] = [];
+    const guard = (includeIgnored: boolean): string => {
+      const run = readRun(path);
+      return JSON.stringify([workspaceGuard(run, undefined, includeIgnored), checkInputs(run, "开发评审").files]);
+    };
     const preparation = configuration.preparation;
+    let usedRecoveries = 0;
     if (preparation) {
       const statePath = join(initial.dir, "preparation-state.json");
       const state: PreparationState = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : {};
-      const result = await runPreparation({ config: preparation, cwd: initial.worktree, state, exec: createChildExec(join(initial.dir, "review.procs.json")),
-        runDir: join(initial.dir, "preparation"), signal: controller.signal, env: { ...process.env, AUTOREVIEW_BASE_REV: initial.base },
-        saveState: () => writeFileSync(statePath, JSON.stringify(state)) });
-      if (!result.ok) throw new Error(`准备阻塞：${result.reason}；证据 ${result.log}`);
+      const before = guard(false); // 补装可写 ignored 依赖，但不能改候选、本机文件或登记输入。
+      let result;
+      try {
+        result = await runPreparation({ config: preparation, cwd: initial.worktree, state, exec: createChildExec(join(initial.dir, "review.procs.json")),
+          runDir: join(initial.dir, "preparation"), signal: controller.signal, env: { ...process.env, AUTOREVIEW_BASE_REV: initial.base },
+          saveState: () => writeFileSync(statePath, JSON.stringify(state)) });
+      } finally { if (guard(false) !== before) throw new Error("准备过程改动候选/输入或稳定规则，未启动开发；保留用户成果"); }
+      usedRecoveries = state.preparationAttempts?.environment ?? 0;
+      if (result.blocked) throw new Error(result.reason);
+      if (!result.ok) reasons.push(`准备未通过：${result.reason}；证据 ${result.log}`);
     }
-    if (readRun(path).stopped) return;
+    if (configuration.methods) {
+      const before = guard(true);
+      let result;
+      try {
+        result = await runMethodsSelfTest(initial.worktree, { loopRoot: ROOT, procsFile: join(initial.dir, "review.procs.json"), signal: controller.signal, env: { ...process.env, AUTOREVIEW_BASE_REV: initial.base, AUTOREVIEW_BATCH_FILE: initial.file, AUTOREVIEW_STAGE: taskDefinition(initial).name } });
+      } finally { if (guard(true) !== before) throw new Error("方法自测改动候选/输入或稳定规则，未启动开发；请修正方法并保留用户成果"); }
+      if (result.selfCheck && !result.selfCheck.passed) {
+        const check = result.selfCheck, recovery = recoveryDecision(check.exitCode, check.output, preparation, usedRecoveries);
+        reasons.push(`方法自测未通过；原始错误：${failureLine(check.exitCode, check.output)}；${recovery.allowed ? "本轮准备已结束，方法自检未额外补装" : recovery.reason}；剩余补装次数：${recovery.remaining}；下一步命令：cd ${shellQuote(initial.worktree)} && ${check.command}`);
+      }
+    }
+    if (readRun(path).stopped || controller.signal.aborted) return;
+    updateRun(path, (r) => {
+      r.preparationStatus = { ready: !reasons.length, reasons, at: new Date().toISOString() };
+      if (reasons.length && !r.session) {
+        const file = join(r.dir, `start-${randomUUID()}.md`);
+        writeFileSync(file, `【Loop 开工环境说明】\n环境未就绪（不阻断开发，不代表检查通过）：\n${reasons.join("\n")}\n\n以下为本卡原始任务：\n${readFileSync(taskDefinition(r).prompt, "utf8")}`, { mode: 0o600, flag: "wx" });
+        r.preparationStatus.startupFile = file;
+      }
+    });
+    writeKernelSummary(path);
     prepareManagedContinuation(path, task);
     const launch = managedLaunchArgs(path, task, interactive), token = randomUUID();
     child = spawn(launch.command, launch.args, { cwd: launch.cwd, env: { ...launch.env, AUTOREVIEW_PROCESS_OWNER: token, AUTOREVIEW_KERNEL_LAUNCH: token }, detached: true, stdio: "inherit" });

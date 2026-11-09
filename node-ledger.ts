@@ -21,7 +21,15 @@ export interface NodeResult {
   interruption?: { trigger?: { kind: string; path?: string; event?: string; at: string; reason: string }; observations?: { kind: string; path?: string; event: string; at: string }[]; executorReason?: string;
     validity: { candidate: boolean | "未知"; inputs: boolean | "未知"; control: boolean }; protectionReason?: string };
 }
-export interface TestWorkspace { attempt: string; run: string; task?: string; candidate: Candidate; inputs: string; source: string; parent: string; path: string; identity: string; state: "creating" | "active" | "released" | "retained"; reason?: string }
+export interface TestWorkspace { attempt: string; consumerAttempt?: string; run: string; task?: string; candidate: Candidate; inputs: string; source: string; parent: string; path: string; identity: string; state: "creating" | "active" | "released" | "retained"; reason?: string }
+/** 已成功补装的依赖快照；独立于尝试的消费者资源，不保存旧产品源码或测试通过资格。 */
+export interface TestEnvironment {
+  id: string; run: string; task?: string; attempt: string; basis: string; candidate: Candidate;
+  resource: RunResource; identity: string; roots: string[]; evidence: string; manifestHash: string;
+  /** 有效观测绑定实际安装输入；无法完整观测时绑定整个候选及原测试输入。 */
+  installation?: { kind: "observed" | "literal" | "candidate"; inputs: string; files: Record<string, string>; links?: Record<string, string>; proof?: string; inherited?: string };
+  state: "creating" | "ready" | "released" | "retained"; reason?: string;
+}
 export interface ConsumerRelease { attempt: string; captured: string; consumers: { file: string; entry: ProcEntry }[]; confirmed?: string; previousProblems?: string[] }
 export interface DeploymentPlan { config: DeploymentConfig; cwd: string; common: string }
 export interface DeploymentAttempt {
@@ -40,7 +48,7 @@ export interface CardChange {
 export interface RepairEnvelope {
   id: string; token: string; session: string; host: string; attempt: string; candidate: Candidate; inputs: string; userVersion: number; epoch: number;
   message: string; hash: string; file: string; state: "pending" | "sent" | "read" | "unknown"; at: string; readAt?: string;
-  taskId?: string; node?: NodeName; batchVersion?: number;
+  taskId?: string; node?: NodeName; batchVersion?: number; environment?: string;
 }
 export interface InputSnapshot { files: Record<string, string>; paths: Record<string, string>; requirement: string }
 export interface UserDecision { id: string; at: string; source: string; text: string; candidate: Candidate; inputs: string; userVersion: number; missing: string[]; mapping?: Contribution[] }
@@ -53,6 +61,7 @@ export interface KernelRun {
   reviewReport?: { report: string; json: string; attempt: string };
   deploymentPlan?: DeploymentPlan; deploymentAttempts?: DeploymentAttempt[];
   testWorkspaces?: TestWorkspace[];
+  testEnvironments?: TestEnvironment[];
   consumerReleases?: ConsumerRelease[];
   localHashHistory?: { path: string; before: string; after: string; evidence: string; at: string; reason: string }[];
   candidate?: Candidate; results: NodeResult[]; repairs: number; userVersion: number; userInputs: string[]; userFiles?: string[];
@@ -72,6 +81,7 @@ export interface KernelRun {
     bindings?: Record<string, { tree: string; round: number; task?: string; candidate?: string; inputs: string; reason?: string }> };
   worker?: SessionGroup; workerRequest?: string;
   repair?: RepairEnvelope;
+  preparationStatus?: { ready: boolean; reasons: string[]; at: string; startupFile?: string };
   delivery?: { candidate: Candidate; inputs: string; userVersion: number; at: string };
   /** 用户的开发会话前后台选择，独立于可撤销的一次性开窗请求。 */
   launchMode?: "terminal" | "background";
@@ -92,7 +102,7 @@ export interface KernelRun {
   release: { status: "未释放" | "已释放" | "未确认"; details: string[] };
 }
 /** 显式上下文投影：不是另一份 run；写回仍持同一个账本短锁。 */
-export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "paRelays", "userFiles", "userFileVersions", "epoch", "counters", "consumerReleases", "blockedNode", "worker", "workerRequest", "repair", "delivery", "launchMode", "terminal", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
+export const TASK_FIELDS = ["dir", "branch", "worktree", "workspaceCreated", "workspaceParentCreated", "candidate", "repairs", "userVersion", "userInputs", "paRelays", "userFiles", "userFileVersions", "epoch", "counters", "consumerReleases", "testEnvironments", "blockedNode", "worker", "workerRequest", "repair", "preparationStatus", "delivery", "launchMode", "terminal", "native", "activity", "session", "launch", "supervisor", "stopReason", "stopped", "abandoned", "release", "integrations", "abandonment"] as const;
 export type TaskRecord = Pick<KernelRun, typeof TASK_FIELDS[number]> & { id: string; name: string; definition?: DevelopmentTask; removed?: boolean };
 export interface Contribution { task: string; candidate: Candidate; base: string; patchBase: string; contribution: string; inputs: Record<string, string>; checks: string[]; epoch: number; userVersion: number }
 export interface BatchIntegration { id: string; task: string; at: string; before: Candidate; after: Candidate; mapping: Contribution[]; history: string; evidence: string; order: number; control?: string; targetSource?: Candidate }

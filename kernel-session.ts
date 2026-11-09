@@ -55,13 +55,21 @@ export function prepareManagedContinuation(path: string, task?: string): void {
   updateTaskRun(path, task, (r) => {
     if (!r.session) return;
     const previous = r.repair;
+    const environment = r.preparationStatus && !r.preparationStatus.ready ? `\n\n环境未就绪（不阻断开发，不代表检查通过）：\n${r.preparationStatus.reasons.join("\n")}` : "";
     if (previous && previous.state !== "read" && previous.userVersion === r.userVersion && previous.epoch === (r.epoch ?? 0)
-      && previous.candidate.tree === r.candidate?.tree && previous.inputs === checkInputs(r, previous.node === "测试" ? "测试" : "开发评审").hash) return;
+      && previous.candidate.tree === r.candidate?.tree && previous.inputs === checkInputs(r, previous.node === "测试" ? "测试" : "开发评审").hash) {
+      if ((previous.environment ?? "") !== environment) {
+        const body = previous.environment && previous.message.endsWith(previous.environment) ? previous.message.slice(0, -previous.environment.length) : previous.message;
+        previous.message = body + environment; previous.environment = environment; previous.hash = digest(previous.message);
+        writeFileSync(previous.file, previous.message, { mode: 0o600 });
+      }
+      return;
+    }
     const context = previous && !previous.message.startsWith("【Loop 开发续跑】") ? `\n\n上次原会话返修上下文（历史次数保留，不重放检查动作）：\n${previous.message}` : "";
-    const id = randomUUID(), token = randomUUID(), message = `【Loop 开发续跑】[${id}:${token}]\n继续本原会话的冻结任务 ${taskDefinition(r).name}，保留未提交成果、标准/授权及全部历史次数。不是新用户授权；不要自行提交/合入。完成后写【交付完成】。${context}`;
+    const id = randomUUID(), token = randomUUID(), message = `【Loop 开发续跑】[${id}:${token}]\n继续本原会话的冻结任务 ${taskDefinition(r).name}，保留未提交成果、标准/授权及全部历史次数。不是新用户授权；不要自行提交/合入。完成后写【交付完成】。${context}${environment}`;
     const file = join(r.dir, `continue-${id}.md`); writeFileSync(file, message, { mode: 0o600, flag: "wx" });
     r.repair = { id, token, taskId: r.taskId, node: "开发评审", attempt: id, candidate: r.candidate!, inputs: checkInputs(r, "开发评审").hash, userVersion: r.userVersion, epoch: r.epoch ?? 0,
-      session: r.session.id, host: r.session.host, message, hash: digest(message), file, state: "pending", at: new Date().toISOString() };
+      session: r.session.id, host: r.session.host, message, hash: digest(message), file, state: "pending", at: new Date().toISOString(), environment };
   });
 }
 /** 同一账本的释放事实也约束停止后的开发/派工；枚举状态不能覆盖未结清票据或检出。 */
@@ -435,7 +443,7 @@ export async function advanceManaged(path: string, options: { signal?: AbortSign
           const file = join(r.dir, `test-repair-${id}.md`); writeFileSync(file, message, { flag: "wx", mode: 0o600 });
           r.repair = { id, token, taskId: r.taskId, node: "测试", attempt: last.id, session: r.session?.id ?? "unattached", host: r.session?.host ?? r.card.host, candidate, inputs: checkInputs(r, "测试").hash,
             userVersion: r.userVersion, epoch: r.epoch ?? 0, message, hash: digest(message), file, state: "pending", at: new Date().toISOString() };
-          output.message = message; r.stopReason = "测试产品失败，返修回原开发会话";
+          output.message = message; r.blockedNode = "开发评审"; r.stopReason = "测试产品失败，返修回原开发会话";
         } else {
           r.stopped = true; r.stopReason = output.failure === "product" ? "达到测试返修上限；提高卡上测试限额后再继续，计数不清零" : output.reason ?? output.status;
           if (!output.released) r.release = { status: "未确认", details: [r.stopReason] };

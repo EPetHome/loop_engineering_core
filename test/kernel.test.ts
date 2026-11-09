@@ -2,12 +2,12 @@ import "./test-env.ts";
 import "./helpers/git-runtime.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { managedLaunchArgs, releaseKernelWorkspace, stopKernel } from "../kernel-runtime.ts";
+import { abandonKernel, managedLaunchArgs, releaseKernelWorkspace, stopKernel } from "../kernel-runtime.ts";
 import { ownedProcessGroupAlive } from "../procs.ts";
 import test from "node:test";
 import { createKernelRun, executeNode, queryKernel } from "../kernel.ts";
@@ -298,7 +298,43 @@ test("新卡会话空闲不报 running；CLI 停止与查询一致；启动失�
   } finally { if (path && existsSync(path)) await stopKernel(path); f.cleanup(); }
 });
 
-test("资源保护：未登记忽略文件、未提交成果、本机文件变化都不强删", async (t) => {
+test("释放 A8：合入后忽略依赖和产物随目录释放，未忽略文件及本机变化仍保留", async () => {
+  for (const mode of ["ignored", "untracked", "local"]) {
+    const f = fixture(["开发评审"]);
+    try {
+      writeFileSync(join(f.repo, ".gitignore"), `${readFileSync(join(f.repo, ".gitignore"), "utf8")}node_modules/\ndist/\n`);
+      f.git(f.repo, "add", ".gitignore"); f.git(f.repo, "commit", "-qm", "rebuildable files");
+      const path = f.start(), run = readRun(path); writeFileSync(join(run.worktree, "file.txt"), "delivered\n");
+      await completeManagedDelivery(path, "【交付完成】", { exec: f.exec, callReviewer: reviewer() });
+      await mergeManaged(path, { localOnly: true }); assert.equal(readRun(path).publication!.local, "merged");
+      mkdirSync(join(run.worktree, "node_modules/core"), { recursive: true }); mkdirSync(join(run.worktree, "node_modules/.bin")); mkdirSync(join(run.worktree, "dist"));
+      writeFileSync(join(run.worktree, "node_modules/core/index.js"), "rebuildable"); symlinkSync("../core/index.js", join(run.worktree, "node_modules/.bin/core"));
+      writeFileSync(join(run.worktree, "dist/output.js"), "rebuildable");
+      if (mode === "untracked") writeFileSync(join(run.worktree, "user-notes.txt"), "keep me");
+      if (mode === "local") writeFileSync(join(run.worktree, "local.txt"), "changed local input");
+      const checks = queryKernel(path).checks; await releaseKernelWorkspace(path);
+      const released = readRun(path); assert.equal(released.release.status, mode === "ignored" ? "已释放" : "未确认", released.release.details.join("；"));
+      assert.equal(existsSync(run.worktree), mode !== "ignored"); assert.deepEqual(queryKernel(path).checks, checks);
+      if (mode !== "ignored") assert.match(released.release.details.join("；"), mode === "untracked" ? /user-notes\.txt/ : /本机文件变更.*local\.txt/);
+    } finally { f.cleanup(); }
+  }
+});
+
+test("释放 A9：未合入放弃任务仍保留 ignored 文件并列明原因", async () => {
+  const f = fixture(["开发评审"]);
+  try {
+    writeFileSync(join(f.repo, ".gitignore"), `${readFileSync(join(f.repo, ".gitignore"), "utf8")}node_modules/\n`);
+    f.git(f.repo, "add", ".gitignore"); f.git(f.repo, "commit", "-qm", "ignored dependency");
+    const path = f.start(), run = readRun(path); mkdirSync(join(run.worktree, "node_modules/core"), { recursive: true });
+    writeFileSync(join(run.worktree, "node_modules/core/index.js"), "unknown owner");
+    await abandonKernel(path, "test:A9"); const abandoned = readRun(path);
+    assert.equal(abandoned.abandoned, true); assert.equal(abandoned.publication, undefined); assert.equal(abandoned.release.status, "未确认");
+    assert.equal(existsSync(run.worktree), true); assert.match(abandoned.release.details.join("；"), /未知归属文件保留.*node_modules\/core\/index\.js/);
+    await releaseKernelWorkspace(path); assert.equal(readRun(path).release.status, "未确认");
+  } finally { f.cleanup(); }
+});
+
+test("资源保护：未知文件、未提交成果、本机文件变化都不强删", async (t) => {
   for (const kind of ["unknown", "dirty", "local", "parent"]) await t.test(kind, async () => {
     const f = fixture(["开发评审"]);
     try {

@@ -60,6 +60,23 @@ export function classifyFailure(code: number, output: string, interrupted = fals
   return { kind: "unknown", reason: `退出码 ${code}，缺少足够证据确定责任` };
 }
 
+/** 补装只跳过项目明确声明的方法错误；文本推断的 method/unknown 不代表禁止恢复。 */
+export function recoveryDecision(code: number, output: string, config: { recover?: string; maxRecoveries: number } | undefined, used: number): { allowed: boolean; reason: string; remaining: number } {
+  const remaining = Math.max(0, (config?.maxRecoveries ?? 0) - used);
+  if (code === 78 || failureLines(output).some((line) => /^AUTOREVIEW_FAILURE=method(?:[ \t]+[^\r\n]*)?$/.test(line))) {
+    return { allowed: false, reason: "项目声明方法错误，未补装", remaining };
+  }
+  if (!config?.recover) return { allowed: false, reason: "未配置 recover，未补装", remaining };
+  if (!remaining) return { allowed: false, reason: "补装次数用完，未补装", remaining };
+  return { allowed: true, reason: "检查失败，先补装再复查", remaining };
+}
+
+/** 状态中的一行原始错误；完整输出仍留在证据日志。 */
+export function failureLine(code: number, output: string): string {
+  const lines = failureLines(output);
+  return (lines.find((line) => /AUTOREVIEW_FAILURE=|Error|Cannot find|error|failed/i.test(line)) ?? lines[0] ?? `退出码 ${code}（无错误输出）`).slice(0, 600);
+}
+
 /** Pi 的会话创建告警不是失败原因；原始输出仍保存在调用日志中。 */
 export function testerDiagnostics(output: string): string {
   return output.split(/\r?\n/).filter((line) => !/No project session found|^\s*creating a new session with that id\.?\s*$/i.test(line)).join("\n").trim();
